@@ -1,0 +1,104 @@
+name: slm_gpt_350m
+
+trainer:
+  devices: 4
+  num_nodes: 1
+  accelerator: gpu
+  precision: bf16
+  logger: false
+  enable_checkpointing: false
+  max_steps: 400000
+  log_every_n_steps: 10
+  val_check_interval: 1000
+  limit_val_batches: 50
+  gradient_clip_val: 1.0
+
+exp_manager:
+  explicit_log_dir: /results/slm_gpt_350m
+  name: ${name}
+  create_wandb_logger: false
+  wandb_logger_kwargs:
+    project: slm
+    name: gpt_350m
+  resume_if_exists: true
+  resume_ignore_no_checkpoint: true
+  create_checkpoint_callback: true
+  checkpoint_callback_params:
+    monitor: val_loss
+    save_top_k: 3
+    mode: min
+    save_last: true
+    filename: slm_gpt_350m--{val_loss:.2f}-{step}-{consumed_samples}
+    model_parallel_size: ${multiply:${model.tensor_model_parallel_size}, ${model.pipeline_model_parallel_size}}
+
+model:
+  # ── Architecture (350M) ────────────────────────────────────────────────────
+  num_layers: 24
+  hidden_size: 1024
+  ffn_hidden_size: 4096
+  num_attention_heads: 16
+  seq_length: 2048
+  max_position_embeddings: 2048
+  position_embedding_type: learned_absolute
+
+  # ── Parallelism — 4x GPU, data parallelism sufficient at 350M ─────────────
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 1
+  virtual_pipeline_model_parallel_size: null
+
+  gradient_as_bucket_view: true
+  resume_from_checkpoint: null
+
+  tokenizer:
+    library: sentencepiece
+    model: /data/tokenizer/slm_tokenizer.model
+
+  init_method_std: 0.02
+  use_scaled_init_method: true
+  hidden_dropout: 0.1
+  attention_dropout: 0.1
+  ffn_dropout: 0.0
+
+  apply_query_key_layer_scaling: true
+  attention_softmax_in_fp32: false
+  bias_gelu_fusion: true
+  masked_softmax_fusion: true
+  bias_dropout_add_fusion: true
+
+  normalization: layernorm
+  layernorm_epsilon: 1.0e-5
+  activation: gelu
+  bias: true
+  share_embeddings_and_output_weights: false
+
+  activations_checkpoint_method: uniform
+  activations_checkpoint_num_layers: 1
+  activations_checkpoint_granularity: full
+
+  optim:
+    name: fused_adam
+    lr: 2.0e-4
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+    sched:
+      name: CosineAnnealing
+      warmup_steps: 2000
+      constant_steps: 0
+      min_lr: 2.0e-5
+
+  data:
+    data_impl: mmap
+    splits_string: "99,1,0"
+    seq_length: ${model.seq_length}
+    skip_warmup: true
+    num_workers: 4
+    dataloader_type: single
+    eod_mask_loss: false
+    data_prefix:
+      - 0.7
+      - /data/pretrain/general/text_document
+      - 0.3
+      - /data/pretrain/code/text_document
+
+  micro_batch_size: 4
+  global_batch_size: 128           # data_parallel_size=4

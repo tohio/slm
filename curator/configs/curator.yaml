@@ -1,0 +1,72 @@
+curation:
+  input_data_dir: /data/raw
+  output_data_dir: /data/curated
+  log_dir: /logs/curator
+
+  dask:
+    n_workers: 8
+    threads_per_worker: 1
+    memory_limit: "3GB"   # r5.4xlarge: increase to "8GB"
+
+  language_filter:
+    enabled: true
+    target_language: en
+    min_language_score: 0.65
+    model_path: /models/lid.176.bin
+
+  heuristic_filter:
+    enabled: true
+    min_doc_length: 200
+    max_doc_length: 100000
+    min_word_count: 50
+    max_word_count: 100000
+    max_symbol_to_word_ratio: 0.1
+    max_bullet_start_ratio: 0.9
+    max_ellipsis_ratio: 0.1
+    max_non_alpha_words_ratio: 0.8
+    min_stop_word_count: 2
+    stop_words: ["the", "be", "to", "of", "and", "that", "have", "with"]
+    max_duplicated_ngram_char_frac:
+      n: 5
+      fraction: 0.15
+    max_top_ngram_char_frac:
+      n: 2
+      fraction: 0.20
+
+  quality_filter:
+    enabled: true
+    model_path: /models/quality_classifier.bin
+    min_quality_score: 0.3
+    label: __label__hq
+
+  deduplication:
+    exact_dedup:
+      enabled: true
+      hash_method: md5
+    fuzzy_dedup:
+      enabled: true
+      num_hashes: 128
+      jaccard_threshold: 0.8
+      false_positive_check: true
+
+  pii:
+    enabled: true
+    entities:
+      - EMAIL_ADDRESS
+      - PHONE_NUMBER
+      - IP_ADDRESS
+    replacement_string: "<PII>"
+
+  tokenization:
+    enabled: true
+    tokenizer_library: sentencepiece
+    tokenizer_model: /data/tokenizer/slm_tokenizer.model
+    output_format: mmap
+
+  blend:
+    general_text:
+      path: /data/curated/general
+      weight: 0.7
+    code:
+      path: /data/curated/code
+      weight: 0.3

@@ -1,0 +1,74 @@
+name: slm_sft_chat
+
+trainer:
+  devices: 1
+  num_nodes: 1
+  accelerator: gpu
+  precision: bf16
+  logger: false
+  enable_checkpointing: false
+  max_epochs: 3
+  log_every_n_steps: 10
+  val_check_interval: 200
+  limit_val_batches: 50
+  gradient_clip_val: 1.0
+
+exp_manager:
+  explicit_log_dir: /results/slm_sft_chat
+  name: ${name}
+  create_wandb_logger: false
+  wandb_logger_kwargs:
+    project: slm
+    name: sft_chat
+  resume_if_exists: true
+  resume_ignore_no_checkpoint: true
+  create_checkpoint_callback: true
+  checkpoint_callback_params:
+    monitor: val_loss
+    save_top_k: 3
+    mode: min
+    save_last: true
+    filename: slm_sft_chat--{val_loss:.2f}-{step}
+
+model:
+  restore_from_path: /results/slm_gpt_125m/checkpoints/last.nemo
+
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 1
+
+  # Only compute loss on assistant responses — not the human prompt
+  answer_only_loss: true
+  sample_weight: constant
+
+  data:
+    chat: true
+    num_workers: 4
+    train_ds:
+      file_path: /data/sft/chat/train.jsonl
+      max_seq_length: 2048
+      micro_batch_size: 4
+      global_batch_size: 32
+      shuffle: true
+      add_eos: true
+    validation_ds:
+      file_path: /data/sft/chat/val.jsonl
+      max_seq_length: 2048
+      micro_batch_size: 4
+      global_batch_size: 32
+      shuffle: false
+      add_eos: true
+
+  optim:
+    name: fused_adam
+    lr: 1.0e-5
+    weight_decay: 0.01
+    betas: [0.9, 0.98]
+    sched:
+      name: CosineAnnealing
+      warmup_steps: 100
+      constant_steps: 0
+      min_lr: 1.0e-6
+
+  activations_checkpoint_method: uniform
+  activations_checkpoint_num_layers: 1
+  activations_checkpoint_granularity: full
