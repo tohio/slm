@@ -2,8 +2,6 @@
 
 A production-minded, end-to-end pipeline for training a small language model from scratch using NVIDIA NeMo. Covers the full lifecycle: large-scale data curation, pre-training, supervised fine-tuning, and alignment via DPO — with infrastructure designed for cost efficiency on cloud GPU instances.
 
-> Built to demonstrate practical expertise across data engineering, distributed training, and LLM alignment — not just theory.
-
 ---
 
 ## Overview
@@ -22,7 +20,7 @@ The pipeline is modular — each stage is independently runnable, reproducible, 
 
 ## Pipeline Architecture
 
-![Architecture](docs/slm-architecture.svg)
+![Architecture](docs/architecture.svg)
 
 ---
 
