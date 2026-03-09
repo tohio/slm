@@ -22,39 +22,7 @@ The pipeline is modular — each stage is independently runnable, reproducible, 
 
 ## Pipeline Architecture
 
-```
-┌─────────────────────────────────────────────────────┐
-│               Stage 1: Data Curation                │
-│                  (NeMo Curator)                     │
-│  Common Crawl (WARC) ──┐                            │
-│  Wikipedia (EN)    ────┼──► Curator Pipeline ──► S3 │
-│  CodeSearchNet     ────┘                            │
-└─────────────────────────────────────────────────────┘
-                         │
-                         ▼
-┌─────────────────────────────────────────────────────┐
-│             Stage 2: Pre-Training                   │
-│              (NeMo + Megatron-Core)                 │
-│  GPT ~125M params, BF16, single/multi GPU           │
-│  Trained on general text corpus (~2.5B tokens)      │
-└─────────────────────────────────────────────────────┘
-                         │
-                         ▼
-┌─────────────────────────────────────────────────────┐
-│          Stage 3: Supervised Fine-Tuning            │
-│                 (NeMo Aligner)                      │
-│  SFT-1: General chat (OpenAssistant / Dolly)        │
-│  SFT-2: Coding (CodeSearchNet / The Stack)          │
-└─────────────────────────────────────────────────────┘
-                         │
-                         ▼
-┌─────────────────────────────────────────────────────┐
-│              Stage 4: Alignment (DPO)               │
-│                 (NeMo Aligner)                      │
-│  Preference data: UltraFeedback / HH-RLHF           │
-│  No separate reward model required                  │
-└─────────────────────────────────────────────────────┘
-```
+![Architecture](docs/architecture.svg)
 
 ---
 
@@ -88,19 +56,51 @@ The architecture scales by config change only — no code changes required:
 
 ---
 
-## Quick Start
+## Getting Started
+
+**Prerequisites**
+- Python 3.10+
+- NVIDIA GPU (recommended: A10G or better for pretraining)
+- NVIDIA NeMo dependencies (see `environment.yml`)
+- AWS account (for spot instance data curation and S3 storage)
+
+**Installation — pip**
 
 ```bash
-# 1. Install dependencies (install PyTorch manually first)
-make setup
+git clone https://github.com/tohio/slm.git
+cd slm
 
-# 2. On spot instance — curate data
+python -m venv .venv
+source .venv/bin/activate        # Mac / Linux
+# .venv\Scripts\activate         # Windows
+
+pip install -r requirements.txt
+cp .env.sample .env
+# Add your API keys and S3 config to .env
+```
+
+**Installation — conda (recommended for NeMo)**
+
+```bash
+git clone https://github.com/tohio/slm.git
+cd slm
+
+conda env create -f environment.yml
+conda activate slm
+cp .env.sample .env
+# Add your API keys and S3 config to .env
+```
+
+**Run the pipeline**
+
+```bash
+# 1. On spot instance — curate data
 make download-data
 make curate
 make tokenizer
 make upload-data S3_BUCKET=my-bucket
 
-# 3. On GPU instance — train
+# 2. On GPU instance — train
 make setup-instance S3_BUCKET=my-bucket
 make prepare-sft-data
 make prepare-dpo-data
@@ -108,10 +108,10 @@ make pretrain
 make sft
 make dpo
 
-# 4. Evaluate
+# 3. Evaluate
 make eval-dpo
 
-# 5. Export
+# 4. Export
 make convert-hf
 ```
 
@@ -133,6 +133,21 @@ Sequential fine-tuning lets each stage be evaluated independently and makes it e
 
 ---
 
+## Production Considerations
+
+This project is intentionally scoped for demonstration. In a production system:
+
+- **Data pipeline** — the NeMo Curator pipeline would run on a distributed Spark cluster (AWS EMR or Databricks) rather than a single spot instance, reducing curation time for trillion-token datasets from days to hours.
+- **Training infrastructure** — multi-node training would use AWS EFA networking for low-latency GPU-to-GPU communication. Spot instance interruptions would be handled via NeMo's checkpoint resumption rather than restarting from scratch.
+- **Tokenizer** — the custom BPE tokenizer would be versioned and stored in a model registry (MLflow or Weights & Biases) alongside the model checkpoints it was trained with, to prevent train/serve skew.
+- **Experiment tracking** — Weights & Biases or MLflow would track loss curves, gradient norms, and throughput (tokens/sec) across all training stages, making it possible to diagnose instability or compare runs systematically.
+- **Checkpoint management** — checkpoints would be stored in S3 with versioning enabled and a retention policy. Only the top-k checkpoints by validation loss would be kept to manage storage costs at scale.
+- **Evaluation** — the eval suite would run automatically after each stage (pretrain, SFT, DPO) in CI, gating promotion to the next stage on a minimum score threshold rather than relying on manual inspection.
+- **Serving** — the exported HuggingFace checkpoint would be served via vLLM for high-throughput inference with continuous batching, exposed behind a FastAPI layer with async request handling.
+- **Observability** — token throughput, GPU utilisation, and training loss would be streamed to CloudWatch or Grafana during training runs for real-time monitoring and alerting on divergence.
+
+---
+
 ## References
 
 - [NVIDIA NeMo](https://github.com/NVIDIA/NeMo)
@@ -140,6 +155,16 @@ Sequential fine-tuning lets each stage be evaluated independently and makes it e
 - [NeMo Aligner](https://github.com/NVIDIA/NeMo-Aligner)
 - [Chinchilla Scaling Laws](https://arxiv.org/abs/2203.15556) — Hoffmann et al., 2022
 - [DPO](https://arxiv.org/abs/2305.18290) — Rafailov et al., 2023
+
+---
+
+## Related Projects
+
+This repo is part of a broader AI engineering portfolio:
+
+- [rag-pipeline](https://github.com/tohio/rag-pipeline) — modular RAG pipeline: ingestion, embedding, retrieval, and generation
+- [agentic-rag](https://github.com/tohio/agentic-rag) — extends the RAG pipeline with tool use, query routing, and multi-step reasoning
+- [multi-agent](https://github.com/tohio/multi-agent) — autonomous multi-agent investment research system using CrewAI
 
 ---
 
