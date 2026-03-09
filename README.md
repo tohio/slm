@@ -22,7 +22,7 @@ The pipeline is modular — each stage is independently runnable, reproducible, 
 
 ## Pipeline Architecture
 
-![Architecture](docs/architecture.svg)
+![Architecture](docs/slm-architecture.svg)
 
 ---
 
@@ -87,6 +87,21 @@ cd slm
 
 conda env create -f environment.yml
 conda activate slm
+cp .env.sample .env
+# Add your API keys and S3 config to .env
+```
+
+**Installation — uv**
+
+```bash
+git clone https://github.com/tohio/slm.git
+cd slm
+
+uv venv
+source .venv/bin/activate        # Mac / Linux
+# .venv\Scripts\activate         # Windows
+
+uv pip install -r requirements.txt
 cp .env.sample .env
 # Add your API keys and S3 config to .env
 ```
