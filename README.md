@@ -37,7 +37,12 @@ slm/
 ├── finetune/            Stage 3: supervised fine-tuning
 ├── alignment/           Stage 4: DPO alignment
 ├── eval/                Evaluation suite (all stages)
-└── infra/               GPU instance setup
+├── infra/               GPU instance setup
+└── notebooks/
+    └── exploration.ipynb
+        ├── Section 1 — Dataset Exploration
+        ├── Section 2 — Training Run
+        └── Section 3 — Inference
 ```
 
 ---
