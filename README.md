@@ -40,9 +40,9 @@ slm/
 ├── infra/               GPU instance setup
 └── notebooks/
     └── exploration.ipynb
-        ├── Section 1 — Dataset Exploration
-        ├── Section 2 — Training Run
-        └── Section 3 — Inference
+        ├── Section 1    Dataset Exploration
+        ├── Section 2    Training Run
+        └── Section 3    Inference
 ```
 
 ---
