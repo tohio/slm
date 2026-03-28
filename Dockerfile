@@ -39,9 +39,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 #
 # Key constraints discovered from PyPI metadata:
 #   nemo_toolkit==2.0.0  requires:
-#     huggingface-hub >= 0.24      ← your original ==0.23.0 pin broke this
-#     transformers    >= 4.44.0    ← your original ==4.41.0 pin broke this
-#     pytorch-lightning > 2.2.1    ← your ==2.2.4 is fine but let NeMo own it
+#     huggingface-hub >= 0.24      ← original ==0.23.0 pin broke this
+#     transformers    >= 4.44.0    ← original ==4.41.0 pin broke this
+#     pytorch-lightning > 2.2.1
 #     hydra-core  >1.3,<=1.3.2
 #     omegaconf   <=2.3
 #     sentencepiece < 1.0.0
@@ -54,16 +54,54 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 #   nemo-curator==0.7.1  (NOTE: 0.5.0 does not exist on PyPI — earliest is 0.7.1)
 #     no nemo_toolkit version pin — compatible with 2.0.0
 #     fasttext==0.9.3    ← curator pins this; use 0.9.3 not 0.9.2
-#     transformers>=4.48.0  ← curator needs newer than NeMo's >=4.44.0; both satisfied by latest
+#     transformers>=4.48.0
 #     numpy<2
+#
+# Why [core] not [all] or [nlp]:
+#   [all] and [nlp] both include mamba-ssm==2.2.2 which requires nvcc to
+#   compile from source. The runtime base image does not include nvcc (only
+#   the 'devel' image does). [core] excludes mamba-ssm entirely and covers
+#   everything needed for GPT pretraining, SFT, and DPO.
 #
 # Install order: NeMo first → aligner → curator → everything else
 # This prevents pip from backtracking against already-resolved constraints.
 # -----------------------------------------------------------------------------
 RUN pip install --no-cache-dir \
-    "nemo_toolkit[nlp]==2.0.0" \
+    "nemo_toolkit[core]==2.0.0" \
     "nemo-aligner==0.4.0" \
     "dask[distributed]==2024.4.1"
+
+# -----------------------------------------------------------------------------
+# STEP 1b — NeMo NLP extras needed for GPT/SFT/DPO (mamba-ssm excluded)
+#
+# These are the [nlp] extras minus mamba-ssm and anything that requires
+# nvcc or a GPU at install time. All needed for the SLM training pipeline.
+# -----------------------------------------------------------------------------
+RUN pip install --no-cache-dir \
+    datasets \
+    einops \
+    "sentencepiece<1.0.0" \
+    "tiktoken==0.7.0" \
+    nltk \
+    sacrebleu \
+    sacremoses \
+    rouge-score \
+    pandas \
+    h5py \
+    ftfy \
+    faiss-cpu \
+    sentence-transformers \
+    rapidfuzz \
+    zarr \
+    ijson \
+    inflect \
+    jieba \
+    "opencc<1.1.7" \
+    pangu \
+    gdown \
+    markdown2 \
+    "matplotlib>=3.3.2" \
+    "webdataset>=0.2.86"
 
 # -----------------------------------------------------------------------------
 # STEP 2 — NeMo Curator (CPU-only install — no cudf/dask-cuda needed)

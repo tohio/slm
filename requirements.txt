@@ -1,57 +1,100 @@
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
 # SLM Project Requirements
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
 # Install PyTorch manually first (version must match your CUDA driver):
 #   pip install torch==2.1.2 --index-url https://download.pytorch.org/whl/cu121
 #
-# Then:
+# Then install in order to avoid dependency conflicts:
+#   pip install "nemo_toolkit[core]==2.0.0" "nemo-aligner==0.4.0" "dask[distributed]==2024.4.1"
+#   pip install "nemo-curator==0.7.1"
 #   pip install -r requirements.txt
 #
+# Or just use Docker (recommended — no manual ordering needed):
+#   make docker-build
+#   make docker-shell-gpu
+#
 # Python: 3.10+  |  CUDA: 12.1+  |  GPU: A100 / A6000
-# ─────────────────────────────────────────────────────────────────────────────
+#
+# AWS CLI: installed as v2 standalone binary in Docker (not via pip).
+#   See Dockerfile STEP 5. For local installs: https://aws.amazon.com/cli/
+#
+# Packages intentionally omitted (owned by nemo_toolkit[core] / nemo-curator):
+#   huggingface-hub    — nemo_toolkit requires >=0.24
+#   transformers       — nemo-curator requires >=4.48.0
+#   pytorch-lightning  — nemo_toolkit requires >2.2.1
+#   omegaconf          — nemo_toolkit requires <=2.3
+#   hydra-core         — nemo_toolkit requires >1.3,<=1.3.2
+#   sentencepiece      — nemo_toolkit requires <1.0.0 (installed in NLP extras below)
+#   datasets           — pulled by nemo-curator
+#   awscli             — v1 conflicts with boto3; use v2 binary instead
+#
+# mamba-ssm is intentionally excluded — it requires nvcc to compile from
+# source and is not needed for GPT pretraining, SFT, or DPO.
+# =============================================================================
 
 # ── Core NeMo Stack ───────────────────────────────────────────────────────────
-nemo_toolkit[nlp]==2.0.0
+# [core] extra excludes mamba-ssm (requires nvcc) and other non-GPT extras.
+# NLP packages needed for GPT/SFT/DPO are listed explicitly below.
+# NOTE: install these before this file, see header above.
+nemo_toolkit[core]==2.0.0
 nemo-aligner==0.4.0
 
 # ── NeMo Curator ─────────────────────────────────────────────────────────────
-nemo-curator==0.5.0
+# 0.7.1 is the earliest version on public PyPI (0.5.0 was NGC-only).
+# Install without extras to avoid pulling in cudf/dask-cuda (NVIDIA index).
+nemo-curator==0.7.1
 dask[distributed]==2024.4.1
-dask-cuda==24.4.0                   # optional: GPU-accelerated curator ops
-cudf-cu12==24.4.0                   # optional: GPU dataframes (SemDedup)
+
+# ── NeMo NLP Extras (manual — excludes mamba-ssm) ────────────────────────────
+# Equivalent to nemo_toolkit[nlp] minus mamba-ssm==2.2.2 and accelerated-scan,
+# both of which require nvcc and are not needed for the SLM pipeline.
+datasets
+sentencepiece<1.0.0
+tiktoken==0.7.0
+nltk
+sacrebleu
+sacremoses
+rouge-score
+pandas
+h5py
+ftfy
+faiss-cpu
+sentence-transformers
+rapidfuzz
+zarr
+ijson
+inflect
+jieba
+opencc<1.1.7
+pangu
+gdown
+markdown2
+matplotlib>=3.3.2
+webdataset>=0.2.86
 
 # ── Data Extraction ───────────────────────────────────────────────────────────
-trafilatura==1.9.0                  # HTML → clean text
-warcio==1.7.4                       # WARC file parsing
+trafilatura==1.9.0                  # HTML → clean text (WARC processing)
+warcio==1.7.4                       # WARC file parsing (also pulled by curator)
 beautifulsoup4==4.12.3
 lxml==5.2.1
 
 # ── Language Detection & Quality Filtering ────────────────────────────────────
-fasttext==0.9.2                     # language ID + quality classifier
+# fasttext==0.9.3 required by nemo-curator==0.7.1 (0.9.2 will conflict)
+fasttext==0.9.3
 langdetect==1.0.9
 
 # ── Deduplication ─────────────────────────────────────────────────────────────
 datasketch==1.6.4                   # MinHash + LSH
 
-# ── Tokenizer ─────────────────────────────────────────────────────────────────
-sentencepiece==0.2.0
-
-# ── Datasets & HuggingFace ────────────────────────────────────────────────────
-datasets==2.19.1
-huggingface-hub>=0.18.0
-transformers==4.41.0
+# ── Numerics ──────────────────────────────────────────────────────────────────
+# numpy<2 enforced by nemo-curator — do not raise the upper bound
+numpy>=1.24,<2.0
+scipy==1.13.0
 
 # ── Training Utilities ────────────────────────────────────────────────────────
-pytorch-lightning==2.2.4
-omegaconf==2.3.0
-hydra-core==1.3.2
 einops==0.8.0
-# apex — install from source (NVIDIA fused optimizers):
+# apex — install from source (NVIDIA fused optimizers, optional):
 #   pip install git+https://github.com/NVIDIA/apex.git
-
-# ── Numerics ─────────────────────────────────────────────────────────────────
-numpy==1.26.4
-scipy==1.13.0
 
 # ── Evaluation ────────────────────────────────────────────────────────────────
 lm-eval==0.4.3                      # EleutherAI eval harness
@@ -61,8 +104,8 @@ wandb==0.17.0
 tensorboard==2.16.2
 
 # ── AWS ───────────────────────────────────────────────────────────────────────
+# boto3 only — awscli v2 is a standalone binary (see Dockerfile / header above)
 boto3==1.34.101
-awscli==1.32.101
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
 pyyaml==6.0.1
