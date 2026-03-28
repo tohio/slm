@@ -38,7 +38,7 @@ sentencepiece==0.2.0
 
 # ── Datasets & HuggingFace ────────────────────────────────────────────────────
 datasets==2.19.1
-huggingface-hub==0.23.0
+huggingface-hub>=0.18.0
 transformers==4.41.0
 
 # ── Training Utilities ────────────────────────────────────────────────────────
