@@ -30,6 +30,8 @@ The pipeline is modular — each stage is independently runnable, reproducible, 
 slm/
 ├── README.md            Overview and quick start
 ├── HARDWARE.md          Hardware recommendations and scaling guide
+├── Dockerfile           Docker image for NeMo environment
+├── .dockerignore         Docker build exclusions
 ├── Makefile
 ├── requirements.txt
 ├── environment.yml
@@ -83,68 +85,87 @@ Each run demonstrates a key principle: *validation → efficiency → scaling �
 ## Getting Started
 
 **Prerequisites**
-- Python 3.10+
-- NVIDIA GPU (recommended: A10G or better for pretraining)
-- NVIDIA NeMo dependencies (see `environment.yml`)
-- AWS account (for spot instance data curation and S3 storage)
+- Docker (recommended for local development)
+- Cloud GPU instance (for training: A100, H100, or similar)
+- AWS account (for S3 storage of curated data and checkpoints)
 
-**Installation — pip**
+**Setup: Docker + Cloud Instance**
+
+The project is designed to run on cloud GPU instances using Docker. For local development, use Docker to match the cloud environment exactly.
 
 ```bash
+# Clone the repo
 git clone https://github.com/tohio/slm.git
 cd slm
 
-python -m venv .venv
-source .venv/bin/activate        # Mac / Linux
-# .venv\Scripts\activate         # Windows
+# Build or use official NeMo image
+# Option 1: Build from project Dockerfile
+docker build -t slm:latest .
 
-pip install -r requirements.txt
-cp .env.sample .env
-# Add your API keys and S3 config to .env
+# Option 2: Use official NeMo image directly (no build needed)
+# docker image: nvcr.io/nvidia/nemo:latest
 ```
 
-**Installation — conda (recommended for NeMo)**
+**Data Curation (CPU instance)**
 
 ```bash
-git clone https://github.com/tohio/slm.git
-cd slm
+docker run -it --rm \
+  --shm-size=8g \
+  -v $(pwd):/workspace/slm \
+  -v /data:/data \
+  slm:latest /bin/bash
 
-conda env create -f environment.yml
-conda activate slm
-cp .env.sample .env
-# Add your API keys and S3 config to .env
+# Inside container
+cd /workspace/slm
+make download-data
+make curate
+make tokenizer
+make upload-data S3_BUCKET=my-bucket
 ```
 
-**Installation — uv**
+**Training (GPU instance)**
 
 ```bash
-git clone https://github.com/tohio/slm.git
-cd slm
+docker run --gpus all -it --rm \
+  --shm-size=8g \
+  -v $(pwd):/workspace/slm \
+  -v /data:/data \
+  slm:latest /bin/bash
 
-uv venv
-source .venv/bin/activate        # Mac / Linux
-# .venv\Scripts\activate         # Windows
+# Inside container
+cd /workspace/slm
+make setup-instance S3_BUCKET=my-bucket
+make prepare-sft-data
+make prepare-dpo-data
+# Then run training (see below)
+```
 
-uv pip install -r requirements.txt
+**Environment Setup**
+
+On the cloud instance, create `.env` with your AWS credentials:
+
+```bash
 cp .env.sample .env
-# Add your API keys and S3 config to .env
+# Edit .env with your AWS keys and S3 bucket name
 ```
 
 **Run the pipeline**
 
+The examples below assume you're inside a Docker container or have dependencies installed.
+
 ```bash
-# 1. On spot instance — curate data
+# Data Curation (CPU, one-time)
 make download-data
 make curate
 make tokenizer
 make upload-data S3_BUCKET=my-bucket
 
-# 2. On GPU instance — train (see HARDWARE.md for which GPUs to use)
+# Training Setup (GPU instance)
 make setup-instance S3_BUCKET=my-bucket
 make prepare-sft-data
 make prepare-dpo-data
 
-# Run 1: Pipeline validation (2x A100)
+# Run 1: Pipeline validation (2x A100 or 1x T4)
 make pretrain CONFIG=pretrain/configs/gpt_125m.yaml GPUS=2
 
 # Run 2: 125M full training (choose one)
@@ -165,10 +186,15 @@ make pretrain CONFIG=pretrain/configs/gpt_1b.yaml GPUS=8
 # Option B: 16x H100 with tensor parallelism (fastest)
 # make pretrain CONFIG=pretrain/configs/gpt_1b.yaml GPUS=16
 
-# 3. Evaluate
+# After pre-training, run SFT and DPO (see HARDWARE.md for timing)
+make sft CONFIG=finetune/configs/sft_chat_125m.yaml GPUS=N
+make sft CONFIG=finetune/configs/sft_code_125m.yaml GPUS=N
+make dpo CONFIG=alignment/configs/dpo_125m.yaml GPUS=N
+
+# Evaluate
 make eval-dpo
 
-# 4. Export
+# Export
 make convert-hf
 ```
 

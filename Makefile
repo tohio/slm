@@ -3,10 +3,12 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Usage:
 #   make help
+#   make docker-build              Build NeMo Docker image
+#   make docker-curate             Run data curation in container
+#   make docker-shell-cpu          Interactive CPU container (data curation)
+#   make docker-shell-gpu          Interactive GPU container (training)
 #   make all
 #   make pretrain GPUS=4 CONFIG=pretrain/configs/gpt_350m.yaml
-#   make curate N_WARC_FILES=50
-#   make upload-data S3_BUCKET=my-bucket
 # ─────────────────────────────────────────────────────────────────────────────
 
 GPUS          ?= $(shell python3 -c "import torch; print(torch.cuda.device_count())" 2>/dev/null || echo 1)
@@ -17,6 +19,8 @@ N_WARC_FILES  ?= 20
 DATA_DIR      ?= /data
 RESULTS_DIR   ?= /results
 PYTHON        ?= python3
+DOCKER_IMAGE  ?= slm:latest
+DOCKER_REGISTRY ?= nvcr.io/nvidia/nemo:latest
 
 PRETRAIN_CKPT = $(shell find $(RESULTS_DIR)/slm_gpt_125m/checkpoints -name "*.nemo" 2>/dev/null | sort | tail -1)
 SFT_CHAT_CKPT = $(shell find $(RESULTS_DIR)/slm_sft_chat/checkpoints -name "*.nemo" 2>/dev/null | sort | tail -1)
@@ -25,6 +29,7 @@ DPO_CKPT      = $(shell find $(RESULTS_DIR)/slm_dpo/checkpoints      -name "*.ne
 
 .DEFAULT_GOAL := help
 .PHONY: help all setup setup-instance \
+        docker-build docker-curate docker-shell-cpu docker-shell-gpu \
         download-data curate tokenizer upload-data \
         prepare-sft-data prepare-dpo-data \
         pretrain sft dpo \
@@ -37,17 +42,23 @@ help:
 	@echo "  SLM — Small Language Model Pipeline"
 	@echo "  ════════════════════════════════════"
 	@echo ""
+	@echo "  DOCKER  (recommended)"
+	@echo "    make docker-build           Build NeMo Docker image (or use nvcr.io/nvidia/nemo:latest)"
+	@echo "    make docker-shell-cpu       Start interactive CPU container (data curation)"
+	@echo "    make docker-shell-gpu       Start interactive GPU container (training)"
+	@echo "    make docker-curate          Run full data curation in container"
+	@echo ""
 	@echo "  SETUP"
-	@echo "    make setup                  Install dependencies"
+	@echo "    make setup                  Install dependencies (local only)"
 	@echo "    make setup-instance         GPU instance first-time setup"
 	@echo ""
-	@echo "  DATA  (run on spot/local)"
+	@echo "  DATA  (run in container)"
 	@echo "    make download-data          Download Common Crawl WARCs"
 	@echo "    make curate                 Run full Curator pipeline"
 	@echo "    make tokenizer              Train custom BPE tokenizer"
 	@echo "    make upload-data            Upload dataset to S3"
 	@echo ""
-	@echo "  TRAINING  (run on GPU instance)"
+	@echo "  TRAINING  (run in GPU container)"
 	@echo "    make prepare-sft-data       Download & format SFT datasets"
 	@echo "    make prepare-dpo-data       Download & format DPO preference data"
 	@echo "    make pretrain               Pre-train from scratch"
@@ -67,6 +78,7 @@ help:
 	@echo "    make pretrain GPUS=4 CONFIG=pretrain/configs/gpt_350m.yaml"
 	@echo "    make curate N_WARC_FILES=50"
 	@echo "    make upload-data S3_BUCKET=my-bucket"
+	@echo "    make docker-build DOCKER_IMAGE=slm:latest"
 	@echo ""
 
 all: curate tokenizer upload-data prepare-sft-data prepare-dpo-data pretrain sft dpo eval-dpo
@@ -82,7 +94,36 @@ setup-instance:
 	@if [ -z "$(S3_BUCKET)" ]; then echo "ERROR: S3_BUCKET required"; exit 1; fi
 	bash infra/setup_gpu_instance.sh --bucket $(S3_BUCKET) --prefix $(S3_PREFIX)
 
-# ── Data ──────────────────────────────────────────────────────────────────────
+# ── Docker ────────────────────────────────────────────────────────────────────
+docker-build:
+	@echo "Building NeMo Docker image: $(DOCKER_IMAGE)"
+	docker build -t $(DOCKER_IMAGE) .
+	@echo "✓ Docker image built: $(DOCKER_IMAGE)"
+
+docker-shell-cpu:
+	@echo "Starting CPU container for data curation..."
+	docker run -it --rm \
+		--shm-size=8g \
+		-v $$(pwd):/workspace/slm \
+		-v /data:/data \
+		$(DOCKER_IMAGE) /bin/bash
+
+docker-shell-gpu:
+	@echo "Starting GPU container for training..."
+	docker run --gpus all -it --rm \
+		--shm-size=8g \
+		-v $$(pwd):/workspace/slm \
+		-v /data:/data \
+		-v /results:/results \
+		$(DOCKER_IMAGE) /bin/bash
+
+docker-curate:
+	@echo "Running data curation in Docker..."
+	docker run -it --rm \
+		--shm-size=8g \
+		-v $$(pwd):/workspace/slm \
+		-v /data:/data \
+		$(DOCKER_IMAGE) bash -c "cd /workspace/slm && make curate tokenizer"
 download-data:
 	bash curator/scripts/download_cc.sh --n-files $(N_WARC_FILES) --output-dir $(DATA_DIR)/raw/common_crawl
 
