@@ -28,6 +28,8 @@ The pipeline is modular — each stage is independently runnable, reproducible, 
 
 ```
 slm/
+├── README.md            Overview and quick start
+├── HARDWARE.md          Hardware recommendations and scaling guide
 ├── Makefile
 ├── requirements.txt
 ├── environment.yml
@@ -56,6 +58,25 @@ The architecture scales by config change only — no code changes required:
 | **125M** (baseline) | 12 | 768 | 12 | ~2.5B | 1 |
 | 350M | 24 | 1024 | 16 | ~7B | 4 |
 | 1B | 32 | 2048 | 16 | ~20B | 4 (TP=2) |
+
+---
+
+## Hardware Recommendations
+
+**See [HARDWARE.md](HARDWARE.md) for a detailed guide.**
+
+Quick summary — train in four runs:
+
+| Run | Goal | Model | Hardware | Duration | Cost |
+|---|---|---|---|---|---|
+| 1 | Validate pipeline | 125M | 2x A100 | 30-45 min | $3-5 |
+| 2 | Full baseline | 125M | 4x A100 or 2x H100 | 4-5 hrs | $12-22 |
+| 3 | Prove scaling | 350M | 6-8x H100 | 5-7 hrs | $60-100 |
+| 4 | Production scale | 1B | 8-16x H100 | 12-26 hrs | $240-330 |
+
+**Total:** ~40-60 hours wall-clock, $365-555
+
+Each run demonstrates a key principle: *validation → efficiency → scaling → tensor parallelism.*
 
 ---
 
@@ -118,13 +139,31 @@ make curate
 make tokenizer
 make upload-data S3_BUCKET=my-bucket
 
-# 2. On GPU instance — train
+# 2. On GPU instance — train (see HARDWARE.md for which GPUs to use)
 make setup-instance S3_BUCKET=my-bucket
 make prepare-sft-data
 make prepare-dpo-data
-make pretrain
-make sft
-make dpo
+
+# Run 1: Pipeline validation (2x A100)
+make pretrain CONFIG=pretrain/configs/gpt_125m.yaml GPUS=2
+
+# Run 2: 125M full training (choose one)
+# Option A: 4x A100 (cost-conscious)
+make pretrain CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
+# Option B: 2x H100 (speed-focused)
+# make pretrain CONFIG=pretrain/configs/gpt_125m.yaml GPUS=2
+
+# Run 3: 350M full training (choose one)
+# Option A: 6x H100 (balanced)
+make pretrain CONFIG=pretrain/configs/gpt_350m.yaml GPUS=6
+# Option B: 8x H100 (maximum efficiency)
+# make pretrain CONFIG=pretrain/configs/gpt_350m.yaml GPUS=8
+
+# Run 4: 1B production-scale training (choose one)
+# Option A: 8x H100 with tensor parallelism (balanced)
+make pretrain CONFIG=pretrain/configs/gpt_1b.yaml GPUS=8
+# Option B: 16x H100 with tensor parallelism (fastest)
+# make pretrain CONFIG=pretrain/configs/gpt_1b.yaml GPUS=16
 
 # 3. Evaluate
 make eval-dpo
