@@ -6,11 +6,8 @@ FROM pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime
 # Set working directory
 WORKDIR /workspace
 
-# Install Python 3.12 and system dependencies
+# Install system dependencies (Python already in base image)
 RUN apt-get update && apt-get install -y \
-    python3.12 \
-    python3.12-venv \
-    python3-pip \
     git \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
