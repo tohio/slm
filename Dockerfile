@@ -68,8 +68,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # -----------------------------------------------------------------------------
 RUN pip install --no-cache-dir \
     "nemo_toolkit[core]==2.0.0" \
-    "nemo-aligner==0.4.0" \
     "dask[distributed]==2024.4.1"
+
+# nemo-aligner==0.4.0 declares nemo_toolkit[nlp] as a dependency, which
+# includes mamba-ssm==2.2.2 (requires nvcc). Installing with --no-deps
+# after nemo_toolkit is already present prevents pip from re-resolving
+# the [nlp] extra and triggering the mamba-ssm compile failure.
+RUN pip install --no-cache-dir --no-deps "nemo-aligner==0.4.0"
+
+# Install nemo-aligner's other direct deps explicitly (since --no-deps skipped them)
+RUN pip install --no-cache-dir \
+    "megatron-core==0.8.0" \
+    jsonlines \
+    nvidia-pytriton
 
 # -----------------------------------------------------------------------------
 # STEP 1b — NeMo NLP extras needed for GPT/SFT/DPO (mamba-ssm excluded)
