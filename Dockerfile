@@ -61,7 +61,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # This prevents pip from backtracking against already-resolved constraints.
 # -----------------------------------------------------------------------------
 RUN pip install --no-cache-dir \
-    "nemo_toolkit[all]==2.0.0" \
+    "nemo_toolkit[nlp]==2.0.0" \
     "nemo-aligner==0.4.0" \
     "dask[distributed]==2024.4.1"
 
