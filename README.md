@@ -91,19 +91,15 @@ Each run demonstrates a key principle: *validation → efficiency → scaling �
 
 **Setup: Docker + Cloud Instance**
 
-The project is designed to run on cloud GPU instances using Docker. For local development, use Docker to match the cloud environment exactly.
+The project is designed to run on cloud GPU instances using Docker. No authentication required — the Dockerfile uses public PyTorch base image.
 
 ```bash
 # Clone the repo
 git clone https://github.com/tohio/slm.git
 cd slm
 
-# Build or use official NeMo image
-# Option 1: Build from project Dockerfile
+# Build Docker image (public base, no NGC auth needed)
 docker build -t slm:latest .
-
-# Option 2: Use official NeMo image directly (no build needed)
-# docker image: nvcr.io/nvidia/nemo:latest
 ```
 
 **Data Curation (CPU instance)**
