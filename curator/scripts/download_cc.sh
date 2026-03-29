@@ -42,7 +42,7 @@ LOG_FILE="$OUTPUT_DIR/download.log"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"; }
 
-# ── Fetch WARC paths index ─────────────────────────────────────────────────────
+# ── Fetch WARC paths index ────────────────────────────────────────────────────
 WARC_PATHS_URL="https://data.commoncrawl.org/crawl-data/${SNAPSHOT}/warc.paths.gz"
 WARC_PATHS_FILE="$OUTPUT_DIR/warc.paths.gz"
 
@@ -60,12 +60,26 @@ fi
 SELECTED_PATHS_FILE="$OUTPUT_DIR/selected_warc_paths.txt"
 
 log "Selecting $N_FILES WARC files from index"
-zcat "$WARC_PATHS_FILE" | head -n "$N_FILES" > "$SELECTED_PATHS_FILE"
+
+# NOTE: || true suppresses SIGPIPE (exit 141) from zcat when head exits early
+# after reading N_FILES lines. This is expected behavior with set -euo pipefail.
+zcat "$WARC_PATHS_FILE" | head -n "$N_FILES" > "$SELECTED_PATHS_FILE" || true
 
 ACTUAL_N=$(wc -l < "$SELECTED_PATHS_FILE")
+
+# Verify we actually got the expected number of paths
+if [[ "$ACTUAL_N" -eq 0 ]]; then
+    log "ERROR: No WARC paths selected — index file may be corrupt"
+    exit 1
+fi
+
+if [[ "$ACTUAL_N" -lt "$N_FILES" ]]; then
+    log "WARNING: Only $ACTUAL_N paths available (requested $N_FILES)"
+fi
+
 log "Selected $ACTUAL_N WARC paths"
 
-# ── Download WARCs in parallel ─────────────────────────────────────────────────
+# ── Download WARCs in parallel ────────────────────────────────────────────────
 log "Starting parallel download ($PARALLEL_DOWNLOADS concurrent)"
 
 download_warc() {
@@ -101,7 +115,7 @@ export OUTPUT_DIR CC_BUCKET
 cat "$SELECTED_PATHS_FILE" | \
     xargs -P "$PARALLEL_DOWNLOADS" -I{} bash -c 'download_warc "$@"' _ {}
 
-# ── Summary ────────────────────────────────────────────────────────────────────
+# ── Summary ───────────────────────────────────────────────────────────────────
 DOWNLOADED=$(find "$OUTPUT_DIR" -name "*.warc.gz" | wc -l)
 TOTAL_SIZE=$(du -sh "$OUTPUT_DIR" --exclude="*.txt" --exclude="*.gz" 2>/dev/null | cut -f1 || echo "unknown")
 
@@ -110,4 +124,4 @@ log "  WARC files downloaded: $DOWNLOADED"
 log "  Output directory:      $OUTPUT_DIR"
 log ""
 log "Next step: run the curator pipeline"
-log "  python pipelines/pipeline.py --config configs/curator.yaml"
+log "  make docker-curate"
