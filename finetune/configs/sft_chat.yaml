@@ -31,16 +31,23 @@ exp_manager:
     filename: slm_sft_chat--{val_loss:.2f}-{step}
 
 model:
+  # Pre-trained checkpoint to fine-tune from
   restore_from_path: /results/slm_gpt_125m/checkpoints/last.nemo
 
   tensor_model_parallel_size: 1
   pipeline_model_parallel_size: 1
 
-  # Only compute loss on assistant responses — not the human prompt
+  # Only compute loss on assistant responses — not the human prompt tokens.
+  # Critical for SFT quality — without this the model trains on prompt tokens
+  # which dilutes the gradient signal and hurts instruction following.
+  # Requires GPTSFTModel from nemo_aligner (not base MegatronGPTModel).
   answer_only_loss: true
   sample_weight: constant
 
+  # ── Data ────────────────────────────────────────────────────────────────────
   data:
+    # chat: true enables conversation template formatting in NeMo Aligner's
+    # SFT data loader — applies <|user|>/<|assistant|> token wrapping
     chat: true
     num_workers: 4
     train_ds:
@@ -58,6 +65,8 @@ model:
       shuffle: false
       add_eos: true
 
+  # ── Optimizer ───────────────────────────────────────────────────────────────
+  # Lower LR than pre-training — we're fine-tuning, not learning from scratch
   optim:
     name: fused_adam
     lr: 1.0e-5
@@ -69,6 +78,8 @@ model:
       constant_steps: 0
       min_lr: 1.0e-6
 
+  # ── Memory ──────────────────────────────────────────────────────────────────
+  # Must match pre-training checkpoint settings to load weights correctly
   activations_checkpoint_method: uniform
   activations_checkpoint_num_layers: 1
   activations_checkpoint_granularity: full

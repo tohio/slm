@@ -31,15 +31,19 @@ exp_manager:
     filename: slm_sft_code--{val_loss:.2f}-{step}
 
 model:
-  # Load from chat SFT checkpoint — sequential fine-tuning
+  # Sequential fine-tuning: load from chat SFT checkpoint, not pre-train.
+  # This preserves conversational ability while adding code capability.
   restore_from_path: /results/slm_sft_chat/checkpoints/last.nemo
 
   tensor_model_parallel_size: 1
   pipeline_model_parallel_size: 1
 
+  # Only compute loss on assistant responses — not the human prompt tokens.
+  # Requires GPTSFTModel from nemo_aligner (not base MegatronGPTModel).
   answer_only_loss: true
   sample_weight: constant
 
+  # ── Data ────────────────────────────────────────────────────────────────────
   data:
     chat: true
     num_workers: 4
@@ -58,7 +62,9 @@ model:
       shuffle: false
       add_eos: true
 
-  # Lower LR than chat SFT to reduce catastrophic forgetting
+  # ── Optimizer ───────────────────────────────────────────────────────────────
+  # Lower LR than chat SFT (5e-6 vs 1e-5) to reduce catastrophic forgetting
+  # of chat capabilities while adapting to code tasks.
   optim:
     name: fused_adam
     lr: 5.0e-6
@@ -70,6 +76,8 @@ model:
       constant_steps: 0
       min_lr: 5.0e-7
 
+  # ── Memory ──────────────────────────────────────────────────────────────────
+  # Must match chat SFT checkpoint settings to load weights correctly
   activations_checkpoint_method: uniform
   activations_checkpoint_num_layers: 1
   activations_checkpoint_granularity: full

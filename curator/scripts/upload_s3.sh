@@ -15,20 +15,20 @@ set -euo pipefail
 # ── Defaults ──────────────────────────────────────────────────────────────────
 S3_BUCKET=""
 S3_PREFIX="slm/data"
-LOCAL_DATA_DIR="/data/curated/stages/tokenize"
+# tokenize_data.py writes output to /data/curated/tokenized/
+# (not /data/curated/stages/tokenize/ which is the pipeline stage dir)
+LOCAL_DATA_DIR="/data/curated/tokenized"
 TOKENIZER_DIR="/data/tokenizer"
 CONFIG_DIR="$(dirname "$0")/../configs"
 DRY_RUN=false
-COMPRESS=true
 
 # ── Arg parsing ───────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --bucket)     S3_BUCKET="$2";     shift 2 ;;
-        --prefix)     S3_PREFIX="$2";     shift 2 ;;
+        --bucket)     S3_BUCKET="$2";      shift 2 ;;
+        --prefix)     S3_PREFIX="$2";      shift 2 ;;
         --data-dir)   LOCAL_DATA_DIR="$2"; shift 2 ;;
         --dry-run)    DRY_RUN=true;        shift ;;
-        --no-compress) COMPRESS=false;    shift ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
@@ -43,7 +43,6 @@ S3_BASE="s3://${S3_BUCKET}/${S3_PREFIX}"
 LOG_FILE="/tmp/upload_s3_$(date +%Y%m%d_%H%M%S).log"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"; }
-dry() { [[ "$DRY_RUN" == "true" ]] && echo "[DRY-RUN] $*" || true; }
 
 AWS_FLAGS="--no-progress"
 [[ "$DRY_RUN" == "true" ]] && AWS_FLAGS="$AWS_FLAGS --dryrun"
@@ -54,16 +53,22 @@ log "  Source (tokenizer):      $TOKENIZER_DIR"
 log "  Destination:             $S3_BASE"
 log "  Dry run:                 $DRY_RUN"
 
-# ── Upload tokenized dataset ───────────────────────────────────────────────────
-log "Uploading tokenized dataset (.bin/.idx files)..."
-
+# ── Validate source ────────────────────────────────────────────────────────────
 BIN_COUNT=$(find "$LOCAL_DATA_DIR" -name "*.bin" 2>/dev/null | wc -l)
+if [[ "$BIN_COUNT" -eq 0 ]]; then
+    echo "ERROR: No .bin files found in $LOCAL_DATA_DIR"
+    echo "  Run 'make tokenizer' first to generate the tokenized dataset."
+    exit 1
+fi
 IDX_COUNT=$(find "$LOCAL_DATA_DIR" -name "*.idx" 2>/dev/null | wc -l)
 log "  Found: $BIN_COUNT .bin files, $IDX_COUNT .idx files"
 
+# ── Upload tokenized dataset ───────────────────────────────────────────────────
+log "Uploading tokenized dataset (.bin/.idx files)..."
+
 aws s3 sync \
     "$LOCAL_DATA_DIR" \
-    "${S3_BASE}/tokenized/" \
+    "${S3_BASE}/curated/tokenized/" \
     --exclude "*" \
     --include "*.bin" \
     --include "*.idx" \
@@ -95,12 +100,12 @@ if [[ -d "$CONFIG_DIR" ]]; then
     log "Config uploaded"
 fi
 
-# ── Generate manifest ─────────────────────────────────────────────────────────
+# ── Generate manifest ──────────────────────────────────────────────────────────
 MANIFEST_FILE="/tmp/dataset_manifest.json"
-
 log "Generating dataset manifest..."
+
 python3 - <<EOF
-import json, os
+import json
 from pathlib import Path
 
 data_dir = Path("$LOCAL_DATA_DIR")
@@ -116,7 +121,7 @@ for f in sorted(data_dir.glob("*.bin")):
 manifest = {
     "dataset": "slm_pretrain",
     "created": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-    "s3_base": "$S3_BASE/tokenized",
+    "s3_base": "$S3_BASE/curated/tokenized",
     "files": files,
     "total_files": len(files),
 }
@@ -133,9 +138,9 @@ log "Manifest uploaded to ${S3_BASE}/manifest.json"
 # ── Summary ────────────────────────────────────────────────────────────────────
 log ""
 log "Upload complete!"
-log "  S3 location:  $S3_BASE"
-log "  Log:          $LOG_FILE"
+log "  S3 location: $S3_BASE"
+log "  Log:         $LOG_FILE"
 log ""
 log "On your GPU instance, sync with:"
-log "  aws s3 sync ${S3_BASE}/tokenized/ /data/pretrain/"
+log "  aws s3 sync ${S3_BASE}/curated/tokenized/ /data/curated/tokenized/"
 log "  aws s3 sync ${S3_BASE}/tokenizer/ /data/tokenizer/"

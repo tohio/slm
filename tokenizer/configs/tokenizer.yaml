@@ -16,6 +16,9 @@ tokenizer:
   eos_id: 3
 
   # Special tokens — baked in from the start
+  # NOTE: <PAD>, <UNK>, <BOS>, <EOS> here are redundant with pad_id/unk_id/bos_id/eos_id
+  # above — they push chat tokens from IDs 4-9 to IDs 8-13.
+  # Tracked in .todo for a future cleanup pass.
   user_defined_symbols:
     - "<PAD>"
     - "<UNK>"
@@ -32,6 +35,9 @@ tokenizer:
   remove_extra_whitespaces: true
   add_dummy_prefix: true
   byte_fallback: true           # no UNK tokens — encode unknown chars as bytes
-  num_threads: 16
+
+  # num_threads intentionally omitted — train_tokenizer.py detects CPU count
+  # at runtime and uses all available CPUs automatically
+
   max_sentence_length: 4096
   train_extremely_large_corpus: false

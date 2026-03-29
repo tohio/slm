@@ -127,9 +127,53 @@ def should_run_tokenization(cfg: dict) -> bool:
     return True
 
 
+def resolve_dask_config(cfg: dict) -> dict:
+    """
+    Resolve Dask worker config dynamically at runtime.
+    - n_workers: defaults to all available CPUs if not set or set to 0
+    - memory_limit: defaults to (total_RAM - 2GB) / n_workers if not set
+    Explicit config values are respected as overrides.
+    """
+    import os
+    import psutil
+
+    dask_cfg = cfg.get("dask", {})
+
+    # Resolve n_workers
+    cpu_count = os.cpu_count() or 1
+    configured_workers = dask_cfg.get("n_workers", 0)
+    if not configured_workers or configured_workers <= 0:
+        n_workers = cpu_count
+    else:
+        n_workers = min(configured_workers, cpu_count)
+
+    # Resolve memory_limit
+    configured_limit = dask_cfg.get("memory_limit", None)
+    if not configured_limit:
+        total_ram_gb = psutil.virtual_memory().total / (1024 ** 3)
+        mem_per_worker_gb = max(1, (total_ram_gb - 2) / n_workers)
+        memory_limit = f"{mem_per_worker_gb:.1f}GB"
+    else:
+        memory_limit = configured_limit
+
+    logger.info(
+        f"Dask config resolved: n_workers={n_workers} "
+        f"(available CPUs={cpu_count}), memory_limit={memory_limit}"
+    )
+
+    return {
+        **dask_cfg,
+        "n_workers": n_workers,
+        "memory_limit": memory_limit,
+    }
+
+
 def run_pipeline(config: dict, start_stage: str = "extract"):
     cfg = config["curation"]
     output_base = cfg["output_data_dir"]
+
+    # Resolve Dask config dynamically and inject back into cfg
+    cfg["dask"] = resolve_dask_config(cfg)
 
     # Set up logging to file as well
     log_dir = Path(cfg.get("log_dir", "/data/logs/curator"))

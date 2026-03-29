@@ -49,32 +49,38 @@ model:
   gradient_as_bucket_view: true
   resume_from_checkpoint: null
 
+  # ── Tokenizer ──────────────────────────────────────────────────────────────
   tokenizer:
     library: sentencepiece
     model: /data/tokenizer/slm_tokenizer.model
 
+  # ── Initialization ─────────────────────────────────────────────────────────
   init_method_std: 0.02
   use_scaled_init_method: true
   hidden_dropout: 0.1
   attention_dropout: 0.1
   ffn_dropout: 0.0
 
+  # ── Attention ──────────────────────────────────────────────────────────────
   apply_query_key_layer_scaling: true
   attention_softmax_in_fp32: false
   bias_gelu_fusion: true
   masked_softmax_fusion: true
   bias_dropout_add_fusion: true
 
+  # ── Normalization ──────────────────────────────────────────────────────────
   normalization: layernorm
   layernorm_epsilon: 1.0e-5
   activation: gelu
   bias: true
   share_embeddings_and_output_weights: false
 
+  # ── Memory ────────────────────────────────────────────────────────────────
   activations_checkpoint_method: uniform
   activations_checkpoint_num_layers: 1
   activations_checkpoint_granularity: full
 
+  # ── Optimizer ──────────────────────────────────────────────────────────────
   optim:
     name: fused_adam
     lr: 2.0e-4
@@ -86,6 +92,7 @@ model:
       constant_steps: 0
       min_lr: 2.0e-5
 
+  # ── Data ───────────────────────────────────────────────────────────────────
   data:
     data_impl: mmap
     splits_string: "99,1,0"
@@ -94,11 +101,12 @@ model:
     num_workers: 4
     dataloader_type: single
     eod_mask_loss: false
+    # Paths match output of 'make tokenizer' → /data/curated/tokenized/
     data_prefix:
       - 0.7
-      - /data/pretrain/general/text_document
+      - /data/curated/tokenized/text_document
       - 0.3
-      - /data/pretrain/code/text_document
+      - /data/curated/tokenized/text_document   # replace with code path when available
 
   micro_batch_size: 4
-  global_batch_size: 128           # data_parallel_size=4
+  global_batch_size: 128          # data_parallel_size=4

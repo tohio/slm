@@ -31,11 +31,15 @@ exp_manager:
     filename: slm_dpo--{val_loss:.2f}-{step}
 
 model:
+  # Path to the SFT checkpoint to start DPO from.
+  # This is also used as the frozen reference policy.
+  # Must be a .nemo file produced by make sft.
   restore_from_path: /results/slm_sft_code/checkpoints/last.nemo
 
   tensor_model_parallel_size: 1
   pipeline_model_parallel_size: 1
 
+  # ── DPO ────────────────────────────────────────────────────────────────────
   dpo:
     # Beta controls KL divergence from reference policy.
     # Lower = more aggressive preference optimization.
@@ -46,12 +50,13 @@ model:
     average_log_probs: false
     label_smoothing: 0.0
 
+  # ── Data ────────────────────────────────────────────────────────────────────
   data:
     num_workers: 4
     train_ds:
       file_path: /data/dpo/train.jsonl
       max_seq_length: 2048
-      micro_batch_size: 2       # DPO runs policy + reference simultaneously
+      micro_batch_size: 2       # DPO runs policy + reference forward pass simultaneously
       global_batch_size: 16
       shuffle: true
       add_eos: true
@@ -63,7 +68,8 @@ model:
       shuffle: false
       add_eos: true
 
-  # DPO is sensitive to LR — keep low
+  # ── Optimizer ───────────────────────────────────────────────────────────────
+  # DPO is sensitive to LR — keep low to avoid drifting far from reference
   optim:
     name: fused_adam
     lr: 5.0e-7
@@ -75,6 +81,8 @@ model:
       constant_steps: 0
       min_lr: 0.0
 
+  # ── Memory ──────────────────────────────────────────────────────────────────
+  # Must match the SFT checkpoint's settings to load weights correctly
   activations_checkpoint_method: uniform
   activations_checkpoint_num_layers: 1
   activations_checkpoint_granularity: full

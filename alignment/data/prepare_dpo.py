@@ -79,10 +79,32 @@ def format_hh_rlhf(example: dict) -> dict | None:
     }
 
 
+def _get_ultrafeedback_score(completion: dict) -> float | None:
+    """
+    Extract score from a UltraFeedback completion dict.
+    Handles both schema versions:
+      - Old: completion["overall_score"]
+      - New: completion["annotations"]["overall_score"]
+    Returns None if score cannot be parsed.
+    """
+    # Try new schema first
+    score = completion.get("annotations", {}).get("overall_score", None)
+    if score is None:
+        # Fall back to old schema
+        score = completion.get("overall_score", None)
+    if score is None:
+        return None
+    try:
+        return float(score)
+    except (ValueError, TypeError):
+        return None
+
+
 def format_ultrafeedback(example: dict) -> dict | None:
     """
     Format UltraFeedback dataset.
     Contains GPT-4 rated completions — we take highest vs lowest rated.
+    Handles both old and new dataset schemas.
     """
     instruction = example.get("instruction", "").strip()
     completions = example.get("completions", [])
@@ -93,13 +115,10 @@ def format_ultrafeedback(example: dict) -> dict | None:
     # Sort by overall score — take best and worst
     scored = []
     for c in completions:
-        score = c.get("overall_score", 0)
+        score = _get_ultrafeedback_score(c)
         response = c.get("response", "").strip()
-        if response:
-            try:
-                scored.append((float(score), response))
-            except (ValueError, TypeError):
-                continue
+        if score is not None and response:
+            scored.append((score, response))
 
     if len(scored) < 2:
         return None
@@ -149,17 +168,30 @@ def prepare_dpo(output_dir: Path, seed: int = 42):
     logger.info("Loading UltraFeedback...")
     try:
         uf = load_dataset("openbmb/UltraFeedback", split="train")
+
+        # Log schema of first example to help debug if formatter produces 0 results
+        if len(uf) > 0:
+            sample_completion = uf[0].get("completions", [{}])[0]
+            logger.info(f"  UltraFeedback completion keys: {list(sample_completion.keys())}")
+
         before = len(all_examples)
         for ex in uf:
             formatted = format_ultrafeedback(ex)
             if formatted:
                 all_examples.append(formatted)
-        logger.info(f"  UltraFeedback: {len(all_examples) - before:,} examples")
+
+        added = len(all_examples) - before
+        logger.info(f"  UltraFeedback: {added:,} examples")
+        if added == 0:
+            logger.warning(
+                "  UltraFeedback produced 0 examples — dataset schema may have changed. "
+                "Check completion keys logged above."
+            )
     except Exception as e:
         logger.warning(f"Failed to load UltraFeedback: {e}")
 
     if not all_examples:
-        raise RuntimeError("No DPO examples loaded.")
+        raise RuntimeError("No DPO examples loaded. Check dataset availability and schema.")
 
     # Shuffle and split
     random.shuffle(all_examples)
@@ -176,7 +208,9 @@ def prepare_dpo(output_dir: Path, seed: int = 42):
                 f.write(json.dumps(ex, ensure_ascii=False) + "\n")
         logger.info(f"  {split}: {len(data):,} examples → {out_file}")
 
-    logger.info(f"DPO dataset prepared: {len(train_examples):,} train, {len(val_examples):,} val")
+    logger.info(
+        f"DPO dataset prepared: {len(train_examples):,} train, {len(val_examples):,} val"
+    )
 
 
 def main():

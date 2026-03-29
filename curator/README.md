@@ -4,14 +4,14 @@ Data quality determines model quality more than any other factor. This stage pro
 
 ## Pipeline
 
-Each stage is independently resumable. If a spot instance is preempted mid-run, restart with `--start-stage <stage>` and the pipeline picks up where it left off.
+Each stage is independently resumable. If an instance is preempted mid-run, restart with `--start-stage <stage>` and the pipeline picks up where it left off using `.complete` markers.
 
 ```
 Common Crawl WARCs
       │
       ▼
  1. extract          HTML → clean text (trafilatura), encoding normalization
-      │
+      │              Parallelized at record level across all available CPUs
       ▼
  2. language_filter  fastText language ID, retain English (score ≥ 0.65)
       │
@@ -20,7 +20,7 @@ Common Crawl WARCs
       │
       ▼
  4. quality_filter   fastText classifier — Wikipedia-like vs web noise
-      │
+      │              Auto-skipped if model not trained yet (pass 1)
       ▼
  5. exact_dedup      MD5 hash deduplication — byte-identical documents
       │
@@ -32,7 +32,27 @@ Common Crawl WARCs
       │
       ▼
  8. tokenize         SentencePiece BPE → memory-mapped .bin/.idx files
+                     Auto-skipped if tokenizer not trained yet (pass 1)
 ```
+
+## Two-Pass Curation
+
+The pipeline runs in two passes because the quality classifier and tokenizer depend on curated output that doesn't exist yet on the first run.
+
+**Pass 1** — `quality_filter` and `tokenize` are auto-skipped (models not present):
+```bash
+make docker-curate    # extract → language_filter → heuristic_filter →
+                      # exact_dedup → fuzzy_dedup → pii
+make tokenizer        # train tokenizer on pass 1 output
+```
+
+**Pass 2** — both stages run automatically once models exist:
+```bash
+# train quality classifier (see .todo for automation)
+make docker-curate    # pipeline.py detects models at runtime, runs all stages
+```
+
+No manual edits to `curator.yaml` required between passes — `pipeline.py` checks for model files at startup and logs `WILL RUN` or `WILL SKIP` for each optional stage.
 
 ## Design Decisions
 
@@ -45,61 +65,64 @@ Exact dedup (MD5) is O(n) and catches byte-identical documents cheaply. Fuzzy de
 **Why heuristics before the classifier?**
 Heuristic filters are fast and cheap — they eliminate the majority of garbage (too short, too many symbols, high repetition) before the slower fastText classifier runs. Ordering matters for throughput.
 
-**Retention rates to expect**
+**Why process WARCs one at a time during extraction?**
+Loading all WARC records into memory simultaneously (~11GB for 20 WARCs) exhausts the Dask scheduler during task graph submission. Processing one WARC at a time (~600MB peak) keeps memory bounded while still utilizing all CPU cores via Dask parallelism within each WARC.
 
-| Stage | Typical retention |
-|---|---|
-| Language filter | 60–70% |
-| Heuristic filter | 40–60% |
-| Quality filter | 30–50% |
-| Exact dedup | 85–95% |
-| Fuzzy dedup | 70–85% |
-| **Combined** | **~15–20% of raw** |
+**Retention rates (observed on CC-MAIN-2024-10)**
 
-This is normal. A 20GB WARC file yielding 3–4GB of clean text is a good outcome.
+| Stage | Typical | Observed (20 WARCs) |
+|---|---|---|
+| Language filter | 60–70% | ~22% |
+| Heuristic filter | 40–60% | — |
+| Quality filter | 30–50% | skipped (pass 1) |
+| Exact dedup | 85–95% | ~99% |
+| Fuzzy dedup | 70–85% | ~98.7% |
+| **Combined** | **~15–20% of raw** | — |
+
+> Language filter retention of 22% is normal for Common Crawl — the raw crawl is heavily non-English. Overall combined retention of 15–20% of raw records is expected.
+
+## Infrastructure
+
+Curation runs on CPU instances. Dask worker count and memory limits are detected automatically from available CPUs and RAM — no instance-specific config required.
+
+All commands run inside the Docker container via `make docker-curate`. The `/data` directory is bind-mounted from the host so output persists across container restarts.
 
 ## Usage
 
 ```bash
-# Download Common Crawl subset (20 WARC files ~20GB compressed)
-make download-data
+# First time setup
+make init-dirs
+make docker-build
+make download-models        # fastText language ID model (lid.176.bin)
 
-# Run full pipeline
-make curate
+# Download Common Crawl WARCs
+make download-data N_WARC_FILES=20
 
-# Resume after preemption
-python curator/pipelines/pipeline.py \
-    --config curator/configs/curator.yaml \
-    --start-stage fuzzy_dedup
+# Run curation pipeline (pass 1)
+make docker-curate
 
 # Train tokenizer on curated output
 make tokenizer
 
 # Upload to S3 for GPU instance
 make upload-data S3_BUCKET=my-bucket
+
+# Resume after interruption
+make docker-shell-cpu
+# inside container:
+python curator/pipelines/pipeline.py \
+    --config curator/configs/curator.yaml \
+    --start-stage fuzzy_dedup
 ```
-
-## Infrastructure
-
-Curation runs on AWS Spot instances (CPU-bound workload). Spot instances offer 70–90% cost savings over on-demand — and since each stage checkpoints to S3, preemption only loses the current stage's progress.
-
-Recommended instance types:
-
-| Instance | vCPU | RAM | Best for |
-|---|---|---|---|
-| `c5.4xlarge` | 16 | 32GB | Extraction, filtering |
-| `r5.4xlarge` | 16 | 128GB | MinHash deduplication |
-
-Estimated cost for a full curation run (20 WARC files): **$3–5**.
 
 ## Output
 
-The tokenization stage produces NeMo-compatible memory-mapped files:
+The curation pipeline writes to `/data/curated/stages/<stage>/` at each step. The tokenization stage produces NeMo-compatible memory-mapped files:
 
 ```
-/data/curated/stages/tokenize/
+/data/curated/tokenized/
     text_document.bin     ← raw uint16 token IDs
     text_document.idx     ← document offsets for O(1) random access
 ```
 
-These files are consumed directly by the pre-training stage with no further conversion.
+These files are uploaded to S3 by `make upload-data` and pulled onto the GPU instance by `make setup-instance`. The pre-training stage consumes them directly with no further conversion.

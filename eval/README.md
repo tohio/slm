@@ -20,7 +20,7 @@ Measures how well the model predicts held-out text. Lower is better.
 perplexity = exp(average cross-entropy loss per token)
 ```
 
-Computed on the 1% validation split from the pre-training dataset (held out by the `splits_string: "99,1,0"` config). Useful for tracking pre-training convergence but less meaningful after SFT — the model's distribution shifts away from raw web text, so perplexity naturally increases even as instruction following improves.
+Computed on the 1% validation split from the pre-training dataset (held out by the `splits_string: "99,1,0"` config). Data is read from `/data/curated/tokenized/text_document.bin`. Useful for tracking pre-training convergence but less meaningful after SFT — the model's distribution shifts away from raw web text, so perplexity naturally increases even as instruction following improves.
 
 **Expected ranges for 125M:**
 - Pre-training: 80–150 at convergence
@@ -58,7 +58,14 @@ Uses a heuristic judge (response length, refusal detection, code block presence)
 
 ## Usage
 
+All eval commands run inside the GPU container:
+
 ```bash
+# Start GPU container
+make docker-shell-gpu
+
+# Inside the container:
+
 # Evaluate each stage
 make eval-pretrain
 make eval-sft
@@ -72,6 +79,12 @@ python eval/run_eval.py \
     --n-samples 10 \
     --n-mmlu 100 \
     --n-pairs 200
+
+# Run extended benchmarks via lm-eval
+lm_eval --model nemo_lm \
+        --model_args pretrained=/results/slm_dpo/checkpoints/last.nemo \
+        --tasks hellaswag,winogrande,arc_easy \
+        --num_fewshot 0
 ```
 
 ## Output
@@ -102,10 +115,4 @@ summary.txt     ← printed summary for quick inspection
 
 **LLM-as-judge win rate:** Replace the heuristic judge in `win_rate.py` with GPT-4 API calls for more reliable preference scoring. The interface is designed to make this swap straightforward.
 
-**Extended benchmarks:** The `lm-eval` package is included in `requirements.txt`. Run additional benchmarks (HellaSwag, WinoGrande, ARC) via:
-```bash
-lm_eval --model nemo_lm \
-        --model_args pretrained=/results/slm_dpo/checkpoints/last.nemo \
-        --tasks hellaswag,winogrande,arc_easy \
-        --num_fewshot 0
-```
+**Extended benchmarks:** The `lm-eval` package is included in `requirements.txt`. Run additional benchmarks (HellaSwag, WinoGrande, ARC) via the `lm_eval` command shown in Usage above.

@@ -1,15 +1,20 @@
 # =============================================================================
 # NeMo Curator Pipeline Configuration
 # =============================================================================
-# Instance:  4 vCPU / 15GB RAM (e.g. GCP n2d-standard-4)
+# Dask worker count and memory limit are auto-detected at runtime from
+# available CPUs and RAM — no instance-specific tuning required.
+# Override in the dask: section below only if needed.
+#
 # Run order:
 #   1. make init-dirs
 #   2. make download-models          # downloads lid.176.bin
 #   3. make download-data            # downloads WARC files
-#   4. make docker-curate            # runs this config (pass 1)
-#   5. make tokenizer                # trains tokenizer on curated output
-#   6. Re-enable tokenization below and re-run make docker-curate (pass 2)
-#   7. Train quality classifier on curated sample, then re-enable quality_filter
+#   4. make docker-curate            # pass 1: quality_filter + tokenization
+#                                    # auto-skipped (models don't exist yet)
+#   5. make tokenizer                # train tokenizer on curated output
+#   6. make train-quality-classifier # train quality classifier (TODO)
+#   7. make docker-curate            # pass 2: all stages run automatically
+#                                    # (pipeline.py detects models at runtime)
 # =============================================================================
 
 curation:
@@ -21,15 +26,14 @@ curation:
   log_dir: /data/logs/curator
 
   # ── Dask ───────────────────────────────────────────────────────────────────
-  # Tuned for 4 vCPU / 15GB RAM instance.
-  # Formula: n_workers = vCPU count, memory_limit = (total_RAM - 2GB) / n_workers
-  # For larger instances:
-  #   r5.4xlarge  (16 vCPU / 128GB): n_workers: 16, memory_limit: "7GB"
-  #   r5.2xlarge  (8 vCPU  /  64GB): n_workers: 8,  memory_limit: "7GB"
+  # n_workers and memory_limit are resolved dynamically at runtime by pipeline.py:
+  #   n_workers    = os.cpu_count()
+  #   memory_limit = (total_RAM_GB - 2) / n_workers
+  # Override here only if you want to cap resource usage on a shared instance.
   dask:
-    n_workers: 32
     threads_per_worker: 1
-    memory_limit: "3GB"
+    # n_workers: 16       # uncomment to cap (default: all CPUs)
+    # memory_limit: "3GB" # uncomment to cap (default: auto)
 
   # ── Language Filter ────────────────────────────────────────────────────────
   # lid.176.bin: download with 'make download-models'

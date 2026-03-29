@@ -24,8 +24,11 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 STAGE="both"
 GPUS=$(python3 -c "import torch; print(torch.cuda.device_count())")
 WANDB=false
-LOG_DIR="/logs/sft"
 PRETRAIN_CKPT=""    # override pretrain checkpoint path
+
+# Changed from /logs/sft → /results/sft_logs
+# /logs is not reliably bind-mounted; /results always is
+LOG_DIR="/results/sft_logs"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -122,7 +125,6 @@ run_sft() {
 if [[ "$STAGE" == "both" || "$STAGE" == "chat" ]]; then
     CHAT_CONFIG="$REPO_ROOT/finetune/configs/sft_chat.yaml"
 
-    # Validate chat dataset
     if [[ ! -f "/data/sft/chat/train.jsonl" ]]; then
         echo "ERROR: Chat SFT training data not found at /data/sft/chat/train.jsonl"
         echo "  Run: python finetune/data/prepare_sft.py --stage chat"
@@ -136,7 +138,6 @@ fi
 if [[ "$STAGE" == "both" || "$STAGE" == "code" ]]; then
     CODE_CONFIG="$REPO_ROOT/finetune/configs/sft_code.yaml"
 
-    # Code SFT loads from chat SFT checkpoint
     CHAT_CKPT=$(find_latest_ckpt "/results/slm_sft_chat/checkpoints")
     if [[ -z "$CHAT_CKPT" ]]; then
         echo "ERROR: Chat SFT checkpoint not found in /results/slm_sft_chat/"
@@ -145,7 +146,6 @@ if [[ "$STAGE" == "both" || "$STAGE" == "code" ]]; then
     fi
     log "Code SFT loading from chat checkpoint: $CHAT_CKPT"
 
-    # Validate code dataset
     if [[ ! -f "/data/sft/code/train.jsonl" ]]; then
         echo "ERROR: Code SFT training data not found at /data/sft/code/train.jsonl"
         echo "  Run: python finetune/data/prepare_sft.py --stage code"

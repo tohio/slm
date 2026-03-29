@@ -41,14 +41,21 @@ The `micro_batch_size: 2` in the DPO config (vs 4 in SFT) accounts for this.
 
 ## Usage
 
+All commands run inside the GPU container:
+
 ```bash
+# Start GPU container
+make docker-shell-gpu
+
+# Inside the container:
+
 # Prepare preference datasets
 make prepare-dpo-data
 
-# Run DPO alignment
+# Run DPO alignment (uses latest SFT checkpoint automatically)
 make dpo
 
-# Tune beta
+# Tune beta without editing the config
 bash alignment/scripts/train_dpo.sh --beta 0.05
 
 # Evaluate win rate vs SFT reference

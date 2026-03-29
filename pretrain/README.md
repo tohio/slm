@@ -46,22 +46,51 @@ Key metrics to watch during pre-training:
 
 Expected validation perplexity at convergence: **80–150** for 125M trained on ~2.5B tokens. This is the baseline; SFT and DPO don't optimize perplexity directly so it may increase slightly in later stages.
 
-## Usage
+## Prerequisites
+
+Before running pre-training, ensure the following are in place on the GPU instance:
 
 ```bash
+# 1. Host directories and data
+make init-dirs
+make setup-instance S3_BUCKET=my-bucket   # pulls tokenized data + tokenizer from S3
+
+# 2. Verify dataset is present
+ls /data/curated/tokenized/               # should show text_document.bin + text_document.idx
+
+# 3. Build the Docker image if not already built
+make docker-build
+```
+
+## Usage
+
+All training commands run inside the Docker container via `make docker-shell-gpu`.
+
+```bash
+# Start GPU container
+make docker-shell-gpu
+
+# Inside the container:
+
 # Single GPU, 125M (default)
 make pretrain
 
 # Multi-GPU, 350M
 make pretrain CONFIG=pretrain/configs/gpt_350m.yaml GPUS=4
 
+# Multi-GPU, 1B (TP=2 required)
+make pretrain CONFIG=pretrain/configs/gpt_1b.yaml GPUS=4
+
 # Resume from latest checkpoint (auto-detected)
 bash pretrain/scripts/train.sh --config pretrain/configs/gpt_125m.yaml
+
+# Enable W&B logging
+bash pretrain/scripts/train.sh --config pretrain/configs/gpt_125m.yaml --wandb
 
 # Evaluate after training
 make eval-pretrain
 
-# Export to HuggingFace format for external evaluation
+# Export to HuggingFace format for external evaluation or serving
 bash pretrain/scripts/convert_ckpt.sh \
     --direction nemo_to_hf \
     --input /results/slm_gpt_125m/checkpoints/last.nemo \
@@ -78,4 +107,6 @@ Pre-training is the most GPU-intensive stage. For 125M on ~2.5B tokens:
 | 1x A100 40GB | ~12–18hrs | ~$18–27 |
 | 4x A6000 48GB | ~6–8hrs | ~$22–30 |
 
-Checkpoints are saved every 1,000 steps. If the instance is terminated, training resumes automatically from the latest checkpoint on the next run.
+Checkpoints are saved to `/results/slm_gpt_125m/checkpoints/` every 1,000 steps and synced to `/results` which is bind-mounted from the host. If the container is stopped, training resumes automatically from the latest checkpoint on the next run.
+
+Training logs are written to `/results/pretrain_logs/` inside the container, which persists to the host via the bind mount.

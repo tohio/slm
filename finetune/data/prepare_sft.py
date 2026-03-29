@@ -22,6 +22,7 @@ NeMo Aligner SFT expects ShareGPT-style JSONL:
 Usage:
   python prepare_sft.py --stage chat --output-dir /data/sft/chat
   python prepare_sft.py --stage code --output-dir /data/sft/code
+  python prepare_sft.py --stage both
 """
 
 import argparse
@@ -52,28 +53,52 @@ VAL_SPLIT = 0.05   # 5% validation
 # Chat datasets
 # ─────────────────────────────────────────────────────────────────────────────
 
-def format_oasst1(example: dict) -> dict | None:
+def build_oasst1_pairs(dataset) -> list[dict]:
     """
-    Format OpenAssistant OASST1 into ShareGPT conversation format.
-    OASST1 is a tree structure — we use the highest-rated reply chain.
+    Extract (prompt, response) pairs from the OASST1 message tree.
+
+    The raw OpenAssistant/oasst1 dataset is a flat list of messages with
+    parent_id references — not pre-flattened instruction/output pairs.
+    Each message has: message_id, parent_id, role ('prompter'|'assistant'),
+    text, rank (0 = best among siblings), lang.
+
+    We extract the top-rated single-turn pairs:
+      parent = prompter message (root or child)
+      child  = assistant reply with rank=0 (highest rated)
+    and filter to English only.
     """
-    # Dataset already flattened into (instruction, response) pairs
-    # by the HuggingFace version we use
-    instruction = example.get("instruction", "").strip()
-    response = example.get("output", "").strip()
+    # Build lookup: message_id → message
+    messages = {m["message_id"]: m for m in dataset}
 
-    if not instruction or not response:
-        return None
-    if len(instruction) < 10 or len(response) < 20:
-        return None
+    pairs = []
+    for msg in dataset:
+        # Only process top-rated assistant responses in English
+        if msg["role"] != "assistant":
+            continue
+        if msg.get("lang", "en") != "en":
+            continue
+        if msg.get("rank", 999) != 0:
+            continue
 
-    return {
-        "conversations": [
-            {"from": "system",    "value": SYSTEM_PROMPT_GENERAL},
-            {"from": "human",     "value": instruction},
-            {"from": "assistant", "value": response},
-        ]
-    }
+        parent = messages.get(msg["parent_id"])
+        if parent is None or parent["role"] != "prompter":
+            continue
+
+        prompt = parent["text"].strip()
+        response = msg["text"].strip()
+
+        if len(prompt) < 10 or len(response) < 20:
+            continue
+
+        pairs.append({
+            "conversations": [
+                {"from": "system",    "value": SYSTEM_PROMPT_GENERAL},
+                {"from": "human",     "value": prompt},
+                {"from": "assistant", "value": response},
+            ]
+        })
+
+    return pairs
 
 
 def format_dolly(example: dict) -> dict | None:
@@ -109,11 +134,17 @@ def prepare_chat(output_dir: Path, seed: int = 42):
     logger.info("Loading OpenAssistant OASST1...")
     try:
         oasst = load_dataset("OpenAssistant/oasst1", split="train")
-        for ex in oasst:
-            formatted = format_oasst1(ex)
-            if formatted:
-                all_examples.append(formatted)
-        logger.info(f"  OASST1: {len(all_examples)} examples")
+        # Log schema of first message to help debug if schema changes
+        if len(oasst) > 0:
+            logger.info(f"  OASST1 message keys: {list(oasst[0].keys())}")
+        oasst_pairs = build_oasst1_pairs(oasst)
+        all_examples.extend(oasst_pairs)
+        logger.info(f"  OASST1: {len(oasst_pairs):,} examples")
+        if len(oasst_pairs) == 0:
+            logger.warning(
+                "  OASST1 produced 0 examples — dataset schema may have changed. "
+                "Check message keys logged above."
+            )
     except Exception as e:
         logger.warning(f"Failed to load OASST1: {e}")
 
@@ -126,7 +157,7 @@ def prepare_chat(output_dir: Path, seed: int = 42):
             formatted = format_dolly(ex)
             if formatted:
                 all_examples.append(formatted)
-        logger.info(f"  Dolly: {len(all_examples) - dolly_start} examples")
+        logger.info(f"  Dolly: {len(all_examples) - dolly_start:,} examples")
     except Exception as e:
         logger.warning(f"Failed to load Dolly: {e}")
 
@@ -208,7 +239,7 @@ def prepare_code(output_dir: Path, seed: int = 42):
             if explain_ex:
                 all_examples.append(explain_ex)
 
-        logger.info(f"  CodeSearchNet: {len(all_examples)} examples")
+        logger.info(f"  CodeSearchNet: {len(all_examples):,} examples")
     except Exception as e:
         logger.warning(f"Failed to load CodeSearchNet: {e}")
 
@@ -244,7 +275,7 @@ def write_splits(examples: list[dict], output_dir: Path, seed: int):
 def main():
     parser = argparse.ArgumentParser(description="Prepare SFT datasets")
     parser.add_argument("--stage", required=True, choices=["chat", "code", "both"])
-    parser.add_argument("--output-dir", help="Output directory (overrides default)")
+    parser.add_argument("--output-dir", help="Output directory (overrides default per-stage path)")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 

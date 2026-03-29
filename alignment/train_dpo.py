@@ -29,10 +29,14 @@ from nemo.core.config import hydra_runner
 from nemo.utils import logging
 from nemo.utils.exp_manager import exp_manager
 
-# NeMo Aligner DPO
+# NeMo Aligner 0.7.0 imports
+# nemo-aligner 0.7.0 restructured its module layout — verify these paths
+# at runtime with: python -c "from nemo_aligner.models.nlp.gpt import gpt_dpo_model"
 from nemo_aligner.models.nlp.gpt.gpt_dpo_model import GPTDPOModel
-from nemo_aligner.utils.train_script_utils import resolve_and_create_trainer
-from nemo_aligner.utils.distributed import Timer
+from nemo_aligner.utils.train_script_utils import (
+    CustomLoggerWrapper,
+    resolve_and_create_trainer,
+)
 
 
 @hydra_runner(config_path="configs", config_name="dpo")
@@ -41,11 +45,12 @@ def main(cfg: DictConfig) -> None:
     logging.info(f"Config:\n{OmegaConf.to_yaml(cfg)}")
     logging.info(f"DPO beta: {cfg.model.dpo.beta}")
 
-    # ── Trainer ────────────────────────────────────────────────────────────────
+    # ── Trainer ────────────────────────────────────────────────────────────
+    # resolve_and_create_trainer handles MegatronStrategy setup for NeMo Aligner
     trainer = resolve_and_create_trainer(cfg, "dpo")
     exp_manager(trainer, cfg.get("exp_manager", None))
 
-    # ── Model ──────────────────────────────────────────────────────────────────
+    # ── Model ──────────────────────────────────────────────────────────────
     # GPTDPOModel internally manages both policy and reference model.
     # The reference model is loaded from the same checkpoint but frozen.
     model = GPTDPOModel.restore_from(
@@ -59,14 +64,14 @@ def main(cfg: DictConfig) -> None:
     trainable_count = sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6
     logging.info(f"Total parameters:     {param_count:.1f}M")
     logging.info(f"Trainable parameters: {trainable_count:.1f}M")
-    logging.info(f"Reference model is frozen (DPO)")
+    logging.info("Reference model is frozen (DPO)")
 
-    # ── Training ───────────────────────────────────────────────────────────────
-    timer = Timer(cfg.get("max_time_per_run", "0:23:30:00"))  # safety timer
+    # ── Training ───────────────────────────────────────────────────────────
     trainer.fit(model)
-
     logging.info("DPO alignment complete.")
-    logging.info(f"Final checkpoint: {trainer.checkpoint_callback.best_model_path}")
+
+    best_ckpt = getattr(trainer.checkpoint_callback, "best_model_path", "see /results/slm_dpo/")
+    logging.info(f"Final checkpoint: {best_ckpt}")
 
 
 if __name__ == "__main__":

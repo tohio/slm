@@ -25,6 +25,7 @@ Usage:
 import argparse
 import logging
 import json
+import os
 import random
 from pathlib import Path
 
@@ -36,6 +37,27 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
 logger = logging.getLogger("tokenizer.train")
+
+
+def get_num_threads(config_value: int | None = None) -> int:
+    """
+    Determine number of threads to use for tokenizer training.
+    Uses all available CPUs by default — tokenizer training is
+    embarrassingly parallel and benefits from full CPU utilization.
+    Config value is used as an override if explicitly set to a non-None value.
+    """
+    cpu_count = os.cpu_count() or 1
+    if config_value is not None and config_value > 0:
+        threads = min(config_value, cpu_count)
+        if config_value > cpu_count:
+            logger.warning(
+                f"num_threads={config_value} in config exceeds available CPUs ({cpu_count}). "
+                f"Using {cpu_count}."
+            )
+    else:
+        threads = cpu_count
+    logger.info(f"Using {threads} threads for tokenizer training (available CPUs: {cpu_count})")
+    return threads
 
 
 def sample_text_from_jsonl(
@@ -95,6 +117,10 @@ def train_tokenizer(config: dict, input_text_file: str, output_dir: Path):
 
     model_prefix = str(output_dir / "slm_tokenizer")
 
+    # Resolve num_threads dynamically — use all available CPUs
+    # unless the config explicitly overrides with a specific value
+    num_threads = get_num_threads(cfg.get("num_threads", None))
+
     # Build SentencePiece training args
     train_args = {
         "input": input_text_file,
@@ -111,7 +137,7 @@ def train_tokenizer(config: dict, input_text_file: str, output_dir: Path):
         "add_dummy_prefix": cfg.get("add_dummy_prefix", True),
         "input_sentence_size": cfg.get("input_sentence_size", 10_000_000),
         "shuffle_input_sentence": cfg.get("shuffle_input_sentence", True),
-        "num_threads": cfg.get("num_threads", 16),
+        "num_threads": num_threads,
         "max_sentence_length": cfg.get("max_sentence_length", 4096),
         "byte_fallback": cfg.get("byte_fallback", True),
         "train_extremely_large_corpus": cfg.get("train_extremely_large_corpus", False),
@@ -125,17 +151,10 @@ def train_tokenizer(config: dict, input_text_file: str, output_dir: Path):
     logger.info(f"Training SentencePiece BPE tokenizer")
     logger.info(f"  Vocab size:  {train_args['vocab_size']:,}")
     logger.info(f"  Model type:  {train_args['model_type']}")
+    logger.info(f"  Threads:     {num_threads}")
     logger.info(f"  Output:      {model_prefix}.{{model,vocab}}")
 
-    # Format as SentencePiece argument string
-    args_str = " ".join(f"--{k}={v}" for k, v in train_args.items() if not isinstance(v, bool))
-    bool_args = " ".join(
-        f"--{k}={str(v).lower()}" for k, v in train_args.items() if isinstance(v, bool)
-    )
-
-    spm.SentencePieceTrainer.Train(
-        **{k: v for k, v in train_args.items()}
-    )
+    spm.SentencePieceTrainer.Train(**train_args)
 
     logger.info("Tokenizer training complete")
     return model_prefix

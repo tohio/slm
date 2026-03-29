@@ -10,8 +10,10 @@ Lower is better. Tracks model quality through each training stage:
   - After SFT: may increase slightly on raw text (expected — distribution shift)
   - Compare within stage across checkpoints, not across stages
 
-Uses the memory-mapped validation split defined in the pre-training config
-(splits_string: "99,1,0" → 1% of data held out for validation).
+Uses the memory-mapped validation split from the tokenization stage:
+  /data/curated/tokenized/text_document.bin
+  /data/curated/tokenized/text_document.idx
+(splits_string: "99,1,0" → 1% of data held out for validation)
 """
 
 import logging
@@ -42,7 +44,9 @@ def load_nemo_model(checkpoint: str, device: str):
 def load_val_tokens(val_data_dir: str, max_sequences: int = 1000) -> list[list[int]]:
     """
     Load tokenized validation sequences from memory-mapped dataset.
-    Reads the .bin/.idx files produced by the tokenization stage.
+    Reads the .bin/.idx files produced by tokenize_data.py at:
+      /data/curated/tokenized/text_document.bin
+      /data/curated/tokenized/text_document.idx
     """
     data_dir = Path(val_data_dir)
     bin_files = sorted(data_dir.glob("*.bin"))
@@ -50,7 +54,6 @@ def load_val_tokens(val_data_dir: str, max_sequences: int = 1000) -> list[list[i
     if not bin_files:
         raise FileNotFoundError(f"No .bin files found in {val_data_dir}")
 
-    # Read index file to get document boundaries
     idx_file = bin_files[0].with_suffix(".idx")
     if not idx_file.exists():
         raise FileNotFoundError(f"Index file not found: {idx_file}")
@@ -64,11 +67,9 @@ def load_val_tokens(val_data_dir: str, max_sequences: int = 1000) -> list[list[i
         sizes = np.frombuffer(f.read(doc_count * 4), dtype=np.int32)
         offsets = np.frombuffer(f.read(doc_count * 8), dtype=np.int64)
 
-    # Read token data
     with open(bin_files[0], "rb") as f:
         data = np.frombuffer(f.read(), dtype=np.uint16)
 
-    # Extract individual sequences (up to max_sequences)
     sequences = []
     for i in range(min(doc_count, max_sequences)):
         start = offsets[i] // 2  # uint16 = 2 bytes
@@ -98,7 +99,6 @@ def compute_perplexity(
 
     with torch.no_grad():
         for seq in sequences:
-            # Truncate to model's context window
             tokens = seq[:seq_length]
             if len(tokens) < 2:
                 continue
@@ -107,15 +107,12 @@ def compute_perplexity(
             target_ids = torch.tensor([tokens[1:]], dtype=torch.long, device=device)
 
             try:
-                # Get logits from the model
-                # NeMo's forward returns loss directly when labels are provided
                 outputs = model(
                     input_ids=input_ids,
                     attention_mask=torch.ones_like(input_ids),
                     labels=target_ids,
                 )
 
-                # outputs is the loss (scalar) for this sequence
                 if isinstance(outputs, torch.Tensor):
                     loss = outputs.item()
                 elif hasattr(outputs, "loss"):
@@ -139,9 +136,9 @@ def compute_perplexity(
     perplexity = math.exp(avg_loss)
 
     return {
-        "val_perplexity":   round(perplexity, 4),
-        "val_loss":         round(avg_loss, 6),
-        "tokens_evaluated": total_tokens,
+        "val_perplexity":      round(perplexity, 4),
+        "val_loss":            round(avg_loss, 6),
+        "tokens_evaluated":    total_tokens,
         "sequences_evaluated": len(sequences),
     }
 
@@ -159,8 +156,7 @@ def evaluate_perplexity(
         sequences = load_val_tokens(val_data_dir, max_sequences=max_sequences)
     except FileNotFoundError as e:
         logger.warning(f"Could not load mmap val data: {e}")
-        logger.warning("Falling back to synthetic sequences for testing")
-        # Fallback: generate random token sequences for smoke testing
+        logger.warning("Falling back to synthetic sequences for smoke testing")
         vocab_size = model.cfg.tokenizer.get("vocab_size", 32000)
         sequences = [
             list(np.random.randint(4, vocab_size, size=512))

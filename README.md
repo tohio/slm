@@ -22,39 +22,7 @@ The pipeline is modular — each stage is independently runnable, reproducible, 
 
 ## Pipeline Architecture
 
-```
-┌─────────────────────────────────────────────────────┐
-│               Stage 1: Data Curation                │
-│                  (NeMo Curator)                     │
-│  Common Crawl (WARC) ──┐                            │
-│  Wikipedia (EN)    ────┼──► Curator Pipeline ──► S3 │
-│  CodeSearchNet     ────┘                            │
-└─────────────────────────────────────────────────────┘
-                         │
-                         ▼
-┌─────────────────────────────────────────────────────┐
-│             Stage 2: Pre-Training                   │
-│              (NeMo + Megatron-Core)                 │
-│  GPT ~125M params, BF16, single/multi GPU           │
-│  Trained on general text corpus (~2.5B tokens)      │
-└─────────────────────────────────────────────────────┘
-                         │
-                         ▼
-┌─────────────────────────────────────────────────────┐
-│          Stage 3: Supervised Fine-Tuning            │
-│                 (NeMo Aligner)                      │
-│  SFT-1: General chat (OpenAssistant / Dolly)        │
-│  SFT-2: Coding (CodeSearchNet / The Stack)          │
-└─────────────────────────────────────────────────────┘
-                         │
-                         ▼
-┌─────────────────────────────────────────────────────┐
-│              Stage 4: Alignment (DPO)               │
-│                 (NeMo Aligner)                      │
-│  Preference data: UltraFeedback / HH-RLHF           │
-│  No separate reward model required                  │
-└─────────────────────────────────────────────────────┘
-```
+![Pipeline Architecture](docs/architecture.svg)
 
 ---
 
@@ -272,18 +240,9 @@ The image is based on `pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime` (public Do
 
 ### Curator Config
 
-`curator/configs/curator.yaml` is tuned for a 32 vCPU / 128GB instance:
+Dask worker count and memory limit are resolved automatically at runtime — `pipeline.py` reads `os.cpu_count()` and available RAM via `psutil` and configures workers accordingly. No instance-specific tuning required. To cap resource usage on a shared instance, uncomment the override lines in `curator/configs/curator.yaml`.
 
-```yaml
-dask:
-  n_workers: 32
-  threads_per_worker: 1
-  memory_limit: "3GB"    # 32 × 3GB = 96GB
-```
-
-For smaller instances, scale `n_workers` to your vCPU count and set `memory_limit` to `(total_RAM_GB - 2) / n_workers`.
-
-**Two-pass curation:** `quality_filter` and `tokenization` are disabled on the first curation pass because they depend on artifacts produced later (`quality_classifier.bin` and `slm_tokenizer.model`). Enable them after running `make tokenizer` and training a quality classifier.
+**Two-pass curation:** `quality_filter` and `tokenization` are auto-skipped on the first run because the models they depend on (`quality_classifier.bin`, `slm_tokenizer.model`) don't exist yet. `pipeline.py` detects their presence at startup and logs `WILL RUN` or `WILL SKIP` for each — no manual config edits needed between passes.
 
 ### AWS
 
@@ -293,6 +252,52 @@ Data curation runs on CPU instances. Training runs on GPU instances. The `upload
 make upload-data S3_BUCKET=my-bucket S3_PREFIX=slm/data
 make setup-instance S3_BUCKET=my-bucket
 ```
+
+---
+
+## Screenshots
+
+> Captured during an actual end-to-end pipeline run. Replace placeholders with real screenshots as each stage completes.
+
+### Docker image build
+
+![Docker build](docs/screenshots/docker_build.png)
+*`make docker-build` — self-contained NeMo image, no NGC auth*
+
+### Data curation pipeline
+
+![Curation pipeline](docs/screenshots/curation_pipeline.png)
+*`make docker-curate` — Dask workers processing 20 WARC files across all available CPUs*
+
+### Dask dashboard
+
+![Dask dashboard](docs/screenshots/dask_dashboard.png)
+*Dask worker utilization during the extract stage — record-level parallelism across 32 workers*
+
+### Tokenizer training
+
+![Tokenizer training](docs/screenshots/tokenizer_training.png)
+*`make tokenizer` — custom BPE tokenizer trained on curated output, 32k vocab with special tokens validated*
+
+### Pre-training loss curve
+
+![Pretrain loss](docs/screenshots/pretrain_loss.png)
+*W&B training loss during GPT-125M pre-training — smooth convergence from random initialization*
+
+### SFT training
+
+![SFT training](docs/screenshots/sft_training.png)
+*`make sft` — sequential chat then code fine-tuning, lower LR on code stage to prevent forgetting*
+
+### DPO alignment
+
+![DPO training](docs/screenshots/dpo_training.png)
+*`make dpo` — policy diverging from reference as preference signal takes effect*
+
+### Evaluation results
+
+![Evaluation](docs/screenshots/eval_results.png)
+*`make eval-dpo` — perplexity, generation samples, and win rate vs SFT reference*
 
 ---
 

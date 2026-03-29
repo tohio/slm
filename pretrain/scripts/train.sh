@@ -26,7 +26,10 @@ CONFIG="$SCRIPT_DIR/../configs/gpt_125m.yaml"
 GPUS=$(python3 -c "import torch; print(torch.cuda.device_count())")
 RESUME=""
 WANDB=false
-LOG_DIR="/logs/pretrain"
+
+# Changed from /logs/pretrain → /results/pretrain_logs
+# /logs is not reliably bind-mounted; /results always is
+LOG_DIR="/results/pretrain_logs"
 
 # ── Arg parsing ───────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -58,11 +61,12 @@ if [[ ! -f "$CONFIG" ]]; then
 fi
 
 # Check dataset files exist
-PRETRAIN_DIR="/data/pretrain"
+# Tokenized output is written to /data/curated/tokenized/ by make tokenizer
+PRETRAIN_DIR="/data/curated/tokenized"
 BIN_COUNT=$(find "$PRETRAIN_DIR" -name "*.bin" 2>/dev/null | wc -l)
 if [[ "$BIN_COUNT" -eq 0 ]]; then
     echo "ERROR: No .bin dataset files found in $PRETRAIN_DIR"
-    echo "  Run: aws s3 sync s3://your-bucket/slm/data/tokenized/ $PRETRAIN_DIR/"
+    echo "  Run: make tokenizer"
     exit 1
 fi
 log "Dataset:   $BIN_COUNT .bin file(s) in $PRETRAIN_DIR"
@@ -71,6 +75,7 @@ log "Dataset:   $BIN_COUNT .bin file(s) in $PRETRAIN_DIR"
 TOKENIZER="/data/tokenizer/slm_tokenizer.model"
 if [[ ! -f "$TOKENIZER" ]]; then
     echo "ERROR: Tokenizer not found: $TOKENIZER"
+    echo "  Run: make tokenizer"
     exit 1
 fi
 log "Tokenizer: $TOKENIZER"
@@ -85,7 +90,7 @@ if [[ -n "$RESUME" ]]; then
     OVERRIDES+=("model.resume_from_checkpoint=$RESUME")
     log "Resuming from: $RESUME"
 elif [[ -d "/results/${CONFIG_NAME}/checkpoints" ]]; then
-    LATEST=$(find "/results/${CONFIG_NAME}/checkpoints" -name "*.ckpt" | sort | tail -1)
+    LATEST=$(find "/results/${CONFIG_NAME}/checkpoints" -name "*.nemo" -o -name "*.ckpt" | sort | tail -1)
     if [[ -n "$LATEST" ]]; then
         OVERRIDES+=("model.resume_from_checkpoint=$LATEST")
         log "Auto-resuming from: $LATEST"
@@ -103,6 +108,7 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1       # required for Megatron tensor parall
 export TOKENIZERS_PARALLELISM=false        # avoid HuggingFace tokenizer warnings
 export PYTHONFAULTHANDLER=1                # better crash traces
 export NCCL_DEBUG=WARN                     # suppress verbose NCCL logs (set INFO to debug)
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512  # reduce memory fragmentation
 
 # For multi-GPU: ensure NCCL uses NVLink if available
 if [[ "$GPUS" -gt 1 ]]; then

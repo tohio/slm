@@ -172,9 +172,13 @@ def run_extraction(input_dir: str, output_path: Path, cfg: dict):
     """
     Main extraction entry point.
 
-    Records from all WARC files are batched into partitions and
-    distributed across all Dask workers. This ensures full worker
-    utilization regardless of WARC file count.
+    Processes WARCs one at a time to avoid loading all raw HTML into memory
+    at once. Each WARC's records are distributed across all Dask workers,
+    results written to disk, then memory freed before the next WARC.
+
+    With 20 WARCs (~693k records, ~11GB raw HTML), loading everything at
+    once causes the Dask scheduler to OOM during task graph submission.
+    Processing one WARC at a time keeps peak memory under 1GB per batch.
     """
     output_path.mkdir(parents=True, exist_ok=True)
     warc_files = get_warc_files(input_dir)
@@ -187,31 +191,6 @@ def run_extraction(input_dir: str, output_path: Path, cfg: dict):
     memory_limit = dask_cfg.get("memory_limit", "2GB")
 
     logger.info(f"Starting extraction: {len(warc_files)} WARC files, {n_workers} workers")
-    logger.info(f"Reading records from all WARCs (this may take a few minutes)...")
-
-    # Collect all raw records from all WARCs into a flat list.
-    # This runs on the main process — fast since we're only reading
-    # headers and raw bytes, not doing any text extraction yet.
-    all_records = []
-    for warc_path in warc_files:
-        warc_records = list(iter_warc_records(warc_path))
-        logger.info(f"  {warc_path.name}: {len(warc_records)} HTML records")
-        all_records.extend(warc_records)
-
-    logger.info(f"Total records to process: {len(all_records)}")
-
-    # Calculate partitions dynamically based on worker count and record count.
-    # Target: each worker gets PARTITIONS_PER_WORKER partitions so fast
-    # workers pick up new work while slower ones finish (load balancing).
-    # Floor of 1 record per partition prevents empty partitions.
-    target_partitions = n_workers * PARTITIONS_PER_WORKER
-    max_partitions = len(all_records)  # never more partitions than records
-    n_partitions = min(target_partitions, max_partitions)
-    records_per_partition = max(1, len(all_records) // n_partitions)
-    logger.info(
-        f"Distributing {len(all_records)} records into {n_partitions} partitions "
-        f"(~{records_per_partition} records each) across {n_workers} workers"
-    )
 
     cluster = LocalCluster(
         n_workers=n_workers,
@@ -221,33 +200,50 @@ def run_extraction(input_dir: str, output_path: Path, cfg: dict):
     client = Client(cluster)
     logger.info(f"Dask dashboard: {client.dashboard_link}")
 
+    total_docs = 0
+    total_records = 0
+
     try:
-        bag = db.from_sequence(all_records, npartitions=n_partitions)
-        results = (
-            bag
-            .map(process_record)
-            .filter(lambda x: x is not None)
-            .compute()
-        )
+        # Process one WARC at a time — keeps peak memory bounded
+        for warc_path in warc_files:
+            warc_records = list(iter_warc_records(warc_path))
+            n_records = len(warc_records)
+            total_records += n_records
+            logger.info(f"  {warc_path.name}: {n_records} HTML records")
 
-        # Group results by WARC file and write one JSONL per WARC
-        from collections import defaultdict
-        docs_by_warc = defaultdict(list)
-        for doc in results:
-            docs_by_warc[doc["warc_file"]].append(doc)
+            if not warc_records:
+                continue
 
-        total_docs = 0
-        for warc_name, documents in docs_by_warc.items():
-            stem = Path(warc_name).name.replace(".warc.gz", "").replace(".warc", "")
-            output_file = output_path / f"{stem}.jsonl"
-            write_jsonl(documents, output_file)
-            total_docs += len(documents)
-            logger.info(f"  {warc_name}: {len(documents)} docs → {output_file.name}")
+            # Partitions: each worker gets PARTITIONS_PER_WORKER tasks
+            n_partitions = min(n_workers * PARTITIONS_PER_WORKER, n_records)
+
+            bag = db.from_sequence(warc_records, npartitions=n_partitions)
+            results = (
+                bag
+                .map(process_record)
+                .filter(lambda x: x is not None)
+                .compute()
+            )
+
+            # Write output for this WARC
+            if results:
+                stem = warc_path.name.replace(".warc.gz", "").replace(".warc", "")
+                output_file = output_path / f"{stem}.jsonl"
+                write_jsonl(results, output_file)
+                total_docs += len(results)
+                retention = len(results) / n_records * 100
+                logger.info(
+                    f"    → {len(results)} docs written "
+                    f"({retention:.1f}% retained) → {output_file.name}"
+                )
+
+            # Explicitly free memory before next WARC
+            del warc_records, results
 
         logger.info(
             f"Extraction complete: {total_docs} documents from "
             f"{len(warc_files)} WARC files "
-            f"({total_docs / len(all_records) * 100:.1f}% of records kept)"
+            f"({total_docs / total_records * 100:.1f}% of records kept)"
         )
 
     finally:

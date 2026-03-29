@@ -1,100 +1,95 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 620" width="780" height="620" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
-
-  <!-- Background -->
-  <rect width="780" height="620" fill="#ffffff" rx="12"/>
-
-  <!-- Title -->
-  <text x="390" y="44" text-anchor="middle" fill="#111827" font-size="17" font-weight="bold" letter-spacing="3">SLM TRAINING PIPELINE</text>
-  <line x1="60" y1="56" x2="720" y2="56" stroke="#e5e7eb" stroke-width="1"/>
-
-  <!-- ── Stage 1: Data Curation ── -->
-  <rect x="60" y="76" width="660" height="110" rx="6" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.5"/>
-  <text x="76" y="97" fill="#15803d" font-size="12" font-weight="bold" letter-spacing="1">STAGE 1 — DATA CURATION</text>
-  <text x="76" y="113" fill="#6b7280" font-size="12">NeMo Curator</text>
-
-  <!-- Source boxes -->
-  <rect x="76" y="122" width="130" height="28" rx="4" fill="#ffffff" stroke="#d1d5db" stroke-width="1"/>
-  <text x="141" y="140" text-anchor="middle" fill="#374151" font-size="12">Common Crawl (WARC)</text>
-
-  <rect x="220" y="122" width="130" height="28" rx="4" fill="#ffffff" stroke="#d1d5db" stroke-width="1"/>
-  <text x="285" y="140" text-anchor="middle" fill="#374151" font-size="12">Wikipedia (EN)</text>
-
-  <rect x="364" y="122" width="130" height="28" rx="4" fill="#ffffff" stroke="#d1d5db" stroke-width="1"/>
-  <text x="429" y="140" text-anchor="middle" fill="#374151" font-size="12">CodeSearchNet</text>
-
-  <!-- Arrow to curator -->
-  <line x1="510" y1="136" x2="548" y2="136" stroke="#9ca3af" stroke-width="1.5" marker-end="url(#arr)"/>
-  <rect x="550" y="122" width="100" height="28" rx="4" fill="#eff6ff" stroke="#3b82f6" stroke-width="1"/>
-  <text x="600" y="137" text-anchor="middle" fill="#2563eb" font-size="12" font-weight="bold">Curator</text>
-  <text x="600" y="148" text-anchor="middle" fill="#2563eb" font-size="11">Pipeline → S3</text>
-
-  <!-- Down arrow 1 -->
-  <line x1="390" y1="186" x2="390" y2="210" stroke="#9ca3af" stroke-width="1.5" marker-end="url(#arr)"/>
-
-  <!-- ── Stage 2: Pre-Training ── -->
-  <rect x="60" y="210" width="660" height="90" rx="6" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
-  <text x="76" y="231" fill="#1d4ed8" font-size="12" font-weight="bold" letter-spacing="1">STAGE 2 — PRE-TRAINING</text>
-  <text x="76" y="247" fill="#6b7280" font-size="12">NeMo + Megatron-Core</text>
-
-  <rect x="76" y="256" width="180" height="28" rx="4" fill="#ffffff" stroke="#d1d5db" stroke-width="1"/>
-  <text x="166" y="271" text-anchor="middle" fill="#374151" font-size="12">GPT ~125M params, BF16</text>
-  <text x="166" y="281" text-anchor="middle" fill="#6b7280" font-size="11">single / multi GPU</text>
-
-  <rect x="276" y="256" width="200" height="28" rx="4" fill="#ffffff" stroke="#d1d5db" stroke-width="1"/>
-  <text x="376" y="271" text-anchor="middle" fill="#374151" font-size="12">General text corpus</text>
-  <text x="376" y="281" text-anchor="middle" fill="#6b7280" font-size="11">~2.5B tokens</text>
-
-  <rect x="496" y="256" width="200" height="28" rx="4" fill="#ffffff" stroke="#d1d5db" stroke-width="1"/>
-  <text x="596" y="271" text-anchor="middle" fill="#374151" font-size="12">Custom BPE tokenizer</text>
-  <text x="596" y="281" text-anchor="middle" fill="#6b7280" font-size="11">domain-specific vocab</text>
-
-  <!-- Down arrow 2 -->
-  <line x1="390" y1="300" x2="390" y2="324" stroke="#9ca3af" stroke-width="1.5" marker-end="url(#arr)"/>
-
-  <!-- ── Stage 3: SFT ── -->
-  <rect x="60" y="324" width="660" height="90" rx="6" fill="#fffbeb" stroke="#d97706" stroke-width="1.5"/>
-  <text x="76" y="345" fill="#b45309" font-size="12" font-weight="bold" letter-spacing="1">STAGE 3 — SUPERVISED FINE-TUNING</text>
-  <text x="76" y="361" fill="#6b7280" font-size="12">NeMo Aligner — sequential: chat → code</text>
-
-  <rect x="76" y="370" width="280" height="28" rx="4" fill="#ffffff" stroke="#d1d5db" stroke-width="1"/>
-  <text x="216" y="385" text-anchor="middle" fill="#374151" font-size="12">SFT-1: General chat</text>
-  <text x="216" y="395" text-anchor="middle" fill="#6b7280" font-size="11">OpenAssistant / Dolly</text>
-
-  <rect x="380" y="370" width="280" height="28" rx="4" fill="#ffffff" stroke="#d1d5db" stroke-width="1"/>
-  <text x="520" y="385" text-anchor="middle" fill="#374151" font-size="12">SFT-2: Coding</text>
-  <text x="520" y="395" text-anchor="middle" fill="#6b7280" font-size="11">CodeSearchNet / The Stack</text>
-
-  <!-- Down arrow 3 -->
-  <line x1="390" y1="414" x2="390" y2="438" stroke="#9ca3af" stroke-width="1.5" marker-end="url(#arr)"/>
-
-  <!-- ── Stage 4: DPO ── -->
-  <rect x="60" y="438" width="660" height="90" rx="6" fill="#faf5ff" stroke="#9333ea" stroke-width="1.5"/>
-  <text x="76" y="459" fill="#7e22ce" font-size="12" font-weight="bold" letter-spacing="1">STAGE 4 — ALIGNMENT (DPO)</text>
-  <text x="76" y="475" fill="#6b7280" font-size="12">NeMo Aligner — no separate reward model required</text>
-
-  <rect x="76" y="484" width="280" height="28" rx="4" fill="#ffffff" stroke="#d1d5db" stroke-width="1"/>
-  <text x="216" y="499" text-anchor="middle" fill="#374151" font-size="12">UltraFeedback</text>
-  <text x="216" y="509" text-anchor="middle" fill="#6b7280" font-size="11">preference pairs</text>
-
-  <rect x="380" y="484" width="280" height="28" rx="4" fill="#ffffff" stroke="#d1d5db" stroke-width="1"/>
-  <text x="520" y="499" text-anchor="middle" fill="#374151" font-size="12">HH-RLHF</text>
-  <text x="520" y="509" text-anchor="middle" fill="#6b7280" font-size="11">preference pairs</text>
-
-  <!-- Down arrow 4 -->
-  <line x1="390" y1="528" x2="390" y2="552" stroke="#9ca3af" stroke-width="1.5" marker-end="url(#arr)"/>
-
-  <!-- ── Output ── -->
-  <rect x="200" y="552" width="380" height="44" rx="6" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
-  <text x="390" y="572" text-anchor="middle" fill="#1d4ed8" font-size="13" font-weight="bold">Aligned Instruction-Following Model</text>
-  <text x="390" y="587" text-anchor="middle" fill="#6b7280" font-size="12">HuggingFace checkpoint — general chat + code generation</text>
-
-
-
-  <!-- Arrow marker -->
+<svg width="100%" viewBox="0 0 680 820" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
-      <path d="M0,0 L0,6 L8,3 z" fill="#9ca3af"/>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#888780" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
     </marker>
+    <style>
+      text { font-family: system-ui, -apple-system, sans-serif; fill: #085041; }
+      .th  { font-size: 14px; font-weight: 500; fill: #085041; }
+      .ts  { font-size: 12px; font-weight: 400; fill: #0F6E56; }
+      .gh  { font-size: 14px; font-weight: 500; fill: #2C2C2A; }
+      .gs  { font-size: 12px; font-weight: 400; fill: #5F5E5A; }
+      .ph  { font-size: 14px; font-weight: 500; fill: #4A1B0C; }
+      .ps  { font-size: 12px; font-weight: 400; fill: #712B13; }
+      .uh  { font-size: 14px; font-weight: 500; fill: #26215C; }
+      .us  { font-size: 12px; font-weight: 400; fill: #3C3489; }
+      .ch  { font-size: 14px; font-weight: 500; fill: #4B1528; }
+      .cs  { font-size: 12px; font-weight: 400; fill: #72243E; }
+    </style>
   </defs>
 
+  <!-- Stage 1: Data Curation (teal) -->
+  <rect x="60" y="30" width="560" height="130" rx="12" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+  <text class="th" x="340" y="58" text-anchor="middle">Stage 1 — data curation</text>
+  <text class="ts" x="340" y="76" text-anchor="middle">NeMo Curator · CPU instance · parallel Dask pipeline</text>
+
+  <!-- Curation source boxes -->
+  <rect x="80" y="90" width="140" height="56" rx="8" fill="#9FE1CB" stroke="#0F6E56" stroke-width="0.5"/>
+  <text class="th" x="150" y="114" text-anchor="middle" dominant-baseline="central">Common Crawl</text>
+  <text class="ts" x="150" y="132" text-anchor="middle">WARC files</text>
+
+  <rect x="240" y="90" width="140" height="56" rx="8" fill="#9FE1CB" stroke="#0F6E56" stroke-width="0.5"/>
+  <text class="th" x="310" y="114" text-anchor="middle" dominant-baseline="central">Wikipedia EN</text>
+  <text class="ts" x="310" y="132" text-anchor="middle">clean text</text>
+
+  <rect x="400" y="90" width="200" height="56" rx="8" fill="#9FE1CB" stroke="#0F6E56" stroke-width="0.5"/>
+  <text class="th" x="500" y="114" text-anchor="middle" dominant-baseline="central">CodeSearchNet</text>
+  <text class="ts" x="500" y="132" text-anchor="middle">Python functions</text>
+
+  <!-- Arrow Stage 1 → pipeline -->
+  <line x1="340" y1="161" x2="340" y2="195" stroke="#888780" stroke-width="1" marker-end="url(#arrow)"/>
+
+  <!-- Curator pipeline steps -->
+  <rect x="60" y="196" width="560" height="44" rx="8" fill="#D3D1C7" stroke="#5F5E5A" stroke-width="0.5"/>
+  <text class="gs" x="340" y="218" text-anchor="middle" dominant-baseline="central">extract → language filter → heuristic filter → exact dedup → fuzzy dedup → PII → tokenize</text>
+
+  <!-- Arrow pipeline → S3 -->
+  <line x1="340" y1="241" x2="340" y2="275" stroke="#888780" stroke-width="1" marker-end="url(#arrow)"/>
+
+  <!-- S3 -->
+  <rect x="210" y="276" width="260" height="44" rx="8" fill="#D3D1C7" stroke="#5F5E5A" stroke-width="0.5"/>
+  <text class="gh" x="340" y="298" text-anchor="middle" dominant-baseline="central">S3 — tokenized dataset (.bin / .idx)</text>
+
+  <!-- Arrow S3 → Stage 2 -->
+  <line x1="340" y1="321" x2="340" y2="355" stroke="#888780" stroke-width="1" marker-end="url(#arrow)"/>
+
+  <!-- Stage 2: Pre-Training (purple) -->
+  <rect x="60" y="356" width="560" height="84" rx="12" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.5"/>
+  <text class="uh" x="340" y="384" text-anchor="middle">Stage 2 — pre-training</text>
+  <text class="us" x="340" y="402" text-anchor="middle">NeMo + Megatron-Core · GPU instance · BF16</text>
+  <text class="us" x="340" y="420" text-anchor="middle">GPT decoder-only · 125M params (scalable to 350M, 1B) · ~2.5B tokens</text>
+
+  <!-- Arrow Stage 2 → Stage 3 -->
+  <line x1="340" y1="441" x2="340" y2="475" stroke="#888780" stroke-width="1" marker-end="url(#arrow)"/>
+
+  <!-- Stage 3: SFT (purple) -->
+  <rect x="60" y="476" width="560" height="100" rx="12" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.5"/>
+  <text class="uh" x="340" y="504" text-anchor="middle">Stage 3 — supervised fine-tuning</text>
+  <text class="us" x="340" y="522" text-anchor="middle">NeMo Aligner · answer_only_loss · sequential stages</text>
+
+  <!-- SFT sub-boxes -->
+  <rect x="90" y="536" width="220" height="28" rx="6" fill="#CECBF6" stroke="#534AB7" stroke-width="0.5"/>
+  <text class="uh" x="200" y="550" text-anchor="middle" dominant-baseline="central">SFT-1: chat</text>
+
+  <line x1="310" y1="550" x2="330" y2="550" stroke="#534AB7" stroke-width="1" marker-end="url(#arrow)"/>
+
+  <rect x="330" y="536" width="220" height="28" rx="6" fill="#CECBF6" stroke="#534AB7" stroke-width="0.5"/>
+  <text class="uh" x="440" y="550" text-anchor="middle" dominant-baseline="central">SFT-2: code (lower LR)</text>
+
+  <!-- Arrow Stage 3 → Stage 4 -->
+  <line x1="340" y1="577" x2="340" y2="611" stroke="#888780" stroke-width="1" marker-end="url(#arrow)"/>
+
+  <!-- Stage 4: DPO (coral) -->
+  <rect x="60" y="612" width="560" height="84" rx="12" fill="#FAECE7" stroke="#993C1D" stroke-width="0.5"/>
+  <text class="ph" x="340" y="640" text-anchor="middle">Stage 4 — alignment (DPO)</text>
+  <text class="ps" x="340" y="658" text-anchor="middle">NeMo Aligner · policy + frozen reference · no reward model</text>
+  <text class="ps" x="340" y="676" text-anchor="middle">UltraFeedback + HH-RLHF · beta=0.1</text>
+
+  <!-- Arrow Stage 4 → Output -->
+  <line x1="340" y1="697" x2="340" y2="731" stroke="#888780" stroke-width="1" marker-end="url(#arrow)"/>
+
+  <!-- Output -->
+  <rect x="160" y="732" width="360" height="56" rx="12" fill="#D3D1C7" stroke="#5F5E5A" stroke-width="0.5"/>
+  <text class="gh" x="340" y="757" text-anchor="middle" dominant-baseline="central">Aligned model</text>
+  <text class="gs" x="340" y="775" text-anchor="middle">HuggingFace export · lm-eval evaluation</text>
 </svg>

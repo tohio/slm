@@ -13,7 +13,6 @@ The alternative is blending chat and coding data into a single SFT run. Sequenti
 ## Stage 1 — General Chat
 
 **Dataset:** OpenAssistant OASST1 + Dolly 15k (~25k examples combined)
-
 **Goal:** Instruction following, multi-turn conversation, appropriate response length and tone.
 
 **Key config:** `answer_only_loss: true` — cross-entropy loss is computed only on the assistant's response tokens, not the human prompt. This is essential: without it the model learns to predict user messages, which wastes capacity and produces odd behavior.
@@ -32,7 +31,6 @@ The alternative is blending chat and coding data into a single SFT run. Sequenti
 ## Stage 2 — Coding
 
 **Dataset:** CodeSearchNet Python (~100k examples, two formats)
-
 **Goal:** Code generation, code explanation, debugging assistance.
 
 **Two example formats per function** are generated from CodeSearchNet:
@@ -53,7 +51,14 @@ Using a fixed system prompt during SFT keeps things simple. Varying system promp
 
 ## Usage
 
+All commands run inside the GPU container:
+
 ```bash
+# Start GPU container
+make docker-shell-gpu
+
+# Inside the container:
+
 # Prepare datasets (downloads from HuggingFace)
 make prepare-sft-data
 

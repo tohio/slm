@@ -27,7 +27,10 @@ GPUS=$(python3 -c "import torch; print(torch.cuda.device_count())")
 SFT_CKPT=""
 BETA=""
 WANDB=false
-LOG_DIR="/logs/dpo"
+
+# Changed from /logs/dpo → /results/dpo_logs
+# /logs is not reliably bind-mounted; /results always is
+LOG_DIR="/results/dpo_logs"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in

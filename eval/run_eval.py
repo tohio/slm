@@ -26,8 +26,9 @@ Usage:
 import argparse
 import json
 import logging
-import os
+import io
 import sys
+from contextlib import redirect_stdout
 from datetime import datetime
 from pathlib import Path
 
@@ -60,28 +61,28 @@ def print_summary(results: dict, stage: str):
 
     if "perplexity" in results:
         r = results["perplexity"]
-        print(f"\n{'PERPLEXITY':}")
+        print(f"\nPERPLEXITY")
         print(f"  Val perplexity:     {r.get('val_perplexity', 'N/A'):.3f}")
         print(f"  Val loss:           {r.get('val_loss', 'N/A'):.4f}")
         print(f"  Tokens evaluated:   {r.get('tokens_evaluated', 0):,}")
 
     if "generation" in results:
         r = results["generation"]
-        print(f"\n{'GENERATION SAMPLES':}")
+        print(f"\nGENERATION SAMPLES")
         for i, sample in enumerate(r.get("samples", []), 1):
             print(f"\n  [{i}] Prompt: {sample['prompt'][:80]}{'...' if len(sample['prompt']) > 80 else ''}")
             print(f"      Response: {sample['response'][:200]}{'...' if len(sample['response']) > 200 else ''}")
 
     if "mmlu" in results:
         r = results["mmlu"]
-        print(f"\n{'MMLU BENCHMARK':}")
+        print(f"\nMMLU BENCHMARK")
         print(f"  Overall accuracy:   {r.get('overall_accuracy', 0):.1%}")
         for subject, acc in r.get("by_subject", {}).items():
-            print(f"  {subject:<30} {acc:.1%}")
+            print(f"  {subject:<40} {acc:.1%}")
 
     if "win_rate" in results:
         r = results["win_rate"]
-        print(f"\n{'WIN RATE vs SFT REFERENCE':}")
+        print(f"\nWIN RATE vs SFT REFERENCE")
         print(f"  Win rate:           {r.get('win_rate', 0):.1%}")
         print(f"  Tie rate:           {r.get('tie_rate', 0):.1%}")
         print(f"  Loss rate:          {r.get('loss_rate', 0):.1%}")
@@ -97,7 +98,9 @@ def main():
     parser.add_argument("--checkpoint",     required=True, help="Path to .nemo checkpoint to evaluate")
     parser.add_argument("--ref-checkpoint", help="Reference checkpoint for win rate eval (SFT checkpoint)")
     parser.add_argument("--output-dir",     default="/results/eval")
-    parser.add_argument("--val-data",       default="/data/pretrain", help="Validation data for perplexity")
+    # Val data path matches tokenize_data.py output — /data/curated/tokenized/
+    parser.add_argument("--val-data",       default="/data/curated/tokenized",
+                        help="Tokenized validation data dir (contains .bin/.idx files)")
     parser.add_argument("--n-samples",      type=int, default=10, help="Number of generation samples")
     parser.add_argument("--n-mmlu",         type=int, default=100, help="MMLU questions per subject")
     parser.add_argument("--n-pairs",        type=int, default=200, help="Preference pairs for win rate")
@@ -172,14 +175,11 @@ def main():
         json.dump(results, f, indent=2)
     logger.info(f"Results written to {json_path}")
 
-    # Print summary and also capture to txt
-    import io
-    from contextlib import redirect_stdout
+    # Print summary and capture to txt
     buffer = io.StringIO()
     with redirect_stdout(buffer):
         print_summary(results["metrics"], args.stage)
     summary_text = buffer.getvalue()
-
     print(summary_text)
 
     txt_path = out_dir / "summary.txt"

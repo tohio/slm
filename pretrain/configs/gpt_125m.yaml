@@ -52,6 +52,7 @@ model:
   # ── Tokenizer ──────────────────────────────────────────────────────────────
   tokenizer:
     library: sentencepiece
+    # Path matches output of 'make tokenizer' → /data/tokenizer/slm_tokenizer.model
     model: /data/tokenizer/slm_tokenizer.model
 
   # ── Initialization ─────────────────────────────────────────────────────────
@@ -101,11 +102,13 @@ model:
     num_workers: 4
     dataloader_type: single
     eod_mask_loss: false
+    # Paths match output of 'make tokenizer' → /data/curated/tokenized/
+    # Weights: 70% general text, 30% code (Chinchilla-style for general+code model)
     data_prefix:
       - 0.7
-      - /data/pretrain/general/text_document
+      - /data/curated/tokenized/text_document
       - 0.3
-      - /data/pretrain/code/text_document
+      - /data/curated/tokenized/text_document   # replace with code path when available
 
   micro_batch_size: 4
   global_batch_size: 32
