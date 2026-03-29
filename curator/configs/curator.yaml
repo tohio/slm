@@ -1,19 +1,46 @@
+# =============================================================================
+# NeMo Curator Pipeline Configuration
+# =============================================================================
+# Instance:  4 vCPU / 15GB RAM (e.g. GCP n2d-standard-4)
+# Run order:
+#   1. make init-dirs
+#   2. make download-models          # downloads lid.176.bin
+#   3. make download-data            # downloads WARC files
+#   4. make docker-curate            # runs this config (pass 1)
+#   5. make tokenizer                # trains tokenizer on curated output
+#   6. Re-enable tokenization below and re-run make docker-curate (pass 2)
+#   7. Train quality classifier on curated sample, then re-enable quality_filter
+# =============================================================================
+
 curation:
   input_data_dir: /data/raw
   output_data_dir: /data/curated
-  log_dir: /logs/curator
 
+  # Changed from /logs/curator → /data/logs/curator
+  # /data is bind-mounted by docker-curate; /logs was not, so logs were lost
+  log_dir: /data/logs/curator
+
+  # ── Dask ───────────────────────────────────────────────────────────────────
+  # Tuned for 4 vCPU / 15GB RAM instance.
+  # Formula: n_workers = vCPU count, memory_limit = (total_RAM - 2GB) / n_workers
+  # For larger instances:
+  #   r5.4xlarge  (16 vCPU / 128GB): n_workers: 16, memory_limit: "7GB"
+  #   r5.2xlarge  (8 vCPU  /  64GB): n_workers: 8,  memory_limit: "7GB"
   dask:
     n_workers: 8
     threads_per_worker: 1
-    memory_limit: "3GB"   # r5.4xlarge: increase to "8GB"
+    memory_limit: "3GB"
 
+  # ── Language Filter ────────────────────────────────────────────────────────
+  # lid.176.bin: download with 'make download-models'
+  # Changed model_path from /models → /data/models (bind-mounted volume)
   language_filter:
     enabled: true
     target_language: en
     min_language_score: 0.65
-    model_path: /models/lid.176.bin
+    model_path: /data/models/lid.176.bin
 
+  # ── Heuristic Filter ───────────────────────────────────────────────────────
   heuristic_filter:
     enabled: true
     min_doc_length: 200
@@ -33,12 +60,20 @@ curation:
       n: 2
       fraction: 0.20
 
+  # ── Quality Filter ─────────────────────────────────────────────────────────
+  # DISABLED for pass 1 — quality_classifier.bin does not exist yet.
+  # To enable after pass 1:
+  #   1. Train a fasttext classifier on a labeled sample of your curated data
+  #   2. Save to /data/models/quality_classifier.bin
+  #   3. Set enabled: true below
+  #   4. Re-run make docker-curate
   quality_filter:
-    enabled: true
-    model_path: /models/quality_classifier.bin
+    enabled: false
+    model_path: /data/models/quality_classifier.bin
     min_quality_score: 0.3
     label: __label__hq
 
+  # ── Deduplication ──────────────────────────────────────────────────────────
   deduplication:
     exact_dedup:
       enabled: true
@@ -49,6 +84,7 @@ curation:
       jaccard_threshold: 0.8
       false_positive_check: true
 
+  # ── PII Redaction ──────────────────────────────────────────────────────────
   pii:
     enabled: true
     entities:
@@ -57,12 +93,23 @@ curation:
       - IP_ADDRESS
     replacement_string: "<PII>"
 
+  # ── Tokenization ───────────────────────────────────────────────────────────
+  # DISABLED for pass 1 — tokenizer does not exist yet.
+  # The tokenizer is trained by 'make tokenizer' AFTER curation completes.
+  # To enable after tokenizer is trained:
+  #   1. Run: make tokenizer
+  #   2. Confirm /data/tokenizer/slm_tokenizer.model exists
+  #   3. Set enabled: true below
+  #   4. Re-run make docker-curate
   tokenization:
-    enabled: true
+    enabled: false
     tokenizer_library: sentencepiece
     tokenizer_model: /data/tokenizer/slm_tokenizer.model
     output_format: mmap
 
+  # ── Data Blend ─────────────────────────────────────────────────────────────
+  # Weights used when mixing general text and code for pre-training.
+  # Matches Chinchilla-style recommendations for a general + code model.
   blend:
     general_text:
       path: /data/curated/general
