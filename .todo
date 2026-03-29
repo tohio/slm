@@ -1,54 +1,111 @@
 # SLM Pipeline — TODO
+# ─────────────────────────────────────────────────────────────────────────────
 # Items marked [BLOCKS] must be resolved before the pipeline stage can run.
 # Items marked [IMPROVEMENT] are enhancements for later iterations.
 # Items marked [DONE] are completed.
+# ─────────────────────────────────────────────────────────────────────────────
 
 ## QUALITY FILTER AUTOMATION                                       [BLOCKS pass 2]
 
-- [x] Auto-detect quality_filter at runtime (pipeline.py updated)
-- [x] Graceful skip with symlink redirect (pipeline.py updated)
+- [x] Auto-detect quality_filter at runtime — pipeline.py now checks if
+      model file exists on disk before running the stage. No curator.yaml
+      edits required between passes. (pipeline.py updated)
+
+- [x] Graceful skip with symlink redirect — when quality_filter is skipped,
+      pipeline.py creates stages/quality_filter → stages/heuristic_filter
+      symlink so downstream stages find their input correctly. (pipeline.py updated)
+
 - [ ] Write curator/scripts/train_quality_classifier.sh              [BLOCKS pass 2]
+      - Takes curated output dir as input
       - Auto-samples N docs from /data/curated/stages/pii/
-      - Labels hq/lq using heuristic filter scores as weak supervision
-      - Trains fasttext classifier → /data/models/quality_classifier.bin
-      - Prints precision/recall on held-out split
+      - Labels them hq/lq using heuristic proxy (e.g. use heuristic filter
+        scores as weak supervision signal — docs that barely passed vs
+        docs that passed comfortably)
+      - Trains fasttext supervised classifier
+      - Saves to /data/models/quality_classifier.bin
+      - Prints precision/recall on a held-out split
+
 - [ ] Add make target: train-quality-classifier                      [BLOCKS pass 2]
-- [ ] Add make target: curate-full (full two-pass automated pipeline)
-- [ ] Update docker-curate to call curate-full
+      train-quality-classifier:
+          bash curator/scripts/train_quality_classifier.sh \
+              --input-dir $(DATA_DIR)/curated/stages/pii \
+              --output-model $(DATA_DIR)/models/quality_classifier.bin \
+              --n-samples 50000
+
+- [ ] Add make target: curate-full
+      # Runs both passes end-to-end without manual intervention
+      curate-full:
+          make curate                         # pass 1: no quality filter
+          make train-quality-classifier       # train classifier on pass 1 output
+          make tokenizer                      # train tokenizer
+          make curate-resume STAGE=quality_filter   # pass 2: auto-detects both
+
+- [ ] Update docker-curate to call curate-full instead of curate
+      so make docker-curate runs the complete two-pass pipeline automatically
 
 
 ## TOKENIZATION AUTOMATION                                         [DONE]
 
-- [x] Auto-detect tokenizer at runtime (pipeline.py updated)
+- [x] Auto-detect tokenizer at runtime — pipeline.py now checks if
+      tokenizer_model file exists before running tokenize stage.
+      No curator.yaml edits required. (pipeline.py updated)
 
 
 ## TOKENIZER CONFIG CLEANUP                                      [IMPROVEMENT]
 
-- [ ] Remove <PAD><UNK><BOS><EOS> from user_defined_symbols
-      (duplicates pad_id/unk_id/bos_id/eos_id, pushes chat tokens to IDs 8–13)
-      Requires retraining tokenizer + updating SFT/DPO chat templates
+- [ ] Remove <PAD>, <UNK>, <BOS>, <EOS> from user_defined_symbols in
+      tokenizer/configs/tokenizer.yaml — they duplicate pad_id/unk_id/bos_id/eos_id
+      and push chat special tokens from IDs 4–9 to IDs 8–13.
+      Requires retraining tokenizer and updating all configs that reference
+      specific token IDs (SFT, DPO chat templates).
 
 
 ## CURATION PIPELINE                                             [IMPROVEMENT]
 
-- [ ] Add Wikipedia EN + CodeSearchNet to download-data
-- [ ] Add tqdm progress log to pipeline.py for headless runs
-- [ ] Add stage output size logging (input docs, output docs, % retained)
+- [ ] Parallelize WARC reading in extract.py — use multiprocessing.Pool
+      to read multiple WARCs concurrently before distributing to Dask workers.
+      Currently sequential: ~30s per WARC × 20 = ~10min just reading.
+      Fix: pool.map(iter_warc_records, warc_files) then flatten into one list.
+
+- [ ] Add Wikipedia EN download + extraction to download-data
+      Currently only Common Crawl WARCs are downloaded
+
+- [ ] Add CodeSearchNet download to download-data
+
+- [ ] Add progress bar / ETA to curator pipeline stages
+      Dask dashboard exists but requires SSH tunnel — add a simple
+      tqdm progress log to pipeline.py for headless runs
+
+- [ ] Add stage output size logging
+      After each stage, log: input docs, output docs, % retained
+      Useful for tuning filter thresholds
 
 
 ## MAKEFILE                                                      [IMPROVEMENT]
 
-- [ ] Fix _check-data-dirs — drop /logs requirement, check only /data and /results
-- [ ] Add make status target (stage markers, disk usage, latest checkpoint)
+- [ ] Fix _check-data-dirs guard — currently checks for /logs which
+      may not exist if logs are redirected to /data/logs
+      → Check only /data and /results, drop /logs requirement
+
+- [ ] Add make status target
+      Shows: which stages have completed (.complete markers),
+      disk usage per stage, latest checkpoint
 
 
 ## DOCKER                                                        [IMPROVEMENT]
 
-- [ ] Add .dockerignore (exclude /data, /results, notebooks, docs)
-- [ ] Pin base image by digest (@sha256:...)
+- [ ] Add .dockerignore to exclude /data, /results, notebooks, docs
+      from build context — speeds up docker build significantly
+
+- [ ] Pin base image by digest instead of tag
+      pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime is mutable
+      → use @sha256:... for reproducible builds
 
 
 ## TRAINING                                                      [IMPROVEMENT]
 
-- [ ] Verify train.sh works with nemo_toolkit 2.2.0
+- [ ] Verify pretrain/scripts/train.sh works with nemo_toolkit 2.2.0
+      API changed from 1.x — megatron-core path may need updating
+
 - [ ] Add gradient checkpointing config to gpt_125m.yaml
+      Required to fit 125M model in GPU memory during SFT on smaller GPUs

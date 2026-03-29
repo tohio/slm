@@ -9,23 +9,25 @@ Removes:
   - Documents where the language model is uncertain (low confidence)
 
 Parallelism:
-  Documents are distributed across all Dask workers at the record level,
-  not the file level. This ensures full worker utilization regardless of
-  how many JSONL files are present.
+  Documents are distributed across all Dask workers at the record level.
+  Files are processed one at a time to keep peak memory bounded —
+  loading all 671k records at once causes the Dask scheduler to OOM
+  when serializing the 2GB+ task graph. Processing one file at a time
+  (~33k records, ~100MB) keeps peak memory well within budget.
 
 Input/Output: JSONL
 """
 
 import json
 import logging
-from collections import defaultdict
 from pathlib import Path
 
-import fasttext
 import dask.bag as db
 from dask.distributed import Client, LocalCluster
 
 logger = logging.getLogger("curator.language_filter")
+
+PARTITIONS_PER_WORKER = 4
 
 
 def detect_language(record: dict, model_path: str, target_language: str, min_score: float) -> dict | None:
@@ -34,7 +36,6 @@ def detect_language(record: dict, model_path: str, target_language: str, min_sco
     Loads the model once per worker (cached in worker memory).
     Returns None if the document does not pass the language filter.
     """
-    # Worker-local model cache — loaded once, reused for all records on this worker
     import fasttext as ft
     if not hasattr(detect_language, "_model"):
         detect_language._model = ft.load_model(model_path)
@@ -59,7 +60,10 @@ def detect_language(record: dict, model_path: str, target_language: str, min_sco
 def run_language_filter(input_path: Path, output_path: Path, cfg: dict):
     """
     Main language filter entry point.
-    Distributes all documents across Dask workers at record level.
+
+    Processes one JSONL file at a time to keep peak memory bounded.
+    Each file's records are distributed across all Dask workers,
+    results written to disk, then memory freed before the next file.
     """
     if not cfg.get("enabled", True):
         logger.info("Language filter disabled — symlinking input to output")
@@ -81,30 +85,9 @@ def run_language_filter(input_path: Path, output_path: Path, cfg: dict):
         f"(target={target_language}, min_score={min_score})"
     )
 
-    # Load all records into memory — they are already filtered/small after extract
-    all_records = []
-    source_map = {}  # doc id → source filename for output grouping
-    for input_file in input_files:
-        with open(input_file, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                doc = json.loads(line)
-                all_records.append(doc)
-                source_map[doc["id"]] = input_file.name
-
-    total_in = len(all_records)
-    logger.info(f"Loaded {total_in:,} documents for language filtering")
-
-    # Dask config from parent pipeline config
     dask_cfg = cfg.get("dask", {})
     n_workers = dask_cfg.get("n_workers", 4)
     memory_limit = dask_cfg.get("memory_limit", "2GB")
-
-    # Dynamic partitioning — same strategy as extract.py
-    partitions_per_worker = 4
-    n_partitions = min(n_workers * partitions_per_worker, total_in)
 
     cluster = LocalCluster(
         n_workers=n_workers,
@@ -114,36 +97,59 @@ def run_language_filter(input_path: Path, output_path: Path, cfg: dict):
     client = Client(cluster)
     logger.info(f"Dask dashboard: {client.dashboard_link}")
 
+    total_in = 0
+    total_out = 0
+
     try:
-        bag = db.from_sequence(all_records, npartitions=n_partitions)
-        results = (
-            bag
-            .map(detect_language, model_path=model_path,
-                 target_language=target_language, min_score=min_score)
-            .filter(lambda x: x is not None)
-            .compute()
-        )
+        for input_file in input_files:
+            # Load one file at a time — keeps peak memory bounded
+            records = []
+            with open(input_file, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        records.append(json.loads(line))
 
-        # Group results by source file and write output
-        docs_by_file = defaultdict(list)
-        for doc in results:
-            source_file = source_map.get(doc["id"], "unknown.jsonl")
-            docs_by_file[source_file].append(doc)
+            n_records = len(records)
+            total_in += n_records
 
-        for source_file, docs in docs_by_file.items():
-            output_file = output_path / source_file
-            output_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(output_file, "w", encoding="utf-8") as fout:
-                for doc in docs:
-                    fout.write(json.dumps(doc, ensure_ascii=False) + "\n")
+            if not records:
+                continue
 
-        total_out = len(results)
-        retention = (total_out / total_in * 100) if total_in > 0 else 0
-        logger.info(
-            f"Language filter complete: {total_out}/{total_in} "
-            f"documents retained ({retention:.1f}%)"
-        )
+            n_partitions = min(n_workers * PARTITIONS_PER_WORKER, n_records)
+
+            bag = db.from_sequence(records, npartitions=n_partitions)
+            results = (
+                bag
+                .map(detect_language, model_path=model_path,
+                     target_language=target_language, min_score=min_score)
+                .filter(lambda x: x is not None)
+                .compute()
+            )
+
+            if results:
+                output_file = output_path / input_file.name
+                with open(output_file, "w", encoding="utf-8") as fout:
+                    for doc in results:
+                        fout.write(json.dumps(doc, ensure_ascii=False) + "\n")
+
+            n_out = len(results)
+            total_out += n_out
+            retention = n_out / n_records * 100 if n_records > 0 else 0
+            logger.info(
+                f"  {input_file.name}: {n_out}/{n_records} retained "
+                f"({retention:.1f}%)"
+            )
+
+            # Free memory before next file
+            del records, results
 
     finally:
         client.close()
         cluster.close()
+
+    overall_retention = (total_out / total_in * 100) if total_in > 0 else 0
+    logger.info(
+        f"Language filter complete: {total_out:,}/{total_in:,} "
+        f"documents retained ({overall_retention:.1f}%)"
+    )

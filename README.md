@@ -125,7 +125,8 @@ make download-models
 
 # 4. Download Common Crawl WARC files
 #    Start with 2 files to validate the pipeline before a full run
-make download-data N_WARC_FILES=2
+#    make download-data N_WARC_FILES=2
+make download-data
 
 # 5. Run the full curation pipeline in Docker
 make docker-curate
