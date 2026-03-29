@@ -37,50 +37,38 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # -----------------------------------------------------------------------------
 # STEP 1 — NeMo core (sets the dependency floor for everything else)
 #
-# Key constraints discovered from PyPI metadata:
-#   nemo_toolkit==2.0.0  requires:
-#     huggingface-hub >= 0.24      ← original ==0.23.0 pin broke this
-#     transformers    >= 4.44.0    ← original ==4.41.0 pin broke this
+# Version compatibility matrix (verified against PyPI metadata):
+#
+#   nemo_toolkit==2.2.0  [core] extra:
+#     transformers>=4.48.0,<=4.48.3  ← exact match with nemo-curator requirement
 #     pytorch-lightning > 2.2.1
 #     hydra-core  >1.3,<=1.3.2
 #     omegaconf   <=2.3
 #     sentencepiece < 1.0.0
+#     NO mamba-ssm in [core] — safe to use without nvcc
 #
-#   nemo-aligner==0.4.0  requires:
-#     nemo_toolkit[nlp]  (no version pin — compatible with 2.0.0)
-#     megatron-core==0.8
-#     nvidia-pytriton    (public on PyPI — no NGC needed)
+#   nemo-aligner==0.7.0:
+#     deps: jsonlines, Jinja2 only — no nemo_toolkit[nlp] pin
+#     nemo-aligner 0.4.0 pulled nemo_toolkit[nlp] → mamba-ssm (nvcc required)
+#     0.7.0 eliminates this entirely
 #
-#   nemo-curator==0.7.1  (NOTE: 0.5.0 does not exist on PyPI — earliest is 0.7.1)
-#     no nemo_toolkit version pin — compatible with 2.0.0
-#     fasttext==0.9.3    ← curator pins this; use 0.9.3 not 0.9.2
-#     transformers>=4.48.0
+#   nemo-curator==0.7.1:
+#     transformers>=4.48.0 — satisfied by nemo_toolkit 2.2.0's pin
+#     fasttext==0.9.3  ← use 0.9.3 not 0.9.2
 #     numpy<2
-#
-# Why [core] not [all] or [nlp]:
-#   [all] and [nlp] both include mamba-ssm==2.2.2 which requires nvcc to
-#   compile from source. The runtime base image does not include nvcc (only
-#   the 'devel' image does). [core] excludes mamba-ssm entirely and covers
-#   everything needed for GPT pretraining, SFT, and DPO.
+#     NOTE: nemo-curator 0.5.0 referenced in earlier docs never existed on PyPI
 #
 # Install order: NeMo first → aligner → curator → everything else
 # This prevents pip from backtracking against already-resolved constraints.
 # -----------------------------------------------------------------------------
+# nemo_toolkit 2.2.0: pins transformers>=4.48.0,<=4.48.3 — compatible with
+# nemo-curator 0.7.1 (needs >=4.48.0) and avoids BasicTokenizer removal in 4.46+.
+# nemo-aligner 0.7.0: no nemo_toolkit[nlp] dependency — avoids mamba-ssm entirely.
+# No --no-deps workarounds needed with this version combination.
 RUN pip install --no-cache-dir \
-    "nemo_toolkit[core]==2.0.0" \
+    "nemo_toolkit[core]==2.2.0" \
+    "nemo-aligner==0.7.0" \
     "dask[distributed]==2024.4.1"
-
-# nemo-aligner==0.4.0 declares nemo_toolkit[nlp] as a dependency, which
-# includes mamba-ssm==2.2.2 (requires nvcc). Installing with --no-deps
-# after nemo_toolkit is already present prevents pip from re-resolving
-# the [nlp] extra and triggering the mamba-ssm compile failure.
-RUN pip install --no-cache-dir --no-deps "nemo-aligner==0.4.0"
-
-# Install nemo-aligner's other direct deps explicitly (since --no-deps skipped them)
-RUN pip install --no-cache-dir \
-    "megatron-core==0.8.0" \
-    jsonlines \
-    nvidia-pytriton
 
 # -----------------------------------------------------------------------------
 # STEP 1b — NeMo NLP extras needed for GPT/SFT/DPO (mamba-ssm excluded)
