@@ -148,6 +148,7 @@ make curate-full
 # 6. Upload curated dataset to S3
 make upload-data                    # reads S3_BUCKET from .env
 #    Auto-detects pass 1 vs pass 2 and uploads the right files
+#    Override bucket: make upload-data S3_BUCKET=other-bucket
 ```
 
 #### Training (GPU instance)
@@ -158,7 +159,8 @@ make init-dirs
 make docker-build
 
 # 2. Pull curated data from S3
-make setup-instance S3_BUCKET=my-bucket
+#    Reads S3_BUCKET from .env — override with: make setup-instance S3_BUCKET=other-bucket
+make setup-instance
 
 # 3. Prepare fine-tuning datasets
 make prepare-sft-data
@@ -289,8 +291,9 @@ make docker-curate              # pass 2 — both stages now auto-detected
 Data curation runs on CPU instances. Training runs on GPU instances. The `upload-data` and `setup-instance` targets handle the handoff via S3.
 
 ```bash
-make upload-data                    # reads S3_BUCKET from .env S3_PREFIX=slm/data
-make setup-instance S3_BUCKET=my-bucket
+make upload-data     # reads S3_BUCKET from .env
+make setup-instance  # reads S3_BUCKET from .env
+#    Override bucket: make upload-data S3_BUCKET=other-bucket
 ```
 
 ---

@@ -15,30 +15,15 @@
       pipeline.py creates stages/quality_filter → stages/heuristic_filter
       symlink so downstream stages find their input correctly. (pipeline.py updated)
 
-- [ ] Write curator/scripts/train_quality_classifier.sh              [BLOCKS pass 2]
-      - Takes curated output dir as input
-      - Auto-samples N docs from /data/curated/stages/pii/
-      - Labels them hq/lq using heuristic proxy (e.g. use heuristic filter
-        scores as weak supervision signal — docs that barely passed vs
-        docs that passed comfortably)
-      - Trains fasttext supervised classifier
-      - Saves to /data/models/quality_classifier.bin
-      - Prints precision/recall on a held-out split
+- [x] Write curator/scripts/train_quality_classifier.sh
+      Weak supervision: top/bottom quartile of heuristic scores → hq/lq labels
+      fastText supervised, 10 epochs, bigrams, F1 reported on held-out split
 
-- [ ] Add make target: train-quality-classifier                      [BLOCKS pass 2]
-      train-quality-classifier:
-          bash curator/scripts/train_quality_classifier.sh \
-              --input-dir $(DATA_DIR)/curated/stages/pii \
-              --output-model $(DATA_DIR)/models/quality_classifier.bin \
-              --n-samples 50000
+- [x] Add make target: train-quality-classifier
 
-- [ ] Add make target: curate-full
-      # Runs both passes end-to-end without manual intervention
-      curate-full:
-          make curate                         # pass 1: no quality filter
-          make train-quality-classifier       # train classifier on pass 1 output
-          make tokenizer                      # train tokenizer
-          make curate-resume STAGE=quality_filter   # pass 2: auto-detects both
+- [x] Add make target: curate-full
+      Runs: make curate → make tokenizer → make train-quality-classifier
+            → make curate-resume STAGE=quality_filter
 
 - [ ] Update docker-curate to call curate-full instead of curate
       so make docker-curate runs the complete two-pass pipeline automatically
@@ -100,6 +85,21 @@
 - [ ] Pin base image by digest instead of tag
       pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime is mutable
       → use @sha256:... for reproducible builds
+
+
+## UPLOAD SCRIPT                                                           [DONE]
+
+- [ ] Fix upload_s3.sh to handle pass 1 state gracefully
+      Currently exits with error if /data/curated/tokenized has no .bin files
+      (these only exist after pass 2 tokenization stage runs).
+      Pass 1 state: tokenizer model exists, curated JSONL exists, no .bin/.idx yet.
+      Fix options:
+        A. Make .bin check a warning not a hard exit — upload what exists
+        B. Add --mode flag: pass1 (upload pii + tokenizer) vs pass2 (upload mmap)
+        C. Auto-detect what exists and upload accordingly
+      Workaround until fixed:
+        aws s3 sync /data/tokenizer s3://bucket/slm/data/tokenizer/
+        aws s3 sync /data/curated/stages/pii s3://bucket/slm/data/curated/pii/
 
 
 ## TRAINING                                                      [IMPROVEMENT]
