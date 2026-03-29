@@ -11,6 +11,9 @@
 #   make pretrain GPUS=4 CONFIG=pretrain/configs/gpt_350m.yaml
 # ─────────────────────────────────────────────────────────────────────────────
 
+-include .env
+export
+
 GPUS          ?= $(shell python3 -c "import torch; print(torch.cuda.device_count())" 2>/dev/null || echo 1)
 CONFIG        ?= pretrain/configs/gpt_125m.yaml
 S3_BUCKET     ?=
@@ -85,7 +88,7 @@ help:
 	@echo "  OVERRIDES"
 	@echo "    make pretrain GPUS=4 CONFIG=pretrain/configs/gpt_350m.yaml"
 	@echo "    make curate N_WARC_FILES=50"
-	@echo "    make upload-data S3_BUCKET=my-bucket"
+	@echo "    make upload-data                  # reads S3_BUCKET from .env"
 	@echo "    make docker-build DOCKER_IMAGE=slm:latest"
 	@echo ""
 
@@ -267,7 +270,10 @@ _check-dpo-ckpt:
 
 _check-s3-bucket:
 	@if [ -z "$(S3_BUCKET)" ]; then \
-		echo "ERROR: S3_BUCKET required. Pass: make $(@:_check-%=%) S3_BUCKET=my-bucket"; exit 1; fi
+		echo "ERROR: S3_BUCKET not set."; \
+		echo "  Option 1 (recommended): add S3_BUCKET=your-bucket to .env"; \
+		echo "  Option 2: pass on command line: make $(@:_check-%=%) S3_BUCKET=your-bucket"; \
+		exit 1; fi
 
 _check-data-dirs:
 	@if [ ! -d "$(DATA_DIR)" ] || [ ! -d "$(RESULTS_DIR)" ] || [ ! -d "$(LOGS_DIR)" ]; then \

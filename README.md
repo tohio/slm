@@ -144,7 +144,7 @@ make docker-curate
 #    tokenizer trains automatically after curation completes
 
 # 6. Upload curated dataset to S3
-make upload-data S3_BUCKET=my-bucket
+make upload-data                    # reads S3_BUCKET from .env
 ```
 
 #### Training (GPU instance)
@@ -272,7 +272,7 @@ Dask worker count and memory limit are resolved automatically at runtime — `pi
 Data curation runs on CPU instances. Training runs on GPU instances. The `upload-data` and `setup-instance` targets handle the handoff via S3.
 
 ```bash
-make upload-data S3_BUCKET=my-bucket S3_PREFIX=slm/data
+make upload-data                    # reads S3_BUCKET from .env S3_PREFIX=slm/data
 make setup-instance S3_BUCKET=my-bucket
 ```
 
