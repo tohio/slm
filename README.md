@@ -16,7 +16,7 @@ The pipeline is modular — each stage is independently runnable, reproducible, 
 **Domain:** General chat → coding (sequential fine-tuning)
 **Alignment:** Direct Preference Optimization (DPO)
 **Framework:** NVIDIA NeMo + NeMo Curator + NeMo Aligner
-**Infrastructure:** AWS Spot (data) + Cloud GPU instances (training)
+**Infrastructure:** Cloud CPU instances (data) + Cloud GPU instances (training)
 
 ---
 
@@ -62,17 +62,76 @@ The pipeline is modular — each stage is independently runnable, reproducible, 
 
 ```
 slm/
-├── Dockerfile           Self-contained NeMo image (no NGC auth required)
+├── Dockerfile                        Self-contained NeMo image (no NGC auth required)
 ├── Makefile
 ├── requirements.txt
 ├── environment.yml
-├── curator/             Stage 1: data curation pipeline
-├── tokenizer/           Custom BPE tokenizer training
-├── pretrain/            Stage 2: pre-training
-├── finetune/            Stage 3: supervised fine-tuning
-├── alignment/           Stage 4: DPO alignment
-├── eval/                Evaluation suite (all stages)
-└── infra/               GPU instance setup
+├── .env.sample                       Environment variable template
+├── .dockerignore
+├── HARDWARE.md                       GPU/instance recommendations
+├── docs/
+│   └── architecture.svg
+├── notebooks/
+│   └── exploration.ipynb
+├── curator/                          Stage 1: data curation pipeline
+│   ├── configs/
+│   │   └── curator.yaml
+│   ├── pipelines/
+│   │   ├── pipeline.py               Orchestrator — runs all stages in order
+│   │   ├── extract.py                WARC → clean text (trafilatura)
+│   │   ├── language_filter.py        fastText language ID
+│   │   ├── heuristic_filter.py       Gopher-style rule filters
+│   │   ├── quality_filter.py         fastText quality classifier
+│   │   ├── dedup.py                  Exact (MD5) + fuzzy (MinHash) dedup
+│   │   ├── pii.py                    Regex-based PII redaction
+│   │   └── tokenize_data.py          SentencePiece → NeMo mmap format
+│   ├── scripts/
+│   │   ├── download_cc.sh            Download Common Crawl WARCs
+│   │   └── upload_s3.sh              Upload curated data to S3
+│   └── README.md
+├── tokenizer/                        Custom BPE tokenizer training
+│   ├── configs/
+│   │   └── tokenizer.yaml
+│   ├── train_tokenizer.py
+│   └── README.md
+├── pretrain/                         Stage 2: pre-training
+│   ├── configs/
+│   │   ├── gpt_125m.yaml
+│   │   ├── gpt_350m.yaml
+│   │   └── gpt_1b.yaml
+│   ├── scripts/
+│   │   ├── train.sh
+│   │   └── convert_ckpt.sh           Export to HuggingFace format
+│   ├── train.py
+│   └── README.md
+├── finetune/                         Stage 3: supervised fine-tuning
+│   ├── configs/
+│   │   ├── sft_chat.yaml
+│   │   └── sft_code.yaml
+│   ├── data/
+│   │   └── prepare_sft.py
+│   ├── scripts/
+│   │   └── train_sft.sh
+│   ├── train_sft.py
+│   └── README.md
+├── alignment/                        Stage 4: DPO alignment
+│   ├── configs/
+│   │   └── dpo.yaml
+│   ├── data/
+│   │   └── prepare_dpo.py
+│   ├── scripts/
+│   │   └── train_dpo.sh
+│   ├── train_dpo.py
+│   └── README.md
+├── eval/                             Evaluation suite (all stages)
+│   ├── run_eval.py                   Main eval entry point
+│   ├── perplexity.py
+│   ├── mmlu.py
+│   ├── generation.py
+│   ├── win_rate.py
+│   └── README.md
+└── infra/
+    └── setup_gpu_instance.sh
 ```
 
 ---
@@ -83,31 +142,68 @@ slm/
 
 The image is self-contained and built from public sources only — **no NGC account or API token required**.
 
+#### Data Curation (CPU instance)
+
 ```bash
-# Build once
+# 1. First-time host setup — creates /data, /results, /logs on the host
+make init-dirs
+
+# 2. Build the Docker image
 make docker-build
 
-# Data curation (CPU — runs on a cheap spot instance)
-make docker-shell-cpu
-# then inside the container:
-make download-data
-make curate
-make tokenizer
-make upload-data S3_BUCKET=my-bucket
+# 3. Download fasttext language ID model (lid.176.bin)
+make download-models
 
-# Training (GPU)
-make docker-shell-gpu
-# then inside the container:
+# 4. Download Common Crawl WARC files
+#    Start with 2 files to validate the pipeline before a full run
+make download-data N_WARC_FILES=2
+
+# 5. Run the full curation pipeline in Docker
+make docker-curate
+#    Stages: extract → language_filter → heuristic_filter →
+#            exact_dedup → fuzzy_dedup → pii
+#    NOTE: quality_filter and tokenization are disabled on first pass
+#    See curator/configs/curator.yaml for details
+
+# 6. Train the custom BPE tokenizer on curated output
+make tokenizer
+
+# 7. Upload curated dataset to S3
+make upload-data S3_BUCKET=my-bucket
+```
+
+#### Training (GPU instance)
+
+```bash
+# 1. First-time setup on GPU instance
+make init-dirs
+make docker-build
+
+# 2. Pull curated data from S3
 make setup-instance S3_BUCKET=my-bucket
+
+# 3. Prepare fine-tuning datasets
 make prepare-sft-data
 make prepare-dpo-data
+
+# 4. Train
 make pretrain
 make sft
 make dpo
 
-# Evaluate & export
+# 5. Evaluate and export
 make eval-dpo
 make convert-hf
+```
+
+#### Interactive shells
+
+```bash
+# CPU container — for curation and data prep
+make docker-shell-cpu
+
+# GPU container — for training
+make docker-shell-gpu
 ```
 
 ### Local (no Docker)
@@ -116,7 +212,11 @@ make convert-hf
 # 1. Install PyTorch first — version must match your CUDA driver
 pip install torch==2.1.2 --index-url https://download.pytorch.org/whl/cu121
 
-# 2. Install remaining dependencies
+# 2. Install NeMo stack first (sets dependency floor)
+pip install "nemo_toolkit[core]==2.2.0" "nemo-aligner==0.7.0" "dask[distributed]==2024.4.1"
+pip install "nemo-curator==0.7.1"
+
+# 3. Install remaining dependencies
 pip install -r requirements.txt
 ```
 
@@ -165,13 +265,29 @@ The image is based on `pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime` (public Do
 
 **Key decisions:**
 
-- `nemo_toolkit[core]` not `[all]` or `[nlp]` — both `[all]` and `[nlp]` include `mamba-ssm==2.2.2` which requires `nvcc` to compile from source. The `runtime` base image does not ship `nvcc` (only `devel` does). `[core]` excludes it entirely.
-- `huggingface-hub`, `transformers`, `pytorch-lightning`, `omegaconf`, `hydra-core`, `sentencepiece`, and `datasets` are not pinned directly — owned and versioned by `nemo_toolkit` and `nemo-curator`. Re-pinning them causes resolution conflicts across environments.
+- `nemo_toolkit[core]` not `[all]` or `[nlp]` — both pull in `mamba-ssm==2.2.2` which requires `nvcc` to compile. The `runtime` base image does not ship `nvcc`.
+- `huggingface-hub`, `transformers`, `pytorch-lightning`, `omegaconf`, `hydra-core`, `sentencepiece`, and `datasets` are not pinned directly — owned by `nemo_toolkit` and `nemo-curator`. Re-pinning causes resolution conflicts.
+- Common Crawl WARC files are downloaded via `curl` over HTTPS (`data.commoncrawl.org`) rather than `aws s3 cp`. The `--no-sign-request` flag returns 403 when instance IAM credentials are present. `curl` bypasses this entirely.
 - GPU-accelerated curator ops (`cudf`, `dask-cuda`) are excluded. They require the NVIDIA PyPI index and are not needed for the CPU curation pipeline.
+
+### Curator Config
+
+`curator/configs/curator.yaml` is tuned for a 32 vCPU / 128GB instance:
+
+```yaml
+dask:
+  n_workers: 32
+  threads_per_worker: 1
+  memory_limit: "3GB"    # 32 × 3GB = 96GB
+```
+
+For smaller instances, scale `n_workers` to your vCPU count and set `memory_limit` to `(total_RAM_GB - 2) / n_workers`.
+
+**Two-pass curation:** `quality_filter` and `tokenization` are disabled on the first curation pass because they depend on artifacts produced later (`quality_classifier.bin` and `slm_tokenizer.model`). Enable them after running `make tokenizer` and training a quality classifier.
 
 ### AWS
 
-Data curation runs on spot instances (CPU, storage-optimized). Training runs on on-demand GPU instances. The `upload-data` and `setup-instance` targets handle the handoff between the two via S3.
+Data curation runs on CPU instances. Training runs on GPU instances. The `upload-data` and `setup-instance` targets handle the handoff via S3.
 
 ```bash
 make upload-data S3_BUCKET=my-bucket S3_PREFIX=slm/data
@@ -195,7 +311,7 @@ A tokenizer trained on your specific data mix (general + code) encodes domain pa
 Sequential fine-tuning lets each stage be evaluated independently and makes it easier to diagnose regressions. The code SFT uses a lower learning rate specifically to reduce catastrophic forgetting of chat capabilities.
 
 **Why a self-contained Docker image instead of the official NeMo NGC image?**
-The official `nvcr.io/nvidia/nemo` image requires an NGC account and API token, which adds friction for open development and CI pipelines. The Dockerfile here reproduces the same stack from public sources only, with all transitive dependencies resolved and locked against the public PyPI index. Resolving this stack required pinning specific intermediate versions — notably upgrading `nemo_toolkit` to `2.2.0` (where `transformers>=4.48` support was added) and `nemo-aligner` to `0.7.0` (which dropped the `nemo_toolkit[nlp]` dependency that pulled in `mamba-ssm`).
+The official `nvcr.io/nvidia/nemo` image requires an NGC account and API token, which adds friction for open development and CI pipelines. The Dockerfile here reproduces the same stack from public sources only, with all transitive dependencies resolved and locked against the public PyPI index. Resolving this required upgrading `nemo_toolkit` to `2.2.0` (where `transformers>=4.48` support was added) and `nemo-aligner` to `0.7.0` (which dropped the `nemo_toolkit[nlp]` dependency that pulled in `mamba-ssm`).
 
 ---
 

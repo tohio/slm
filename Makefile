@@ -261,7 +261,8 @@ _check-data-dirs:
 
 # ── Cleanup ───────────────────────────────────────────────────────────────────
 clean:
-	find $(DATA_DIR)/curated/stages -name ".complete" -delete 2>/dev/null || true
+	# Stage files are written by root inside Docker — sudo required
+	sudo find $(DATA_DIR)/curated/stages -name ".complete" -delete 2>/dev/null || true
 	@echo "✓ Stage markers cleared (checkpoints and data preserved)"
 
 clean-all:
