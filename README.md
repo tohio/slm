@@ -98,6 +98,7 @@ slm/
 │   ├── generation.py
 │   ├── win_rate.py
 │   └── README.md
+├── inference.py                      Interactive + batch inference CLI
 └── infra/
     └── setup_gpu_instance.sh
 ```
@@ -255,6 +256,61 @@ make setup-instance S3_BUCKET=my-bucket
 
 ---
 
+## Inference
+
+Load any checkpoint and interact with the model directly — pretrain, SFT, or DPO. Inference is how you verify the model is actually useful, not just that the metrics improved.
+
+```bash
+# Interactive session — talk to the DPO-aligned model
+make inference
+
+# Compare DPO vs SFT on the same prompt
+make inference-compare PROMPT="Write a Python function to check if a number is prime."
+
+# Single prompt (non-interactive)
+docker run --gpus all --rm \
+    -v $(pwd):/workspace/slm \
+    -v /results:/results \
+    slm:latest python inference.py \
+    --checkpoint /results/slm_dpo/checkpoints/last.nemo \
+    --prompt "Explain the difference between a list and a tuple in Python."
+
+# Batch inference from a file
+docker run --gpus all --rm \
+    -v $(pwd):/workspace/slm \
+    -v /results:/results \
+    slm:latest python inference.py \
+    --checkpoint /results/slm_dpo/checkpoints/last.nemo \
+    --prompt-file prompts.txt \
+    --output /results/inference/batch_results.jsonl
+
+# Compare two checkpoints side by side
+docker run --gpus all --rm \
+    -v $(pwd):/workspace/slm \
+    -v /results:/results \
+    slm:latest python inference.py \
+    --checkpoint /results/slm_dpo/checkpoints/last.nemo \
+    --compare   /results/slm_sft_code/checkpoints/last.nemo \
+    --prompt "How do I reverse a string in Python?"
+```
+
+**Generation parameters:**
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--temperature` | `0.7` | Lower = more deterministic, higher = more creative |
+| `--max-tokens` | `512` | Maximum new tokens to generate |
+| `--top-p` | `0.9` | Nucleus sampling threshold |
+| `--no-chat-template` | off | Pass prompts raw — useful for testing pretrain checkpoint |
+
+**What to look for at each stage:**
+
+- **Pretrain checkpoint** (`--no-chat-template`): generates coherent text continuations but doesn't follow instructions or stop cleanly
+- **SFT checkpoint**: follows instructions, stops at the right place, produces fenced code blocks for coding prompts
+- **DPO checkpoint**: more helpful tone, declines safety-violating prompts gracefully, less likely to ramble
+
+---
+
 ## Screenshots
 
 > Captured during an actual end-to-end pipeline run. Replace placeholders with real screenshots as each stage completes.
@@ -263,6 +319,16 @@ make setup-instance S3_BUCKET=my-bucket
 
 ![Docker build](docs/screenshots/docker_build.png)
 *`make docker-build` — self-contained NeMo image, no NGC auth*
+
+### Interactive inference
+
+![Inference](docs/screenshots/inference.png)
+*`make inference` — interactive session with the DPO-aligned model*
+
+### Checkpoint comparison
+
+![Inference compare](docs/screenshots/inference_compare.png)
+*`make inference-compare` — DPO vs SFT response on the same coding prompt*
 
 ### Data curation pipeline
 

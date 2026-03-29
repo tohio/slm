@@ -1,0 +1,54 @@
+# SLM Pipeline — TODO
+# Items marked [BLOCKS] must be resolved before the pipeline stage can run.
+# Items marked [IMPROVEMENT] are enhancements for later iterations.
+# Items marked [DONE] are completed.
+
+## QUALITY FILTER AUTOMATION                                       [BLOCKS pass 2]
+
+- [x] Auto-detect quality_filter at runtime (pipeline.py updated)
+- [x] Graceful skip with symlink redirect (pipeline.py updated)
+- [ ] Write curator/scripts/train_quality_classifier.sh              [BLOCKS pass 2]
+      - Auto-samples N docs from /data/curated/stages/pii/
+      - Labels hq/lq using heuristic filter scores as weak supervision
+      - Trains fasttext classifier → /data/models/quality_classifier.bin
+      - Prints precision/recall on held-out split
+- [ ] Add make target: train-quality-classifier                      [BLOCKS pass 2]
+- [ ] Add make target: curate-full (full two-pass automated pipeline)
+- [ ] Update docker-curate to call curate-full
+
+
+## TOKENIZATION AUTOMATION                                         [DONE]
+
+- [x] Auto-detect tokenizer at runtime (pipeline.py updated)
+
+
+## TOKENIZER CONFIG CLEANUP                                      [IMPROVEMENT]
+
+- [ ] Remove <PAD><UNK><BOS><EOS> from user_defined_symbols
+      (duplicates pad_id/unk_id/bos_id/eos_id, pushes chat tokens to IDs 8–13)
+      Requires retraining tokenizer + updating SFT/DPO chat templates
+
+
+## CURATION PIPELINE                                             [IMPROVEMENT]
+
+- [ ] Add Wikipedia EN + CodeSearchNet to download-data
+- [ ] Add tqdm progress log to pipeline.py for headless runs
+- [ ] Add stage output size logging (input docs, output docs, % retained)
+
+
+## MAKEFILE                                                      [IMPROVEMENT]
+
+- [ ] Fix _check-data-dirs — drop /logs requirement, check only /data and /results
+- [ ] Add make status target (stage markers, disk usage, latest checkpoint)
+
+
+## DOCKER                                                        [IMPROVEMENT]
+
+- [ ] Add .dockerignore (exclude /data, /results, notebooks, docs)
+- [ ] Pin base image by digest (@sha256:...)
+
+
+## TRAINING                                                      [IMPROVEMENT]
+
+- [ ] Verify train.sh works with nemo_toolkit 2.2.0
+- [ ] Add gradient checkpointing config to gpt_125m.yaml

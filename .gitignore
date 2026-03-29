@@ -37,7 +37,7 @@ env/
 
 # Jupyter
 .ipynb_checkpoints/
-*.ipynb
+#*.ipynb
 
 # Data & Checkpoints (large, don't commit)
 /data/

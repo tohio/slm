@@ -231,6 +231,17 @@ eval-dpo: _check-dpo-ckpt _check-sft-ckpt
 		--ref-checkpoint $(SFT_CODE_CKPT) \
 		--val-data $(DATA_DIR)/pretrain
 
+# ── Inference ─────────────────────────────────────────────────────────────────
+# Interactive session with the latest DPO checkpoint
+inference: _check-dpo-ckpt
+	docker run --gpus all -it --rm 		--shm-size=8g 		-v $$(pwd):/workspace/slm 		-v $(DATA_DIR):$(DATA_DIR) 		-v $(RESULTS_DIR):$(RESULTS_DIR) 		$(DOCKER_IMAGE) 		python /workspace/slm/inference.py 		--checkpoint $(DPO_CKPT)
+
+# Compare DPO vs SFT checkpoint on a single prompt
+# Usage: make inference-compare PROMPT="Write a Python function to sort a list."
+PROMPT ?= "Explain recursion to a 10-year-old."
+inference-compare: _check-dpo-ckpt _check-sft-ckpt
+	docker run --gpus all -it --rm 		--shm-size=8g 		-v $$(pwd):/workspace/slm 		-v $(DATA_DIR):$(DATA_DIR) 		-v $(RESULTS_DIR):$(RESULTS_DIR) 		$(DOCKER_IMAGE) 		python /workspace/slm/inference.py 		--checkpoint $(DPO_CKPT) 		--compare $(SFT_CODE_CKPT) 		--prompt $(PROMPT)
+
 # ── Export ────────────────────────────────────────────────────────────────────
 convert-hf: _check-dpo-ckpt
 	bash pretrain/scripts/convert_ckpt.sh \
