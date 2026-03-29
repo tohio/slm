@@ -38,9 +38,18 @@ slm/
 ├── .dockerignore
 ├── HARDWARE.md                       GPU/instance recommendations
 ├── docs/
-│   └── architecture.svg
-├── notebooks/
-│   └── exploration.ipynb
+│   ├── architecture.svg
+│   └── screenshots/                  Proof-of-deployment screenshots
+├── notebooks/                        Interactive analysis and exploration
+│   ├── inference.ipynb
+│   ├── training_run.ipynb
+│   ├── data_exploration.ipynb
+│   ├── training_curves.ipynb
+│   ├── model_comparison.ipynb
+│   ├── eval_analysis.ipynb
+│   ├── tokenizer_analysis.ipynb
+│   ├── dataset_blend.ipynb
+│   └── README.md
 ├── curator/                          Stage 1: data curation pipeline
 │   ├── configs/
 │   │   └── curator.yaml
@@ -127,17 +136,14 @@ make download-models
 #    Start with 2 files to validate the pipeline before a full run
 make download-data N_WARC_FILES=2
 
-# 5. Run the full curation pipeline in Docker
+# 5. Run the full curation pipeline + tokenizer training in Docker
 make docker-curate
 #    Stages: extract → language_filter → heuristic_filter →
-#            exact_dedup → fuzzy_dedup → pii
-#    NOTE: quality_filter and tokenization are disabled on first pass
-#    See curator/configs/curator.yaml for details
+#            exact_dedup → fuzzy_dedup → pii → tokenizer
+#    quality_filter is auto-skipped (no model yet)
+#    tokenizer trains automatically after curation completes
 
-# 6. Train the custom BPE tokenizer on curated output
-make tokenizer
-
-# 7. Upload curated dataset to S3
+# 6. Upload curated dataset to S3
 make upload-data S3_BUCKET=my-bucket
 ```
 
@@ -336,20 +342,10 @@ docker run --gpus all --rm \
 ![Docker build](docs/screenshots/docker_build.png)
 *`make docker-build` — self-contained NeMo image, no NGC auth*
 
-### Interactive inference
-
-![Inference](docs/screenshots/inference.png)
-*`make inference` — interactive session with the DPO-aligned model*
-
-### Checkpoint comparison
-
-![Inference compare](docs/screenshots/inference_compare.png)
-*`make inference-compare` — DPO vs SFT response on the same coding prompt*
-
 ### Data curation pipeline
 
 ![Curation pipeline](docs/screenshots/curation_pipeline.png)
-*`make docker-curate` — Dask workers processing 20 WARC files across all available CPUs*
+*`make docker-curate` — per-file Dask processing across 32 workers, 671k docs extracted from 20 WARCs*
 
 ### Dask dashboard
 
@@ -359,7 +355,7 @@ docker run --gpus all --rm \
 ### Tokenizer training
 
 ![Tokenizer training](docs/screenshots/tokenizer_training.png)
-*`make tokenizer` — custom BPE tokenizer trained on curated output, 32k vocab with special tokens validated*
+*Tokenizer trains automatically after curation — 32k vocab BPE, special tokens validated*
 
 ### Pre-training loss curve
 
@@ -380,6 +376,16 @@ docker run --gpus all --rm \
 
 ![Evaluation](docs/screenshots/eval_results.png)
 *`make eval-dpo` — perplexity, generation samples, and win rate vs SFT reference*
+
+### Interactive inference
+
+![Inference](docs/screenshots/inference.png)
+*`make inference` — interactive session with the DPO-aligned model*
+
+### Checkpoint comparison
+
+![Inference compare](docs/screenshots/inference_compare.png)
+*`make inference-compare` — DPO vs SFT response on the same coding prompt*
 
 ---
 
