@@ -24,7 +24,6 @@ SNAPSHOT="CC-MAIN-2024-10"          # Common Crawl snapshot ID
 N_FILES=20                           # number of WARC files to download
 OUTPUT_DIR="/data/raw/common_crawl"
 PARALLEL_DOWNLOADS=4                 # concurrent downloads (watch bandwidth)
-CC_BUCKET="s3://commoncrawl"
 
 # ── Arg parsing ───────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -94,22 +93,25 @@ download_warc() {
     fi
 
     echo "[DL] $filename"
-    aws s3 cp \
-        "${CC_BUCKET}/${relative_path}" \
-        "$output_file" \
-        --no-sign-request \
-        --quiet
+    # Using curl via HTTPS instead of aws s3 cp:
+    # Common Crawl's S3 bucket is public but aws s3 cp --no-sign-request
+    # returns 403 when instance IAM credentials are present and interfere.
+    # curl via https://data.commoncrawl.org bypasses this entirely.
+    curl -fsSL \
+        "https://data.commoncrawl.org/${relative_path}" \
+        -o "$output_file"
 
     if [[ $? -eq 0 ]]; then
         echo "[OK] $filename ($(du -sh "$output_file" | cut -f1))"
     else
         echo "[FAIL] $filename"
+        rm -f "$output_file"   # remove partial download
         return 1
     fi
 }
 
 export -f download_warc
-export OUTPUT_DIR CC_BUCKET
+export OUTPUT_DIR
 
 # Use xargs for parallel downloads
 cat "$SELECTED_PATHS_FILE" | \
