@@ -125,8 +125,7 @@ make download-models
 
 # 4. Download Common Crawl WARC files
 #    Start with 2 files to validate the pipeline before a full run
-#    make download-data N_WARC_FILES=2
-make download-data
+make download-data N_WARC_FILES=2
 
 # 5. Run the full curation pipeline in Docker
 make docker-curate
@@ -239,6 +238,22 @@ The image is based on `pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime` (public Do
 - `huggingface-hub`, `transformers`, `pytorch-lightning`, `omegaconf`, `hydra-core`, `sentencepiece`, and `datasets` are not pinned directly — owned by `nemo_toolkit` and `nemo-curator`. Re-pinning causes resolution conflicts.
 - Common Crawl WARC files are downloaded via `curl` over HTTPS (`data.commoncrawl.org`) rather than `aws s3 cp`. The `--no-sign-request` flag returns 403 when instance IAM credentials are present. `curl` bypasses this entirely.
 - GPU-accelerated curator ops (`cudf`, `dask-cuda`) are excluded. They require the NVIDIA PyPI index and are not needed for the CPU curation pipeline.
+
+### Dask Dashboard
+
+The Dask dashboard is available at port `8787` during curation and training runs.
+All `docker-shell-*` and `docker-curate` targets expose this port automatically (`-p 8787:8787`).
+
+**On Lightning.ai:**
+1. Open the **Ports** tab in the sidebar
+2. Add port `8787` — Lightning will provide a public URL
+3. Open that URL while the container is running
+
+**SSH tunnel (other cloud instances):**
+```bash
+ssh -L 8787:localhost:8787 <your-instance>
+# then open http://localhost:8787
+```
 
 ### Curator Config
 

@@ -43,10 +43,12 @@ jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --allow-root \
     --notebook-dir=/workspace/slm/notebooks
 ```
 
-Then open the URL printed in the terminal. If running on a remote instance, forward the port:
+Then open the URL printed in the terminal.
 
+**On Lightning.ai** — use the Ports tab in the sidebar, add port `8888`. Lightning provides a public URL directly. No SSH tunnel needed.
+
+**Other remote instances** — forward the port via SSH:
 ```bash
-# On your local machine
 ssh -L 8888:localhost:8888 <your-instance>
 # then open http://localhost:8888 in your browser
 ```

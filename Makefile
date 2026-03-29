@@ -124,6 +124,7 @@ docker-shell-cpu: _check-data-dirs
 	@echo "Starting CPU container for data curation..."
 	docker run -it --rm \
 		--shm-size=8g \
+		-p 8787:8787 \
 		-v $$(pwd):/workspace/slm \
 		-v $(DATA_DIR):$(DATA_DIR) \
 		-v $(LOGS_DIR):$(LOGS_DIR) \
@@ -133,6 +134,7 @@ docker-shell-gpu: _check-data-dirs
 	@echo "Starting GPU container for training..."
 	docker run --gpus all -it --rm \
 		--shm-size=8g \
+		-p 8787:8787 \
 		-v $$(pwd):/workspace/slm \
 		-v $(DATA_DIR):$(DATA_DIR) \
 		-v $(RESULTS_DIR):$(RESULTS_DIR) \
@@ -143,6 +145,7 @@ docker-curate: _check-data-dirs
 	@echo "Running data curation in Docker..."
 	docker run -it --rm \
 		--shm-size=8g \
+		-p 8787:8787 \
 		-v $$(pwd):/workspace/slm \
 		-v $(DATA_DIR):$(DATA_DIR) \
 		-v $(LOGS_DIR):$(LOGS_DIR) \
