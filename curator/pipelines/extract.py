@@ -17,6 +17,13 @@ Output: JSONL files with fields:
     "url": "<source url>",
     "warc_file": "<filename>"
   }
+
+Parallelism:
+  WARC records are batched and distributed across all Dask workers,
+  not whole files. This ensures all n_workers are utilized regardless
+  of how many WARC files are present.
+  With 2 WARCs and 32 workers: ~32 batches, all workers active.
+  With 20 WARCs and 32 workers: ~320 batches, all workers active.
 """
 
 import gzip
@@ -30,22 +37,29 @@ from typing import Iterator, Optional
 import trafilatura
 from trafilatura.settings import use_config
 from warcio.archiveiterator import ArchiveIterator
-import dask
 import dask.bag as db
 from dask.distributed import Client, LocalCluster
 
 logger = logging.getLogger("curator.extract")
 
-
-# --- Trafilatura config ---
+# Trafilatura config
 TRAFILATURA_CONFIG = use_config()
 TRAFILATURA_CONFIG.set("DEFAULT", "EXTRACTION_TIMEOUT", "10")
+
+# Target partitions per worker — controls granularity of parallelism.
+# Higher = more even load balancing but more scheduler overhead.
+# 4 is a good default: each worker gets ~4 partitions in flight,
+# so fast workers pick up new work while slow ones finish.
+PARTITIONS_PER_WORKER = 4
 
 
 def get_warc_files(input_dir: str) -> list[Path]:
     """Find all WARC and WARC.gz files in the input directory."""
     input_path = Path(input_dir)
-    warc_files = list(input_path.glob("**/*.warc.gz")) + list(input_path.glob("**/*.warc"))
+    warc_files = (
+        list(input_path.glob("**/*.warc.gz"))
+        + list(input_path.glob("**/*.warc"))
+    )
     logger.info(f"Found {len(warc_files)} WARC files in {input_dir}")
     return sorted(warc_files)
 
@@ -63,7 +77,7 @@ def extract_text_from_html(html_content: bytes, url: str = "") -> Optional[str]:
             include_comments=False,
             include_tables=True,
             no_fallback=False,
-            favor_precision=True,   # prefer quality over recall
+            favor_precision=True,
             url=url,
         )
         return text
@@ -73,84 +87,77 @@ def extract_text_from_html(html_content: bytes, url: str = "") -> Optional[str]:
 
 
 def normalize_encoding(text: str) -> str:
-    """
-    Fix common encoding artifacts from web text.
-    Handles mojibake, unusual unicode, excess whitespace.
-    """
-    # Normalize unicode to NFC form
+    """Fix common encoding artifacts from web text."""
     import unicodedata
     text = unicodedata.normalize("NFC", text)
-
-    # Replace null bytes and other control chars (except newline/tab)
     text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
-
-    # Normalize multiple newlines → max 2
     text = re.sub(r"\n{3,}", "\n\n", text)
-
-    # Normalize whitespace within lines
     text = re.sub(r"[ \t]+", " ", text)
-
     return text.strip()
 
 
 def generate_doc_id(url: str, warc_file: str) -> str:
     """Generate a stable document ID from URL + warc file."""
-    content = f"{url}:{warc_file}"
-    return hashlib.md5(content.encode()).hexdigest()
+    return hashlib.md5(f"{url}:{warc_file}".encode()).hexdigest()
 
 
-def process_warc_file(warc_path: Path) -> list[dict]:
+def iter_warc_records(warc_path: Path) -> Iterator[dict]:
     """
-    Process a single WARC file, extracting text from all HTML records.
-    Returns a list of document dicts.
+    Iterate over a WARC file yielding raw HTML records as dicts.
+    Keeps only response records with HTML content.
+    This runs on the main process — lightweight, no extraction yet.
     """
-    documents = []
     open_fn = gzip.open if str(warc_path).endswith(".gz") else open
-
     try:
         with open_fn(warc_path, "rb") as stream:
             for record in ArchiveIterator(stream):
-                # Only process response records with HTML content
                 if record.rec_type != "response":
                     continue
-
                 content_type = record.http_headers.get_header("Content-Type", "")
                 if "text/html" not in content_type:
                     continue
-
                 url = record.rec_headers.get_header("WARC-Target-URI", "")
-
                 try:
                     html_content = record.content_stream().read()
                 except Exception:
                     continue
-
-                text = extract_text_from_html(html_content, url=url)
-                if text is None:
-                    continue
-
-                text = normalize_encoding(text)
-
-                # Skip very short extractions early
-                if len(text) < 100:
-                    continue
-
-                doc = {
-                    "id": generate_doc_id(url, str(warc_path.name)),
-                    "text": text,
-                    "source": "common_crawl",
-                    "url": url,
-                    "warc_file": warc_path.name,
-                    "char_count": len(text),
-                    "word_count": len(text.split()),
-                }
-                documents.append(doc)
-
+                if html_content:
+                    yield {
+                        "html": html_content,
+                        "url": url,
+                        "warc_file": warc_path.name,
+                    }
     except Exception as e:
-        logger.warning(f"Failed to process WARC file {warc_path}: {e}")
+        logger.warning(f"Failed to iterate WARC file {warc_path}: {e}")
 
-    logger.debug(f"Extracted {len(documents)} documents from {warc_path.name}")
-    return documents
+
+def process_record(record: dict) -> Optional[dict]:
+    """
+    Process a single WARC record: extract + normalize text.
+    This is the unit of work distributed across Dask workers.
+    Returns None if extraction fails or text is too short.
+    """
+    url = record["url"]
+    warc_file = record["warc_file"]
+    html_content = record["html"]
+
+    text = extract_text_from_html(html_content, url=url)
+    if text is None:
+        return None
+
+    text = normalize_encoding(text)
+    if len(text) < 100:
+        return None
+
+    return {
+        "id": generate_doc_id(url, warc_file),
+        "text": text,
+        "source": "common_crawl",
+        "url": url,
+        "warc_file": warc_file,
+        "char_count": len(text),
+        "word_count": len(text.split()),
+    }
 
 
 def write_jsonl(documents: list[dict], output_file: Path):
@@ -164,7 +171,10 @@ def write_jsonl(documents: list[dict], output_file: Path):
 def run_extraction(input_dir: str, output_path: Path, cfg: dict):
     """
     Main extraction entry point.
-    Processes all WARC files in parallel using Dask.
+
+    Records from all WARC files are batched into partitions and
+    distributed across all Dask workers. This ensures full worker
+    utilization regardless of WARC file count.
     """
     output_path.mkdir(parents=True, exist_ok=True)
     warc_files = get_warc_files(input_dir)
@@ -177,6 +187,31 @@ def run_extraction(input_dir: str, output_path: Path, cfg: dict):
     memory_limit = dask_cfg.get("memory_limit", "2GB")
 
     logger.info(f"Starting extraction: {len(warc_files)} WARC files, {n_workers} workers")
+    logger.info(f"Reading records from all WARCs (this may take a few minutes)...")
+
+    # Collect all raw records from all WARCs into a flat list.
+    # This runs on the main process — fast since we're only reading
+    # headers and raw bytes, not doing any text extraction yet.
+    all_records = []
+    for warc_path in warc_files:
+        warc_records = list(iter_warc_records(warc_path))
+        logger.info(f"  {warc_path.name}: {len(warc_records)} HTML records")
+        all_records.extend(warc_records)
+
+    logger.info(f"Total records to process: {len(all_records)}")
+
+    # Calculate partitions dynamically based on worker count and record count.
+    # Target: each worker gets PARTITIONS_PER_WORKER partitions so fast
+    # workers pick up new work while slower ones finish (load balancing).
+    # Floor of 1 record per partition prevents empty partitions.
+    target_partitions = n_workers * PARTITIONS_PER_WORKER
+    max_partitions = len(all_records)  # never more partitions than records
+    n_partitions = min(target_partitions, max_partitions)
+    records_per_partition = max(1, len(all_records) // n_partitions)
+    logger.info(
+        f"Distributing {len(all_records)} records into {n_partitions} partitions "
+        f"(~{records_per_partition} records each) across {n_workers} workers"
+    )
 
     cluster = LocalCluster(
         n_workers=n_workers,
@@ -187,21 +222,33 @@ def run_extraction(input_dir: str, output_path: Path, cfg: dict):
     logger.info(f"Dask dashboard: {client.dashboard_link}")
 
     try:
-        # Process WARC files in parallel
-        bag = db.from_sequence(warc_files, npartitions=len(warc_files))
-        results = bag.map(process_warc_file).compute()
+        bag = db.from_sequence(all_records, npartitions=n_partitions)
+        results = (
+            bag
+            .map(process_record)
+            .filter(lambda x: x is not None)
+            .compute()
+        )
 
-        # Write output — one JSONL per WARC file
+        # Group results by WARC file and write one JSONL per WARC
+        from collections import defaultdict
+        docs_by_warc = defaultdict(list)
+        for doc in results:
+            docs_by_warc[doc["warc_file"]].append(doc)
+
         total_docs = 0
-        for warc_path, documents in zip(warc_files, results):
-            if not documents:
-                continue
-            output_file = output_path / f"{warc_path.stem}.jsonl"
+        for warc_name, documents in docs_by_warc.items():
+            stem = Path(warc_name).name.replace(".warc.gz", "").replace(".warc", "")
+            output_file = output_path / f"{stem}.jsonl"
             write_jsonl(documents, output_file)
             total_docs += len(documents)
-            logger.debug(f"Written {len(documents)} docs → {output_file.name}")
+            logger.info(f"  {warc_name}: {len(documents)} docs → {output_file.name}")
 
-        logger.info(f"Extraction complete: {total_docs} documents extracted from {len(warc_files)} WARC files")
+        logger.info(
+            f"Extraction complete: {total_docs} documents from "
+            f"{len(warc_files)} WARC files "
+            f"({total_docs / len(all_records) * 100:.1f}% of records kept)"
+        )
 
     finally:
         client.close()
