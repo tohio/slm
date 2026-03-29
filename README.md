@@ -133,18 +133,21 @@ make docker-build
 make download-models
 
 # 4. Download Common Crawl WARC files
-#    Start with 2 files to validate the pipeline before a full run
-make download-data N_WARC_FILES=2
+#    Default: 20 files (~20GB compressed, ~670k docs after extraction)
+#    Override: make download-data N_WARC_FILES=2  (for quick validation)
+make download-data
 
-# 5. Run the full curation pipeline + tokenizer training in Docker
-make docker-curate
-#    Stages: extract → language_filter → heuristic_filter →
+# 5. Run the full two-pass curation pipeline
+make curate-full
+#    Pass 1: extract → language_filter → heuristic_filter →
 #            exact_dedup → fuzzy_dedup → pii → tokenizer
-#    quality_filter is auto-skipped (no model yet)
-#    tokenizer trains automatically after curation completes
+#    Then:   trains quality classifier on pass 1 output
+#    Pass 2: quality_filter → tokenize (mmap .bin/.idx files)
+#    quality_filter and tokenize auto-detected by pipeline.py
 
 # 6. Upload curated dataset to S3
 make upload-data                    # reads S3_BUCKET from .env
+#    Auto-detects pass 1 vs pass 2 and uploads the right files
 ```
 
 #### Training (GPU instance)
@@ -265,7 +268,21 @@ ssh -L 8787:localhost:8787 <your-instance>
 
 Dask worker count and memory limit are resolved automatically at runtime — `pipeline.py` reads `os.cpu_count()` and available RAM via `psutil` and configures workers accordingly. No instance-specific tuning required. To cap resource usage on a shared instance, uncomment the override lines in `curator/configs/curator.yaml`.
 
-**Two-pass curation:** `quality_filter` and `tokenization` are auto-skipped on the first run because the models they depend on (`quality_classifier.bin`, `slm_tokenizer.model`) don't exist yet. `pipeline.py` detects their presence at startup and logs `WILL RUN` or `WILL SKIP` for each — no manual config edits needed between passes.
+**Two-pass curation:** `quality_filter` and `tokenization` are auto-skipped on the first run because the models they depend on don't exist yet. `pipeline.py` detects their presence at startup and logs `WILL RUN` or `WILL SKIP` for each — no manual config edits needed between passes.
+
+```
+Pass 1: make curate-full
+  └── curation (quality_filter skipped, tokenizer trained)
+  └── make train-quality-classifier  (trains /data/models/quality_classifier.bin)
+  └── pass 2 resumes automatically   (quality_filter + tokenize now run)
+```
+
+Or run steps individually:
+```bash
+make docker-curate              # pass 1
+make train-quality-classifier   # train classifier on pass 1 output
+make docker-curate              # pass 2 — both stages now auto-detected
+```
 
 ### AWS
 
@@ -355,7 +372,7 @@ docker run --gpus all --rm \
 ### Tokenizer training
 
 ![Tokenizer training](docs/screenshots/tokenizer_training.png)
-*Tokenizer trains automatically after curation — 32k vocab BPE, special tokens validated*
+*Tokenizer trains automatically at the end of `make curate-full` — 32k vocab BPE, special tokens validated*
 
 ### Pre-training loss curve
 

@@ -35,6 +35,7 @@ DPO_CKPT      = $(shell find $(RESULTS_DIR)/slm_dpo/checkpoints      -name "*.ne
         docker-build docker-curate docker-shell-cpu docker-shell-gpu \
         download-data download-models \
         curate curate-resume tokenizer upload-data \
+        train-quality-classifier curate-full \
         prepare-sft-data prepare-dpo-data \
         pretrain sft dpo \
         eval-pretrain eval-sft eval-dpo \
@@ -89,6 +90,8 @@ help:
 	@echo "    make pretrain GPUS=4 CONFIG=pretrain/configs/gpt_350m.yaml"
 	@echo "    make curate N_WARC_FILES=50"
 	@echo "    make upload-data                  # reads S3_BUCKET from .env"
+	@echo "    make train-quality-classifier   Train fastText quality classifier"
+	@echo "    make curate-full                Full two-pass curation (automated)"
 	@echo "    make docker-build DOCKER_IMAGE=slm:latest"
 	@echo ""
 
@@ -153,6 +156,22 @@ docker-curate: _check-data-dirs
 		-v $(DATA_DIR):$(DATA_DIR) \
 		-v $(LOGS_DIR):$(LOGS_DIR) \
 		$(DOCKER_IMAGE) bash -c "cd /workspace/slm && make curate tokenizer"
+
+# ── Quality Classifier ───────────────────────────────────────────────────────
+train-quality-classifier:
+	@echo "Training quality classifier on pass 1 output..."
+	bash curator/scripts/train_quality_classifier.sh 		--input-dir $(DATA_DIR)/curated/stages/pii 		--heuristic-dir $(DATA_DIR)/curated/stages/heuristic_filter 		--output-model $(DATA_DIR)/models/quality_classifier.bin 		--n-samples 50000
+
+# ── Full two-pass curation ────────────────────────────────────────────────────
+# Runs both passes end-to-end without manual intervention.
+# Pass 1: extract → filter → dedup → pii + tokenizer training
+# Pass 2: quality_filter + tokenize (auto-detected by pipeline.py)
+curate-full:
+	@echo "Running full two-pass curation..."
+	make curate
+	make tokenizer
+	make train-quality-classifier
+	make curate-resume STAGE=quality_filter
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 download-data: _check-data-dirs
