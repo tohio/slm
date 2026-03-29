@@ -178,7 +178,11 @@ RUN curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" \
     && unzip /tmp/awscliv2.zip -d /tmp \
     && /tmp/aws/install \
     && rm -rf /tmp/awscliv2.zip /tmp/aws \
-    && aws --version
+    # The pytorch base image ships awscli v1 at /opt/conda/bin/aws.
+    # That v1 has a botocore mismatch with our installed boto3.
+    # Shadow it with the v2 binary so PATH always resolves to v2.
+    && ln -sf /usr/local/bin/aws /opt/conda/bin/aws \
+    && /usr/local/bin/aws --version
 
 # -----------------------------------------------------------------------------
 # Workspace directories
