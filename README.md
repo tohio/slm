@@ -167,7 +167,10 @@ make prepare-sft-data
 make prepare-dpo-data
 
 # 4. Train
-make pretrain
+make pretrain                                          # 125M (default)
+# make pretrain CONFIG=pretrain/configs/gpt_350m.yaml   # 350M
+# make pretrain CONFIG=pretrain/configs/gpt_1b.yaml     # 1B
+# make pretrain CONFIG=pretrain/configs/gpt_350m.yaml GPUS=4  # multi-GPU
 make sft
 make dpo
 
