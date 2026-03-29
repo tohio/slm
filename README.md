@@ -2,6 +2,8 @@
 
 A production-minded, end-to-end pipeline for training a small language model from scratch using NVIDIA NeMo. Covers the full lifecycle: large-scale data curation, pre-training, supervised fine-tuning, and alignment via DPO — with infrastructure designed for cost efficiency on cloud GPU instances.
 
+> Built to demonstrate practical expertise across data engineering, distributed training, and LLM alignment — not just theory.
+
 ---
 
 ## Overview
@@ -20,7 +22,39 @@ The pipeline is modular — each stage is independently runnable, reproducible, 
 
 ## Pipeline Architecture
 
-![Architecture](docs/architecture.svg)
+```
+┌─────────────────────────────────────────────────────┐
+│               Stage 1: Data Curation                │
+│                  (NeMo Curator)                     │
+│  Common Crawl (WARC) ──┐                            │
+│  Wikipedia (EN)    ────┼──► Curator Pipeline ──► S3 │
+│  CodeSearchNet     ────┘                            │
+└─────────────────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────┐
+│             Stage 2: Pre-Training                   │
+│              (NeMo + Megatron-Core)                 │
+│  GPT ~125M params, BF16, single/multi GPU           │
+│  Trained on general text corpus (~2.5B tokens)      │
+└─────────────────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────┐
+│          Stage 3: Supervised Fine-Tuning            │
+│                 (NeMo Aligner)                      │
+│  SFT-1: General chat (OpenAssistant / Dolly)        │
+│  SFT-2: Coding (CodeSearchNet / The Stack)          │
+└─────────────────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────┐
+│              Stage 4: Alignment (DPO)               │
+│                 (NeMo Aligner)                      │
+│  Preference data: UltraFeedback / HH-RLHF           │
+│  No separate reward model required                  │
+└─────────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -28,10 +62,7 @@ The pipeline is modular — each stage is independently runnable, reproducible, 
 
 ```
 slm/
-├── README.md            Overview and quick start
-├── HARDWARE.md          Hardware recommendations and scaling guide
-├── Dockerfile           Docker image for NeMo environment
-├── .dockerignore         Docker build exclusions
+├── Dockerfile           Self-contained NeMo image (no NGC auth required)
 ├── Makefile
 ├── requirements.txt
 ├── environment.yml
@@ -41,12 +72,52 @@ slm/
 ├── finetune/            Stage 3: supervised fine-tuning
 ├── alignment/           Stage 4: DPO alignment
 ├── eval/                Evaluation suite (all stages)
-├── infra/               GPU instance setup
-└── notebooks/
-    └── exploration.ipynb
-        ├── Section 1    Dataset Exploration
-        ├── Section 2    Training Run
-        └── Section 3    Inference
+└── infra/               GPU instance setup
+```
+
+---
+
+## Quick Start
+
+### Docker (recommended)
+
+The image is self-contained and built from public sources only — **no NGC account or API token required**.
+
+```bash
+# Build once
+make docker-build
+
+# Data curation (CPU — runs on a cheap spot instance)
+make docker-shell-cpu
+# then inside the container:
+make download-data
+make curate
+make tokenizer
+make upload-data S3_BUCKET=my-bucket
+
+# Training (GPU)
+make docker-shell-gpu
+# then inside the container:
+make setup-instance S3_BUCKET=my-bucket
+make prepare-sft-data
+make prepare-dpo-data
+make pretrain
+make sft
+make dpo
+
+# Evaluate & export
+make eval-dpo
+make convert-hf
+```
+
+### Local (no Docker)
+
+```bash
+# 1. Install PyTorch first — version must match your CUDA driver
+pip install torch==2.1.2 --index-url https://download.pytorch.org/whl/cu121
+
+# 2. Install remaining dependencies
+pip install -r requirements.txt
 ```
 
 ---
@@ -61,137 +132,50 @@ The architecture scales by config change only — no code changes required:
 | 350M | 24 | 1024 | 16 | ~7B | 4 |
 | 1B | 32 | 2048 | 16 | ~20B | 4 (TP=2) |
 
----
-
-## Hardware Recommendations
-
-**See [HARDWARE.md](HARDWARE.md) for a detailed guide.**
-
-Quick summary — train in four runs:
-
-| Run | Goal | Model | Hardware | Duration | Cost |
-|---|---|---|---|---|---|
-| 1 | Validate pipeline | 125M | 2x A100 | 30-45 min | $3-5 |
-| 2 | Full baseline | 125M | 4x A100 or 2x H100 | 4-5 hrs | $12-22 |
-| 3 | Prove scaling | 350M | 6-8x H100 | 5-7 hrs | $60-100 |
-| 4 | Production scale | 1B | 8-16x H100 | 12-26 hrs | $240-330 |
-
-**Total:** ~40-60 hours wall-clock, $365-555
-
-Each run demonstrates a key principle: *validation → efficiency → scaling → tensor parallelism.*
+```bash
+# Override scale and GPU count at runtime
+make pretrain GPUS=4 CONFIG=pretrain/configs/gpt_350m.yaml
+```
 
 ---
 
-## Getting Started
+## Infrastructure
 
-**Prerequisites**
-- Docker (recommended for local development)
-- Cloud GPU instance (for training: A100, H100, or similar)
-- AWS account (for S3 storage of curated data and checkpoints)
+### Docker Image
 
-**Setup: Docker + Cloud Instance**
+The Dockerfile builds a single image that serves both pipeline roles:
 
-The project is designed to run on cloud GPU instances using Docker. No authentication required — the Dockerfile uses public PyTorch base image.
+| Target | Command | GPU required |
+|---|---|---|
+| Data curation | `make docker-shell-cpu` | No |
+| Training / alignment | `make docker-shell-gpu` | Yes |
 
-```bash
-# Clone the repo
-git clone https://github.com/tohio/slm.git
-cd slm
+The image is based on `pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime` (public DockerHub). No NVIDIA NGC account is needed.
 
-# Build Docker image (public base, no NGC auth needed)
-docker build -t slm:latest .
-```
+**Validated version stack:**
 
-**Data Curation (CPU instance)**
+| Package | Version | Notes |
+|---|---|---|
+| `nemo_toolkit` | `2.2.0` | `[core]` extra — excludes `mamba-ssm` (requires `nvcc`) |
+| `nemo-aligner` | `0.7.0` | No `nemo_toolkit[nlp]` dep — avoids `mamba-ssm` entirely |
+| `nemo-curator` | `0.7.1` | Earliest version on public PyPI (0.5.0 was NGC-only) |
+| `transformers` | `>=4.48.0,<=4.48.3` | Pinned by `nemo_toolkit 2.2.0`; curator needs `>=4.48.0` |
+| `fasttext` | `0.9.3` | `nemo-curator` pins this exactly; 0.9.2 will conflict |
+| AWS CLI | v2 binary | `awscli` v1 (pip) hard-pins `botocore` and conflicts with `boto3` |
 
-```bash
-docker run -it --rm \
-  --shm-size=8g \
-  -v $(pwd):/workspace/slm \
-  -v /data:/data \
-  slm:latest /bin/bash
+**Key decisions:**
 
-# Inside container
-cd /workspace/slm
-make download-data
-make curate
-make tokenizer
-make upload-data S3_BUCKET=my-bucket
-```
+- `nemo_toolkit[core]` not `[all]` or `[nlp]` — both `[all]` and `[nlp]` include `mamba-ssm==2.2.2` which requires `nvcc` to compile from source. The `runtime` base image does not ship `nvcc` (only `devel` does). `[core]` excludes it entirely.
+- `huggingface-hub`, `transformers`, `pytorch-lightning`, `omegaconf`, `hydra-core`, `sentencepiece`, and `datasets` are not pinned directly — owned and versioned by `nemo_toolkit` and `nemo-curator`. Re-pinning them causes resolution conflicts across environments.
+- GPU-accelerated curator ops (`cudf`, `dask-cuda`) are excluded. They require the NVIDIA PyPI index and are not needed for the CPU curation pipeline.
 
-**Training (GPU instance)**
+### AWS
+
+Data curation runs on spot instances (CPU, storage-optimized). Training runs on on-demand GPU instances. The `upload-data` and `setup-instance` targets handle the handoff between the two via S3.
 
 ```bash
-docker run --gpus all -it --rm \
-  --shm-size=8g \
-  -v $(pwd):/workspace/slm \
-  -v /data:/data \
-  slm:latest /bin/bash
-
-# Inside container
-cd /workspace/slm
+make upload-data S3_BUCKET=my-bucket S3_PREFIX=slm/data
 make setup-instance S3_BUCKET=my-bucket
-make prepare-sft-data
-make prepare-dpo-data
-# Then run training (see below)
-```
-
-**Environment Setup**
-
-On the cloud instance, create `.env` with your AWS credentials:
-
-```bash
-cp .env.sample .env
-# Edit .env with your AWS keys and S3 bucket name
-```
-
-**Run the pipeline**
-
-The examples below assume you're inside a Docker container or have dependencies installed.
-
-```bash
-# Data Curation (CPU, one-time)
-make download-data
-make curate
-make tokenizer
-make upload-data S3_BUCKET=my-bucket
-
-# Training Setup (GPU instance)
-make setup-instance S3_BUCKET=my-bucket
-make prepare-sft-data
-make prepare-dpo-data
-
-# Run 1: Pipeline validation (2x A100 or 1x T4)
-make pretrain CONFIG=pretrain/configs/gpt_125m.yaml GPUS=2
-
-# Run 2: 125M full training (choose one)
-# Option A: 4x A100 (cost-conscious)
-make pretrain CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
-# Option B: 2x H100 (speed-focused)
-# make pretrain CONFIG=pretrain/configs/gpt_125m.yaml GPUS=2
-
-# Run 3: 350M full training (choose one)
-# Option A: 6x H100 (balanced)
-make pretrain CONFIG=pretrain/configs/gpt_350m.yaml GPUS=6
-# Option B: 8x H100 (maximum efficiency)
-# make pretrain CONFIG=pretrain/configs/gpt_350m.yaml GPUS=8
-
-# Run 4: 1B production-scale training (choose one)
-# Option A: 8x H100 with tensor parallelism (balanced)
-make pretrain CONFIG=pretrain/configs/gpt_1b.yaml GPUS=8
-# Option B: 16x H100 with tensor parallelism (fastest)
-# make pretrain CONFIG=pretrain/configs/gpt_1b.yaml GPUS=16
-
-# After pre-training, run SFT and DPO (see HARDWARE.md for timing)
-make sft CONFIG=finetune/configs/sft_chat_125m.yaml GPUS=N
-make sft CONFIG=finetune/configs/sft_code_125m.yaml GPUS=N
-make dpo CONFIG=alignment/configs/dpo_125m.yaml GPUS=N
-
-# Evaluate
-make eval-dpo
-
-# Export
-make convert-hf
 ```
 
 ---
@@ -210,20 +194,8 @@ A tokenizer trained on your specific data mix (general + code) encodes domain pa
 **Why sequential SFT (chat → code)?**
 Sequential fine-tuning lets each stage be evaluated independently and makes it easier to diagnose regressions. The code SFT uses a lower learning rate specifically to reduce catastrophic forgetting of chat capabilities.
 
----
-
-## Production Considerations
-
-This project is intentionally scoped for demonstration. In a production system:
-
-- **Data pipeline** — the NeMo Curator pipeline would run on a distributed Spark cluster (AWS EMR or Databricks) rather than a single spot instance, reducing curation time for trillion-token datasets from days to hours.
-- **Training infrastructure** — multi-node training would use AWS EFA networking for low-latency GPU-to-GPU communication. Spot instance interruptions would be handled via NeMo's checkpoint resumption rather than restarting from scratch.
-- **Tokenizer** — the custom BPE tokenizer would be versioned and stored in a model registry (MLflow or Weights & Biases) alongside the model checkpoints it was trained with, to prevent train/serve skew.
-- **Experiment tracking** — Weights & Biases or MLflow would track loss curves, gradient norms, and throughput (tokens/sec) across all training stages, making it possible to diagnose instability or compare runs systematically.
-- **Checkpoint management** — checkpoints would be stored in S3 with versioning enabled and a retention policy. Only the top-k checkpoints by validation loss would be kept to manage storage costs at scale.
-- **Evaluation** — the eval suite would run automatically after each stage (pretrain, SFT, DPO) in CI, gating promotion to the next stage on a minimum score threshold rather than relying on manual inspection.
-- **Serving** — the exported HuggingFace checkpoint would be served via vLLM for high-throughput inference with continuous batching, exposed behind a FastAPI layer with async request handling.
-- **Observability** — token throughput, GPU utilisation, and training loss would be streamed to CloudWatch or Grafana during training runs for real-time monitoring and alerting on divergence.
+**Why a self-contained Docker image instead of the official NeMo NGC image?**
+The official `nvcr.io/nvidia/nemo` image requires an NGC account and API token, which adds friction for open development and CI pipelines. The Dockerfile here reproduces the same stack from public sources only, with all transitive dependencies resolved and locked against the public PyPI index. Resolving this stack required pinning specific intermediate versions — notably upgrading `nemo_toolkit` to `2.2.0` (where `transformers>=4.48` support was added) and `nemo-aligner` to `0.7.0` (which dropped the `nemo_toolkit[nlp]` dependency that pulled in `mamba-ssm`).
 
 ---
 
@@ -234,16 +206,6 @@ This project is intentionally scoped for demonstration. In a production system:
 - [NeMo Aligner](https://github.com/NVIDIA/NeMo-Aligner)
 - [Chinchilla Scaling Laws](https://arxiv.org/abs/2203.15556) — Hoffmann et al., 2022
 - [DPO](https://arxiv.org/abs/2305.18290) — Rafailov et al., 2023
-
----
-
-## Related Projects
-
-This repo is part of a broader AI engineering portfolio:
-
-- [rag-pipeline](https://github.com/tohio/rag-pipeline) — modular RAG pipeline: ingestion, embedding, retrieval, and generation
-- [agentic-rag](https://github.com/tohio/agentic-rag) — extends the RAG pipeline with tool use, query routing, and multi-step reasoning
-- [multi-agent](https://github.com/tohio/multi-agent) — autonomous multi-agent investment research system using CrewAI
 
 ---
 
