@@ -124,7 +124,8 @@ This pipeline uses `nvcr.io/nvidia/nemo:25.02` as its base container. This image
 
 1. Create a free account at [ngc.nvidia.com](https://ngc.nvidia.com)
 2. Generate an API key under **Setup → Generate API Key**
-3. Add it to your `.env` file:
+3. Accept the NeMo container license — visit [catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo), find the `25.02` tag, and accept the license agreement. Without this step, `docker build` will fail with a `412 Precondition Failed` error even after a successful NGC login.
+4. Add your API key to `.env`:
 
 ```bash
 cp .env.sample .env
