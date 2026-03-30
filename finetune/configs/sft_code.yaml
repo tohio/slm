@@ -7,11 +7,15 @@ trainer:
   precision: bf16
   logger: false
   enable_checkpointing: false
-  max_epochs: 3
-  log_every_n_steps: 10
-  val_check_interval: 200
-  limit_val_batches: 50
-  gradient_clip_val: 1.0
+  # NeMo-Aligner reads training params from trainer.sft, not top-level trainer
+  sft:
+    max_steps: -1
+    max_epochs: 3
+    val_check_interval: 200
+    save_interval: 200
+    limit_val_batches: 50
+    gradient_clip_val: 1.0
+    log_every_n_steps: 10
 
 exp_manager:
   explicit_log_dir: /results/slm_sft_code
@@ -29,24 +33,25 @@ exp_manager:
     mode: min
     save_last: true
     filename: slm_sft_code--{val_loss:.2f}-{step}
+    save_nemo_on_train_end: true
 
 model:
   # Sequential fine-tuning: load from chat SFT checkpoint, not pre-train.
   # This preserves conversational ability while adding code capability.
+  # Path is auto-resolved by train_sft.sh from /results/slm_sft_chat/
   restore_from_path: /results/slm_sft_chat/checkpoints/last.nemo
-
   tensor_model_parallel_size: 1
   pipeline_model_parallel_size: 1
+  megatron_amp_O2: true
+  encoder_seq_length: 2048
 
-  # Only compute loss on assistant responses — not the human prompt tokens.
-  # Requires GPTSFTModel from nemo_aligner (not base MegatronGPTModel).
   answer_only_loss: true
   sample_weight: constant
 
-  # ── Data ────────────────────────────────────────────────────────────────────
+  # ── Data ──────────────────────────────────────────────────────────────────
   data:
     chat: true
-    num_workers: 4
+    num_workers: 0
     train_ds:
       file_path: /data/sft/code/train.jsonl
       max_seq_length: 2048
@@ -62,11 +67,10 @@ model:
       shuffle: false
       add_eos: true
 
-  # ── Optimizer ───────────────────────────────────────────────────────────────
+  # ── Optimizer ─────────────────────────────────────────────────────────────
   # Lower LR than chat SFT (5e-6 vs 1e-5) to reduce catastrophic forgetting
-  # of chat capabilities while adapting to code tasks.
   optim:
-    name: fused_adam
+    name: distributed_fused_adam
     lr: 5.0e-6
     weight_decay: 0.01
     betas: [0.9, 0.98]
@@ -76,8 +80,7 @@ model:
       constant_steps: 0
       min_lr: 5.0e-7
 
-  # ── Memory ──────────────────────────────────────────────────────────────────
-  # Must match chat SFT checkpoint settings to load weights correctly
+  # ── Memory ────────────────────────────────────────────────────────────────
   activations_checkpoint_method: uniform
   activations_checkpoint_num_layers: 1
   activations_checkpoint_granularity: full

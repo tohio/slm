@@ -60,7 +60,7 @@ fi
 # ── Convert ───────────────────────────────────────────────────────────────────
 log "Running conversion script..."
 
-python3 "$REPO_ROOT/pretrain/scripts/convert_pretrain.py" \
+python3 "$REPO_ROOT/pretrain/convert_pretrain.py" \
     --input     "$INPUT_DIR" \
     --output    "$OUTPUT_PATH" \
     --tokenizer "$TOKENIZER" \

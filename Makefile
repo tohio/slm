@@ -293,6 +293,7 @@ convert-pretrain:
 		--shm-size=8g \
 		-e RESULTS_DIR=$(RESULTS_DIR) \
 		-v $$(pwd):/workspace/slm \
+		-v /data:/data \
 		-v $(RESULTS_DIR):$(RESULTS_DIR) \
 		$(DOCKER_IMAGE) bash -c "cd /workspace/slm && \
 			bash pretrain/scripts/convert_pretrain.sh \
