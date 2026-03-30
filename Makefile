@@ -253,10 +253,10 @@ tokenize: _check-data-dirs
 				--dataset-impl mmap \
 				--append-eod \
 				--workers \$$(nproc) && \
-			mv $(DATA_DIR)/curated/tokenized/text_document_pii.bin \
-			   $(DATA_DIR)/curated/tokenized/text_document.bin && \
-			mv $(DATA_DIR)/curated/tokenized/text_document_pii.idx \
-			   $(DATA_DIR)/curated/tokenized/text_document.idx"
+			mv $(DATA_DIR)/curated/tokenized/text_document_text_document.bin \
+		       $(DATA_DIR)/curated/tokenized/text_document.bin && \
+		    mv $(DATA_DIR)/curated/tokenized/text_document_text_document.idx \
+		       $(DATA_DIR)/curated/tokenized/text_document.idx"
 
 upload-data: _check-s3-bucket
 	bash curator/scripts/upload_s3.sh \
