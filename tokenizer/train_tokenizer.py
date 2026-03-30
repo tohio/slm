@@ -204,6 +204,7 @@ def main():
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
     sample_file = output_dir / "training_sample.txt"
+    complete_marker = output_dir / ".complete"
 
     # Step 1: Sample text
     if args.skip_sampling and sample_file.exists():
@@ -221,6 +222,10 @@ def main():
     logger.info(f"Tokenizer saved to {output_dir}/")
     logger.info(f"  Model:  slm_tokenizer.model")
     logger.info(f"  Vocab:  slm_tokenizer.vocab")
+
+    # Step 4: Write completion marker
+    complete_marker.touch()
+    logger.info(f"✓ Completion marker written: {complete_marker}")
 
 
 if __name__ == "__main__":

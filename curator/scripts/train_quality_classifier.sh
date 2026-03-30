@@ -15,6 +15,7 @@
 #
 # Output:
 #   /data/models/quality_classifier.bin   ← used by pipeline quality_filter stage
+#   /data/models/.complete                ← checkpoint marker for curate-full
 #
 # Usage:
 #   bash train_quality_classifier.sh
@@ -44,7 +45,10 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-mkdir -p "$(dirname "$OUTPUT_MODEL")"
+MODEL_DIR="$(dirname "$OUTPUT_MODEL")"
+COMPLETE_MARKER="$MODEL_DIR/.complete"
+
+mkdir -p "$MODEL_DIR"
 
 LOG_FILE="/tmp/train_quality_classifier_$(date +%Y%m%d_%H%M%S).log"
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"; }
@@ -244,6 +248,11 @@ PYEOF
 log "Quality classifier trained successfully"
 log "  Model: $OUTPUT_MODEL"
 log "  Size:  $(du -sh "$OUTPUT_MODEL" | cut -f1)"
+
+# ── Write completion marker ────────────────────────────────────────────────────
+touch "$COMPLETE_MARKER"
+log "✓ Completion marker written: $COMPLETE_MARKER"
+
 log ""
 log "Next steps:"
 log "  make docker-curate    # pass 2 — quality_filter and tokenize now run automatically"

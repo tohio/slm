@@ -160,18 +160,44 @@ docker-curate: _check-data-dirs
 # ── Quality Classifier ───────────────────────────────────────────────────────
 train-quality-classifier:
 	@echo "Training quality classifier on pass 1 output..."
-	bash curator/scripts/train_quality_classifier.sh 		--input-dir $(DATA_DIR)/curated/stages/pii 		--heuristic-dir $(DATA_DIR)/curated/stages/heuristic_filter 		--output-model $(DATA_DIR)/models/quality_classifier.bin 		--n-samples 50000
+	bash curator/scripts/train_quality_classifier.sh \
+		--input-dir $(DATA_DIR)/curated/stages/pii \
+		--heuristic-dir $(DATA_DIR)/curated/stages/heuristic_filter \
+		--output-model $(DATA_DIR)/models/quality_classifier.bin \
+		--n-samples 50000
 
 # ── Full two-pass curation ────────────────────────────────────────────────────
 # Runs both passes end-to-end without manual intervention.
+# Each step is checkpointed — re-running skips already completed steps.
 # Pass 1: extract → filter → dedup → pii + tokenizer training
 # Pass 2: quality_filter + tokenize (auto-detected by pipeline.py)
 curate-full:
-	@echo "Running full two-pass curation..."
-	make curate
-	make tokenizer
-	make train-quality-classifier
-	make curate-resume STAGE=quality_filter
+	@echo "=== curate-full: two-pass curation pipeline ==="
+	@if [ -f $(DATA_DIR)/curated/stages/pii/.complete ]; then \
+		echo "[SKIP] curate — pass 1 already complete"; \
+	else \
+		echo "[RUN] curate — pass 1..."; \
+		$(MAKE) curate; \
+	fi
+	@if [ -f $(DATA_DIR)/tokenizer/.complete ]; then \
+		echo "[SKIP] tokenizer — already trained"; \
+	else \
+		echo "[RUN] tokenizer..."; \
+		$(MAKE) tokenizer; \
+	fi
+	@if [ -f $(DATA_DIR)/models/.complete ]; then \
+		echo "[SKIP] train-quality-classifier — already trained"; \
+	else \
+		echo "[RUN] train-quality-classifier..."; \
+		$(MAKE) train-quality-classifier; \
+	fi
+	@if [ -f $(DATA_DIR)/curated/stages/tokenize/.complete ]; then \
+		echo "[SKIP] pass 2 — already complete"; \
+	else \
+		echo "[RUN] pass 2 — quality_filter + tokenize..."; \
+		$(MAKE) curate-resume STAGE=quality_filter; \
+	fi
+	@echo "✓ curate-full complete"
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 download-data: _check-data-dirs
@@ -259,13 +285,29 @@ eval-dpo: _check-dpo-ckpt _check-sft-ckpt
 # ── Inference ─────────────────────────────────────────────────────────────────
 # Interactive session with the latest DPO checkpoint
 inference: _check-dpo-ckpt
-	docker run --gpus all -it --rm 		--shm-size=8g 		-v $$(pwd):/workspace/slm 		-v $(DATA_DIR):$(DATA_DIR) 		-v $(RESULTS_DIR):$(RESULTS_DIR) 		$(DOCKER_IMAGE) 		python /workspace/slm/inference.py 		--checkpoint $(DPO_CKPT)
+	docker run --gpus all -it --rm \
+		--shm-size=8g \
+		-v $$(pwd):/workspace/slm \
+		-v $(DATA_DIR):$(DATA_DIR) \
+		-v $(RESULTS_DIR):$(RESULTS_DIR) \
+		$(DOCKER_IMAGE) \
+		python /workspace/slm/inference.py \
+		--checkpoint $(DPO_CKPT)
 
 # Compare DPO vs SFT checkpoint on a single prompt
 # Usage: make inference-compare PROMPT="Write a Python function to sort a list."
 PROMPT ?= "Explain recursion to a 10-year-old."
 inference-compare: _check-dpo-ckpt _check-sft-ckpt
-	docker run --gpus all -it --rm 		--shm-size=8g 		-v $$(pwd):/workspace/slm 		-v $(DATA_DIR):$(DATA_DIR) 		-v $(RESULTS_DIR):$(RESULTS_DIR) 		$(DOCKER_IMAGE) 		python /workspace/slm/inference.py 		--checkpoint $(DPO_CKPT) 		--compare $(SFT_CODE_CKPT) 		--prompt $(PROMPT)
+	docker run --gpus all -it --rm \
+		--shm-size=8g \
+		-v $$(pwd):/workspace/slm \
+		-v $(DATA_DIR):$(DATA_DIR) \
+		-v $(RESULTS_DIR):$(RESULTS_DIR) \
+		$(DOCKER_IMAGE) \
+		python /workspace/slm/inference.py \
+		--checkpoint $(DPO_CKPT) \
+		--compare $(SFT_CODE_CKPT) \
+		--prompt $(PROMPT)
 
 # ── Export ────────────────────────────────────────────────────────────────────
 convert-hf: _check-dpo-ckpt
@@ -302,6 +344,8 @@ _check-data-dirs:
 clean:
 	# Stage files are written by root inside Docker — sudo required
 	sudo find $(DATA_DIR)/curated/stages -name ".complete" -delete 2>/dev/null || true
+	sudo find $(DATA_DIR)/tokenizer -name ".complete" -delete 2>/dev/null || true
+	sudo find $(DATA_DIR)/models -name ".complete" -delete 2>/dev/null || true
 	@echo "✓ Stage markers cleared (checkpoints and data preserved)"
 
 clean-all:
