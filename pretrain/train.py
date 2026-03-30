@@ -133,6 +133,7 @@ def main():
         adam_eps=1e-8,
         bf16=True,
         use_distributed_optimizer=True,
+        clip_grad=1.0,
     )
 
     opt = nl.MegatronOptimizerModule(
@@ -186,7 +187,6 @@ def main():
         log_every_n_steps=args.log_every_n_steps,
         val_check_interval=args.val_check_interval,
         limit_val_batches=args.limit_val_batches,
-        gradient_clip_val=args.gradient_clip_val,
         callbacks=[checkpoint_callback],
     )
 
