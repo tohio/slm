@@ -264,11 +264,23 @@ upload-data: _check-s3-bucket
 		--prefix $(S3_PREFIX)
 
 prepare-sft-data:
-	$(PYTHON) finetune/data/prepare_sft.py --stage both
+	@echo "Preparing SFT datasets in Docker..."
+	docker run --rm \
+		--shm-size=8g \
+		-v $$(pwd):/workspace/slm \
+		-v $(DATA_DIR):$(DATA_DIR) \
+		$(DOCKER_IMAGE) bash -c "cd /workspace/slm && \
+			python3 finetune/data/prepare_sft.py --stage both"
 
 prepare-dpo-data:
-	$(PYTHON) alignment/data/prepare_dpo.py \
-		--output-dir $(DATA_DIR)/dpo
+	@echo "Preparing DPO datasets in Docker..."
+	docker run --rm \
+		--shm-size=8g \
+		-v $$(pwd):/workspace/slm \
+		-v $(DATA_DIR):$(DATA_DIR) \
+		$(DOCKER_IMAGE) bash -c "cd /workspace/slm && \
+			python3 alignment/data/prepare_dpo.py \
+				--output-dir $(DATA_DIR)/dpo"
 
 # ── Training — all run inside Docker ─────────────────────────────────────────
 # Step 1: Pre-train with NeMo 2.x
@@ -293,8 +305,8 @@ convert-pretrain:
 		--shm-size=8g \
 		-e RESULTS_DIR=$(RESULTS_DIR) \
 		-v $$(pwd):/workspace/slm \
-		-v /data:/data \
 		-v $(RESULTS_DIR):$(RESULTS_DIR) \
+		-v $(DATA_DIR):$(DATA_DIR) \
 		$(DOCKER_IMAGE) bash -c "cd /workspace/slm && \
 			bash pretrain/scripts/convert_pretrain.sh \
 				--input $(RESULTS_DIR)/slm_gpt_125m \
