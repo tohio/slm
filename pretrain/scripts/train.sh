@@ -27,7 +27,9 @@ SIZE="125m"
 GPUS=$(python3 -c "import torch; print(torch.cuda.device_count())" 2>/dev/null || echo 1)
 WANDB=false
 RESUME=false
-LOG_DIR="/results/pretrain_logs"
+# Respect RESULTS_DIR from environment (set via Makefile -e flag), fallback to /results
+BASE_RESULTS_DIR="${RESULTS_DIR:-/results}"
+LOG_DIR="${BASE_RESULTS_DIR}/pretrain_logs"
 
 # ── Arg parsing ───────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -64,7 +66,7 @@ case "$SIZE" in
         PP=1
         LR=3e-4
         MIN_LR=3e-5
-        RESULTS_DIR="/results/slm_gpt_125m"
+        RESULTS_DIR="${BASE_RESULTS_DIR}/slm_gpt_125m"
         ;;
     350m)
         NUM_LAYERS=24
@@ -77,7 +79,7 @@ case "$SIZE" in
         PP=1
         LR=2e-4
         MIN_LR=2e-5
-        RESULTS_DIR="/results/slm_gpt_350m"
+        RESULTS_DIR="${BASE_RESULTS_DIR}/slm_gpt_350m"
         ;;
     1b)
         NUM_LAYERS=32
@@ -90,7 +92,7 @@ case "$SIZE" in
         PP=1
         LR=1e-4
         MIN_LR=1e-5
-        RESULTS_DIR="/results/slm_gpt_1b"
+        RESULTS_DIR="${BASE_RESULTS_DIR}/slm_gpt_1b"
         ;;
     *)
         echo "ERROR: Unknown size '$SIZE'. Valid: 125m, 350m, 1b"

@@ -1,72 +1,101 @@
-"""
-alignment/train_dpo.py
------------------------
-NeMo-Aligner DPO entry point (nvcr.io/nvidia/nemo:25.02).
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# alignment/scripts/train_dpo.sh
+# Launch NeMo-Aligner Direct Preference Optimization (DPO).
+#
+# Requires: SFT .nemo checkpoint from make sft
+#
+# Usage:
+#   bash train_dpo.sh
+#   bash train_dpo.sh --gpus 2
+#   bash train_dpo.sh --sft-ckpt /results/slm_sft_code/checkpoints/last.nemo
+#   bash train_dpo.sh --beta 0.05
+# ─────────────────────────────────────────────────────────────────────────────
 
-DPO reference: Rafailov et al., 2023 — https://arxiv.org/abs/2305.18290
+set -euo pipefail
 
-How DPO works in NeMo-Aligner:
-  1. Load SFT checkpoint as both trainable policy AND frozen reference
-  2. For each (prompt, chosen, rejected) triplet:
-     - Compute log-probs of chosen/rejected under policy
-     - Compute log-probs of chosen/rejected under reference (frozen)
-     - DPO loss = -log(sigmoid(beta * ((log_pi_chosen - log_ref_chosen)
-                                     - (log_pi_rejected - log_ref_rejected))))
-  3. Gradient update on policy only — reference stays frozen
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-Called by:
-  bash alignment/scripts/train_dpo.sh
+GPUS=$(python3 -c "import torch; print(torch.cuda.device_count())" 2>/dev/null || echo 1)
+SFT_CKPT=""
+BETA=""
+WANDB=false
+BASE_RESULTS_DIR="${RESULTS_DIR:-/results}"
+LOG_DIR="${BASE_RESULTS_DIR}/dpo_logs"
 
-Base container: nvcr.io/nvidia/nemo:25.02
-NeMo-Aligner:  0.7.0
-"""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --gpus)     GPUS="$2";     shift 2 ;;
+        --sft-ckpt) SFT_CKPT="$2"; shift 2 ;;
+        --beta)     BETA="$2";     shift 2 ;;
+        --wandb)    WANDB=true;    shift ;;
+        *) echo "Unknown arg: $1"; exit 1 ;;
+    esac
+done
 
-import torch
-from omegaconf import OmegaConf, DictConfig
-from nemo.core.config import hydra_runner
-from nemo.utils import logging
-from nemo.utils.exp_manager import exp_manager
+mkdir -p "$LOG_DIR"
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+LOG_FILE="$LOG_DIR/dpo_${TIMESTAMP}.log"
 
-from nemo_aligner.models.nlp.gpt.gpt_dpo_model import GPTDPOModel
-from nemo_aligner.utils.train_script_utils import (
-    CustomLoggerWrapper,
-    resolve_and_create_trainer,
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"; }
+
+log "=== SLM DPO Alignment ==="
+
+# ── Locate SFT checkpoint ─────────────────────────────────────────────────────
+if [[ -z "$SFT_CKPT" ]]; then
+    SFT_CKPT=$(find "${BASE_RESULTS_DIR}/slm_sft_code" -name "*.nemo" 2>/dev/null | sort | tail -1 || true)
+    if [[ -z "$SFT_CKPT" ]]; then
+        echo "ERROR: No SFT checkpoint found in ${BASE_RESULTS_DIR}/slm_sft_code/"
+        echo "  Run: make sft"
+        exit 1
+    fi
+fi
+
+log "SFT checkpoint: $SFT_CKPT"
+log "GPUs:           $GPUS"
+log "Log:            $LOG_FILE"
+
+# ── Validate DPO dataset ──────────────────────────────────────────────────────
+if [[ ! -f "/data/dpo/train.jsonl" ]]; then
+    echo "ERROR: DPO data not found at /data/dpo/train.jsonl"
+    echo "  Run: make prepare-dpo-data"
+    exit 1
+fi
+
+DPO_TRAIN_COUNT=$(wc -l < /data/dpo/train.jsonl)
+log "DPO train examples: $DPO_TRAIN_COUNT"
+
+# ── Environment ───────────────────────────────────────────────────────────────
+export CUDA_DEVICE_MAX_CONNECTIONS=1
+export TOKENIZERS_PARALLELISM=false
+export PYTHONFAULTHANDLER=1
+export NVTE_MASKED_SOFTMAX_FUSION=0
+export NVTE_FLASH_ATTN=0
+export NVTE_FUSED_ATTN=0
+
+# ── Build overrides ───────────────────────────────────────────────────────────
+OVERRIDES=(
+    trainer.devices="$GPUS"
+    trainer.num_nodes=1
+    model.restore_from_path="$SFT_CKPT"
 )
 
+[[ -n "$BETA" ]] && OVERRIDES+=(model.dpo.beta="$BETA") && log "DPO beta override: $BETA"
+[[ "$WANDB" == "true" ]] && OVERRIDES+=(exp_manager.create_wandb_logger=true)
 
-@hydra_runner(config_path="configs", config_name="dpo")
-def main(cfg: DictConfig) -> None:
-    logging.info("\n\n============ SLM DPO Alignment ============")
-    logging.info(f"Config:\n{OmegaConf.to_yaml(cfg)}")
-    logging.info(f"DPO beta: {cfg.model.dpo.beta}")
+# ── Launch ────────────────────────────────────────────────────────────────────
+log "Launching DPO training..."
 
-    # ── Trainer ────────────────────────────────────────────────────────────────
-    trainer = resolve_and_create_trainer(cfg, "dpo")
-    exp_manager(trainer, cfg.get("exp_manager", None))
+python "$REPO_ROOT/alignment/train_dpo.py" \
+    --config-path "$REPO_ROOT/alignment/configs" \
+    --config-name "dpo" \
+    "${OVERRIDES[@]}" \
+    2>&1 | tee -a "$LOG_FILE"
 
-    # ── Model ──────────────────────────────────────────────────────────────────
-    # GPTDPOModel internally manages both the trainable policy
-    # and the frozen reference model from the same SFT checkpoint.
-    model = GPTDPOModel.restore_from(
-        restore_path=cfg.model.restore_from_path,
-        trainer=trainer,
-        override_config_path=cfg.model,
-        strict=True,
-    )
-
-    param_count = sum(p.numel() for p in model.parameters()) / 1e6
-    trainable_count = sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6
-    logging.info(f"Total parameters:     {param_count:.1f}M")
-    logging.info(f"Trainable parameters: {trainable_count:.1f}M")
-    logging.info("Reference model is frozen (DPO)")
-
-    # ── Training ───────────────────────────────────────────────────────────────
-    trainer.fit(model)
-    logging.info("DPO alignment complete.")
-
-    best_ckpt = getattr(trainer.checkpoint_callback, "best_model_path", "see /results/slm_dpo/")
-    logging.info(f"Final checkpoint: {best_ckpt}")
-
-
-if __name__ == "__main__":
-    main()
+log "DPO training complete"
+log "Final checkpoint: ${BASE_RESULTS_DIR}/slm_dpo/"
+log ""
+log "Next steps:"
+log "  make eval-dpo"
+log "  make convert-hf"

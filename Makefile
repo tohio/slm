@@ -253,10 +253,10 @@ tokenize: _check-data-dirs
 				--dataset-impl mmap \
 				--append-eod \
 				--workers \$$(nproc) && \
-			mv $(DATA_DIR)/curated/tokenized/text_document_text_document.bin \
-		       $(DATA_DIR)/curated/tokenized/text_document.bin && \
-		    mv $(DATA_DIR)/curated/tokenized/text_document_text_document.idx \
-		       $(DATA_DIR)/curated/tokenized/text_document.idx"
+			mv $(DATA_DIR)/curated/tokenized/text_document_pii.bin \
+			   $(DATA_DIR)/curated/tokenized/text_document.bin && \
+			mv $(DATA_DIR)/curated/tokenized/text_document_pii.idx \
+			   $(DATA_DIR)/curated/tokenized/text_document.idx"
 
 upload-data: _check-s3-bucket
 	bash curator/scripts/upload_s3.sh \
@@ -276,6 +276,7 @@ pretrain:
 	@echo "Launching pre-training in Docker (NeMo 2.x)..."
 	docker run --gpus all --rm \
 		--shm-size=8g \
+		-e RESULTS_DIR=$(RESULTS_DIR) \
 		-v $$(pwd):/workspace/slm \
 		-v $(DATA_DIR):$(DATA_DIR) \
 		-v $(RESULTS_DIR):$(RESULTS_DIR) \
@@ -290,6 +291,7 @@ convert-pretrain:
 	@echo "Converting pretrain checkpoint → mcore_gpt.nemo in Docker..."
 	docker run --gpus all --rm \
 		--shm-size=8g \
+		-e RESULTS_DIR=$(RESULTS_DIR) \
 		-v $$(pwd):/workspace/slm \
 		-v $(RESULTS_DIR):$(RESULTS_DIR) \
 		$(DOCKER_IMAGE) bash -c "cd /workspace/slm && \
@@ -302,6 +304,7 @@ sft: _check-pretrain-nemo
 	@echo "Launching SFT in Docker (NeMo-Aligner)..."
 	docker run --gpus all --rm \
 		--shm-size=8g \
+		-e RESULTS_DIR=$(RESULTS_DIR) \
 		-v $$(pwd):/workspace/slm \
 		-v $(DATA_DIR):$(DATA_DIR) \
 		-v $(RESULTS_DIR):$(RESULTS_DIR) \
@@ -316,6 +319,7 @@ dpo: _check-sft-ckpt
 	@echo "Launching DPO in Docker (NeMo-Aligner)..."
 	docker run --gpus all --rm \
 		--shm-size=8g \
+		-e RESULTS_DIR=$(RESULTS_DIR) \
 		-v $$(pwd):/workspace/slm \
 		-v $(DATA_DIR):$(DATA_DIR) \
 		-v $(RESULTS_DIR):$(RESULTS_DIR) \

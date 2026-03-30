@@ -25,7 +25,8 @@ STAGE="both"
 GPUS=$(python3 -c "import torch; print(torch.cuda.device_count())" 2>/dev/null || echo 1)
 WANDB=false
 PRETRAIN_CKPT=""
-LOG_DIR="/results/sft_logs"
+BASE_RESULTS_DIR="${RESULTS_DIR:-/results}"
+LOG_DIR="${BASE_RESULTS_DIR}/sft_logs"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -44,9 +45,9 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
 # ── Locate mcore_gpt.nemo pretrain checkpoint ─────────────────────────────────
 if [[ -z "$PRETRAIN_CKPT" ]]; then
-    PRETRAIN_CKPT=$(find /results/slm_gpt_125m -name "mcore_gpt.nemo" 2>/dev/null | sort | tail -1 || true)
+    PRETRAIN_CKPT=$(find "${BASE_RESULTS_DIR}/slm_gpt_125m" -name "mcore_gpt.nemo" 2>/dev/null | sort | tail -1 || true)
     if [[ -z "$PRETRAIN_CKPT" ]]; then
-        echo "ERROR: mcore_gpt.nemo not found in /results/slm_gpt_125m/"
+        echo "ERROR: mcore_gpt.nemo not found in ${BASE_RESULTS_DIR}/slm_gpt_125m/"
         echo "  Run: make convert-pretrain"
         exit 1
     fi
@@ -105,9 +106,9 @@ fi
 
 # ── Stage 2: Code SFT ──────────────────────────────────────────────────────────
 if [[ "$STAGE" == "both" || "$STAGE" == "code" ]]; then
-    CHAT_CKPT=$(find /results/slm_sft_chat -name "*.nemo" 2>/dev/null | sort | tail -1 || true)
+    CHAT_CKPT=$(find "${BASE_RESULTS_DIR}/slm_sft_chat" -name "*.nemo" 2>/dev/null | sort | tail -1 || true)
     if [[ -z "$CHAT_CKPT" ]]; then
-        echo "ERROR: Chat SFT checkpoint not found in /results/slm_sft_chat/"
+        echo "ERROR: Chat SFT checkpoint not found in ${BASE_RESULTS_DIR}/slm_sft_chat/"
         echo "  Run chat SFT first: bash train_sft.sh --stage chat"
         exit 1
     fi
@@ -123,7 +124,7 @@ fi
 
 log "=== All SFT stages complete ==="
 log "Checkpoints:"
-log "  Chat: /results/slm_sft_chat/"
-log "  Code: /results/slm_sft_code/"
+log "  Chat: ${BASE_RESULTS_DIR}/slm_sft_chat/"
+log "  Code: ${BASE_RESULTS_DIR}/slm_sft_code/"
 log ""
 log "Next step: make dpo"

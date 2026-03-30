@@ -18,9 +18,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
-INPUT_DIR="/results/slm_gpt_125m"
-OUTPUT_PATH="/results/slm_gpt_125m/mcore_gpt.nemo"
-LOG_DIR="/results/pretrain_logs"
+INPUT_DIR="${RESULTS_DIR:-/results}/slm_gpt_125m"
+OUTPUT_PATH="${RESULTS_DIR:-/results}/slm_gpt_125m/mcore_gpt.nemo"
+LOG_DIR="${RESULTS_DIR:-/results}/pretrain_logs"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -58,13 +58,19 @@ input_path = Path("$INPUT_DIR")
 output_path = Path("$OUTPUT_PATH")
 output_path.parent.mkdir(parents=True, exist_ok=True)
 
-# Find the latest checkpoint inside the results dir
-ckpt_dirs = sorted(input_path.glob("checkpoints/*"))
-if not ckpt_dirs:
-    # Try the dir itself
-    ckpt_path = input_path
-else:
-    ckpt_path = ckpt_dirs[-1]
+# NeMo 2.x saves checkpoints as:
+#   <results_dir>/slm_gpt/<date>/checkpoints/<name>/context/ + weights/
+# Find the checkpoint with the lowest val_loss (best model)
+ckpt_dirs = sorted(input_path.glob("*/*/checkpoints/*"), key=lambda p: p.name)
+# Filter to dirs that have a context subdirectory (valid NeMo 2.x checkpoints)
+# and prefer -last checkpoints, otherwise pick lowest val_loss
+valid = [d for d in ckpt_dirs if (d / "context").exists()]
+if not valid:
+    raise FileNotFoundError(f"No valid NeMo 2.x checkpoints found under {input_path}")
+
+# Prefer -last checkpoint, fallback to latest by name
+last = [d for d in valid if d.name.endswith("-last")]
+ckpt_path = last[-1] if last else valid[-1]
 
 print(f"Converting checkpoint: {ckpt_path}")
 print(f"Output: {output_path}")
