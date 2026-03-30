@@ -52,6 +52,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 #     nemo-aligner 0.4.0 pulled nemo_toolkit[nlp] → mamba-ssm (nvcc required)
 #     0.7.0 eliminates this entirely
 #
+#   megatron-core==0.8.0:
+#     required by nemo_toolkit 2.2.0 for GPT pretraining, SFT, and DPO
+#     provides megatron.core.dist_checkpointing and related APIs
+#
 #   nemo-curator==0.7.1:
 #     transformers>=4.48.0 — satisfied by nemo_toolkit 2.2.0's pin
 #     fasttext==0.9.3  ← use 0.9.3 not 0.9.2
@@ -61,13 +65,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install order: NeMo first → aligner → curator → everything else
 # This prevents pip from backtracking against already-resolved constraints.
 # -----------------------------------------------------------------------------
-# nemo_toolkit 2.2.0: pins transformers>=4.48.0,<=4.48.3 — compatible with
-# nemo-curator 0.7.1 (needs >=4.48.0) and avoids BasicTokenizer removal in 4.46+.
-# nemo-aligner 0.7.0: no nemo_toolkit[nlp] dependency — avoids mamba-ssm entirely.
-# No --no-deps workarounds needed with this version combination.
 RUN pip install --no-cache-dir \
     "nemo_toolkit[core]==2.2.0" \
     "nemo-aligner==0.7.0" \
+    "megatron-core==0.8.0" \
     "dask[distributed]==2024.4.1"
 
 # -----------------------------------------------------------------------------
