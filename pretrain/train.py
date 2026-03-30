@@ -106,7 +106,6 @@ def main():
         ffn_hidden_size=args.ffn_hidden_size,
         num_attention_heads=args.num_attention_heads,
         seq_length=args.seq_length,
-        max_position_embeddings=args.seq_length,
         init_method_std=0.02,
         hidden_dropout=0.1,
         attention_dropout=0.1,
