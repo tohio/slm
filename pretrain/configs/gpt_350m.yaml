@@ -30,9 +30,13 @@ exp_manager:
     save_last: true
     filename: slm_gpt_350m--{val_loss:.2f}-{step}-{consumed_samples}
     model_parallel_size: ${multiply:${model.tensor_model_parallel_size}, ${model.pipeline_model_parallel_size}}
+    save_nemo_on_train_end: true
 
 model:
-  # ── Architecture (350M) ────────────────────────────────────────────────────
+  mcore_gpt: true
+  megatron_amp_O2: true
+
+  # ── Architecture (350M) ───────────────────────────────────────────────────
   num_layers: 24
   hidden_size: 1024
   ffn_hidden_size: 4096
@@ -41,48 +45,39 @@ model:
   max_position_embeddings: 2048
   position_embedding_type: learned_absolute
 
-  # ── Parallelism — 4x GPU, data parallelism sufficient at 350M ─────────────
   tensor_model_parallel_size: 1
   pipeline_model_parallel_size: 1
   virtual_pipeline_model_parallel_size: null
-
   gradient_as_bucket_view: true
-  resume_from_checkpoint: null
 
-  # ── Tokenizer ──────────────────────────────────────────────────────────────
   tokenizer:
     library: sentencepiece
     model: /data/tokenizer/slm_tokenizer.model
 
-  # ── Initialization ─────────────────────────────────────────────────────────
   init_method_std: 0.02
   use_scaled_init_method: true
   hidden_dropout: 0.1
   attention_dropout: 0.1
   ffn_dropout: 0.0
 
-  # ── Attention ──────────────────────────────────────────────────────────────
-  apply_query_key_layer_scaling: true
+  apply_query_key_layer_scaling: false
   attention_softmax_in_fp32: false
   bias_gelu_fusion: true
   masked_softmax_fusion: true
   bias_dropout_add_fusion: true
 
-  # ── Normalization ──────────────────────────────────────────────────────────
   normalization: layernorm
   layernorm_epsilon: 1.0e-5
   activation: gelu
   bias: true
   share_embeddings_and_output_weights: false
 
-  # ── Memory ────────────────────────────────────────────────────────────────
   activations_checkpoint_method: uniform
   activations_checkpoint_num_layers: 1
   activations_checkpoint_granularity: full
 
-  # ── Optimizer ──────────────────────────────────────────────────────────────
   optim:
-    name: fused_adam
+    name: distributed_fused_adam
     lr: 2.0e-4
     weight_decay: 0.1
     betas: [0.9, 0.95]
@@ -92,7 +87,6 @@ model:
       constant_steps: 0
       min_lr: 2.0e-5
 
-  # ── Data ───────────────────────────────────────────────────────────────────
   data:
     data_impl: mmap
     splits_string: "99,1,0"
@@ -101,12 +95,11 @@ model:
     num_workers: 4
     dataloader_type: single
     eod_mask_loss: false
-    # Paths match output of 'make tokenizer' → /data/curated/tokenized/
     data_prefix:
       - 0.7
       - /data/curated/tokenized/text_document
       - 0.3
-      - /data/curated/tokenized/text_document   # replace with code path when available
+      - /data/curated/tokenized/text_document
 
   micro_batch_size: 4
-  global_batch_size: 128          # data_parallel_size=4
+  global_batch_size: 128

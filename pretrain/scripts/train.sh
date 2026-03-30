@@ -1,16 +1,13 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
 # pretrain/scripts/train.sh
-# Launch NeMo 2.x GPT pre-training.
+# Launch NeMo 1.x GPT pre-training via megatron_gpt_pretraining.py.
 #
-# Handles:
-#   - Single and multi-GPU launch via torchrun
-#   - Model size selection (125M / 350M / 1B) via --size flag
-#   - Automatic resume from latest checkpoint
-#   - Logging to file + optional W&B
+# Saves checkpoints in .nemo format directly.
+# No conversion step needed — NeMo-Aligner SFT/DPO loads .nemo directly.
 #
 # Usage:
-#   bash train.sh                          # default: 125M, 1 GPU
+#   bash train.sh                          # default: 125m, 1 GPU
 #   bash train.sh --size 350m --gpus 4
 #   bash train.sh --size 1b --gpus 4
 #   bash train.sh --wandb
@@ -27,119 +24,67 @@ SIZE="125m"
 GPUS=$(python3 -c "import torch; print(torch.cuda.device_count())" 2>/dev/null || echo 1)
 WANDB=false
 RESUME=false
-# Respect RESULTS_DIR from environment (set via Makefile -e flag), fallback to /results
 BASE_RESULTS_DIR="${RESULTS_DIR:-/results}"
-LOG_DIR="${BASE_RESULTS_DIR}/pretrain_logs"
 
-# ── Arg parsing ───────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --size)    SIZE="$2";   shift 2 ;;
-        --gpus)    GPUS="$2";   shift 2 ;;
-        --wandb)   WANDB=true;  shift ;;
-        --resume)  RESUME=true; shift ;;
+        --size)   SIZE="$2";   shift 2 ;;
+        --gpus)   GPUS="$2";   shift 2 ;;
+        --wandb)  WANDB=true;  shift ;;
+        --resume) RESUME=true; shift ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
 
+LOG_DIR="${BASE_RESULTS_DIR}/pretrain_logs"
 mkdir -p "$LOG_DIR"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 LOG_FILE="$LOG_DIR/gpt_${SIZE}_${TIMESTAMP}.log"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"; }
 
-log "=== SLM Pre-Training (NeMo 2.x) ==="
-log "Size:      $SIZE"
-log "GPUs:      $GPUS"
-log "Log:       $LOG_FILE"
+log "=== SLM Pre-Training (NeMo 1.x) ==="
+log "Size:   $SIZE"
+log "GPUs:   $GPUS"
+log "Log:    $LOG_FILE"
 
-# ── Model size configs ────────────────────────────────────────────────────────
-case "$SIZE" in
-    125m)
-        NUM_LAYERS=12
-        HIDDEN_SIZE=768
-        FFN_HIDDEN_SIZE=3072
-        NUM_ATTENTION_HEADS=12
-        MICRO_BATCH_SIZE=4
-        GLOBAL_BATCH_SIZE=32
-        TP=1
-        PP=1
-        LR=3e-4
-        MIN_LR=3e-5
-        RESULTS_DIR="${BASE_RESULTS_DIR}/slm_gpt_125m"
-        ;;
-    350m)
-        NUM_LAYERS=24
-        HIDDEN_SIZE=1024
-        FFN_HIDDEN_SIZE=4096
-        NUM_ATTENTION_HEADS=16
-        MICRO_BATCH_SIZE=4
-        GLOBAL_BATCH_SIZE=128
-        TP=1
-        PP=1
-        LR=2e-4
-        MIN_LR=2e-5
-        RESULTS_DIR="${BASE_RESULTS_DIR}/slm_gpt_350m"
-        ;;
-    1b)
-        NUM_LAYERS=32
-        HIDDEN_SIZE=2048
-        FFN_HIDDEN_SIZE=8192
-        NUM_ATTENTION_HEADS=16
-        MICRO_BATCH_SIZE=2
-        GLOBAL_BATCH_SIZE=128
-        TP=2
-        PP=1
-        LR=1e-4
-        MIN_LR=1e-5
-        RESULTS_DIR="${BASE_RESULTS_DIR}/slm_gpt_1b"
-        ;;
-    *)
-        echo "ERROR: Unknown size '$SIZE'. Valid: 125m, 350m, 1b"
-        exit 1
-        ;;
-esac
+# ── Config path ───────────────────────────────────────────────────────────────
+CONFIG_PATH="$REPO_ROOT/pretrain/configs/gpt_${SIZE}.yaml"
+if [[ ! -f "$CONFIG_PATH" ]]; then
+    echo "ERROR: Config not found: $CONFIG_PATH"
+    exit 1
+fi
 
 # ── Validate prerequisites ────────────────────────────────────────────────────
-PRETRAIN_DIR="/data/curated/tokenized"
-BIN_COUNT=$(find "$PRETRAIN_DIR" -name "*.bin" 2>/dev/null | wc -l)
+BIN_COUNT=$(find /data/curated/tokenized -name "*.bin" 2>/dev/null | wc -l)
 if [[ "$BIN_COUNT" -eq 0 ]]; then
-    echo "ERROR: No .bin dataset files found in $PRETRAIN_DIR"
+    echo "ERROR: No .bin dataset files found in /data/curated/tokenized"
     echo "  Run: make tokenize"
     exit 1
 fi
-log "Dataset:   $BIN_COUNT .bin file(s) in $PRETRAIN_DIR"
+log "Dataset:   $BIN_COUNT .bin file(s)"
 
-TOKENIZER="/data/tokenizer/slm_tokenizer.model"
-if [[ ! -f "$TOKENIZER" ]]; then
-    echo "ERROR: Tokenizer not found: $TOKENIZER"
+if [[ ! -f "/data/tokenizer/slm_tokenizer.model" ]]; then
+    echo "ERROR: Tokenizer not found: /data/tokenizer/slm_tokenizer.model"
     echo "  Run: make tokenizer"
     exit 1
 fi
-log "Tokenizer: $TOKENIZER"
+log "Tokenizer: /data/tokenizer/slm_tokenizer.model"
 
-# ── Build args ────────────────────────────────────────────────────────────────
-TRAIN_ARGS=(
-    --num-layers          "$NUM_LAYERS"
-    --hidden-size         "$HIDDEN_SIZE"
-    --ffn-hidden-size     "$FFN_HIDDEN_SIZE"
-    --num-attention-heads "$NUM_ATTENTION_HEADS"
-    --tensor-model-parallel-size   "$TP"
-    --pipeline-model-parallel-size "$PP"
-    --gpus                "$GPUS"
-    --micro-batch-size    "$MICRO_BATCH_SIZE"
-    --global-batch-size   "$GLOBAL_BATCH_SIZE"
-    --lr                  "$LR"
-    --min-lr              "$MIN_LR"
-    --results-dir         "$RESULTS_DIR"
-    --tokenizer-model     "$TOKENIZER"
-    --data-paths
-        0.7 "$PRETRAIN_DIR/text_document"
-        0.3 "$PRETRAIN_DIR/text_document"
-)
+# ── Results dir override ──────────────────────────────────────────────────────
+RESULTS_OVERRIDE="exp_manager.explicit_log_dir=${BASE_RESULTS_DIR}/slm_gpt_${SIZE}"
 
-[[ "$WANDB" == "true" ]] && TRAIN_ARGS+=(--wandb)
-[[ "$RESUME" == "true" ]] && TRAIN_ARGS+=(--resume)
+# ── W&B ───────────────────────────────────────────────────────────────────────
+WANDB_OVERRIDES=""
+if [[ "$WANDB" == "true" ]]; then
+    WANDB_OVERRIDES="exp_manager.create_wandb_logger=true exp_manager.wandb_logger_kwargs.name=gpt_${SIZE}"
+fi
+
+# ── Resume ────────────────────────────────────────────────────────────────────
+RESUME_OVERRIDES=""
+if [[ "$RESUME" == "true" ]]; then
+    RESUME_OVERRIDES="exp_manager.resume_if_exists=true exp_manager.resume_ignore_no_checkpoint=true"
+fi
 
 # ── Environment ───────────────────────────────────────────────────────────────
 export CUDA_DEVICE_MAX_CONNECTIONS=1
@@ -148,16 +93,20 @@ export PYTHONFAULTHANDLER=1
 export NCCL_DEBUG=WARN
 export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
 
-if [[ "$GPUS" -gt 1 ]]; then
-    export NCCL_IB_DISABLE=0
-    export NCCL_NET_GDR_LEVEL=2
-fi
-
 # ── Launch ────────────────────────────────────────────────────────────────────
+NEMO_SCRIPT="/opt/NeMo/examples/nlp/language_modeling/megatron_gpt_pretraining.py"
+
 log "Launching training..."
 
 if [[ "$GPUS" -eq 1 ]]; then
-    python "$REPO_ROOT/pretrain/train.py" "${TRAIN_ARGS[@]}" \
+    python3 "$NEMO_SCRIPT" \
+        --config-path "$REPO_ROOT/pretrain/configs" \
+        --config-name "gpt_${SIZE}" \
+        trainer.devices="$GPUS" \
+        trainer.num_nodes=1 \
+        $RESULTS_OVERRIDE \
+        $WANDB_OVERRIDES \
+        $RESUME_OVERRIDES \
         2>&1 | tee -a "$LOG_FILE"
 else
     torchrun \
@@ -166,8 +115,17 @@ else
         --node_rank=0 \
         --master_addr=localhost \
         --master_port=29500 \
-        "$REPO_ROOT/pretrain/train.py" "${TRAIN_ARGS[@]}" \
+        "$NEMO_SCRIPT" \
+        --config-path "$REPO_ROOT/pretrain/configs" \
+        --config-name "gpt_${SIZE}" \
+        trainer.devices="$GPUS" \
+        trainer.num_nodes=1 \
+        $RESULTS_OVERRIDE \
+        $WANDB_OVERRIDES \
+        $RESUME_OVERRIDES \
         2>&1 | tee -a "$LOG_FILE"
 fi
 
-log "Training complete. Results in $RESULTS_DIR"
+log "Training complete."
+log "Checkpoint: ${BASE_RESULTS_DIR}/slm_gpt_${SIZE}/"
+log "Next step: make sft"

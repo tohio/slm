@@ -25,7 +25,7 @@ LOGS_DIR      ?= /logs
 PYTHON        ?= python3
 DOCKER_IMAGE  ?= slm:latest
 
-PRETRAIN_NEMO = $(shell find $(RESULTS_DIR)/slm_gpt_125m -name "mcore_gpt.nemo" 2>/dev/null | sort | tail -1)
+PRETRAIN_NEMO = $(shell find $(RESULTS_DIR)/slm_gpt_125m -name "*.nemo" 2>/dev/null | sort | tail -1)
 SFT_CHAT_CKPT = $(shell find $(RESULTS_DIR)/slm_sft_chat -name "*.nemo" 2>/dev/null | sort | tail -1)
 SFT_CODE_CKPT = $(shell find $(RESULTS_DIR)/slm_sft_code -name "*.nemo" 2>/dev/null | sort | tail -1)
 DPO_CKPT      = $(shell find $(RESULTS_DIR)/slm_dpo      -name "*.nemo" 2>/dev/null | sort | tail -1)
@@ -37,7 +37,7 @@ DPO_CKPT      = $(shell find $(RESULTS_DIR)/slm_dpo      -name "*.nemo" 2>/dev/n
         curate curate-resume tokenizer tokenize upload-data \
         train-quality-classifier curate-full \
         prepare-sft-data prepare-dpo-data \
-        pretrain convert-pretrain sft dpo \
+        pretrain sft dpo \
         eval-pretrain eval-sft eval-dpo \
         convert-hf clean clean-all \
         _check-pretrain-nemo _check-sft-ckpt _check-dpo-ckpt \
@@ -98,7 +98,7 @@ help:
 	@echo ""
 
 all: curate tokenizer tokenize upload-data prepare-sft-data prepare-dpo-data \
-     pretrain convert-pretrain sft dpo eval-dpo
+     pretrain sft dpo eval-dpo
 	@echo "✓ Full pipeline complete. Final model: $(DPO_CKPT)"
 
 # ── First-time host setup ─────────────────────────────────────────────────────
@@ -312,7 +312,7 @@ convert-pretrain:
 				--input $(RESULTS_DIR)/slm_gpt_125m \
 				--output $(RESULTS_DIR)/slm_gpt_125m/mcore_gpt.nemo"
 
-# Step 3: SFT with NeMo-Aligner
+# Step 2: SFT with NeMo-Aligner
 sft: _check-pretrain-nemo
 	@echo "Launching SFT in Docker (NeMo-Aligner)..."
 	docker run --gpus all --rm \
@@ -327,7 +327,7 @@ sft: _check-pretrain-nemo
 				--gpus $(GPUS) \
 				--pretrain-ckpt $(PRETRAIN_NEMO)"
 
-# Step 4: DPO with NeMo-Aligner
+# Step 3: DPO with NeMo-Aligner
 dpo: _check-sft-ckpt
 	@echo "Launching DPO in Docker (NeMo-Aligner)..."
 	docker run --gpus all --rm \
