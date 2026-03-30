@@ -113,7 +113,7 @@ def main():
         make_vocab_size_divisible_by=128,
         apply_query_key_layer_scaling=True,
         bias_activation_fusion=True,
-        bias_dropout_add_fusion=True,
+        bias_dropout_fusion
         masked_softmax_fusion=True,
         activation_func=torch.nn.functional.gelu,
         normalization="LayerNorm",
