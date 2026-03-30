@@ -263,7 +263,11 @@ def run_pipeline(config: dict, start_stage: str = "extract"):
 
             elif stage == "tokenize":
                 input_path = stage_output_path(output_base, "pii")
-                run_tokenization(input_path, output_path, cfg["tokenization"])
+                # Write mmap files to /data/curated/tokenized/ (not the stage dir)
+                # so upload_s3.sh and setup_gpu_instance.sh can find them consistently.
+                # The .complete marker is still written to the stage dir for checkpointing.
+                tokenized_output = Path(output_base) / "tokenized"
+                run_tokenization(input_path, tokenized_output, cfg["tokenization"])
 
         except Exception as e:
             logger.error(f"[FAILED] Stage '{stage}' failed: {e}", exc_info=True)

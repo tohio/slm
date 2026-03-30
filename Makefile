@@ -34,7 +34,7 @@ DPO_CKPT      = $(shell find $(RESULTS_DIR)/slm_dpo/checkpoints      -name "*.ne
 .PHONY: help all setup setup-instance init-dirs \
         docker-build docker-curate docker-shell-cpu docker-shell-gpu \
         download-data download-models \
-        curate curate-resume tokenizer upload-data \
+        curate curate-resume tokenizer tokenize upload-data \
         train-quality-classifier curate-full \
         prepare-sft-data prepare-dpo-data \
         pretrain sft dpo \
@@ -67,10 +67,11 @@ help:
 	@echo "    make download-models        Download fasttext language ID model"
 	@echo "    make curate                 Run full Curator pipeline"
 	@echo "    make curate-resume          Resume curator from a specific stage"
-	@echo "    make tokenizer              Train custom BPE tokenizer"
+	@echo "    make tokenizer              Train custom BPE tokenizer (runs in Docker)"
+	@echo "    make tokenize               Convert JSONL → .bin/.idx mmap (runs in Docker)"
 	@echo "    make upload-data            Upload dataset to S3"
 	@echo ""
-	@echo "  TRAINING  (run in GPU container)"
+	@echo "  TRAINING  (all run in Docker)"
 	@echo "    make prepare-sft-data       Download & format SFT datasets"
 	@echo "    make prepare-dpo-data       Download & format DPO preference data"
 	@echo "    make pretrain               Pre-train from scratch"
@@ -95,12 +96,10 @@ help:
 	@echo "    make docker-build DOCKER_IMAGE=slm:latest"
 	@echo ""
 
-all: curate tokenizer upload-data prepare-sft-data prepare-dpo-data pretrain sft dpo eval-dpo
+all: curate tokenizer tokenize upload-data prepare-sft-data prepare-dpo-data pretrain sft dpo eval-dpo
 	@echo "✓ Full pipeline complete. Final model: $(DPO_CKPT)"
 
 # ── First-time host setup ─────────────────────────────────────────────────────
-# Creates the host directories that Docker bind-mounts at runtime.
-# Must be run once on any new instance before docker-shell-* or docker-curate.
 init-dirs:
 	@echo "Creating host directories..."
 	sudo mkdir -p $(DATA_DIR) $(RESULTS_DIR) $(LOGS_DIR)
@@ -155,7 +154,7 @@ docker-curate: _check-data-dirs
 		-v $$(pwd):/workspace/slm \
 		-v $(DATA_DIR):$(DATA_DIR) \
 		-v $(LOGS_DIR):$(LOGS_DIR) \
-		$(DOCKER_IMAGE) bash -c "cd /workspace/slm && make curate tokenizer"
+		$(DOCKER_IMAGE) bash -c "cd /workspace/slm && make curate"
 
 # ── Quality Classifier ───────────────────────────────────────────────────────
 train-quality-classifier:
@@ -195,7 +194,7 @@ curate-full:
 		echo "[SKIP] pass 2 — already complete"; \
 	else \
 		echo "[RUN] pass 2 — quality_filter + tokenize..."; \
-		$(MAKE) curate-resume STAGE=quality_filter; \
+		$(MAKE) tokenize; \
 	fi
 	@echo "✓ curate-full complete"
 
@@ -205,9 +204,6 @@ download-data: _check-data-dirs
 		--n-files $(N_WARC_FILES) \
 		--output-dir $(DATA_DIR)/raw/common_crawl
 
-# Downloads models required by curator.yaml:
-#   lid.176.bin          : fasttext language identification model (Meta, public)
-#   quality_classifier.bin is trained from your own data — see docs
 download-models: _check-data-dirs
 	@echo "Downloading fasttext language ID model..."
 	mkdir -p $(DATA_DIR)/models
@@ -217,8 +213,7 @@ download-models: _check-data-dirs
 	@echo "✓ $(DATA_DIR)/models/lid.176.bin"
 	@echo ""
 	@echo "NOTE: quality_classifier.bin must be trained after first curation pass."
-	@echo "      Set quality_filter.enabled: false in curator/configs/curator.yaml"
-	@echo "      until you have trained a classifier on your curated data."
+	@echo "      Run: make train-quality-classifier"
 
 curate: _check-data-dirs
 	$(PYTHON) curator/pipelines/pipeline.py \
@@ -230,11 +225,30 @@ curate-resume: _check-data-dirs
 		--config curator/configs/curator.yaml \
 		--start-stage $$stage
 
+# Train custom BPE tokenizer — runs inside Docker (sentencepiece not on host)
 tokenizer: _check-data-dirs
-	$(PYTHON) tokenizer/train_tokenizer.py \
-		--config tokenizer/configs/tokenizer.yaml \
-		--input-dir $(DATA_DIR)/curated/stages/pii \
-		--output-dir $(DATA_DIR)/tokenizer
+	@echo "Training BPE tokenizer in Docker..."
+	docker run --rm \
+		--shm-size=8g \
+		-v $$(pwd):/workspace/slm \
+		-v $(DATA_DIR):$(DATA_DIR) \
+		$(DOCKER_IMAGE) bash -c "cd /workspace/slm && \
+			python3 tokenizer/train_tokenizer.py \
+				--config tokenizer/configs/tokenizer.yaml \
+				--input-dir $(DATA_DIR)/curated/stages/pii \
+				--output-dir $(DATA_DIR)/tokenizer"
+
+# Convert curated JSONL → NeMo mmap .bin/.idx — runs inside Docker
+tokenize: _check-data-dirs
+	@echo "Tokenizing JSONL → mmap (.bin/.idx) in Docker..."
+	docker run --rm \
+		--shm-size=8g \
+		-v $$(pwd):/workspace/slm \
+		-v $(DATA_DIR):$(DATA_DIR) \
+		$(DOCKER_IMAGE) bash -c "cd /workspace/slm && \
+			python3 curator/pipelines/pipeline.py \
+				--config curator/configs/curator.yaml \
+				--start-stage tokenize"
 
 upload-data: _check-s3-bucket
 	bash curator/scripts/upload_s3.sh \
@@ -248,19 +262,45 @@ prepare-dpo-data:
 	$(PYTHON) alignment/data/prepare_dpo.py \
 		--output-dir $(DATA_DIR)/dpo
 
-# ── Training ──────────────────────────────────────────────────────────────────
+# ── Training — all run inside Docker ─────────────────────────────────────────
 pretrain:
-	bash pretrain/scripts/train.sh --config $(CONFIG) --gpus $(GPUS)
+	@echo "Launching pre-training in Docker..."
+	docker run --gpus all --rm \
+		--shm-size=8g \
+		-v $$(pwd):/workspace/slm \
+		-v $(DATA_DIR):$(DATA_DIR) \
+		-v $(RESULTS_DIR):$(RESULTS_DIR) \
+		-v $(LOGS_DIR):$(LOGS_DIR) \
+		$(DOCKER_IMAGE) bash -c "cd /workspace/slm && \
+			bash pretrain/scripts/train.sh \
+				--config $(CONFIG) \
+				--gpus $(GPUS)"
 
 sft: _check-pretrain-ckpt
-	bash finetune/scripts/train_sft.sh \
-		--gpus $(GPUS) \
-		--pretrain-ckpt $(PRETRAIN_CKPT)
+	@echo "Launching SFT in Docker..."
+	docker run --gpus all --rm \
+		--shm-size=8g \
+		-v $$(pwd):/workspace/slm \
+		-v $(DATA_DIR):$(DATA_DIR) \
+		-v $(RESULTS_DIR):$(RESULTS_DIR) \
+		-v $(LOGS_DIR):$(LOGS_DIR) \
+		$(DOCKER_IMAGE) bash -c "cd /workspace/slm && \
+			bash finetune/scripts/train_sft.sh \
+				--gpus $(GPUS) \
+				--pretrain-ckpt $(PRETRAIN_CKPT)"
 
 dpo: _check-sft-ckpt
-	bash alignment/scripts/train_dpo.sh \
-		--gpus $(GPUS) \
-		--sft-ckpt $(SFT_CODE_CKPT)
+	@echo "Launching DPO in Docker..."
+	docker run --gpus all --rm \
+		--shm-size=8g \
+		-v $$(pwd):/workspace/slm \
+		-v $(DATA_DIR):$(DATA_DIR) \
+		-v $(RESULTS_DIR):$(RESULTS_DIR) \
+		-v $(LOGS_DIR):$(LOGS_DIR) \
+		$(DOCKER_IMAGE) bash -c "cd /workspace/slm && \
+			bash alignment/scripts/train_dpo.sh \
+				--gpus $(GPUS) \
+				--sft-ckpt $(SFT_CODE_CKPT)"
 
 # ── Evaluation ────────────────────────────────────────────────────────────────
 eval-pretrain: _check-pretrain-ckpt
@@ -283,7 +323,6 @@ eval-dpo: _check-dpo-ckpt _check-sft-ckpt
 		--val-data $(DATA_DIR)/pretrain
 
 # ── Inference ─────────────────────────────────────────────────────────────────
-# Interactive session with the latest DPO checkpoint
 inference: _check-dpo-ckpt
 	docker run --gpus all -it --rm \
 		--shm-size=8g \
@@ -294,8 +333,6 @@ inference: _check-dpo-ckpt
 		python /workspace/slm/inference.py \
 		--checkpoint $(DPO_CKPT)
 
-# Compare DPO vs SFT checkpoint on a single prompt
-# Usage: make inference-compare PROMPT="Write a Python function to sort a list."
 PROMPT ?= "Explain recursion to a 10-year-old."
 inference-compare: _check-dpo-ckpt _check-sft-ckpt
 	docker run --gpus all -it --rm \
@@ -342,7 +379,6 @@ _check-data-dirs:
 
 # ── Cleanup ───────────────────────────────────────────────────────────────────
 clean:
-	# Stage files are written by root inside Docker — sudo required
 	sudo find $(DATA_DIR)/curated/stages -name ".complete" -delete 2>/dev/null || true
 	sudo find $(DATA_DIR)/tokenizer -name ".complete" -delete 2>/dev/null || true
 	sudo find $(DATA_DIR)/models -name ".complete" -delete 2>/dev/null || true

@@ -12,32 +12,23 @@
 #   4. make docker-curate            # pass 1: quality_filter + tokenization
 #                                    # auto-skipped (models don't exist yet)
 #   5. make tokenizer                # train tokenizer on curated output
-#   6. make train-quality-classifier # train quality classifier (TODO)
-#   7. make docker-curate            # pass 2: all stages run automatically
-#                                    # (pipeline.py detects models at runtime)
+#   6. make train-quality-classifier # train quality classifier
+#   7. make tokenize                 # pass 2: generate .bin/.idx mmap files
 # =============================================================================
 
 curation:
   input_data_dir: /data/raw
   output_data_dir: /data/curated
 
-  # Changed from /logs/curator → /data/logs/curator
-  # /data is bind-mounted by docker-curate; /logs was not, so logs were lost
   log_dir: /data/logs/curator
 
   # ── Dask ───────────────────────────────────────────────────────────────────
-  # n_workers and memory_limit are resolved dynamically at runtime by pipeline.py:
-  #   n_workers    = os.cpu_count()
-  #   memory_limit = (total_RAM_GB - 2) / n_workers
-  # Override here only if you want to cap resource usage on a shared instance.
   dask:
     threads_per_worker: 1
     # n_workers: 16       # uncomment to cap (default: all CPUs)
     # memory_limit: "3GB" # uncomment to cap (default: auto)
 
   # ── Language Filter ────────────────────────────────────────────────────────
-  # lid.176.bin: download with 'make download-models'
-  # Changed model_path from /models → /data/models (bind-mounted volume)
   language_filter:
     enabled: true
     target_language: en
@@ -65,12 +56,8 @@ curation:
       fraction: 0.20
 
   # ── Quality Filter ─────────────────────────────────────────────────────────
-  # DISABLED for pass 1 — quality_classifier.bin does not exist yet.
-  # To enable after pass 1:
-  #   1. Train a fasttext classifier on a labeled sample of your curated data
-  #   2. Save to /data/models/quality_classifier.bin
-  #   3. Set enabled: true below
-  #   4. Re-run make docker-curate
+  # Auto-detected at runtime — only runs if quality_classifier.bin exists.
+  # Run 'make train-quality-classifier' after pass 1 to generate the model.
   quality_filter:
     enabled: false
     model_path: /data/models/quality_classifier.bin
@@ -98,22 +85,16 @@ curation:
     replacement_string: "<PII>"
 
   # ── Tokenization ───────────────────────────────────────────────────────────
-  # DISABLED for pass 1 — tokenizer does not exist yet.
-  # The tokenizer is trained by 'make tokenizer' AFTER curation completes.
-  # To enable after tokenizer is trained:
-  #   1. Run: make tokenizer
-  #   2. Confirm /data/tokenizer/slm_tokenizer.model exists
-  #   3. Set enabled: true below
-  #   4. Re-run make docker-curate
+  # Auto-detected at runtime by pipeline.py — only runs if
+  # /data/tokenizer/slm_tokenizer.model exists on disk.
+  # Run 'make tokenizer' first to generate the model.
   tokenization:
-    enabled: false
+    enabled: true
     tokenizer_library: sentencepiece
     tokenizer_model: /data/tokenizer/slm_tokenizer.model
     output_format: mmap
 
   # ── Data Blend ─────────────────────────────────────────────────────────────
-  # Weights used when mixing general text and code for pre-training.
-  # Matches Chinchilla-style recommendations for a general + code model.
   blend:
     general_text:
       path: /data/curated/general
