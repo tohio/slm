@@ -15,8 +15,9 @@ The pipeline is modular — each stage is independently runnable, reproducible, 
 **Model:** GPT-style decoder-only transformer, ~125M parameters (scalable to 350M and 1B)
 **Domain:** General chat → coding (sequential fine-tuning)
 **Alignment:** Direct Preference Optimization (DPO)
-**Framework:** NVIDIA NeMo + NeMo Curator + NeMo Aligner
+**Framework:** NVIDIA NeMo 2.x + NeMo-Aligner 0.7.0 + NeMo Curator 0.7.1
 **Infrastructure:** Cloud CPU instances (data) + Cloud GPU instances (training)
+**Container:** `nvcr.io/nvidia/nemo:25.02` (requires NGC account)
 
 ---
 
@@ -30,17 +31,17 @@ The pipeline is modular — each stage is independently runnable, reproducible, 
 
 ```
 slm/
-├── Dockerfile                        Self-contained NeMo image (no NGC auth required)
+├── Dockerfile                        NeMo 25.02-based image (NGC auth required)
 ├── Makefile
 ├── requirements.txt
 ├── environment.yml
-├── .env.sample                       Environment variable template
+├── .env.sample                       Environment variable template (copy to .env)
 ├── .dockerignore
 ├── HARDWARE.md                       GPU/instance recommendations
 ├── docs/
 │   ├── architecture.svg
-│   └── screenshots/                  Proof-of-deployment screenshots
-├── notebooks/                        Interactive analysis and exploration
+│   └── screenshots/
+├── notebooks/
 │   ├── inference.ipynb
 │   ├── training_run.ipynb
 │   ├── data_exploration.ipynb
@@ -54,34 +55,35 @@ slm/
 │   ├── configs/
 │   │   └── curator.yaml
 │   ├── pipelines/
-│   │   ├── pipeline.py               Orchestrator — runs all stages in order
-│   │   ├── extract.py                WARC → clean text (trafilatura)
-│   │   ├── language_filter.py        fastText language ID
-│   │   ├── heuristic_filter.py       Gopher-style rule filters
-│   │   ├── quality_filter.py         fastText quality classifier
-│   │   ├── dedup.py                  Exact (MD5) + fuzzy (MinHash) dedup
-│   │   ├── pii.py                    Regex-based PII redaction
-│   │   └── tokenize_data.py          SentencePiece → NeMo mmap format
+│   │   ├── pipeline.py
+│   │   ├── extract.py
+│   │   ├── language_filter.py
+│   │   ├── heuristic_filter.py
+│   │   ├── quality_filter.py
+│   │   ├── dedup.py
+│   │   ├── pii.py
+│   │   └── tokenize_data.py
 │   ├── scripts/
-│   │   ├── download_cc.sh            Download Common Crawl WARCs
-│   │   └── upload_s3.sh              Upload all curation artifacts to S3
+│   │   ├── download_cc.sh
+│   │   └── upload_s3.sh
 │   └── README.md
 ├── tokenizer/                        Custom BPE tokenizer training
 │   ├── configs/
 │   │   └── tokenizer.yaml
 │   ├── train_tokenizer.py
 │   └── README.md
-├── pretrain/                         Stage 2: pre-training
-│   ├── configs/
+├── pretrain/                         Stage 2: pre-training (NeMo 2.x)
+│   ├── configs/                      Reference configs (documentation only)
 │   │   ├── gpt_125m.yaml
 │   │   ├── gpt_350m.yaml
 │   │   └── gpt_1b.yaml
 │   ├── scripts/
 │   │   ├── train.sh
+│   │   ├── convert_pretrain.sh       NeMo 2.x ckpt → mcore_gpt.nemo
 │   │   └── convert_ckpt.sh           Export to HuggingFace format
-│   ├── train.py
+│   ├── train.py                      NeMo 2.x entry point
 │   └── README.md
-├── finetune/                         Stage 3: supervised fine-tuning
+├── finetune/                         Stage 3: supervised fine-tuning (NeMo-Aligner)
 │   ├── configs/
 │   │   ├── sft_chat.yaml
 │   │   └── sft_code.yaml
@@ -91,7 +93,7 @@ slm/
 │   │   └── train_sft.sh
 │   ├── train_sft.py
 │   └── README.md
-├── alignment/                        Stage 4: DPO alignment
+├── alignment/                        Stage 4: DPO alignment (NeMo-Aligner)
 │   ├── configs/
 │   │   └── dpo.yaml
 │   ├── data/
@@ -100,17 +102,36 @@ slm/
 │   │   └── train_dpo.sh
 │   ├── train_dpo.py
 │   └── README.md
-├── eval/                             Evaluation suite (all stages)
-│   ├── run_eval.py                   Main eval entry point
+├── eval/
+│   ├── run_eval.py
 │   ├── perplexity.py
 │   ├── mmlu.py
 │   ├── generation.py
 │   ├── win_rate.py
 │   └── README.md
-├── inference.py                      Interactive + batch inference CLI
+├── inference.py
 └── infra/
     └── setup_gpu_instance.sh
 ```
+
+---
+
+## Prerequisites
+
+### NGC Account
+
+This pipeline uses `nvcr.io/nvidia/nemo:25.02` as its base container. This image is hosted on NVIDIA GPU Cloud (NGC) and requires a free NGC account and API key.
+
+1. Create a free account at [ngc.nvidia.com](https://ngc.nvidia.com)
+2. Generate an API key under **Setup → Generate API Key**
+3. Add it to your `.env` file:
+
+```bash
+cp .env.sample .env
+# Edit .env and set NGC_API_KEY=your-key-here
+```
+
+The `make setup-instance` command handles NGC login non-interactively using this key — no manual `docker login` required.
 
 ---
 
@@ -118,80 +139,60 @@ slm/
 
 ### Docker (recommended)
 
-The image is self-contained and built from public sources only — **no NGC account or API token required**.
-
 #### Data Curation (CPU instance)
 
 ```bash
-# 1. First-time host setup — creates /data, /results, /logs on the host
+# 1. First-time host setup
 make init-dirs
 
 # 2. Build the Docker image
+#    Requires NGC_API_KEY in .env — handled automatically by setup_gpu_instance.sh
 make docker-build
 
-# 3. Download fasttext language ID model (lid.176.bin)
+# 3. Download fasttext language ID model
 make download-models
 
 # 4. Download Common Crawl WARC files
-#    Default: 20 files (~20GB compressed, ~670k docs after extraction)
-#    Override: make download-data N_WARC_FILES=2  (for quick validation)
+#    Default: 20 files. Override: make download-data N_WARC_FILES=2
 make download-data
 
 # 5. Run the full two-pass curation pipeline
 make curate-full
-#    Pass 1: extract → language_filter → heuristic_filter →
-#            exact_dedup → fuzzy_dedup → pii → tokenizer
-#    Then:   trains quality classifier on pass 1 output
-#    Pass 2: quality_filter → tokenize (mmap .bin/.idx files)
-#    quality_filter and tokenize auto-detected by pipeline.py
-#
-#    Checkpointed — each step writes a .complete marker on success.
-#    Re-running skips already completed steps automatically.
-#    If a step fails, fix the error and re-run — it resumes from where it left off.
+#    Checkpointed — re-running skips completed steps automatically.
 
 # 6. Upload all curation artifacts to S3
 make upload-data                    # reads S3_BUCKET from .env
 #    Uploads: curated JSONL, tokenized .bin/.idx, tokenizer model, quality classifier
-#    Missing artifacts are warnings, not errors — uploads whatever exists
-#    Override bucket:  make upload-data S3_BUCKET=other-bucket
-#    Skip individual artifacts:
-#      make upload-data --skip-jsonl
-#      make upload-data --skip-bin
-#      make upload-data --skip-tokenizer
-#      make upload-data --skip-classifier
+#    Skip flags: --skip-jsonl, --skip-bin, --skip-tokenizer, --skip-classifier
 ```
 
 #### Training (GPU instance)
 
 ```bash
 # 1. First-time setup on GPU instance
-make init-dirs
-make docker-build
-
-# 2. Pull all curation artifacts from S3
-#    Reads S3_BUCKET from .env
-#    Pulls: tokenized .bin/.idx, curated JSONL, tokenizer model, quality classifier
+#    Handles: NGC login, S3 data pull, Docker build
 make setup-instance
-#    Override bucket: make setup-instance S3_BUCKET=other-bucket
-#    Skip individual artifacts:
-#      make setup-instance --skip-jsonl
-#      make setup-instance --skip-bin
-#      make setup-instance --skip-tokenizer
-#      make setup-instance --skip-classifier
 
-# 3. Prepare fine-tuning datasets
+# 2. Prepare fine-tuning datasets
 make prepare-sft-data
 make prepare-dpo-data
 
-# 4. Train
-make pretrain                                          # 125M (default)
-# make pretrain CONFIG=pretrain/configs/gpt_350m.yaml   # 350M
-# make pretrain CONFIG=pretrain/configs/gpt_1b.yaml     # 1B
-# make pretrain CONFIG=pretrain/configs/gpt_350m.yaml GPUS=4  # multi-GPU
+# 3. Pre-train (NeMo 2.x)
+make pretrain                    # 125M, 1 GPU (default)
+make pretrain SIZE=350m GPUS=4   # 350M, 4 GPUs
+make pretrain SIZE=1b GPUS=4     # 1B, tensor parallel
+
+# 4. Convert pretrain checkpoint for NeMo-Aligner
+#    NeMo 2.x saves distributed checkpoints; NeMo-Aligner requires .nemo format.
+make convert-pretrain
+
+# 5. Supervised fine-tuning (NeMo-Aligner)
 make sft
+
+# 6. DPO alignment (NeMo-Aligner)
 make dpo
 
-# 5. Evaluate and export
+# 7. Evaluate and export
 make eval-dpo
 make convert-hf
 ```
@@ -199,32 +200,15 @@ make convert-hf
 #### Interactive shells
 
 ```bash
-# CPU container — for curation and data prep
-make docker-shell-cpu
-
-# GPU container — for training
-make docker-shell-gpu
-```
-
-### Local (no Docker)
-
-```bash
-# 1. Install PyTorch first — version must match your CUDA driver
-pip install torch==2.1.2 --index-url https://download.pytorch.org/whl/cu121
-
-# 2. Install NeMo stack first (sets dependency floor)
-pip install "nemo_toolkit[core]==2.2.0" "nemo-aligner==0.7.0" "dask[distributed]==2024.4.1"
-pip install "nemo-curator==0.7.1"
-
-# 3. Install remaining dependencies
-pip install -r requirements.txt
+make docker-shell-cpu   # CPU container — curation and data prep
+make docker-shell-gpu   # GPU container — training
 ```
 
 ---
 
 ## Scaling Path
 
-The architecture scales by config change only — no code changes required:
+The architecture scales by config change only — no code modifications required:
 
 | Scale | Layers | Hidden | Heads | Tokens | GPUs |
 |---|---|---|---|---|---|
@@ -233,8 +217,8 @@ The architecture scales by config change only — no code changes required:
 | 1B | 32 | 2048 | 16 | ~20B | 4 (TP=2) |
 
 ```bash
-# Override scale and GPU count at runtime
-make pretrain GPUS=4 CONFIG=pretrain/configs/gpt_350m.yaml
+make pretrain SIZE=350m GPUS=4
+make pretrain SIZE=1b GPUS=4
 ```
 
 ---
@@ -243,72 +227,42 @@ make pretrain GPUS=4 CONFIG=pretrain/configs/gpt_350m.yaml
 
 ### Docker Image
 
-The Dockerfile builds a single image that serves both pipeline roles:
+The Dockerfile is based on `nvcr.io/nvidia/nemo:25.02` — NVIDIA's official NeMo Framework container. It ships with all LLM training dependencies pre-compiled and tested together.
 
 | Target | Command | GPU required |
 |---|---|---|
 | Data curation | `make docker-shell-cpu` | No |
 | Training / alignment | `make docker-shell-gpu` | Yes |
 
-The image is based on `pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime` (public DockerHub). No NVIDIA NGC account is needed.
+**Component versions in `nvcr.io/nvidia/nemo:25.02`:**
 
-**Validated version stack:**
-
-| Package | Version | Notes |
+| Component | Version | Notes |
 |---|---|---|
-| `nemo_toolkit` | `2.2.0` | `[core]` extra — excludes `mamba-ssm` (requires `nvcc`) |
-| `nemo-aligner` | `0.7.0` | No `nemo_toolkit[nlp]` dep — avoids `mamba-ssm` entirely |
-| `nemo-curator` | `0.7.1` | Earliest version on public PyPI (0.5.0 was NGC-only) |
-| `transformers` | `>=4.48.0,<=4.48.3` | Pinned by `nemo_toolkit 2.2.0`; curator needs `>=4.48.0` |
-| `fasttext` | `0.9.3` | `nemo-curator` pins this exactly; 0.9.2 will conflict |
-| AWS CLI | v2 binary | `awscli` v1 (pip) hard-pins `botocore` and conflicts with `boto3` |
+| `nemo-toolkit` | `2.2.1` | NeMo 2.x LLM collection |
+| `nemo-aligner` | `0.7.0` | SFT and DPO alignment |
+| `megatron-core` | `0.11.1` | Megatron Core distributed training |
+| `apex` | `0.1` | Pre-compiled NVIDIA Apex |
+| `transformer-engine` | `1.14.0` | Pre-compiled Transformer Engine |
+| `nemo-curator` | `0.7.1` | Data curation pipeline |
+| Python | `3.10` | Ubuntu 22.04 base |
 
-**Key decisions:**
+The image adds only three curation-specific packages not present in the base: `trafilatura`, `langdetect`, `datasketch`.
 
-- `nemo_toolkit[core]` not `[all]` or `[nlp]` — both pull in `mamba-ssm==2.2.2` which requires `nvcc` to compile. The `runtime` base image does not ship `nvcc`.
-- `huggingface-hub`, `transformers`, `pytorch-lightning`, `omegaconf`, `hydra-core`, `sentencepiece`, and `datasets` are not pinned directly — owned by `nemo_toolkit` and `nemo-curator`. Re-pinning causes resolution conflicts.
-- Common Crawl WARC files are downloaded via `curl` over HTTPS (`data.commoncrawl.org`) rather than `aws s3 cp`. The `--no-sign-request` flag returns 403 when instance IAM credentials are present. `curl` bypasses this entirely.
-- GPU-accelerated curator ops (`cudf`, `dask-cuda`) are excluded. They require the NVIDIA PyPI index and are not needed for the CPU curation pipeline.
+### Training Stack
 
-### Dask Dashboard
-
-The Dask dashboard is available at port `8787` during curation and training runs.
-All `docker-shell-*` and `docker-curate` targets expose this port automatically (`-p 8787:8787`).
-
-**On Lightning.ai:**
-1. Open the **Ports** tab in the sidebar
-2. Add port `8787` — Lightning will provide a public URL
-3. Open that URL while the container is running
-
-**SSH tunnel (other cloud instances):**
-```bash
-ssh -L 8787:localhost:8787 <your-instance>
-# then open http://localhost:8787
-```
-
-### Curator Config
-
-Dask worker count and memory limit are resolved automatically at runtime — `pipeline.py` reads `os.cpu_count()` and available RAM via `psutil` and configures workers accordingly. No instance-specific tuning required. To cap resource usage on a shared instance, uncomment the override lines in `curator/configs/curator.yaml`.
-
-**Two-pass curation:** `quality_filter` and `tokenization` are auto-skipped on the first run because the models they depend on don't exist yet. `pipeline.py` detects their presence at startup and logs `WILL RUN` or `WILL SKIP` for each — no manual config edits needed between passes.
+Pre-training uses the **NeMo 2.x API** (`nemo.collections.llm.GPTModel`) for its Python-native configuration and cleaner megatron-core integration. SFT and DPO use **NeMo-Aligner 0.7.0**, which requires a `.nemo` format checkpoint. A conversion step (`make convert-pretrain`) bridges the two.
 
 ```
-Pass 1: make curate-full
-  └── curation (quality_filter skipped, tokenizer trained)
-  └── make train-quality-classifier  (trains /data/models/quality_classifier.bin)
-  └── pass 2 resumes automatically   (quality_filter + tokenize now run)
-```
-
-Or run steps individually:
-```bash
-make docker-curate              # pass 1
-make train-quality-classifier   # train classifier on pass 1 output
-make docker-curate              # pass 2 — both stages now auto-detected
+make pretrain        →  NeMo 2.x distributed checkpoint
+make convert-pretrain →  mcore_gpt.nemo  (NeMo-Aligner input)
+make sft             →  megatron_gpt_sft.nemo
+make dpo             →  megatron_gpt_dpo.nemo
+make convert-hf      →  HuggingFace format
 ```
 
 ### AWS
 
-Data curation runs on CPU instances. Training runs on GPU instances. All curation artifacts are pushed to S3 from the CPU instance and pulled down on the GPU instance — the two instances never share a filesystem.
+Data curation runs on CPU instances. Training runs on GPU instances. All curation artifacts are pushed to S3 from the CPU instance and pulled down on the GPU instance.
 
 **Artifacts managed via S3:**
 
@@ -322,125 +276,40 @@ Data curation runs on CPU instances. Training runs on GPU instances. All curatio
 ```bash
 # On CPU instance — push everything to S3
 make upload-data                         # reads S3_BUCKET from .env
-make upload-data S3_BUCKET=other-bucket  # override bucket
 make upload-data --skip-bin              # skip if pass 2 not yet complete
 
 # On GPU instance — pull everything from S3
-make setup-instance                          # reads S3_BUCKET from .env
-make setup-instance S3_BUCKET=other-bucket   # override bucket
-make setup-instance --skip-jsonl             # skip JSONL if only training
+make setup-instance                      # reads S3_BUCKET and NGC_API_KEY from .env
+make setup-instance --skip-jsonl         # skip JSONL if only training
+```
+
+### Dask Dashboard
+
+Available at port `8787` during curation. All `docker-shell-*` and `docker-curate` targets expose this port automatically.
+
+**SSH tunnel:**
+```bash
+ssh -L 8787:localhost:8787 <your-instance>
+# then open http://localhost:8787
 ```
 
 ---
 
 ## Inference
 
-Load any checkpoint and interact with the model directly — pretrain, SFT, or DPO. Inference is how you verify the model is actually useful, not just that the metrics improved.
-
 ```bash
-# Interactive session — talk to the DPO-aligned model
 make inference
-
-# Compare DPO vs SFT on the same prompt
 make inference-compare PROMPT="Write a Python function to check if a number is prime."
-
-# Single prompt (non-interactive)
-docker run --gpus all --rm \
-    -v $(pwd):/workspace/slm \
-    -v /results:/results \
-    slm:latest python inference.py \
-    --checkpoint /results/slm_dpo/checkpoints/last.nemo \
-    --prompt "Explain the difference between a list and a tuple in Python."
-
-# Batch inference from a file
-docker run --gpus all --rm \
-    -v $(pwd):/workspace/slm \
-    -v /results:/results \
-    slm:latest python inference.py \
-    --checkpoint /results/slm_dpo/checkpoints/last.nemo \
-    --prompt-file prompts.txt \
-    --output /results/inference/batch_results.jsonl
-
-# Compare two checkpoints side by side
-docker run --gpus all --rm \
-    -v $(pwd):/workspace/slm \
-    -v /results:/results \
-    slm:latest python inference.py \
-    --checkpoint /results/slm_dpo/checkpoints/last.nemo \
-    --compare   /results/slm_sft_code/checkpoints/last.nemo \
-    --prompt "How do I reverse a string in Python?"
 ```
 
 **Generation parameters:**
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--temperature` | `0.7` | Lower = more deterministic, higher = more creative |
-| `--max-tokens` | `512` | Maximum new tokens to generate |
+| `--temperature` | `0.7` | Lower = more deterministic |
+| `--max-tokens` | `512` | Maximum new tokens |
 | `--top-p` | `0.9` | Nucleus sampling threshold |
-| `--no-chat-template` | off | Pass prompts raw — useful for testing pretrain checkpoint |
-
-**What to look for at each stage:**
-
-- **Pretrain checkpoint** (`--no-chat-template`): generates coherent text continuations but doesn't follow instructions or stop cleanly
-- **SFT checkpoint**: follows instructions, stops at the right place, produces fenced code blocks for coding prompts
-- **DPO checkpoint**: more helpful tone, declines safety-violating prompts gracefully, less likely to ramble
-
----
-
-## Screenshots
-
-> Captured during an actual end-to-end pipeline run. Replace placeholders with real screenshots as each stage completes.
-
-### Docker image build
-
-![Docker build](docs/screenshots/docker_build.png)
-*`make docker-build` — self-contained NeMo image, no NGC auth*
-
-### Data curation pipeline
-
-![Curation pipeline](docs/screenshots/curation_pipeline.png)
-*`make docker-curate` — per-file Dask processing across 32 workers, 671k docs extracted from 20 WARCs*
-
-### Dask dashboard
-
-![Dask dashboard](docs/screenshots/dask_dashboard.png)
-*Dask worker utilization during the extract stage — record-level parallelism across 32 workers*
-
-### Tokenizer training
-
-![Tokenizer training](docs/screenshots/tokenizer_training.png)
-*Tokenizer trains automatically at the end of `make curate-full` — 32k vocab BPE, special tokens validated*
-
-### Pre-training loss curve
-
-![Pretrain loss](docs/screenshots/pretrain_loss.png)
-*W&B training loss during GPT-125M pre-training — smooth convergence from random initialization*
-
-### SFT training
-
-![SFT training](docs/screenshots/sft_training.png)
-*`make sft` — sequential chat then code fine-tuning, lower LR on code stage to prevent forgetting*
-
-### DPO alignment
-
-![DPO training](docs/screenshots/dpo_training.png)
-*`make dpo` — policy diverging from reference as preference signal takes effect*
-
-### Evaluation results
-
-![Evaluation](docs/screenshots/eval_results.png)
-*`make eval-dpo` — perplexity, generation samples, and win rate vs SFT reference*
-
-### Interactive inference
-
-![Inference](docs/screenshots/inference.png)
-*`make inference` — interactive session with the DPO-aligned model*
-
-### Checkpoint comparison
-
-![Inference compare](docs/screenshots/inference_compare.png)
-*`make inference-compare` — DPO vs SFT response on the same coding prompt*
+| `--no-chat-template` | off | Raw prompts — useful for pretrain checkpoint |
 
 ---
 
@@ -458,8 +327,11 @@ A tokenizer trained on your specific data mix (general + code) encodes domain pa
 **Why sequential SFT (chat → code)?**
 Sequential fine-tuning lets each stage be evaluated independently and makes it easier to diagnose regressions. The code SFT uses a lower learning rate specifically to reduce catastrophic forgetting of chat capabilities.
 
-**Why a self-contained Docker image instead of the official NeMo NGC image?**
-The official `nvcr.io/nvidia/nemo` image requires an NGC account and API token, which adds friction for open development and CI pipelines. The Dockerfile here reproduces the same stack from public sources only, with all transitive dependencies resolved and locked against the public PyPI index. Resolving this required upgrading `nemo_toolkit` to `2.2.0` (where `transformers>=4.48` support was added) and `nemo-aligner` to `0.7.0` (which dropped the `nemo_toolkit[nlp]` dependency that pulled in `mamba-ssm`).
+**Why NeMo 2.x for pretraining and NeMo-Aligner for SFT/DPO?**
+NeMo 2.x provides a cleaner Python-native API for pretraining with better megatron-core integration. NeMo-Aligner 0.7.0 is the stable, production-tested path for SFT and DPO in the `nemo:25.02` container — full NeMo 2.x SFT/DPO was not yet stable in this release. A conversion step (`make convert-pretrain`) bridges the checkpoint formats between the two APIs.
+
+**Why NGC instead of a self-contained public image?**
+The NeMo training stack requires Apex and Transformer Engine, which must be compiled against a specific CUDA/PyTorch version. Building from scratch takes 20-30 minutes and is fragile across CUDA driver updates. The NGC container ships these pre-compiled and validated — significantly reducing build time and dependency hell. A free NGC account is the only requirement.
 
 ---
 
@@ -467,7 +339,7 @@ The official `nvcr.io/nvidia/nemo` image requires an NGC account and API token, 
 
 - [NVIDIA NeMo](https://github.com/NVIDIA/NeMo)
 - [NeMo Curator](https://github.com/NVIDIA/NeMo-Curator)
-- [NeMo Aligner](https://github.com/NVIDIA/NeMo-Aligner)
+- [NeMo-Aligner](https://github.com/NVIDIA/NeMo-Aligner)
 - [Chinchilla Scaling Laws](https://arxiv.org/abs/2203.15556) — Hoffmann et al., 2022
 - [DPO](https://arxiv.org/abs/2305.18290) — Rafailov et al., 2023
 

@@ -86,7 +86,7 @@ sudo apt-get install -y -qq \
     unzip \
     htop \
     tmux \
-    nvtop 2>/dev/null || true   # nvtop may not be available everywhere
+    nvtop 2>/dev/null || true
 
 # ── AWS CLI v2 ────────────────────────────────────────────────────────────────
 if ! command -v aws &>/dev/null || [[ $(aws --version 2>&1) == *"aws-cli/1"* ]]; then
@@ -104,6 +104,21 @@ if ! command -v docker &>/dev/null; then
     curl -fsSL https://get.docker.com | sh
     sudo usermod -aG docker "$(whoami)"
     log "Docker installed. You may need to log out and back in for group changes."
+fi
+
+# ── NGC Login ─────────────────────────────────────────────────────────────────
+# Required to pull nvcr.io/nvidia/nemo:25.02 base image.
+# NGC_API_KEY must be set in .env or as an environment variable.
+if [[ -n "${NGC_API_KEY:-}" ]]; then
+    log "Logging into NGC container registry..."
+    echo "$NGC_API_KEY" | docker login nvcr.io \
+        --username '$oauthtoken' \
+        --password-stdin
+    log "NGC login successful"
+else
+    log "WARNING: NGC_API_KEY not set — skipping NGC login"
+    log "  Add NGC_API_KEY=your-key to .env before running make docker-build"
+    log "  Without this, docker build will fail pulling nvcr.io/nvidia/nemo:25.02"
 fi
 
 # ── Pull dataset from S3 ──────────────────────────────────────────────────────

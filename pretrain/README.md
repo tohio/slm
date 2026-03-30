@@ -15,98 +15,100 @@ The baseline model targets ~125M parameters — small enough to complete a full 
 | Tokens (Chinchilla) | ~2.5B | ~7B | ~20B |
 | Parallelism | data only | data only | TP=2, DP=2 |
 
-Scaling to 350M or 1B requires only a config change — no code modifications.
+Scaling to 350M or 1B requires only the `SIZE` flag — no code or config changes.
 
 ```bash
-make pretrain CONFIG=pretrain/configs/gpt_350m.yaml GPUS=4
+make pretrain SIZE=350m GPUS=4
+make pretrain SIZE=1b   GPUS=4
+```
+
+## Framework
+
+Pre-training uses the **NeMo 2.x API** (`nemo.collections.llm.GPTModel`) running inside `nvcr.io/nvidia/nemo:25.02`. Configuration is Python-native — no YAML/Hydra required. All hyperparameters are passed as CLI arguments by `pretrain/scripts/train.sh`.
+
+After pretraining, a conversion step produces `mcore_gpt.nemo` — the format required by NeMo-Aligner for SFT and DPO:
+
+```
+make pretrain         →  NeMo 2.x distributed checkpoint (/results/slm_gpt_125m/)
+make convert-pretrain →  /results/slm_gpt_125m/mcore_gpt.nemo
+make sft              →  loads mcore_gpt.nemo via NeMo-Aligner
 ```
 
 ## Design Decisions
 
 **Why from scratch instead of continued pre-training?**
-Starting from an existing checkpoint (LLaMA, Mistral) is the right production choice — it's faster and cheaper. We start from scratch here deliberately: it exercises every stage of the pipeline, exposes how data quality and tokenizer design interact with training dynamics, and makes the pre-training stage non-trivial to showcase. Switching to continued pre-training later is a one-line config change.
+Starting from an existing checkpoint (LLaMA, Mistral) is the right production choice — it's faster and cheaper. We start from scratch deliberately: it exercises every stage of the pipeline, exposes how data quality and tokenizer design interact with training dynamics, and makes the pre-training stage non-trivial to showcase.
 
 **Why BF16 over FP16?**
-BF16 has the same range as FP32 (8 exponent bits) with reduced precision (7 mantissa bits). FP16's smaller range (5 exponent bits) requires loss scaling to prevent gradient underflow — BF16 doesn't. On A100/A6000, BF16 is natively supported with the same throughput as FP16. Simpler training loop, no loss scaling to tune.
+BF16 has the same range as FP32 (8 exponent bits) with reduced precision (7 mantissa bits). FP16's smaller range (5 exponent bits) requires loss scaling to prevent gradient underflow — BF16 doesn't. On A100/H100, BF16 is natively supported. Simpler training loop, no loss scaling to tune.
 
 **Gradient checkpointing**
-Enabled by default (`activations_checkpoint_method: uniform`). Trades compute for memory — recomputes activations during the backward pass rather than storing them. At 125M on a single A6000 this isn't strictly necessary, but it's good practice and required when scaling to 1B.
+Enabled by default. Trades compute for memory — recomputes activations during the backward pass rather than storing them. At 125M on a single H100 this isn't strictly necessary, but it's good practice and required when scaling to 1B.
 
 **Data blend: 70% general, 30% code**
-The model needs strong general language understanding to be useful for chat — code-heavy pre-training produces models that are technically capable but poor at natural conversation. The 70/30 split is a starting point; adjust based on what your SFT data looks like.
+The model needs strong general language understanding to be useful for chat. The 70/30 split is a starting point; adjust based on what your SFT data looks like.
 
 ## Training Dynamics
 
-Key metrics to watch during pre-training:
+Key metrics to watch:
 
-- **Training loss** should decrease smoothly. Spikes followed by recovery are normal. A spike that doesn't recover suggests a bad batch or a learning rate issue.
-- **Validation loss** should track training loss. A widening gap indicates overfitting (unlikely at this data scale, but worth watching).
-- **Gradient norm** should stay below `gradient_clip_val=1.0`. Sustained high norms suggest the LR is too high.
-- **Throughput (tokens/sec)** should be stable. Sudden drops often indicate GPU memory pressure or NCCL communication issues on multi-GPU.
+- **Training loss** should decrease smoothly. Spikes followed by recovery are normal.
+- **Validation loss** should track training loss. A widening gap indicates overfitting.
+- **Gradient norm** should stay below `gradient_clip_val=1.0`.
+- **Throughput (tokens/sec)** should be stable.
 
-Expected validation perplexity at convergence: **80–150** for 125M trained on ~2.5B tokens. This is the baseline; SFT and DPO don't optimize perplexity directly so it may increase slightly in later stages.
+Expected validation perplexity at convergence: **80–150** for 125M trained on ~2.5B tokens.
 
 ## Prerequisites
-
-Before running pre-training, ensure the following are in place on the GPU instance:
 
 ```bash
 # 1. Host directories and data
 make init-dirs
 make setup-instance S3_BUCKET=my-bucket   # pulls tokenized data + tokenizer from S3
 
-# 2. Verify dataset is present
+# 2. Verify dataset
 ls /data/curated/tokenized/               # should show text_document.bin + text_document.idx
 
-# 3. Build the Docker image if not already built
+# 3. Build the Docker image (NGC auth handled by setup_gpu_instance.sh)
 make docker-build
 ```
 
 ## Usage
 
-All training commands run inside the Docker container via `make docker-shell-gpu`.
-
 ```bash
-# Start GPU container
-make docker-shell-gpu
-
-# Inside the container:
-
 # Single GPU, 125M (default)
 make pretrain
 
 # Multi-GPU, 350M
-make pretrain CONFIG=pretrain/configs/gpt_350m.yaml GPUS=4
+make pretrain SIZE=350m GPUS=4
 
 # Multi-GPU, 1B (TP=2 required)
-make pretrain CONFIG=pretrain/configs/gpt_1b.yaml GPUS=4
-
-# Resume from latest checkpoint (auto-detected)
-bash pretrain/scripts/train.sh --config pretrain/configs/gpt_125m.yaml
+make pretrain SIZE=1b GPUS=4
 
 # Enable W&B logging
-bash pretrain/scripts/train.sh --config pretrain/configs/gpt_125m.yaml --wandb
+docker run --gpus all --rm ... bash pretrain/scripts/train.sh --size 125m --wandb
 
-# Evaluate after training
+# Resume from latest checkpoint
+docker run --gpus all --rm ... bash pretrain/scripts/train.sh --size 125m --resume
+
+# Convert checkpoint for NeMo-Aligner (required before make sft)
+make convert-pretrain
+
+# Evaluate
 make eval-pretrain
 
-# Export to HuggingFace format for external evaluation or serving
-bash pretrain/scripts/convert_ckpt.sh \
-    --direction nemo_to_hf \
-    --input /results/slm_gpt_125m/checkpoints/last.nemo \
-    --output /results/slm_gpt_125m_hf/
+# Export to HuggingFace
+make convert-hf
 ```
 
 ## Infrastructure
 
-Pre-training is the most GPU-intensive stage. For 125M on ~2.5B tokens:
+For 125M on ~2.5B tokens:
 
 | GPU | Est. Time | Est. Cost |
 |---|---|---|
-| 1x A6000 48GB | ~20–30hrs | ~$20–28 |
+| 1x H100 80GB | ~8–12hrs | ~$25–36 |
 | 1x A100 40GB | ~12–18hrs | ~$18–27 |
-| 4x A6000 48GB | ~6–8hrs | ~$22–30 |
+| 4x A100 40GB | ~4–6hrs | ~$24–36 |
 
-Checkpoints are saved to `/results/slm_gpt_125m/checkpoints/` every 1,000 steps and synced to `/results` which is bind-mounted from the host. If the container is stopped, training resumes automatically from the latest checkpoint on the next run.
-
-Training logs are written to `/results/pretrain_logs/` inside the container, which persists to the host via the bind mount.
+Checkpoints are saved to `/results/slm_gpt_125m/` every 1,000 steps and bind-mounted to the host. Training resumes automatically from the latest checkpoint on the next run.

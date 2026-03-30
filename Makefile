@@ -8,14 +8,14 @@
 #   make docker-shell-cpu          Interactive CPU container (data curation)
 #   make docker-shell-gpu          Interactive GPU container (training)
 #   make all
-#   make pretrain GPUS=4 CONFIG=pretrain/configs/gpt_350m.yaml
+#   make pretrain SIZE=350m GPUS=4
 # ─────────────────────────────────────────────────────────────────────────────
 
 -include .env
 export
 
+SIZE          ?= 125m
 GPUS          ?= $(shell python3 -c "import torch; print(torch.cuda.device_count())" 2>/dev/null || echo 1)
-CONFIG        ?= pretrain/configs/gpt_125m.yaml
 S3_BUCKET     ?=
 S3_PREFIX     ?= slm/data
 N_WARC_FILES  ?= 20
@@ -25,10 +25,10 @@ LOGS_DIR      ?= /logs
 PYTHON        ?= python3
 DOCKER_IMAGE  ?= slm:latest
 
-PRETRAIN_CKPT = $(shell find $(RESULTS_DIR)/slm_gpt_125m/checkpoints -name "*.nemo" 2>/dev/null | sort | tail -1)
-SFT_CHAT_CKPT = $(shell find $(RESULTS_DIR)/slm_sft_chat/checkpoints -name "*.nemo" 2>/dev/null | sort | tail -1)
-SFT_CODE_CKPT = $(shell find $(RESULTS_DIR)/slm_sft_code/checkpoints -name "*.nemo" 2>/dev/null | sort | tail -1)
-DPO_CKPT      = $(shell find $(RESULTS_DIR)/slm_dpo/checkpoints      -name "*.nemo" 2>/dev/null | sort | tail -1)
+PRETRAIN_NEMO = $(shell find $(RESULTS_DIR)/slm_gpt_125m -name "mcore_gpt.nemo" 2>/dev/null | sort | tail -1)
+SFT_CHAT_CKPT = $(shell find $(RESULTS_DIR)/slm_sft_chat -name "*.nemo" 2>/dev/null | sort | tail -1)
+SFT_CODE_CKPT = $(shell find $(RESULTS_DIR)/slm_sft_code -name "*.nemo" 2>/dev/null | sort | tail -1)
+DPO_CKPT      = $(shell find $(RESULTS_DIR)/slm_dpo      -name "*.nemo" 2>/dev/null | sort | tail -1)
 
 .DEFAULT_GOAL := help
 .PHONY: help all setup setup-instance init-dirs \
@@ -37,10 +37,10 @@ DPO_CKPT      = $(shell find $(RESULTS_DIR)/slm_dpo/checkpoints      -name "*.ne
         curate curate-resume tokenizer tokenize upload-data \
         train-quality-classifier curate-full \
         prepare-sft-data prepare-dpo-data \
-        pretrain sft dpo \
+        pretrain convert-pretrain sft dpo \
         eval-pretrain eval-sft eval-dpo \
         convert-hf clean clean-all \
-        _check-pretrain-ckpt _check-sft-ckpt _check-dpo-ckpt \
+        _check-pretrain-nemo _check-sft-ckpt _check-dpo-ckpt \
         _check-s3-bucket _check-data-dirs
 
 help:
@@ -50,17 +50,17 @@ help:
 	@echo ""
 	@echo "  FIRST TIME SETUP"
 	@echo "    make init-dirs              Create host directories (/data, /results, /logs)"
-	@echo "    make docker-build           Build NeMo Docker image"
+	@echo "    make docker-build           Build NeMo Docker image (requires NGC_API_KEY in .env)"
 	@echo "    make download-models        Download fasttext models (lid.176.bin)"
 	@echo ""
-	@echo "  DOCKER  (recommended)"
+	@echo "  DOCKER"
 	@echo "    make docker-shell-cpu       Start interactive CPU container (data curation)"
 	@echo "    make docker-shell-gpu       Start interactive GPU container (training)"
 	@echo "    make docker-curate          Run full data curation in container"
 	@echo ""
 	@echo "  SETUP"
 	@echo "    make setup                  Install dependencies (local only)"
-	@echo "    make setup-instance         GPU instance first-time setup"
+	@echo "    make setup-instance         GPU instance first-time setup (NGC login + S3 pull)"
 	@echo ""
 	@echo "  DATA  (run in container or directly)"
 	@echo "    make download-data          Download Common Crawl WARCs"
@@ -74,9 +74,10 @@ help:
 	@echo "  TRAINING  (all run in Docker)"
 	@echo "    make prepare-sft-data       Download & format SFT datasets"
 	@echo "    make prepare-dpo-data       Download & format DPO preference data"
-	@echo "    make pretrain               Pre-train from scratch"
-	@echo "    make sft                    Supervised fine-tuning (chat → code)"
-	@echo "    make dpo                    DPO alignment"
+	@echo "    make pretrain               Pre-train GPT from scratch (NeMo 2.x)"
+	@echo "    make convert-pretrain       Convert NeMo 2.x ckpt → mcore_gpt.nemo"
+	@echo "    make sft                    Supervised fine-tuning (NeMo-Aligner)"
+	@echo "    make dpo                    DPO alignment (NeMo-Aligner)"
 	@echo "    make all                    Full pipeline end to end"
 	@echo ""
 	@echo "  EVALUATION"
@@ -88,15 +89,16 @@ help:
 	@echo "    make convert-hf             Export final model to HuggingFace format"
 	@echo ""
 	@echo "  OVERRIDES"
-	@echo "    make pretrain GPUS=4 CONFIG=pretrain/configs/gpt_350m.yaml"
+	@echo "    make pretrain SIZE=350m GPUS=4"
+	@echo "    make pretrain SIZE=1b GPUS=4"
 	@echo "    make curate N_WARC_FILES=50"
-	@echo "    make upload-data                  # reads S3_BUCKET from .env"
-	@echo "    make train-quality-classifier   Train fastText quality classifier"
-	@echo "    make curate-full                Full two-pass curation (automated)"
-	@echo "    make docker-build DOCKER_IMAGE=slm:latest"
+	@echo "    make upload-data S3_BUCKET=other-bucket"
+	@echo "    make train-quality-classifier"
+	@echo "    make curate-full"
 	@echo ""
 
-all: curate tokenizer tokenize upload-data prepare-sft-data prepare-dpo-data pretrain sft dpo eval-dpo
+all: curate tokenizer tokenize upload-data prepare-sft-data prepare-dpo-data \
+     pretrain convert-pretrain sft dpo eval-dpo
 	@echo "✓ Full pipeline complete. Final model: $(DPO_CKPT)"
 
 # ── First-time host setup ─────────────────────────────────────────────────────
@@ -122,6 +124,7 @@ setup-instance: _check-s3-bucket
 # ── Docker ────────────────────────────────────────────────────────────────────
 docker-build:
 	@echo "Building NeMo Docker image: $(DOCKER_IMAGE)"
+	@echo "NOTE: Requires NGC_API_KEY in .env (handled by setup_gpu_instance.sh)"
 	docker build -t $(DOCKER_IMAGE) .
 	@echo "✓ Docker image built: $(DOCKER_IMAGE)"
 
@@ -166,10 +169,6 @@ train-quality-classifier:
 		--n-samples 50000
 
 # ── Full two-pass curation ────────────────────────────────────────────────────
-# Runs both passes end-to-end without manual intervention.
-# Each step is checkpointed — re-running skips already completed steps.
-# Pass 1: extract → filter → dedup → pii + tokenizer training
-# Pass 2: quality_filter + tokenize (auto-detected by pipeline.py)
 curate-full:
 	@echo "=== curate-full: two-pass curation pipeline ==="
 	@if [ -f $(DATA_DIR)/curated/stages/pii/.complete ]; then \
@@ -211,9 +210,6 @@ download-models: _check-data-dirs
 		-O $(DATA_DIR)/models/lid.176.bin \
 		https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.bin
 	@echo "✓ $(DATA_DIR)/models/lid.176.bin"
-	@echo ""
-	@echo "NOTE: quality_classifier.bin must be trained after first curation pass."
-	@echo "      Run: make train-quality-classifier"
 
 curate: _check-data-dirs
 	$(PYTHON) curator/pipelines/pipeline.py \
@@ -263,8 +259,9 @@ prepare-dpo-data:
 		--output-dir $(DATA_DIR)/dpo
 
 # ── Training — all run inside Docker ─────────────────────────────────────────
+# Step 1: Pre-train with NeMo 2.x
 pretrain:
-	@echo "Launching pre-training in Docker..."
+	@echo "Launching pre-training in Docker (NeMo 2.x)..."
 	docker run --gpus all --rm \
 		--shm-size=8g \
 		-v $$(pwd):/workspace/slm \
@@ -273,11 +270,24 @@ pretrain:
 		-v $(LOGS_DIR):$(LOGS_DIR) \
 		$(DOCKER_IMAGE) bash -c "cd /workspace/slm && \
 			bash pretrain/scripts/train.sh \
-				--config $(CONFIG) \
+				--size $(SIZE) \
 				--gpus $(GPUS)"
 
-sft: _check-pretrain-ckpt
-	@echo "Launching SFT in Docker..."
+# Step 2: Convert NeMo 2.x distributed ckpt → mcore_gpt.nemo for NeMo-Aligner
+convert-pretrain:
+	@echo "Converting pretrain checkpoint → mcore_gpt.nemo in Docker..."
+	docker run --gpus all --rm \
+		--shm-size=8g \
+		-v $$(pwd):/workspace/slm \
+		-v $(RESULTS_DIR):$(RESULTS_DIR) \
+		$(DOCKER_IMAGE) bash -c "cd /workspace/slm && \
+			bash pretrain/scripts/convert_pretrain.sh \
+				--input $(RESULTS_DIR)/slm_gpt_125m \
+				--output $(RESULTS_DIR)/slm_gpt_125m/mcore_gpt.nemo"
+
+# Step 3: SFT with NeMo-Aligner
+sft: _check-pretrain-nemo
+	@echo "Launching SFT in Docker (NeMo-Aligner)..."
 	docker run --gpus all --rm \
 		--shm-size=8g \
 		-v $$(pwd):/workspace/slm \
@@ -287,10 +297,11 @@ sft: _check-pretrain-ckpt
 		$(DOCKER_IMAGE) bash -c "cd /workspace/slm && \
 			bash finetune/scripts/train_sft.sh \
 				--gpus $(GPUS) \
-				--pretrain-ckpt $(PRETRAIN_CKPT)"
+				--pretrain-ckpt $(PRETRAIN_NEMO)"
 
+# Step 4: DPO with NeMo-Aligner
 dpo: _check-sft-ckpt
-	@echo "Launching DPO in Docker..."
+	@echo "Launching DPO in Docker (NeMo-Aligner)..."
 	docker run --gpus all --rm \
 		--shm-size=8g \
 		-v $$(pwd):/workspace/slm \
@@ -303,10 +314,9 @@ dpo: _check-sft-ckpt
 				--sft-ckpt $(SFT_CODE_CKPT)"
 
 # ── Evaluation ────────────────────────────────────────────────────────────────
-eval-pretrain: _check-pretrain-ckpt
+eval-pretrain:
 	$(PYTHON) eval/run_eval.py \
 		--stage pretrain \
-		--checkpoint $(PRETRAIN_CKPT) \
 		--val-data $(DATA_DIR)/pretrain
 
 eval-sft: _check-sft-ckpt
@@ -354,9 +364,9 @@ convert-hf: _check-dpo-ckpt
 		--output $(RESULTS_DIR)/slm_final_hf
 
 # ── Guards ────────────────────────────────────────────────────────────────────
-_check-pretrain-ckpt:
-	@if [ -z "$(PRETRAIN_CKPT)" ]; then \
-		echo "ERROR: No pretrain checkpoint found. Run: make pretrain"; exit 1; fi
+_check-pretrain-nemo:
+	@if [ -z "$(PRETRAIN_NEMO)" ]; then \
+		echo "ERROR: mcore_gpt.nemo not found. Run: make convert-pretrain"; exit 1; fi
 
 _check-sft-ckpt:
 	@if [ -z "$(SFT_CODE_CKPT)" ]; then \
