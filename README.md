@@ -64,7 +64,7 @@ slm/
 │   │   └── tokenize_data.py          SentencePiece → NeMo mmap format
 │   ├── scripts/
 │   │   ├── download_cc.sh            Download Common Crawl WARCs
-│   │   └── upload_s3.sh              Upload curated data to S3
+│   │   └── upload_s3.sh              Upload all curation artifacts to S3
 │   └── README.md
 ├── tokenizer/                        Custom BPE tokenizer training
 │   ├── configs/
@@ -144,11 +144,21 @@ make curate-full
 #    Then:   trains quality classifier on pass 1 output
 #    Pass 2: quality_filter → tokenize (mmap .bin/.idx files)
 #    quality_filter and tokenize auto-detected by pipeline.py
+#
+#    Checkpointed — each step writes a .complete marker on success.
+#    Re-running skips already completed steps automatically.
+#    If a step fails, fix the error and re-run — it resumes from where it left off.
 
-# 6. Upload curated dataset to S3
+# 6. Upload all curation artifacts to S3
 make upload-data                    # reads S3_BUCKET from .env
-#    Auto-detects pass 1 vs pass 2 and uploads the right files
-#    Override bucket: make upload-data S3_BUCKET=other-bucket
+#    Uploads: curated JSONL, tokenized .bin/.idx, tokenizer model, quality classifier
+#    Missing artifacts are warnings, not errors — uploads whatever exists
+#    Override bucket:  make upload-data S3_BUCKET=other-bucket
+#    Skip individual artifacts:
+#      make upload-data --skip-jsonl
+#      make upload-data --skip-bin
+#      make upload-data --skip-tokenizer
+#      make upload-data --skip-classifier
 ```
 
 #### Training (GPU instance)
@@ -158,9 +168,16 @@ make upload-data                    # reads S3_BUCKET from .env
 make init-dirs
 make docker-build
 
-# 2. Pull curated data from S3
-#    Reads S3_BUCKET from .env — override with: make setup-instance S3_BUCKET=other-bucket
+# 2. Pull all curation artifacts from S3
+#    Reads S3_BUCKET from .env
+#    Pulls: tokenized .bin/.idx, curated JSONL, tokenizer model, quality classifier
 make setup-instance
+#    Override bucket: make setup-instance S3_BUCKET=other-bucket
+#    Skip individual artifacts:
+#      make setup-instance --skip-jsonl
+#      make setup-instance --skip-bin
+#      make setup-instance --skip-tokenizer
+#      make setup-instance --skip-classifier
 
 # 3. Prepare fine-tuning datasets
 make prepare-sft-data
@@ -291,12 +308,27 @@ make docker-curate              # pass 2 — both stages now auto-detected
 
 ### AWS
 
-Data curation runs on CPU instances. Training runs on GPU instances. The `upload-data` and `setup-instance` targets handle the handoff via S3.
+Data curation runs on CPU instances. Training runs on GPU instances. All curation artifacts are pushed to S3 from the CPU instance and pulled down on the GPU instance — the two instances never share a filesystem.
+
+**Artifacts managed via S3:**
+
+| Artifact | S3 path | Needed for |
+|---|---|---|
+| Curated JSONL | `curated/pii/*.jsonl` | Tokenizer training, pass 2 |
+| Tokenized mmap | `curated/tokenized/*.bin, *.idx` | Pre-training |
+| Tokenizer model | `tokenizer/` | SFT, DPO, inference |
+| Quality classifier | `models/quality_classifier.bin` | Pass 2 quality filter |
 
 ```bash
-make upload-data     # reads S3_BUCKET from .env
-make setup-instance  # reads S3_BUCKET from .env
-#    Override bucket: make upload-data S3_BUCKET=other-bucket
+# On CPU instance — push everything to S3
+make upload-data                         # reads S3_BUCKET from .env
+make upload-data S3_BUCKET=other-bucket  # override bucket
+make upload-data --skip-bin              # skip if pass 2 not yet complete
+
+# On GPU instance — pull everything from S3
+make setup-instance                          # reads S3_BUCKET from .env
+make setup-instance S3_BUCKET=other-bucket   # override bucket
+make setup-instance --skip-jsonl             # skip JSONL if only training
 ```
 
 ---
