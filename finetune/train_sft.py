@@ -49,8 +49,8 @@ def main(cfg: DictConfig) -> None:
         restore_path=cfg.model.restore_from_path,
         trainer=trainer,
         override_config_path=cfg.model,
-        strict=True,
-    )
+        strict=False,                    
+)
 
     param_count = sum(p.numel() for p in model.parameters()) / 1e6
     logging.info(f"Model parameters:  {param_count:.1f}M")

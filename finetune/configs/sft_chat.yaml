@@ -7,7 +7,7 @@ trainer:
   precision: bf16
   logger: false
   enable_checkpointing: false
-  # NeMo-Aligner reads training params from trainer.sft, not top-level trainer
+  # NeMo-Aligner reads training params from trainer.sft
   sft:
     max_steps: -1
     max_epochs: 3
@@ -36,22 +36,88 @@ exp_manager:
     save_nemo_on_train_end: true
 
 model:
-  # Pre-trained checkpoint to fine-tune from
-  # Must be a mcore_gpt.nemo file produced by make convert-pretrain
+  # ── Checkpoint ────────────────────────────────────────────────────────────
   restore_from_path: /results/slm_gpt_125m/mcore_gpt.nemo
+
+  # ── Required by NeMo-Aligner ──────────────────────────────────────────────
+  mcore_gpt: true
+  megatron_amp_O2: true
+  gradient_as_bucket_view: true
+
+  # ── Parallelism ───────────────────────────────────────────────────────────
   tensor_model_parallel_size: 1
   pipeline_model_parallel_size: 1
-  megatron_amp_O2: true
-  encoder_seq_length: 2048
+  virtual_pipeline_model_parallel_size: null
+  sequence_parallel: false
 
-  # Only compute loss on assistant responses — not the human prompt tokens.
+  # ── Architecture — must match pretrain checkpoint ─────────────────────────
+  num_layers: 12
+  hidden_size: 768
+  ffn_hidden_size: 3072
+  num_attention_heads: 12
+  seq_length: 2048
+  max_position_embeddings: 2048
+  encoder_seq_length: 2048
+  kv_channels: null
+  num_query_groups: null
+
+  # ── Regularization ────────────────────────────────────────────────────────
+  hidden_dropout: 0.1
+  attention_dropout: 0.1
+  ffn_dropout: 0.0
+
+  # ── Normalization ─────────────────────────────────────────────────────────
+  normalization: layernorm
+  layernorm_epsilon: 1.0e-05
+
+  # ── Initialization ────────────────────────────────────────────────────────
+  init_method_std: 0.02
+  use_scaled_init_method: true
+
+  # ── Attention ─────────────────────────────────────────────────────────────
+  apply_query_key_layer_scaling: false
+  attention_softmax_in_fp32: false
+
+  # ── Embeddings ────────────────────────────────────────────────────────────
+  position_embedding_type: learned_absolute
+  share_embeddings_and_output_weights: false
+  make_vocab_size_divisible_by: 128
+
+  # ── Fusions ───────────────────────────────────────────────────────────────
+  bias: true
+  bias_gelu_fusion: true
+  masked_softmax_fusion: true
+  bias_dropout_add_fusion: false
+
+  # ── Activation ────────────────────────────────────────────────────────────
+  activation: gelu
+
+  # ── Precision ─────────────────────────────────────────────────────────────
+  native_amp_init_scale: 4294967296
+  native_amp_growth_interval: 1000
+  fp16_lm_cross_entropy: false
+
+  # ── Memory ────────────────────────────────────────────────────────────────
+  activations_checkpoint_method: uniform
+  activations_checkpoint_num_layers: 1
+  activations_checkpoint_granularity: full
+
+  # ── SFT specific ──────────────────────────────────────────────────────────
   answer_only_loss: true
   sample_weight: constant
+
+  # ── Tokenizer ─────────────────────────────────────────────────────────────
+  tokenizer:
+    library: sentencepiece
+    model: /data/tokenizer/slm_tokenizer.model
+    type: null
+    vocab_file: null
+    merge_file: null
 
   # ── Data ──────────────────────────────────────────────────────────────────
   data:
     chat: true
-    num_workers: 0                # 0 avoids MPI/multiprocessing issues in NeMo-Aligner
+    num_workers: 0
     train_ds:
       file_path: /data/sft/chat/train.jsonl
       max_seq_length: 2048
@@ -69,7 +135,7 @@ model:
 
   # ── Optimizer ─────────────────────────────────────────────────────────────
   optim:
-    name: distributed_fused_adam   # NeMo-Aligner recommended optimizer
+    name: distributed_fused_adam
     lr: 1.0e-5
     weight_decay: 0.01
     betas: [0.9, 0.98]
@@ -78,8 +144,3 @@ model:
       warmup_steps: 100
       constant_steps: 0
       min_lr: 1.0e-6
-
-  # ── Memory ────────────────────────────────────────────────────────────────
-  activations_checkpoint_method: uniform
-  activations_checkpoint_num_layers: 1
-  activations_checkpoint_granularity: full
