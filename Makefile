@@ -189,10 +189,10 @@ curate-full:
 		echo "[RUN] train-quality-classifier..."; \
 		$(MAKE) train-quality-classifier; \
 	fi
-	@if [ -f $(DATA_DIR)/curated/stages/tokenize/.complete ]; then \
-		echo "[SKIP] pass 2 — already complete"; \
+	@if [ -f $(DATA_DIR)/curated/tokenized/text_document.bin ]; then \
+		echo "[SKIP] tokenize — already complete"; \
 	else \
-		echo "[RUN] pass 2 — quality_filter + tokenize..."; \
+		echo "[RUN] tokenize..."; \
 		$(MAKE) tokenize; \
 	fi
 	@echo "✓ curate-full complete"
@@ -234,17 +234,29 @@ tokenizer: _check-data-dirs
 				--input-dir $(DATA_DIR)/curated/stages/pii \
 				--output-dir $(DATA_DIR)/tokenizer"
 
-# Convert curated JSONL → NeMo mmap .bin/.idx — runs inside Docker
+# Convert curated JSONL → megatron-compatible mmap .bin/.idx — runs inside Docker
+# Uses NeMo's official preprocess_data_for_megatron.py for format compatibility.
+# Workers are resolved dynamically from available CPUs at runtime.
 tokenize: _check-data-dirs
 	@echo "Tokenizing JSONL → mmap (.bin/.idx) in Docker..."
 	docker run --rm \
 		--shm-size=8g \
 		-v $$(pwd):/workspace/slm \
 		-v $(DATA_DIR):$(DATA_DIR) \
-		$(DOCKER_IMAGE) bash -c "cd /workspace/slm && \
-			python3 curator/pipelines/pipeline.py \
-				--config curator/configs/curator.yaml \
-				--start-stage tokenize"
+		$(DOCKER_IMAGE) bash -c " \
+			python3 /opt/NeMo/scripts/nlp_language_modeling/preprocess_data_for_megatron.py \
+				--input $(DATA_DIR)/curated/stages/pii \
+				--preproc-folder \
+				--tokenizer-library sentencepiece \
+				--tokenizer-model $(DATA_DIR)/tokenizer/slm_tokenizer.model \
+				--output-prefix $(DATA_DIR)/curated/tokenized/text_document \
+				--dataset-impl mmap \
+				--append-eod \
+				--workers \$$(nproc) && \
+			mv $(DATA_DIR)/curated/tokenized/text_document_pii.bin \
+			   $(DATA_DIR)/curated/tokenized/text_document.bin && \
+			mv $(DATA_DIR)/curated/tokenized/text_document_pii.idx \
+			   $(DATA_DIR)/curated/tokenized/text_document.idx"
 
 upload-data: _check-s3-bucket
 	bash curator/scripts/upload_s3.sh \
