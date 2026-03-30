@@ -111,7 +111,6 @@ def main():
         attention_dropout=0.1,
         layernorm_epsilon=1e-5,
         make_vocab_size_divisible_by=128,
-        apply_query_key_layer_scaling=True,
         bias_activation_fusion=True,
         bias_dropout_fusion=True,
         masked_softmax_fusion=True,
