@@ -127,9 +127,12 @@ slm/
 │   ├── architecture.svg          Pipeline architecture diagram
 │   └── screenshots/              Pipeline stage screenshots
 │
-├── infra/                        GPU instance bootstrap
+├── infra/
+│   └── setup_gpu_instance.sh     GPU instance bootstrap — install deps, pull data from S3
+│
 ├── Makefile                      Full pipeline automation
 ├── requirements.txt              Python dependencies
+├── environment.yml               Conda environment
 └── .env.sample                   Environment variable template
 ```
 
