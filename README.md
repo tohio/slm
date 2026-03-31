@@ -1,224 +1,207 @@
-# SLM — Small Language Model Pipeline
+# slm
 
-A production-minded, end-to-end pipeline for training a small language model from scratch using NVIDIA NeMo. Covers the full lifecycle: large-scale data curation, pre-training, supervised fine-tuning, and alignment via DPO — with infrastructure designed for cost efficiency on cloud GPU instances.
-
-> Built to demonstrate practical expertise across data engineering, distributed training, and LLM alignment — not just theory.
+A decoder-only language model trained from scratch — raw web data through to an aligned, serving-ready model. Covers the full lifecycle: data curation, validation, tokenizer training, pretraining, supervised fine-tuning, preference alignment, evaluation, and production serving.
 
 ---
 
 ## Overview
 
-Most LLM projects start from a pretrained checkpoint. This one doesn't. SLM is built from raw, imperfect web data through to an aligned, instruction-following model capable of general conversation and code generation.
+Most LLM projects start from a pretrained checkpoint. This one doesn't. SLM is built entirely from scratch — from unstructured web crawl data to an instruction-following, chat-capable model deployed on Kubernetes.
 
-The pipeline is modular — each stage is independently runnable, reproducible, and documented with the design decisions that shaped it.
+The pipeline is modular and independently runnable at each stage. Every design decision is documented and justified.
 
-**Model:** GPT-style decoder-only transformer, ~125M parameters (scalable to 350M and 1B)
-**Domain:** General chat → coding (sequential fine-tuning)
-**Alignment:** Direct Preference Optimization (DPO)
-**Framework:** NVIDIA NeMo 1.x + NeMo-Aligner 0.7.0 + NeMo Curator 0.7.1
-**Infrastructure:** Cloud CPU instances (data) + Cloud GPU instances (training)
-**Container:** `nvcr.io/nvidia/nemo:25.02` (requires NGC account)
+**Models:** `tohio/slm-125m` · `tohio/slm-350m` · `tohio/slm-1b`
 
 ---
 
-## Pipeline Architecture
+## Architecture
 
-```
-Common Crawl WARCs
-      │
-      ▼
- NeMo Curator          data curation (CPU instance)
-      │
-      ▼
- Custom Tokenizer      BPE, 32k vocab, sentencepiece
-      │
-      ▼
- Pre-Training          NeMo 1.x megatron_gpt_pretraining.py → .nemo
-      │
-      ▼
- SFT (chat → code)    NeMo-Aligner GPTSFTModel
-      │
-      ▼
- DPO Alignment         NeMo-Aligner GPTDPOModel
-      │
-      ▼
- HuggingFace Export    for inference and evaluation
-```
+The model is a dense decoder-only transformer with a modern architecture:
+
+| Component | Choice | Rationale |
+|---|---|---|
+| Positional encoding | RoPE | Better length generalisation, relative position awareness |
+| Normalization | RMSNorm | Faster than LayerNorm, modern standard |
+| Activation | SwiGLU | Better gradient flow, used by LLaMA, Mistral, Qwen |
+| Attention | GQA | Reduces KV memory overhead at inference |
+| Bias | None | Simpler, modern standard |
+| Embeddings | Tied | Reduces parameters, effective at small scale |
+
+**Model sizes:**
+
+| Model | Layers | Hidden | Q heads | KV heads | Context |
+|---|---|---|---|---|---|
+| `slm-125m` | 12 | 768 | 12 | 4 | 2048 |
+| `slm-350m` | 24 | 1024 | 16 | 8 | 2048 |
+| `slm-1b` | 32 | 2048 | 32 | 8 | 4096 |
 
 ---
 
-## Repository Structure
+## Tech Stack
+
+| Stage | Tool |
+|---|---|
+| Data curation | HuggingFace `datasets` + custom scripts |
+| Data validation | `datatrove` |
+| Tokenizer | HuggingFace `tokenizers` (BPE) |
+| Pretraining | HuggingFace `accelerate` + `transformers` |
+| Experiment tracking | Weights & Biases |
+| SFT | HuggingFace `trl` (`SFTTrainer`) |
+| DPO | HuggingFace `trl` (`DPOTrainer`) |
+| Evaluation | `lm-evaluation-harness` |
+| Export | HuggingFace `transformers` |
+| Inference | HuggingFace `transformers` |
+| Serving | `vLLM` on Kubernetes via `ai-infra` |
+
+---
+
+## Repo Structure
 
 ```
 slm/
-├── Dockerfile                        NeMo 25.02-based image (NGC auth required)
-├── Makefile
-├── requirements.txt
-├── .env.sample
-├── curator/                          Stage 1: data curation pipeline
-├── tokenizer/                        Custom BPE tokenizer training
-├── pretrain/                         Stage 2: pre-training (NeMo 1.x)
-│   ├── configs/
-│   │   ├── gpt_125m.yaml
-│   │   ├── gpt_350m.yaml
-│   │   └── gpt_1b.yaml
-│   ├── scripts/
-│   │   ├── train.sh
-│   │   └── convert_ckpt.sh
-│   ├── train.py
-│   └── README.md
-├── finetune/                         Stage 3: SFT (NeMo-Aligner)
-├── alignment/                        Stage 4: DPO (NeMo-Aligner)
-├── eval/
-└── infra/
-    └── setup_gpu_instance.sh
+├── model/                   Core model architecture (SLMConfig, SLMForCausalLM)
+├── curator/                 Stage 1: data curation from Common Crawl
+├── validation/              Stage 2: quality filtering and validation
+├── tokenizer/               Stage 3: BPE tokenizer training
+├── pretrain/                Stage 4: pretraining with accelerate
+├── finetune/                Stage 5: supervised fine-tuning with trl
+├── alignment/               Stage 6: DPO alignment with trl
+├── eval/                    Stage 7: evaluation with lm-evaluation-harness
+├── export/                  Stage 8: HuggingFace export and Hub push
+├── inference/               Stage 9: local inference and chat CLI
+├── serve/                   Stage 10: vLLM serving + Kubernetes manifests
+├── notebooks/               Exploratory analysis and stage walkthroughs
+└── infra/                   GPU instance bootstrap
 ```
 
 ---
 
-## Prerequisites
+## Getting Started
 
-### NGC Account
+**Prerequisites**
+- Python 3.10+
+- CUDA-capable GPU (H100 or A100 recommended for pretraining)
+- AWS account (S3 for data storage)
+- Weights & Biases account
 
-This pipeline uses `nvcr.io/nvidia/nemo:25.02` as its base container. Requires a free NGC account and API key.
+**Installation**
 
-1. Create a free account at [ngc.nvidia.com](https://ngc.nvidia.com)
-2. Generate an API key under **Setup → Generate API Key**
-3. Accept the NeMo container license — visit [catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo), find the `25.02` tag, and accept the license agreement. Without this step, `docker build` will fail with a `412 Precondition Failed` error even after a successful NGC login.
-4. Add your API key to `.env`:
-
+Using pip:
 ```bash
+git clone https://github.com/tohio/slm.git
+cd slm
+pip install -r requirements.txt
 cp .env.sample .env
-# Edit .env and set NGC_API_KEY=your-key-here
+# Add your credentials to .env
+```
+
+Using uv:
+```bash
+git clone https://github.com/tohio/slm.git
+cd slm
+uv venv && source .venv/bin/activate
+uv pip install -r requirements.txt
+cp .env.sample .env
+# Add your credentials to .env
+```
+
+Using conda:
+```bash
+git clone https://github.com/tohio/slm.git
+cd slm
+conda create -n slm python=3.10 -y
+conda activate slm
+pip install -r requirements.txt
+cp .env.sample .env
+# Add your credentials to .env
+```
+
+**Run the full pipeline**
+
+```bash
+make curate          # Stage 1: download and curate data
+make validate        # Stage 2: quality filter and validate
+make tokenizer       # Stage 3: train tokenizer
+make pretrain        # Stage 4: pretrain slm-125m
+make sft             # Stage 5: supervised fine-tuning
+make dpo             # Stage 6: DPO alignment
+make eval            # Stage 7: evaluate on benchmarks
+make export          # Stage 8: export to HuggingFace Hub
+make serve           # Stage 10: launch vLLM server
+```
+
+**Interactive chat**
+
+```bash
+python inference/chat.py --model tohio/slm-125m
 ```
 
 ---
 
-## Quick Start
+## Key Design Decisions
 
-### Data Curation (CPU instance)
+**Why from scratch?** Starting from an existing checkpoint is the right production choice. We start from scratch deliberately — it exercises every stage of the pipeline and provides full visibility into how data quality and tokenizer design interact with training dynamics.
 
-```bash
-make init-dirs
-make docker-build
-make download-models
-make download-data
-make curate-full
-make upload-data
-```
+**Why a custom tokenizer?** A tokenizer trained on your specific data mix encodes domain patterns more efficiently. Special tokens (`<|user|>`, `<|assistant|>`, `<|code|>`, `<|endofturn|>`) are baked in from the start, giving the model a clean chat template without retrofitting.
 
-### Training (GPU instance)
+**Why GQA over MHA?** At inference time, KV cache is the primary memory bottleneck. GQA reduces KV heads from 12 to 4 (125m) — a 3x reduction in KV memory with negligible quality loss. Directly improves throughput in vLLM.
 
-```bash
-# 1. First-time setup — NGC login, S3 pull, Docker build
-make setup-instance
+**Why DPO over PPO?** At small model scale, PPO's actor-critic setup requires multiple models simultaneously and is sensitive to reward scaling. DPO achieves comparable alignment with a simpler training loop and no separate reward model.
 
-# 2. Prepare fine-tuning datasets
-make prepare-sft-data
-make prepare-dpo-data
+**Why sequential SFT (chat → code)?** Sequential fine-tuning produces independently evaluable checkpoints at each stage, making regressions immediately visible. The code SFT uses a lower learning rate to reduce catastrophic forgetting of chat capability.
 
-# 3. Pre-train (NeMo 1.x — saves .nemo directly)
-make pretrain                    # 125M, 1 GPU (default)
-# make pretrain SIZE=350m GPUS=4
-# make pretrain SIZE=1b GPUS=4
-
-# 4. Supervised fine-tuning (NeMo-Aligner)
-make sft
-
-# 5. DPO alignment (NeMo-Aligner)
-make dpo
-
-# 6. Evaluate and export
-make eval-dpo
-make convert-hf
-```
+**Why vLLM for serving?** PagedAttention enables continuous batching and efficient KV cache management. The OpenAI-compatible API means any client built against the OpenAI SDK works out of the box — no custom client code.
 
 ---
 
-## Scaling Path
+## Evaluation
 
-| Scale | Layers | Hidden | Heads | Tokens | GPUs |
-|---|---|---|---|---|---|
-| **125M** (baseline) | 12 | 768 | 12 | ~2.5B | 1 |
-| 350M | 24 | 1024 | 16 | ~7B | 4 |
-| 1B | 32 | 2048 | 16 | ~20B | 4 (TP=2) |
+Models are evaluated on standard benchmarks via `lm-evaluation-harness`:
 
-```bash
-make pretrain SIZE=350m GPUS=4
-make pretrain SIZE=1b   GPUS=4
-```
-
----
-
-## Infrastructure
-
-### Container
-
-`nvcr.io/nvidia/nemo:25.02` — NVIDIA's official NeMo Framework container.
-
-| Component | Version |
+| Benchmark | Measures |
 |---|---|
-| `nemo-toolkit` | `2.2.1` |
-| `nemo-aligner` | `0.7.0` |
-| `megatron-core` | `0.11.1` |
-| `apex` | `0.1` (pre-compiled) |
-| `transformer-engine` | `1.14.0` (pre-compiled) |
-| `nemo-curator` | `0.7.1` |
-| Python | `3.10`, Ubuntu 22.04 |
-
-### Training Stack
-
-Pre-training uses **NeMo 1.x** (`megatron_gpt_pretraining.py` from `/opt/NeMo/examples/`) which saves checkpoints directly in `.nemo` format. SFT and DPO use **NeMo-Aligner 0.7.0**, which loads `.nemo` checkpoints natively.
-
-```
-make pretrain   →  megatron_gpt_pretraining.py  →  last.nemo
-make sft        →  NeMo-Aligner GPTSFTModel      →  loads last.nemo
-make dpo        →  NeMo-Aligner GPTDPOModel      →  loads SFT .nemo
-make convert-hf →  HuggingFace format
-```
-
-No checkpoint conversion step is needed.
-
-### AWS
-
-| Artifact | S3 path | Needed for |
-|---|---|---|
-| Curated JSONL | `curated/pii/*.jsonl` | Tokenizer training, pass 2 |
-| Tokenized mmap | `curated/tokenized/*.bin, *.idx` | Pre-training |
-| Tokenizer model | `tokenizer/` | All training stages |
-| Quality classifier | `models/quality_classifier.bin` | Pass 2 quality filter |
+| HellaSwag | Commonsense reasoning |
+| ARC-Easy / ARC-Challenge | Science QA |
+| MMLU | Broad knowledge |
+| TruthfulQA | Factual accuracy |
+| HumanEval | Code generation |
 
 ---
 
-## Design Decisions
+## Production Serving
 
-**Why from scratch instead of continued pre-training?**
-Starting from an existing checkpoint is the right production choice. We start from scratch deliberately — it exercises every stage of the pipeline and provides full visibility into how data quality and tokenizer design interact with training dynamics.
+The `serve/manifests/` directory contains Kubernetes manifests deployed via [ai-infra](https://github.com/tohio/ai-infra) using ArgoCD. The vLLM server exposes an OpenAI-compatible REST API and a Prometheus `/metrics` endpoint scraped by the cluster monitoring stack.
 
-**Why DPO over PPO?**
-At small model scale, PPO's actor-critic setup requires four models simultaneously and is sensitive to reward scaling. DPO achieves comparable alignment with a simpler training loop and no separate reward model.
-
-**Why a custom tokenizer?**
-A tokenizer trained on your specific data mix encodes domain patterns more efficiently. Special tokens (`<|user|>`, `<|assistant|>`, `<|code|>`) are baked in from the start.
-
-**Why sequential SFT (chat → code)?**
-Sequential fine-tuning produces independently evaluable checkpoints at each stage, making regressions immediately visible. The code SFT uses a lower learning rate to reduce catastrophic forgetting.
-
-**Why NeMo 1.x for pretraining (not NeMo 2.x)?**
-NeMo 2.x (`nemo.collections.llm.GPTModel`) saves distributed checkpoints in a format that NeMo-Aligner 0.7.0 cannot load directly — there is no export connector registered for the generic `GPTModel` in `nemo:25.02`. NeMo 1.x (`megatron_gpt_pretraining.py`) saves `.nemo` tarballs that NeMo-Aligner loads natively, giving a clean end-to-end pipeline with no conversion step. NeMo 2.x end-to-end support (pretrain + SFT + DPO) becomes viable in later containers (`25.04+`) with NeMo-RL replacing NeMo-Aligner.
-
-**Why NGC instead of a self-contained public image?**
-The NeMo training stack requires Apex and Transformer Engine pre-compiled against a specific CUDA/PyTorch version. The NGC container ships these pre-compiled and validated — significantly reducing build time and dependency fragility.
+```bash
+# Query the model via OpenAI-compatible API
+curl http://slm-service:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "slm-125m",
+    "messages": [{"role": "user", "content": "Hello"}]
+  }'
+```
 
 ---
 
-## References
+## Production Considerations
 
-- [NVIDIA NeMo](https://github.com/NVIDIA/NeMo)
-- [NeMo Curator](https://github.com/NVIDIA/NeMo-Curator)
-- [NeMo-Aligner](https://github.com/NVIDIA/NeMo-Aligner)
-- [Chinchilla Scaling Laws](https://arxiv.org/abs/2203.15556)
-- [DPO](https://arxiv.org/abs/2305.18290)
+This project is scoped as a complete end-to-end training pipeline and demonstration. In a larger production system:
+
+- **Data scale** — the curation pipeline would run on a distributed compute cluster over petabyte-scale crawl data rather than a single CPU instance.
+- **Training scale** — multi-node training with FSDP or tensor parallelism across 8+ GPUs for the 1B model.
+- **Continual learning** — a data flywheel feeding new curated data back into periodic pretraining runs.
+- **Reward modelling** — a trained reward model enabling PPO or online DPO for more sophisticated alignment.
+- **Observability** — per-request latency, token throughput, and generation quality metrics surfaced in Grafana.
+
+---
+
+## Related Projects
+
+- [ai-infra](https://github.com/tohio/ai-infra) — Kubernetes platform that deploys and operates this model in production
+- [rag-pipeline](https://github.com/tohio/rag-pipeline) — RAG pipeline that can use slm as the base LLM
+- [multi-agent](https://github.com/tohio/multi-agent) — autonomous multi-agent investment research
+- [data-flywheel](https://github.com/tohio/data-flywheel) — self-improving data pipeline feeding into future SLM training runs
 
 ---
 
