@@ -12,6 +12,8 @@ The pipeline is modular and independently runnable at each stage. Every design d
 
 **Models:** `tohio/slm-125m` · `tohio/slm-350m` · `tohio/slm-1b`
 
+![Architecture](docs/architecture.svg)
+
 ---
 
 ## Architecture
@@ -73,7 +75,7 @@ slm/
 │   └── scripts/                  curate.py pipeline + upload_s3.py
 │
 ├── validation/                   Stage 2: data validation
-│   └── scripts/validate.py       datatrove + KenLM perplexity filtering
+│   └── scripts/validate.py       Quality filter + perplexity filtering
 │
 ├── tokenizer/                    Stage 3: tokenizer training
 │   ├── train_tokenizer.py        BPE tokenizer — 32k vocab, 16 special tokens
@@ -84,23 +86,23 @@ slm/
 │   ├── data/
 │   │   ├── tokenize.py           JSONL → uint16 memory-mapped binary
 │   │   └── dataset.py            PretrainingDataset wrapping .bin file
-│   └── train.py                  HF Trainer pretraining loop
+│   └── train.py                  Pretraining loop
 │
 ├── finetune/                     Stage 5: supervised fine-tuning
 │   ├── configs/                  sft_chat/code × 125m/350m/1b (6 configs)
-│   ├── data/prepare_sft.py       OpenHermes-2.5 + Magicoder formatting
-│   └── train_sft.py              trl SFTTrainer
+│   ├── data/prepare_sft.py       Chat + code dataset preparation
+│   └── train_sft.py              SFT training loop
 │
-├── alignment/                    Stage 6: DPO alignment
+├── alignment/                    Stage 6: preference alignment
 │   ├── configs/                  dpo_125m.yaml, dpo_350m.yaml, dpo_1b.yaml
-│   ├── data/prepare_dpo.py       hh-rlhf + orca + argilla blending
-│   └── train_dpo.py              trl DPOTrainer
+│   ├── data/prepare_dpo.py       Preference dataset blending
+│   └── train_dpo.py              DPO training loop
 │
 ├── eval/                         Stage 7: benchmark evaluation
-│   └── eval.py                   lm-evaluation-harness — HellaSwag, ARC, MMLU, TruthfulQA, HumanEval
+│   └── eval.py                   HellaSwag, ARC, MMLU, TruthfulQA, HumanEval
 │
-├── export/                       Stage 8: HuggingFace Hub export
-│   └── export.py                 AutoConfig registration + Hub push + model card
+├── export/                       Stage 8: model export
+│   └── export.py                 Hub push + model card generation
 │
 ├── inference/                    Stage 9: local inference
 │   ├── chat.py                   Interactive multi-turn chat CLI
@@ -108,7 +110,7 @@ slm/
 │
 ├── serve/                        Stage 10: production serving
 │   ├── manifests/                Kubernetes deployment, service, HPA
-│   └── serve.sh                  Local vLLM launch script
+│   └── serve.sh                  Local server launch script
 │
 ├── notebooks/                    Exploratory analysis — one per pipeline stage
 │   ├── 01_model_exploration.ipynb
@@ -121,7 +123,10 @@ slm/
 │   ├── 08_eval_exploration.ipynb
 │   └── 09_inference_exploration.ipynb
 │
-├── docs/                         Architecture diagrams and screenshots
+├── docs/
+│   ├── architecture.svg          Pipeline architecture diagram
+│   └── screenshots/              Pipeline stage screenshots
+│
 ├── infra/                        GPU instance bootstrap
 ├── Makefile                      Full pipeline automation
 ├── requirements.txt              Python dependencies
