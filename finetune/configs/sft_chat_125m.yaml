@@ -1,0 +1,35 @@
+name: slm-125m-chat
+wandb_project: slm
+
+model:
+  base_model_path: results/slm-125m/final
+  max_seq_length: 2048
+
+data:
+  train_path: data/sft/chat/train.jsonl
+  val_path: data/sft/chat/val.jsonl
+  packing: false
+
+training:
+  epochs: 3
+  warmup_steps: 100
+  micro_batch_size: 4
+  gradient_accumulation_steps: 4
+  precision: bf16
+  gradient_clip_val: 1.0
+  gradient_checkpointing: false
+  eval_steps: 200
+  save_steps: 200
+  save_total_limit: 3
+  log_steps: 10
+  num_workers: 4
+  seed: 42
+  lr_scheduler: cosine
+  report_to:
+    - wandb
+
+optimizer:
+  lr: 1.0e-5
+  weight_decay: 0.01
+  beta1: 0.9
+  beta2: 0.98

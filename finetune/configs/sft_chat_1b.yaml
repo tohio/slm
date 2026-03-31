@@ -1,9 +1,9 @@
-name: slm-125m-chat
+name: slm-1b-chat
 wandb_project: slm
 
 model:
-  base_model_path: results/slm-125m/final
-  max_seq_length: 2048
+  base_model_path: results/slm-1b/final
+  max_seq_length: 4096
 
 data:
   train_path: data/sft/chat/train.jsonl
@@ -13,11 +13,11 @@ data:
 training:
   epochs: 3
   warmup_steps: 100
-  micro_batch_size: 4
-  gradient_accumulation_steps: 4    # effective global batch = 16
+  micro_batch_size: 1
+  gradient_accumulation_steps: 16   # effective global batch = 16
   precision: bf16
   gradient_clip_val: 1.0
-  gradient_checkpointing: false
+  gradient_checkpointing: true      # required at 1B + 4096 seq len
   eval_steps: 200
   save_steps: 200
   save_total_limit: 3
@@ -29,7 +29,7 @@ training:
     - wandb
 
 optimizer:
-  lr: 1.0e-5                        # lower than pretrain — fine-tuning not learning from scratch
+  lr: 5.0e-6                        # lower for larger model
   weight_decay: 0.01
   beta1: 0.9
   beta2: 0.98

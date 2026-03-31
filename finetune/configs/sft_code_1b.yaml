@@ -1,0 +1,35 @@
+name: slm-1b-chat-code
+wandb_project: slm
+
+model:
+  base_model_path: results/slm-1b-chat/final
+  max_seq_length: 4096
+
+data:
+  train_path: data/sft/code/train.jsonl
+  val_path: data/sft/code/val.jsonl
+  packing: false
+
+training:
+  epochs: 3
+  warmup_steps: 50
+  micro_batch_size: 1
+  gradient_accumulation_steps: 16
+  precision: bf16
+  gradient_clip_val: 1.0
+  gradient_checkpointing: true
+  eval_steps: 200
+  save_steps: 200
+  save_total_limit: 3
+  log_steps: 10
+  num_workers: 4
+  seed: 42
+  lr_scheduler: cosine
+  report_to:
+    - wandb
+
+optimizer:
+  lr: 2.0e-6
+  weight_decay: 0.01
+  beta1: 0.9
+  beta2: 0.98
