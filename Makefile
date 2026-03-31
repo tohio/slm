@@ -1,428 +1,217 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# SLM Project Makefile
-# ─────────────────────────────────────────────────────────────────────────────
+# SLM Pipeline Makefile
+# ----------------------
 # Usage:
-#   make help
-#   make docker-build              Build NeMo Docker image
-#   make docker-curate             Run data curation in container
-#   make docker-shell-cpu          Interactive CPU container (data curation)
-#   make docker-shell-gpu          Interactive GPU container (training)
-#   make all
-#   make pretrain SIZE=350m GPUS=4
-# ─────────────────────────────────────────────────────────────────────────────
+#   make <target>              # run a stage
+#   make <target> SIZE=350m    # run for a specific model size (125m, 350m, 1b)
+#
+# Full pipeline:
+#   make all SIZE=125m
 
--include .env
-export
+SIZE ?= 125m
 
-SIZE          ?= 125m
-GPUS          ?= $(shell python3 -c "import torch; print(torch.cuda.device_count())" 2>/dev/null || echo 1)
-S3_BUCKET     ?=
-S3_PREFIX     ?= slm/data
-N_WARC_FILES  ?= 20
-DATA_DIR      ?= /data
-RESULTS_DIR   ?= /results
-LOGS_DIR      ?= /logs
-PYTHON        ?= python3
-DOCKER_IMAGE  ?= slm:latest
+.PHONY: all curate validate tokenizer tokenize \
+        pretrain prepare-sft sft sft-code \
+        prepare-dpo dpo eval export \
+        clean help
 
-PRETRAIN_NEMO = $(shell find $(RESULTS_DIR)/slm_gpt_125m -name "*.nemo" 2>/dev/null | sort | tail -1)
-SFT_CHAT_CKPT = $(shell find $(RESULTS_DIR)/slm_sft_chat -name "*.nemo" 2>/dev/null | sort | tail -1)
-SFT_CODE_CKPT = $(shell find $(RESULTS_DIR)/slm_sft_code -name "*.nemo" 2>/dev/null | sort | tail -1)
-DPO_CKPT      = $(shell find $(RESULTS_DIR)/slm_dpo      -name "*.nemo" 2>/dev/null | sort | tail -1)
+# ── Full pipeline ──────────────────────────────────────────────────────────────
 
-.DEFAULT_GOAL := help
-.PHONY: help all setup setup-instance init-dirs \
-        docker-build docker-curate docker-shell-cpu docker-shell-gpu \
-        download-data download-models \
-        curate curate-resume tokenizer tokenize upload-data \
-        train-quality-classifier curate-full \
-        prepare-sft-data prepare-dpo-data \
-        pretrain sft dpo \
-        eval-pretrain eval-sft eval-dpo \
-        convert-hf clean clean-all \
-        _check-pretrain-nemo _check-sft-ckpt _check-dpo-ckpt \
-        _check-s3-bucket _check-data-dirs
+all: curate validate tokenizer tokenize pretrain prepare-sft sft sft-code prepare-dpo dpo
+	@echo "Pipeline complete for slm-$(SIZE)"
+
+# ── Stage 1: Data curation ────────────────────────────────────────────────────
+
+curate:
+	@echo "==> Stage 1: Curation (target=$(SIZE))"
+	python curator/scripts/curate.py --target $(SIZE)
+
+curate-download:
+	python curator/scripts/curate.py --target $(SIZE) --stage download
+
+curate-filter:
+	python curator/scripts/curate.py --target $(SIZE) --stage filter
+
+curate-dedup:
+	python curator/scripts/curate.py --target $(SIZE) --stage dedup
+
+curate-blend:
+	python curator/scripts/curate.py --target $(SIZE) --stage blend
+
+curate-upload:
+	python curator/scripts/curate.py --target $(SIZE) --stage upload
+
+# ── Stage 2: Validation ───────────────────────────────────────────────────────
+
+validate:
+	@echo "==> Stage 2: Validation"
+	python validation/scripts/validate.py
+
+validate-datatrove:
+	python validation/scripts/validate.py --use-datatrove
+
+# ── Stage 3: Tokenizer ────────────────────────────────────────────────────────
+
+tokenizer:
+	@echo "==> Stage 3: Tokenizer training"
+	python tokenizer/train_tokenizer.py
+
+tokenizer-test:
+	python tokenizer/test_tokenizer.py
+
+# ── Stage 4: Pretrain ─────────────────────────────────────────────────────────
+
+tokenize:
+	@echo "==> Stage 4a: Tokenize dataset"
+	python pretrain/data/tokenize.py --workers 8 --verify
+
+pretrain:
+	@echo "==> Stage 4b: Pretraining ($(SIZE))"
+	accelerate launch pretrain/train.py \
+		--config pretrain/configs/gpt_$(SIZE).yaml
+
+pretrain-resume:
+	accelerate launch pretrain/train.py \
+		--config pretrain/configs/gpt_$(SIZE).yaml \
+		--resume
+
+# ── Stage 5: SFT ──────────────────────────────────────────────────────────────
+
+prepare-sft:
+	@echo "==> Stage 5a: Prepare SFT data"
+	python finetune/data/prepare_sft.py --stage both
+
+sft:
+	@echo "==> Stage 5b: Chat SFT ($(SIZE))"
+	accelerate launch finetune/train_sft.py \
+		--config finetune/configs/sft_chat_$(SIZE).yaml
+
+sft-resume:
+	accelerate launch finetune/train_sft.py \
+		--config finetune/configs/sft_chat_$(SIZE).yaml \
+		--resume
+
+sft-code:
+	@echo "==> Stage 5c: Code SFT ($(SIZE))"
+	accelerate launch finetune/train_sft.py \
+		--config finetune/configs/sft_code_$(SIZE).yaml
+
+sft-code-resume:
+	accelerate launch finetune/train_sft.py \
+		--config finetune/configs/sft_code_$(SIZE).yaml \
+		--resume
+
+# ── Stage 6: DPO ──────────────────────────────────────────────────────────────
+
+prepare-dpo:
+	@echo "==> Stage 6a: Prepare DPO data"
+	python alignment/data/prepare_dpo.py
+
+dpo:
+	@echo "==> Stage 6b: DPO alignment ($(SIZE))"
+	accelerate launch alignment/train_dpo.py \
+		--config alignment/configs/dpo_$(SIZE).yaml
+
+dpo-resume:
+	accelerate launch alignment/train_dpo.py \
+		--config alignment/configs/dpo_$(SIZE).yaml \
+		--resume
+
+# ── Stage 7: Evaluation ───────────────────────────────────────────────────────
+
+eval:
+	@echo "==> Stage 7: Evaluation ($(SIZE))"
+	python eval/eval.py --model results/slm-$(SIZE)-dpo/final
+
+# ── Stage 8: Export ───────────────────────────────────────────────────────────
+
+export:
+	@echo "==> Stage 8: Export to HuggingFace Hub ($(SIZE))"
+	python export/export.py --model results/slm-$(SIZE)-dpo/final --size $(SIZE)
+
+# ── S3 utilities ──────────────────────────────────────────────────────────────
+
+s3-upload:
+	python curator/scripts/upload_s3.py upload --src data/curated --dst curated
+
+s3-download:
+	python curator/scripts/upload_s3.py download --src curated --dst data/curated
+
+s3-list:
+	python curator/scripts/upload_s3.py list
+
+# ── Setup ─────────────────────────────────────────────────────────────────────
+
+install:
+	pip install -r requirements.txt
+
+install-uv:
+	uv venv && source .venv/bin/activate && uv pip install -r requirements.txt
+
+install-conda:
+	conda create -n slm python=3.10 -y && \
+	conda activate slm && \
+	pip install -r requirements.txt
+
+install-kenlm:
+	pip install https://github.com/kpu/kenlm/archive/master.zip
+
+accelerate-config:
+	accelerate config
+
+# ── Clean ─────────────────────────────────────────────────────────────────────
+
+clean-data:
+	rm -rf data/raw data/filtered data/curated data/validated data/tokenized data/sft data/dpo
+
+clean-results:
+	rm -rf results/
+
+clean-logs:
+	rm -rf logs/
+
+clean: clean-logs
+	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+	find . -type f -name "*.pyc" -delete 2>/dev/null || true
+
+# ── Help ──────────────────────────────────────────────────────────────────────
 
 help:
 	@echo ""
-	@echo "  SLM — Small Language Model Pipeline"
-	@echo "  ════════════════════════════════════"
+	@echo "SLM Pipeline"
+	@echo "============"
 	@echo ""
-	@echo "  FIRST TIME SETUP"
-	@echo "    make init-dirs              Create host directories (/data, /results, /logs)"
-	@echo "    make docker-build           Build NeMo Docker image (requires NGC_API_KEY in .env)"
-	@echo "    make download-models        Download fasttext models (lid.176.bin)"
+	@echo "Usage: make <target> [SIZE=125m|350m|1b]"
 	@echo ""
-	@echo "  DOCKER"
-	@echo "    make docker-shell-cpu       Start interactive CPU container (data curation)"
-	@echo "    make docker-shell-gpu       Start interactive GPU container (training)"
-	@echo "    make docker-curate          Run full data curation in container"
+	@echo "Pipeline stages:"
+	@echo "  curate          Stage 1  — download and curate data"
+	@echo "  validate        Stage 2  — quality filter and validate"
+	@echo "  tokenizer       Stage 3  — train BPE tokenizer"
+	@echo "  tokenize        Stage 4a — tokenize dataset to binary"
+	@echo "  pretrain        Stage 4b — pretrain from scratch"
+	@echo "  prepare-sft     Stage 5a — download SFT datasets"
+	@echo "  sft             Stage 5b — chat supervised fine-tuning"
+	@echo "  sft-code        Stage 5c — code supervised fine-tuning"
+	@echo "  prepare-dpo     Stage 6a — download DPO datasets"
+	@echo "  dpo             Stage 6b — DPO alignment"
+	@echo "  eval            Stage 7  — benchmark evaluation"
+	@echo "  export          Stage 8  — push to HuggingFace Hub"
 	@echo ""
-	@echo "  SETUP"
-	@echo "    make setup                  Install dependencies (local only)"
-	@echo "    make setup-instance         GPU instance first-time setup (NGC login + S3 pull)"
+	@echo "Utilities:"
+	@echo "  install         Install dependencies (pip)"
+	@echo "  install-uv      Install dependencies (uv)"
+	@echo "  install-conda   Install dependencies (conda)"
+	@echo "  install-kenlm   Install KenLM from source"
+	@echo "  accelerate-config  Configure accelerate for multi-GPU"
+	@echo "  s3-upload       Upload curated data to S3"
+	@echo "  s3-download     Download curated data from S3"
+	@echo "  s3-list         List S3 contents"
+	@echo "  clean           Remove cache files"
+	@echo "  clean-data      Remove all data directories"
+	@echo "  clean-results   Remove all training results"
 	@echo ""
-	@echo "  DATA  (run in container or directly)"
-	@echo "    make download-data          Download Common Crawl WARCs"
-	@echo "    make download-models        Download fasttext language ID model"
-	@echo "    make curate                 Run full Curator pipeline"
-	@echo "    make curate-resume          Resume curator from a specific stage"
-	@echo "    make tokenizer              Train custom BPE tokenizer (runs in Docker)"
-	@echo "    make tokenize               Convert JSONL → .bin/.idx mmap (runs in Docker)"
-	@echo "    make upload-data            Upload dataset to S3"
+	@echo "Examples:"
+	@echo "  make all SIZE=125m"
+	@echo "  make pretrain SIZE=350m"
+	@echo "  make sft SIZE=1b"
+	@echo "  make dpo SIZE=125m"
 	@echo ""
-	@echo "  TRAINING  (all run in Docker)"
-	@echo "    make prepare-sft-data       Download & format SFT datasets"
-	@echo "    make prepare-dpo-data       Download & format DPO preference data"
-	@echo "    make pretrain               Pre-train GPT from scratch (NeMo 2.x)"
-	@echo "    make convert-pretrain       Convert NeMo 2.x ckpt → mcore_gpt.nemo"
-	@echo "    make sft                    Supervised fine-tuning (NeMo-Aligner)"
-	@echo "    make dpo                    DPO alignment (NeMo-Aligner)"
-	@echo "    make all                    Full pipeline end to end"
-	@echo ""
-	@echo "  EVALUATION"
-	@echo "    make eval-pretrain"
-	@echo "    make eval-sft"
-	@echo "    make eval-dpo"
-	@echo ""
-	@echo "  EXPORT"
-	@echo "    make convert-hf             Export final model to HuggingFace format"
-	@echo ""
-	@echo "  OVERRIDES"
-	@echo "    make pretrain SIZE=350m GPUS=4"
-	@echo "    make pretrain SIZE=1b GPUS=4"
-	@echo "    make curate N_WARC_FILES=50"
-	@echo "    make upload-data S3_BUCKET=other-bucket"
-	@echo "    make train-quality-classifier"
-	@echo "    make curate-full"
-	@echo ""
-
-all: curate tokenizer tokenize upload-data prepare-sft-data prepare-dpo-data \
-     pretrain sft dpo eval-dpo
-	@echo "✓ Full pipeline complete. Final model: $(DPO_CKPT)"
-
-# ── First-time host setup ─────────────────────────────────────────────────────
-init-dirs:
-	@echo "Creating host directories..."
-	sudo mkdir -p $(DATA_DIR) $(RESULTS_DIR) $(LOGS_DIR)
-	sudo chown -R $(shell whoami):$(shell whoami) $(DATA_DIR) $(RESULTS_DIR) $(LOGS_DIR)
-	mkdir -p $(DATA_DIR)/models $(DATA_DIR)/raw $(DATA_DIR)/curated $(DATA_DIR)/logs
-	@echo "✓ Directories created:"
-	@echo "    $(DATA_DIR)       — raw data, curated output, models"
-	@echo "    $(RESULTS_DIR)    — training checkpoints"
-	@echo "    $(LOGS_DIR)       — curator and training logs"
-
-# ── Setup ─────────────────────────────────────────────────────────────────────
-setup:
-	@echo "NOTE: Install PyTorch first:"
-	@echo "  pip install torch==2.1.2 --index-url https://download.pytorch.org/whl/cu121"
-	pip install -r requirements.txt
-
-setup-instance: _check-s3-bucket
-	bash infra/setup_gpu_instance.sh --bucket $(S3_BUCKET) --prefix $(S3_PREFIX)
-
-# ── Docker ────────────────────────────────────────────────────────────────────
-docker-build:
-	@echo "Building NeMo Docker image: $(DOCKER_IMAGE)"
-	@echo "NOTE: Requires NGC_API_KEY in .env (handled by setup_gpu_instance.sh)"
-	docker build -t $(DOCKER_IMAGE) .
-	@echo "✓ Docker image built: $(DOCKER_IMAGE)"
-
-docker-shell-cpu: _check-data-dirs
-	@echo "Starting CPU container for data curation..."
-	docker run -it --rm \
-		--shm-size=8g \
-		-p 8787:8787 \
-		-v $$(pwd):/workspace/slm \
-		-v $(DATA_DIR):$(DATA_DIR) \
-		-v $(LOGS_DIR):$(LOGS_DIR) \
-		$(DOCKER_IMAGE) /bin/bash
-
-docker-shell-gpu: _check-data-dirs
-	@echo "Starting GPU container for training..."
-	docker run --gpus all -it --rm \
-		--shm-size=8g \
-		-p 8787:8787 \
-		-v $$(pwd):/workspace/slm \
-		-v $(DATA_DIR):$(DATA_DIR) \
-		-v $(RESULTS_DIR):$(RESULTS_DIR) \
-		-v $(LOGS_DIR):$(LOGS_DIR) \
-		$(DOCKER_IMAGE) /bin/bash
-
-docker-curate: _check-data-dirs
-	@echo "Running data curation in Docker..."
-	docker run -it --rm \
-		--shm-size=8g \
-		-p 8787:8787 \
-		-v $$(pwd):/workspace/slm \
-		-v $(DATA_DIR):$(DATA_DIR) \
-		-v $(LOGS_DIR):$(LOGS_DIR) \
-		$(DOCKER_IMAGE) bash -c "cd /workspace/slm && make curate"
-
-# ── Quality Classifier ───────────────────────────────────────────────────────
-train-quality-classifier:
-	@echo "Training quality classifier on pass 1 output..."
-	bash curator/scripts/train_quality_classifier.sh \
-		--input-dir $(DATA_DIR)/curated/stages/pii \
-		--heuristic-dir $(DATA_DIR)/curated/stages/heuristic_filter \
-		--output-model $(DATA_DIR)/models/quality_classifier.bin \
-		--n-samples 50000
-
-# ── Full two-pass curation ────────────────────────────────────────────────────
-curate-full:
-	@echo "=== curate-full: two-pass curation pipeline ==="
-	@if [ -f $(DATA_DIR)/curated/stages/pii/.complete ]; then \
-		echo "[SKIP] curate — pass 1 already complete"; \
-	else \
-		echo "[RUN] curate — pass 1..."; \
-		$(MAKE) curate; \
-	fi
-	@if [ -f $(DATA_DIR)/tokenizer/.complete ]; then \
-		echo "[SKIP] tokenizer — already trained"; \
-	else \
-		echo "[RUN] tokenizer..."; \
-		$(MAKE) tokenizer; \
-	fi
-	@if [ -f $(DATA_DIR)/models/.complete ]; then \
-		echo "[SKIP] train-quality-classifier — already trained"; \
-	else \
-		echo "[RUN] train-quality-classifier..."; \
-		$(MAKE) train-quality-classifier; \
-	fi
-	@if [ -f $(DATA_DIR)/curated/tokenized/text_document.bin ]; then \
-		echo "[SKIP] tokenize — already complete"; \
-	else \
-		echo "[RUN] tokenize..."; \
-		$(MAKE) tokenize; \
-	fi
-	@echo "✓ curate-full complete"
-
-# ── Data ──────────────────────────────────────────────────────────────────────
-download-data: _check-data-dirs
-	bash curator/scripts/download_cc.sh \
-		--n-files $(N_WARC_FILES) \
-		--output-dir $(DATA_DIR)/raw/common_crawl
-
-download-models: _check-data-dirs
-	@echo "Downloading fasttext language ID model..."
-	mkdir -p $(DATA_DIR)/models
-	wget -q --show-progress \
-		-O $(DATA_DIR)/models/lid.176.bin \
-		https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.bin
-	@echo "✓ $(DATA_DIR)/models/lid.176.bin"
-
-curate: _check-data-dirs
-	$(PYTHON) curator/pipelines/pipeline.py \
-		--config curator/configs/curator.yaml
-
-curate-resume: _check-data-dirs
-	@read -p "Resume from stage: " stage; \
-	$(PYTHON) curator/pipelines/pipeline.py \
-		--config curator/configs/curator.yaml \
-		--start-stage $$stage
-
-# Train custom BPE tokenizer — runs inside Docker (sentencepiece not on host)
-tokenizer: _check-data-dirs
-	@echo "Training BPE tokenizer in Docker..."
-	docker run --rm \
-		--shm-size=8g \
-		-v $$(pwd):/workspace/slm \
-		-v $(DATA_DIR):$(DATA_DIR) \
-		$(DOCKER_IMAGE) bash -c "cd /workspace/slm && \
-			python3 tokenizer/train_tokenizer.py \
-				--config tokenizer/configs/tokenizer.yaml \
-				--input-dir $(DATA_DIR)/curated/stages/pii \
-				--output-dir $(DATA_DIR)/tokenizer"
-
-# Convert curated JSONL → megatron-compatible mmap .bin/.idx — runs inside Docker
-# Uses NeMo's official preprocess_data_for_megatron.py for format compatibility.
-# Workers are resolved dynamically from available CPUs at runtime.
-tokenize: _check-data-dirs
-	@echo "Tokenizing JSONL → mmap (.bin/.idx) in Docker..."
-	docker run --rm \
-		--shm-size=8g \
-		-v $$(pwd):/workspace/slm \
-		-v $(DATA_DIR):$(DATA_DIR) \
-		$(DOCKER_IMAGE) bash -c " \
-			python3 /opt/NeMo/scripts/nlp_language_modeling/preprocess_data_for_megatron.py \
-				--input $(DATA_DIR)/curated/stages/pii \
-				--preproc-folder \
-				--tokenizer-library sentencepiece \
-				--tokenizer-model $(DATA_DIR)/tokenizer/slm_tokenizer.model \
-				--output-prefix $(DATA_DIR)/curated/tokenized/text_document \
-				--dataset-impl mmap \
-				--append-eod \
-				--workers \$$(nproc) && \
-			mv $(DATA_DIR)/curated/tokenized/text_document_pii.bin \
-			   $(DATA_DIR)/curated/tokenized/text_document.bin && \
-			mv $(DATA_DIR)/curated/tokenized/text_document_pii.idx \
-			   $(DATA_DIR)/curated/tokenized/text_document.idx"
-
-upload-data: _check-s3-bucket
-	bash curator/scripts/upload_s3.sh \
-		--bucket $(S3_BUCKET) \
-		--prefix $(S3_PREFIX)
-
-prepare-sft-data:
-	@echo "Preparing SFT datasets in Docker..."
-	docker run --rm \
-		--shm-size=8g \
-		-v $$(pwd):/workspace/slm \
-		-v $(DATA_DIR):$(DATA_DIR) \
-		$(DOCKER_IMAGE) bash -c "cd /workspace/slm && \
-			python3 finetune/data/prepare_sft.py --stage both"
-
-prepare-dpo-data:
-	@echo "Preparing DPO datasets in Docker..."
-	docker run --rm \
-		--shm-size=8g \
-		-v $$(pwd):/workspace/slm \
-		-v $(DATA_DIR):$(DATA_DIR) \
-		$(DOCKER_IMAGE) bash -c "cd /workspace/slm && \
-			python3 alignment/data/prepare_dpo.py \
-				--output-dir $(DATA_DIR)/dpo"
-
-# ── Training — all run inside Docker ─────────────────────────────────────────
-# Step 1: Pre-train with NeMo 2.x
-pretrain:
-	@echo "Launching pre-training in Docker (NeMo 2.x)..."
-	docker run --gpus all --rm \
-		--shm-size=8g \
-		-e RESULTS_DIR=$(RESULTS_DIR) \
-		-v $$(pwd):/workspace/slm \
-		-v $(DATA_DIR):$(DATA_DIR) \
-		-v $(RESULTS_DIR):$(RESULTS_DIR) \
-		-v $(LOGS_DIR):$(LOGS_DIR) \
-		$(DOCKER_IMAGE) bash -c "cd /workspace/slm && \
-			bash pretrain/scripts/train.sh \
-				--size $(SIZE) \
-				--gpus $(GPUS)"
-
-# Step 2: Convert NeMo 2.x distributed ckpt → mcore_gpt.nemo for NeMo-Aligner
-convert-pretrain:
-	@echo "Converting pretrain checkpoint → mcore_gpt.nemo in Docker..."
-	docker run --gpus all --rm \
-		--shm-size=8g \
-		-e RESULTS_DIR=$(RESULTS_DIR) \
-		-v $$(pwd):/workspace/slm \
-		-v $(RESULTS_DIR):$(RESULTS_DIR) \
-		-v $(DATA_DIR):$(DATA_DIR) \
-		$(DOCKER_IMAGE) bash -c "cd /workspace/slm && \
-			bash pretrain/scripts/convert_pretrain.sh \
-				--input $(RESULTS_DIR)/slm_gpt_125m \
-				--output $(RESULTS_DIR)/slm_gpt_125m/mcore_gpt.nemo"
-
-# Step 2: SFT with NeMo-Aligner
-sft: _check-pretrain-nemo
-	@echo "Launching SFT in Docker (NeMo-Aligner)..."
-	docker run --gpus all --rm \
-		--shm-size=8g \
-		-e RESULTS_DIR=$(RESULTS_DIR) \
-		-v $$(pwd):/workspace/slm \
-		-v $(DATA_DIR):$(DATA_DIR) \
-		-v $(RESULTS_DIR):$(RESULTS_DIR) \
-		-v $(LOGS_DIR):$(LOGS_DIR) \
-		$(DOCKER_IMAGE) bash -c "cd /workspace/slm && \
-			bash finetune/scripts/train_sft.sh \
-				--gpus $(GPUS) \
-				--pretrain-ckpt $(PRETRAIN_NEMO)"
-
-# Step 3: DPO with NeMo-Aligner
-dpo: _check-sft-ckpt
-	@echo "Launching DPO in Docker (NeMo-Aligner)..."
-	docker run --gpus all --rm \
-		--shm-size=8g \
-		-e RESULTS_DIR=$(RESULTS_DIR) \
-		-v $$(pwd):/workspace/slm \
-		-v $(DATA_DIR):$(DATA_DIR) \
-		-v $(RESULTS_DIR):$(RESULTS_DIR) \
-		-v $(LOGS_DIR):$(LOGS_DIR) \
-		$(DOCKER_IMAGE) bash -c "cd /workspace/slm && \
-			bash alignment/scripts/train_dpo.sh \
-				--gpus $(GPUS) \
-				--sft-ckpt $(SFT_CODE_CKPT)"
-
-# ── Evaluation ────────────────────────────────────────────────────────────────
-eval-pretrain:
-	$(PYTHON) eval/run_eval.py \
-		--stage pretrain \
-		--val-data $(DATA_DIR)/pretrain
-
-eval-sft: _check-sft-ckpt
-	$(PYTHON) eval/run_eval.py \
-		--stage sft \
-		--checkpoint $(SFT_CODE_CKPT) \
-		--val-data $(DATA_DIR)/pretrain
-
-eval-dpo: _check-dpo-ckpt _check-sft-ckpt
-	$(PYTHON) eval/run_eval.py \
-		--stage dpo \
-		--checkpoint $(DPO_CKPT) \
-		--ref-checkpoint $(SFT_CODE_CKPT) \
-		--val-data $(DATA_DIR)/pretrain
-
-# ── Inference ─────────────────────────────────────────────────────────────────
-inference: _check-dpo-ckpt
-	docker run --gpus all -it --rm \
-		--shm-size=8g \
-		-v $$(pwd):/workspace/slm \
-		-v $(DATA_DIR):$(DATA_DIR) \
-		-v $(RESULTS_DIR):$(RESULTS_DIR) \
-		$(DOCKER_IMAGE) \
-		python /workspace/slm/inference.py \
-		--checkpoint $(DPO_CKPT)
-
-PROMPT ?= "Explain recursion to a 10-year-old."
-inference-compare: _check-dpo-ckpt _check-sft-ckpt
-	docker run --gpus all -it --rm \
-		--shm-size=8g \
-		-v $$(pwd):/workspace/slm \
-		-v $(DATA_DIR):$(DATA_DIR) \
-		-v $(RESULTS_DIR):$(RESULTS_DIR) \
-		$(DOCKER_IMAGE) \
-		python /workspace/slm/inference.py \
-		--checkpoint $(DPO_CKPT) \
-		--compare $(SFT_CODE_CKPT) \
-		--prompt $(PROMPT)
-
-# ── Export ────────────────────────────────────────────────────────────────────
-convert-hf: _check-dpo-ckpt
-	bash pretrain/scripts/convert_ckpt.sh \
-		--direction nemo_to_hf \
-		--input $(DPO_CKPT) \
-		--output $(RESULTS_DIR)/slm_final_hf
-
-# ── Guards ────────────────────────────────────────────────────────────────────
-_check-pretrain-nemo:
-	@if [ -z "$(PRETRAIN_NEMO)" ]; then \
-		echo "ERROR: mcore_gpt.nemo not found. Run: make convert-pretrain"; exit 1; fi
-
-_check-sft-ckpt:
-	@if [ -z "$(SFT_CODE_CKPT)" ]; then \
-		echo "ERROR: No SFT checkpoint found. Run: make sft"; exit 1; fi
-
-_check-dpo-ckpt:
-	@if [ -z "$(DPO_CKPT)" ]; then \
-		echo "ERROR: No DPO checkpoint found. Run: make dpo"; exit 1; fi
-
-_check-s3-bucket:
-	@if [ -z "$(S3_BUCKET)" ]; then \
-		echo "ERROR: S3_BUCKET not set."; \
-		echo "  Option 1 (recommended): add S3_BUCKET=your-bucket to .env"; \
-		echo "  Option 2: pass on command line: make $(@:_check-%=%) S3_BUCKET=your-bucket"; \
-		exit 1; fi
-
-_check-data-dirs:
-	@if [ ! -d "$(DATA_DIR)" ] || [ ! -d "$(RESULTS_DIR)" ] || [ ! -d "$(LOGS_DIR)" ]; then \
-		echo "ERROR: Host directories not found. Run: make init-dirs"; exit 1; fi
-
-# ── Cleanup ───────────────────────────────────────────────────────────────────
-clean:
-	sudo find $(DATA_DIR)/curated/stages -name ".complete" -delete 2>/dev/null || true
-	sudo find $(DATA_DIR)/tokenizer -name ".complete" -delete 2>/dev/null || true
-	sudo find $(DATA_DIR)/models -name ".complete" -delete 2>/dev/null || true
-	@echo "✓ Stage markers cleared (checkpoints and data preserved)"
-
-clean-all:
-	@read -p "Delete ALL results and curated data? [y/N] " c; \
-	if [ "$$c" = "y" ]; then rm -rf $(RESULTS_DIR)/* $(DATA_DIR)/curated/*; fi
