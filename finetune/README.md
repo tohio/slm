@@ -1,76 +1,124 @@
-# Supervised Fine-Tuning (SFT)
+# finetune
 
-Adapts the pre-trained base model to follow instructions and produce well-formed responses. SFT runs in two sequential stages — general chat first, then coding — each building on the previous checkpoint.
+Supervised Fine-Tuning (SFT) pipeline for SLM. Two sequential stages — chat then code — using HuggingFace `trl SFTTrainer`.
 
-Uses **NeMo-Aligner 0.7.0** inside `nvcr.io/nvidia/nemo:25.02`. Input is the `mcore_gpt.nemo` file produced by `make convert-pretrain`.
+---
 
-## Why Sequential SFT?
+## Pipeline
 
-**Debuggability.** Each stage produces an independently evaluable checkpoint. If the code SFT degrades general conversation quality, it's immediately visible by comparing the chat and code SFT checkpoints.
-
-**Specialization control.** The code SFT uses a lower learning rate (5e-6 vs 1e-5) specifically to reduce catastrophic forgetting of chat capabilities from stage 1.
-
-## Stage 1 — General Chat
-
-**Dataset:** OpenAssistant OASST1 + Dolly 15k (~25k examples combined)
-**Goal:** Instruction following, multi-turn conversation, appropriate response length and tone.
-**Key config:** `answer_only_loss: true` — cross-entropy loss is computed only on assistant response tokens, not the human prompt. Without it the model learns to predict user messages, which wastes capacity and dilutes the gradient signal.
-
-**Format:**
-```json
-{
-  "conversations": [
-    {"from": "system",    "value": "You are a helpful assistant."},
-    {"from": "human",     "value": "What is Python?"},
-    {"from": "assistant", "value": "Python is a high-level..."}
-  ]
-}
+```
+results/slm-125m/final          (pretrained base)
+        │
+        ▼
+Stage 1: Chat SFT (OpenHermes-2.5)
+        │
+        ▼
+results/slm-125m-chat/final     (instruction-following model)
+        │
+        ▼
+Stage 2: Code SFT (Magicoder-OSS-Instruct)
+        │
+        ▼
+results/slm-125m-chat-code/final  (chat + code model)
 ```
 
-## Stage 2 — Coding
+---
 
-**Dataset:** CodeSearchNet Python (~100k examples, two formats)
-**Goal:** Code generation, code explanation, debugging assistance.
-**Lower learning rate (5e-6)** reduces catastrophic forgetting of the chat capabilities from stage 1.
+## Datasets
 
-## Design Decisions
+| Stage | Dataset | Size | Purpose |
+|---|---|---|---|
+| Chat | `teknium/OpenHermes-2.5` | ~1M examples | General instruction following |
+| Code | `ise-uiuc/Magicoder-OSS-Instruct-75K` | ~75k examples | Code generation and understanding |
 
-**Full fine-tuning over LoRA**
-At 125M parameters, the model fits comfortably in GPU memory for full fine-tuning. LoRA adds complexity without meaningful benefit at this scale. LoRA becomes the right choice at 7B+ where full fine-tuning VRAM requirements become prohibitive.
+---
 
-## Prerequisites
+## Getting Started
+
+**Step 1 — Prepare data**
 
 ```bash
-# 1. Pretrain checkpoint must be converted to mcore_gpt.nemo format
-make pretrain
-make convert-pretrain     # produces /results/slm_gpt_125m/mcore_gpt.nemo
+make prepare-sft
 
-# 2. SFT datasets must be prepared
-make prepare-sft-data     # downloads from HuggingFace to /data/sft/
+# Or directly
+python finetune/data/prepare_sft.py --stage both
 ```
 
-## Usage
+**Step 2 — Chat SFT**
 
 ```bash
-# Run both stages sequentially (default)
 make sft
 
-# Or run individually
-bash finetune/scripts/train_sft.sh --stage chat
-bash finetune/scripts/train_sft.sh --stage code
+# Or directly
+python finetune/train_sft.py --config finetune/configs/sft_chat.yaml
 
-# Evaluate
-make eval-sft
+# Multi-GPU
+accelerate launch finetune/train_sft.py --config finetune/configs/sft_chat.yaml
+
+# Resume
+python finetune/train_sft.py --config finetune/configs/sft_chat.yaml --resume
 ```
 
-## What to Watch
+**Step 3 — Code SFT**
 
-After chat SFT, generation samples should show:
-- Responses that stop at the right place
-- Appropriate response length
-- No repetition loops
+```bash
+make sft-code
 
-After code SFT:
-- Code blocks are fenced correctly (` ```python `)
-- Generated functions are syntactically valid Python
-- General conversation quality is not visibly degraded vs chat checkpoint
+# Or directly
+python finetune/train_sft.py --config finetune/configs/sft_code.yaml
+```
+
+---
+
+## Files
+
+```
+finetune/
+├── configs/
+│   ├── sft_chat.yaml       chat SFT — OpenHermes-2.5, LR=1e-5
+│   └── sft_code.yaml       code SFT — Magicoder, LR=5e-6
+├── data/
+│   └── prepare_sft.py      download and format both datasets
+└── train_sft.py            trl SFTTrainer entry point
+```
+
+---
+
+## Chat Template
+
+All data is formatted into the SLM chat template before training:
+
+```
+<|system|>You are a helpful assistant.<|endofturn|>
+<|user|>What is the capital of France?<|endofturn|>
+<|assistant|>The capital of France is Paris.<|endofturn|>
+```
+
+---
+
+## Checkpoints
+
+```
+results/
+├── slm-125m-chat/
+│   ├── checkpoint-200/
+│   ├── checkpoint-400/
+│   └── final/              best checkpoint (lowest eval loss)
+└── slm-125m-chat-code/
+    ├── checkpoint-200/
+    └── final/
+```
+
+---
+
+## Key Design Decisions
+
+**Why sequential SFT?** Training code SFT on top of the chat checkpoint preserves the instruction-following capability learned in stage 1. The lower LR in code SFT (5e-6 vs 1e-5) further reduces catastrophic forgetting.
+
+**Why OpenHermes-2.5?** One of the highest-quality open instruction datasets — generated by GPT-4 with careful filtering. 1M diverse examples covering reasoning, coding, creative writing, and general knowledge.
+
+**Why Magicoder?** Generates coding problems inspired by real open-source code then produces solutions. More diverse and higher quality than CodeAlpaca. 75k examples is sufficient for strong code SFT at 125M scale.
+
+**Why LR=1e-5 for chat, 5e-6 for code?** SFT learning rates are typically 10–100x lower than pretraining. The lower rate for code SFT further preserves chat capability from stage 1.
+
+**Why `trl SFTTrainer`?** Handles tokenization, packing, and sequence length management automatically. Integrates cleanly with HuggingFace Trainer for checkpointing, logging, and multi-GPU support.
