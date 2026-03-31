@@ -59,19 +59,73 @@ The model is a dense decoder-only transformer with a modern architecture:
 
 ```
 slm/
-├── model/                   Core model architecture (SLMConfig, SLMForCausalLM)
-├── curator/                 Stage 1: data curation from Common Crawl
-├── validation/              Stage 2: quality filtering and validation
-├── tokenizer/               Stage 3: BPE tokenizer training
-├── pretrain/                Stage 4: pretraining with accelerate
-├── finetune/                Stage 5: supervised fine-tuning with trl
-├── alignment/               Stage 6: DPO alignment with trl
-├── eval/                    Stage 7: evaluation with lm-evaluation-harness
-├── export/                  Stage 8: HuggingFace export and Hub push
-├── inference/               Stage 9: local inference and chat CLI
-├── serve/                   Stage 10: vLLM serving + Kubernetes manifests
-├── notebooks/               Exploratory analysis and stage walkthroughs
-└── infra/                   GPU instance bootstrap
+├── model/                        Custom decoder-only transformer architecture
+│   ├── config.py                 SLMConfig — hyperparameters for 125M/350M/1B
+│   ├── attention.py              Grouped Query Attention + RoPE
+│   ├── mlp.py                    SwiGLU feed-forward network
+│   ├── norm.py                   RMSNorm
+│   ├── block.py                  Pre-norm transformer block
+│   └── model.py                  SLMModel + SLMForCausalLM
+│
+├── curator/                      Stage 1: data curation
+│   ├── sources/                  Wikipedia, CodeSearchNet, Common Crawl
+│   ├── filters/                  Quality heuristics + MinHash deduplication
+│   └── scripts/                  curate.py pipeline + upload_s3.py
+│
+├── validation/                   Stage 2: data validation
+│   └── scripts/validate.py       datatrove + KenLM perplexity filtering
+│
+├── tokenizer/                    Stage 3: tokenizer training
+│   ├── train_tokenizer.py        BPE tokenizer — 32k vocab, 16 special tokens
+│   └── test_tokenizer.py         Roundtrip, fertility, chat template tests
+│
+├── pretrain/                     Stage 4: pretraining
+│   ├── configs/                  gpt_125m.yaml, gpt_350m.yaml, gpt_1b.yaml
+│   ├── data/
+│   │   ├── tokenize.py           JSONL → uint16 memory-mapped binary
+│   │   └── dataset.py            PretrainingDataset wrapping .bin file
+│   └── train.py                  HF Trainer pretraining loop
+│
+├── finetune/                     Stage 5: supervised fine-tuning
+│   ├── configs/                  sft_chat/code × 125m/350m/1b (6 configs)
+│   ├── data/prepare_sft.py       OpenHermes-2.5 + Magicoder formatting
+│   └── train_sft.py              trl SFTTrainer
+│
+├── alignment/                    Stage 6: DPO alignment
+│   ├── configs/                  dpo_125m.yaml, dpo_350m.yaml, dpo_1b.yaml
+│   ├── data/prepare_dpo.py       hh-rlhf + orca + argilla blending
+│   └── train_dpo.py              trl DPOTrainer
+│
+├── eval/                         Stage 7: benchmark evaluation
+│   └── eval.py                   lm-evaluation-harness — HellaSwag, ARC, MMLU, TruthfulQA, HumanEval
+│
+├── export/                       Stage 8: HuggingFace Hub export
+│   └── export.py                 AutoConfig registration + Hub push + model card
+│
+├── inference/                    Stage 9: local inference
+│   ├── chat.py                   Interactive multi-turn chat CLI
+│   └── generate.py               Batch text generation
+│
+├── serve/                        Stage 10: production serving
+│   ├── manifests/                Kubernetes deployment, service, HPA
+│   └── serve.sh                  Local vLLM launch script
+│
+├── notebooks/                    Exploratory analysis — one per pipeline stage
+│   ├── 01_model_exploration.ipynb
+│   ├── 02_data_exploration.ipynb
+│   ├── 03_validation_exploration.ipynb
+│   ├── 04_tokenizer_exploration.ipynb
+│   ├── 05_pretrain_exploration.ipynb
+│   ├── 06_sft_exploration.ipynb
+│   ├── 07_dpo_exploration.ipynb
+│   ├── 08_eval_exploration.ipynb
+│   └── 09_inference_exploration.ipynb
+│
+├── docs/                         Architecture diagrams and screenshots
+├── infra/                        GPU instance bootstrap
+├── Makefile                      Full pipeline automation
+├── requirements.txt              Python dependencies
+└── .env.sample                   Environment variable template
 ```
 
 ---
