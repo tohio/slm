@@ -1,0 +1,38 @@
+name: slm-350m-dpo
+wandb_project: slm
+
+model:
+  base_model_path: results/slm-350m-chat-code/final
+  max_seq_length: 2048
+
+dpo:
+  beta: 0.1
+  max_prompt_length: 512
+
+data:
+  train_path: data/dpo/train.jsonl
+  val_path: data/dpo/val.jsonl
+
+training:
+  epochs: 1
+  warmup_steps: 100
+  micro_batch_size: 1
+  gradient_accumulation_steps: 16   # effective global batch = 16
+  precision: bf16
+  gradient_clip_val: 1.0
+  gradient_checkpointing: false
+  eval_steps: 200
+  save_steps: 200
+  save_total_limit: 3
+  log_steps: 10
+  num_workers: 4
+  seed: 42
+  lr_scheduler: cosine
+  report_to:
+    - wandb
+
+optimizer:
+  lr: 3.0e-7
+  weight_decay: 0.01
+  beta1: 0.9
+  beta2: 0.98

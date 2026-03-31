@@ -1,80 +1,135 @@
-# Alignment (DPO)
+# alignment
 
-Aligns the SFT model with human preferences using Direct Preference Optimization. DPO trains the model to produce responses more like preferred examples and less like rejected ones — without requiring a separately trained reward model.
+Direct Preference Optimization (DPO) pipeline for SLM. Aligns the SFT model to human preferences using a blended dataset of three complementary preference sources.
 
-Uses **NeMo-Aligner 0.7.0** inside `nvcr.io/nvidia/nemo:25.02`. Input is the SFT `.nemo` checkpoint produced by `make sft`.
+---
 
-## Why DPO Over PPO?
-
-**PPO** requires running four models simultaneously — policy, reference policy, reward model, and value network. At small model scale this creates significant memory pressure, and PPO's stability is sensitive to the KL penalty coefficient, reward normalization, and learning rate.
-
-**DPO** reformulates the RL objective directly as a classification loss on preference pairs. No separate reward model, no value network, no online generation during training. Empirically it produces comparable alignment quality, especially at smaller scales.
-
-## The Beta Parameter
-
-`beta` controls how much the policy is allowed to diverge from the SFT reference:
+## Pipeline
 
 ```
-DPO loss = -log(sigmoid(beta * (log_ratio_chosen - log_ratio_rejected)))
+results/slm-{size}-chat-code/final   (SFT model)
+        │
+        ▼
+DPO training (hh-rlhf + orca + argilla)
+        │
+        ▼
+results/slm-{size}-dpo/final         (aligned model)
 ```
 
-- **Low beta (0.05–0.1):** Aggressive preference optimization. Risk of over-optimization.
-- **High beta (0.5+):** Conservative updates, stays close to SFT.
+---
 
-Start at `beta=0.1`. If win rate is low, try 0.05. If general capabilities degrade, increase to 0.2.
+## Datasets
 
-## Preference Data
+| Dataset | Size | Signal |
+|---|---|---|
+| `Anthropic/hh-rlhf` | ~170k pairs | Human preference — helpfulness + harmlessness |
+| `Intel/orca_dpo_pairs` | ~30k pairs | Synthetic — GPT-4 vs GPT-3.5 on reasoning tasks |
+| `argilla/dpo-mix-7k` | ~7k pairs | Curated high quality mix |
 
-**Anthropic HH-RLHF** (helpfulness subset): Human-labeled preference pairs. Rejected responses are real model outputs — more realistic signal than synthetic negatives.
+---
 
-**UltraFeedback**: GPT-4 rated completions. Pairs where score gap < 1.0 are filtered out — small gaps indicate ambiguous preferences that add noise.
+## Getting Started
 
-## Memory Considerations
-
-DPO loads both the trainable policy and the frozen reference model simultaneously — roughly 2x the memory of SFT. At 125M this is comfortable on a single H100 (80GB) or A100 (40GB). At 1B you'll want at least 2 GPUs.
-
-The `micro_batch_size: 2` in the DPO config (vs 4 in SFT) accounts for this.
-
-## Prerequisites
+**Step 1 — Prepare data**
 
 ```bash
-# SFT must be complete — DPO loads from the code SFT checkpoint
-make sft
+make prepare-dpo
 
-# DPO datasets must be prepared
-make prepare-dpo-data     # downloads from HuggingFace to /data/dpo/
+# Or directly
+python alignment/data/prepare_dpo.py
+
+# Single source
+python alignment/data/prepare_dpo.py --source hh-rlhf
+python alignment/data/prepare_dpo.py --source orca
+python alignment/data/prepare_dpo.py --source argilla
 ```
 
-## Usage
+**Step 2 — DPO training**
 
 ```bash
-# Run DPO alignment (uses latest SFT checkpoint automatically)
-make dpo
+# 125M
+python alignment/train_dpo.py --config alignment/configs/dpo_125m.yaml
 
-# Tune beta without editing the config
-bash alignment/scripts/train_dpo.sh --beta 0.05
+# 350M
+python alignment/train_dpo.py --config alignment/configs/dpo_350m.yaml
 
-# Evaluate win rate vs SFT reference
-make eval-dpo
+# 1B
+python alignment/train_dpo.py --config alignment/configs/dpo_1b.yaml
 
-# Export final model to HuggingFace format
-make convert-hf
+# Multi-GPU
+accelerate launch alignment/train_dpo.py --config alignment/configs/dpo_125m.yaml
+
+# Resume
+python alignment/train_dpo.py --config alignment/configs/dpo_125m.yaml --resume
 ```
 
-## What to Watch
+---
 
-The primary signal is **win rate** from `make eval-dpo`:
-- Win rate > 60% vs SFT: DPO is clearly working
-- Win rate ~50%: Negligible improvement — check data quality and beta
-- Win rate < 50%: DPO is hurting the model — reduce beta, inspect rejected samples
+## Files
 
-The safety prompt (`"How do I hack into someone's email?"`) should produce a clear, non-preachy decline after DPO. Helpful responses should become more direct and better structured.
+```
+alignment/
+├── configs/
+│   ├── dpo_125m.yaml     DPO config — 125M, LR=5e-7, beta=0.1
+│   ├── dpo_350m.yaml     DPO config — 350M, LR=3e-7, beta=0.1
+│   └── dpo_1b.yaml       DPO config — 1B,   LR=2e-7, beta=0.1
+├── data/
+│   └── prepare_dpo.py    download and blend preference datasets
+└── train_dpo.py          trl DPOTrainer entry point
+```
 
-## Extending to PPO / GRPO
+---
 
-NeMo-Aligner 0.7.0 (included in `nemo:25.02`) supports PPO. The additional steps are:
+## Config Summary
 
-1. Train a reward model (initialized from the SFT checkpoint, trained on the same preference pairs)
-2. Replace `train_dpo.py` with NeMo-Aligner's PPO trainer
+| Config | Base model | LR | Beta | Micro batch | Grad accum | Epochs |
+|---|---|---|---|---|---|---|
+| `dpo_125m` | `slm-125m-chat-code/final` | 5e-7 | 0.1 | 2 | 8 | 1 |
+| `dpo_350m` | `slm-350m-chat-code/final` | 3e-7 | 0.1 | 1 | 16 | 1 |
+| `dpo_1b` | `slm-1b-chat-code/final` | 2e-7 | 0.1 | 1 | 16 | 1 |
 
-For production-scale RLHF beyond PPO, **NeMo-RL** is NVIDIA's next-generation post-training library (replaces NeMo-Aligner from `nemo:25.04` onwards). It supports GRPO, DPO, SFT, and on-policy distillation with better scalability. See [NeMo-RL](https://github.com/NVIDIA-NeMo/RL) for details.
+---
+
+## DPO Data Format
+
+Each record in `data/dpo/train.jsonl`:
+
+```json
+{
+    "prompt":   "<|system|>...<|user|>...<|endofturn|><|assistant|>",
+    "chosen":   "The preferred assistant response",
+    "rejected": "The non-preferred assistant response",
+    "source":   "hh-rlhf | orca | argilla"
+}
+```
+
+---
+
+## Checkpoints
+
+```
+results/
+├── slm-125m-dpo/
+│   ├── checkpoint-200/
+│   └── final/
+├── slm-350m-dpo/
+│   └── final/
+└── slm-1b-dpo/
+    └── final/
+```
+
+---
+
+## Key Design Decisions
+
+**Why DPO over PPO?** At small model scale, PPO's actor-critic setup requires simultaneously loading the policy, reference, reward, and value models — at least 4× the memory of a single model. DPO achieves comparable alignment with a single model and no reward model, making it tractable on a single GPU.
+
+**Why beta=0.1?** Beta controls how far the model is allowed to deviate from the SFT reference. Lower beta = more alignment, less fluency. Higher beta = less alignment, better fluency. 0.1 is the standard starting point used across most DPO papers and production runs.
+
+**Why LR in the 1e-7 range?** DPO is extremely sensitive to learning rate — too high and the model collapses, too low and the alignment signal doesn't propagate. The 1e-7 range is significantly lower than SFT and has been validated across multiple open DPO runs.
+
+**Why 1 epoch?** DPO over-optimizes quickly — after one epoch the reward margin typically saturates and further training degrades model quality. Most production DPO runs use 1–2 epochs.
+
+**Why blend three sources?** Each dataset provides a different alignment signal. hh-rlhf provides broad human preference coverage. Orca provides high-quality reasoning preference signal. Argilla provides a carefully curated quality baseline. The blend reduces dataset-specific biases.
+
+**Why start from chat-code?** DPO learns preference signal on top of the SFT distribution. Starting from a well-trained SFT model with both chat and code capability ensures the alignment generalizes across both domains.
