@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: slm-125m
+  namespace: inference
+  labels:
+    app: slm
+    size: 125m
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: slm
+      size: 125m
+  template:
+    metadata:
+      labels:
+        app: slm
+        size: 125m
+    spec:
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:latest
+          args:
+            - --model
+            - tohio/slm-125m
+            - --host
+            - "0.0.0.0"
+            - --port
+            - "8000"
+            - --dtype
+            - bfloat16
+            - --max-model-len
+            - "2048"
+            - --gpu-memory-utilization
+            - "0.90"
+            - --served-model-name
+            - slm-125m
+            - --trust-remote-code
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-credentials
+                  key: token
+          resources:
+            requests:
+              memory: "16Gi"
+              cpu: "4"
+              nvidia.com/gpu: "1"
+            limits:
+              memory: "32Gi"
+              cpu: "8"
+              nvidia.com/gpu: "1"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            failureThreshold: 3
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /root/.cache/huggingface
+      volumes:
+        - name: hf-cache
+          emptyDir: {}
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
