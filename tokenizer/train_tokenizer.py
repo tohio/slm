@@ -1,231 +1,307 @@
 """
-train_tokenizer.py
-------------------
-Trains a custom BPE tokenizer using SentencePiece on a sample
-of the curated dataset.
+tokenizer/train_tokenizer.py
+-----------------------------
+Train a BPE tokenizer using HuggingFace tokenizers library.
 
-Why train a custom tokenizer?
-  - Better token efficiency for your specific data mix (general + code)
-  - Bakes in domain-specific special tokens from the start
-  - Pre-training and inference use the same vocabulary
+Trains on the validated dataset to ensure the tokenizer vocabulary
+reflects the actual cleaned data distribution. A domain-specific
+tokenizer encodes the training text more efficiently than a generic
+tokenizer (e.g. GPT-2's), reducing the number of tokens per document
+and improving training efficiency.
 
-Workflow:
-  1. Sample text from curated JSONL files (no need to use all data)
-  2. Train SentencePiece BPE model
-  3. Validate tokenizer on sample sentences
-  4. Save model + vocab
+Special tokens are baked in at training time — they cannot be added
+later without retraining the tokenizer and resizing model embeddings.
+
+Special tokens:
+    Structural:   <PAD>, <UNK>, <BOS>, <EOS>
+    Chat:         <|system|>, <|user|>, <|assistant|>, <|endofturn|>
+    Code:         <|code|>, <|endofcode|>
+    Tool use:     <|tool|>, <|endoftool|>
+    Reasoning:    <|reasoning|>, <|endofreasoning|>
+    RAG context:  <|context|>, <|endofcontext|>
+
+Vocab size: 32,000 (sufficient for English + code at 125M–1B scale)
+
+Output:
+    data/tokenizer/slm_tokenizer.json   — full tokenizer (HF format)
+    data/tokenizer/vocab.json           — vocabulary
+    data/tokenizer/merges.txt           — BPE merge rules
+    data/tokenizer/special_tokens.json  — special token definitions
 
 Usage:
-    python train_tokenizer.py --config ../configs/tokenizer.yaml
-                              --input-dir /data/curated/stages/pii
-                              --output-dir /data/tokenizer
-                              [--sample-size 10000000]
+    python tokenizer/train_tokenizer.py
+    python tokenizer/train_tokenizer.py --vocab-size 32000
+    python tokenizer/train_tokenizer.py --input data/validated/train.jsonl
 """
 
 import argparse
-import logging
 import json
+import logging
 import os
-import random
+import sys
 from pathlib import Path
 
-import yaml
-import sentencepiece as spm
+from dotenv import load_dotenv
+
+load_dotenv()
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
-logger = logging.getLogger("tokenizer.train")
+log = logging.getLogger(__name__)
+
+DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
+TOKENIZER_DIR = DATA_DIR / "tokenizer"
+
+# ── Special tokens ─────────────────────────────────────────────────────────────
+
+SPECIAL_TOKENS = [
+    # Structural — must be first for correct IDs
+    "<PAD>",            # 0
+    "<UNK>",            # 1
+    "<BOS>",            # 2
+    "<EOS>",            # 3
+    # Chat
+    "<|system|>",       # 4
+    "<|user|>",         # 5
+    "<|assistant|>",    # 6
+    "<|endofturn|>",    # 7
+    # Code
+    "<|code|>",         # 8
+    "<|endofcode|>",    # 9
+    # Tool use
+    "<|tool|>",         # 10
+    "<|endoftool|>",    # 11
+    # Reasoning
+    "<|reasoning|>",    # 12
+    "<|endofreasoning|>", # 13
+    # RAG context
+    "<|context|>",      # 14
+    "<|endofcontext|>", # 15
+]
+
+# Token ID constants for use in training scripts
+PAD_ID = 0
+UNK_ID = 1
+BOS_ID = 2
+EOS_ID = 3
+SYSTEM_ID = 4
+USER_ID = 5
+ASSISTANT_ID = 6
+ENDOFTURN_ID = 7
+CODE_ID = 8
+ENDOFCODE_ID = 9
+TOOL_ID = 10
+ENDOFTOOL_ID = 11
+REASONING_ID = 12
+ENDOFREASONING_ID = 13
+CONTEXT_ID = 14
+ENDOFCONTEXT_ID = 15
 
 
-def get_num_threads(config_value: int | None = None) -> int:
+# ── Text iterator ──────────────────────────────────────────────────────────────
+
+def text_iterator(input_path: Path, batch_size: int = 1000):
     """
-    Determine number of threads to use for tokenizer training.
-    Uses all available CPUs by default — tokenizer training is
-    embarrassingly parallel and benefits from full CPU utilization.
-    Config value is used as an override if explicitly set to a non-None value.
+    Yield batches of text strings from a JSONL file.
+
+    The HuggingFace tokenizers trainer expects an iterator of
+    strings or lists of strings. We yield batches for efficiency.
+
+    Args:
+        input_path: Path to JSONL file with "text" field.
+        batch_size: Number of texts per batch.
     """
-    cpu_count = os.cpu_count() or 1
-    if config_value is not None and config_value > 0:
-        threads = min(config_value, cpu_count)
-        if config_value > cpu_count:
-            logger.warning(
-                f"num_threads={config_value} in config exceeds available CPUs ({cpu_count}). "
-                f"Using {cpu_count}."
-            )
-    else:
-        threads = cpu_count
-    logger.info(f"Using {threads} threads for tokenizer training (available CPUs: {cpu_count})")
-    return threads
+    batch = []
+    with open(input_path, encoding="utf-8") as f:
+        for line in f:
+            record = json.loads(line)
+            text = record.get("text", "").strip()
+            if text:
+                batch.append(text)
+            if len(batch) >= batch_size:
+                yield batch
+                batch = []
+    if batch:
+        yield batch
 
 
-def sample_text_from_jsonl(
-    input_dir: Path,
-    output_file: Path,
-    sample_size: int,
-    seed: int = 42,
-) -> int:
+# ── Train ──────────────────────────────────────────────────────────────────────
+
+def train_tokenizer(
+    input_path: Path,
+    output_dir: Path,
+    vocab_size: int = 32_000,
+    min_frequency: int = 2,
+) -> None:
     """
-    Sample up to `sample_size` sentences from JSONL files.
-    Writes one sentence per line to output_file for SentencePiece training.
-    Returns actual number of lines written.
+    Train a BPE tokenizer on the validated dataset.
+
+    Args:
+        input_path: Path to validated JSONL file.
+        output_dir: Directory to save tokenizer files.
+        vocab_size: Target vocabulary size. Default: 32,000.
+        min_frequency: Minimum token frequency to include in vocab.
     """
-    random.seed(seed)
-    output_file.parent.mkdir(parents=True, exist_ok=True)
+    from tokenizers import Tokenizer, AddedToken
+    from tokenizers.models import BPE
+    from tokenizers.trainers import BpeTrainer
+    from tokenizers.pre_tokenizers import ByteLevel
+    from tokenizers.decoders import ByteLevel as ByteLevelDecoder
+    from tokenizers.normalizers import NFC
+    from tokenizers.processors import TemplateProcessing
 
-    all_docs = []
-    for jsonl_file in sorted(input_dir.glob("*.jsonl")):
-        with open(jsonl_file, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    all_docs.append(line)
-
-    logger.info(f"Found {len(all_docs):,} documents total")
-
-    # Shuffle for representative sample
-    random.shuffle(all_docs)
-
-    lines_written = 0
-    with open(output_file, "w", encoding="utf-8") as fout:
-        for doc_line in all_docs:
-            doc = json.loads(doc_line)
-            text = doc.get("text", "").strip()
-            if not text:
-                continue
-
-            # Write sentences (split on newlines for variety)
-            sentences = [s.strip() for s in text.split("\n") if len(s.strip()) > 20]
-            for sentence in sentences:
-                fout.write(sentence + "\n")
-                lines_written += 1
-                if lines_written >= sample_size:
-                    break
-
-            if lines_written >= sample_size:
-                break
-
-    logger.info(f"Wrote {lines_written:,} sentences to {output_file}")
-    return lines_written
-
-
-def train_tokenizer(config: dict, input_text_file: str, output_dir: Path):
-    """Train SentencePiece BPE model using config parameters."""
-    cfg = config["tokenizer"]
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    model_prefix = str(output_dir / "slm_tokenizer")
+    log.info(f"Training BPE tokenizer on {input_path}")
+    log.info(f"Vocab size: {vocab_size:,}")
+    log.info(f"Special tokens: {len(SPECIAL_TOKENS)}")
 
-    # Resolve num_threads dynamically — use all available CPUs
-    # unless the config explicitly overrides with a specific value
-    num_threads = get_num_threads(cfg.get("num_threads", None))
+    # Build tokenizer
+    tokenizer = Tokenizer(BPE(unk_token="<UNK>"))
 
-    # Build SentencePiece training args
-    train_args = {
-        "input": input_text_file,
-        "model_prefix": model_prefix,
-        "model_type": cfg.get("model_type", "bpe"),
-        "vocab_size": cfg.get("vocab_size", 32000),
-        "character_coverage": cfg.get("character_coverage", 0.9995),
-        "pad_id": cfg.get("pad_id", 0),
-        "unk_id": cfg.get("unk_id", 1),
-        "bos_id": cfg.get("bos_id", 2),
-        "eos_id": cfg.get("eos_id", 3),
-        "normalization_rule_name": cfg.get("normalization_rule_name", "nmt_nfkc_cf"),
-        "remove_extra_whitespaces": cfg.get("remove_extra_whitespaces", True),
-        "add_dummy_prefix": cfg.get("add_dummy_prefix", True),
-        "input_sentence_size": cfg.get("input_sentence_size", 10_000_000),
-        "shuffle_input_sentence": cfg.get("shuffle_input_sentence", True),
-        "num_threads": num_threads,
-        "max_sentence_length": cfg.get("max_sentence_length", 4096),
-        "byte_fallback": cfg.get("byte_fallback", True),
-        "train_extremely_large_corpus": cfg.get("train_extremely_large_corpus", False),
-    }
+    # NFC normalization — handles unicode composed/decomposed forms
+    tokenizer.normalizer = NFC()
 
-    # Add user-defined special tokens
-    user_symbols = cfg.get("user_defined_symbols", [])
-    if user_symbols:
-        train_args["user_defined_symbols"] = ",".join(user_symbols)
+    # Byte-level pre-tokenizer — handles any unicode without UNK tokens
+    # Same as GPT-2's approach — every byte is representable
+    tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=False)
+    tokenizer.decoder = ByteLevelDecoder()
 
-    logger.info(f"Training SentencePiece BPE tokenizer")
-    logger.info(f"  Vocab size:  {train_args['vocab_size']:,}")
-    logger.info(f"  Model type:  {train_args['model_type']}")
-    logger.info(f"  Threads:     {num_threads}")
-    logger.info(f"  Output:      {model_prefix}.{{model,vocab}}")
+    # Add BOS/EOS automatically via post-processor
+    tokenizer.post_processor = TemplateProcessing(
+        single="<BOS> $A <EOS>",
+        pair="<BOS> $A <EOS> $B:1 <EOS>:1",
+        special_tokens=[
+            ("<BOS>", BOS_ID),
+            ("<EOS>", EOS_ID),
+        ],
+    )
 
-    spm.SentencePieceTrainer.Train(**train_args)
+    # Trainer
+    trainer = BpeTrainer(
+        vocab_size=vocab_size,
+        min_frequency=min_frequency,
+        special_tokens=SPECIAL_TOKENS,
+        show_progress=True,
+        initial_alphabet=ByteLevel.alphabet(),
+    )
 
-    logger.info("Tokenizer training complete")
-    return model_prefix
+    # Train
+    log.info("Training...")
+    tokenizer.train_from_iterator(
+        text_iterator(input_path),
+        trainer=trainer,
+        length=None,  # unknown length — shows progress by docs not %
+    )
+
+    # Verify special token IDs are correct
+    for expected_id, token in enumerate(SPECIAL_TOKENS):
+        actual_id = tokenizer.token_to_id(token)
+        if actual_id != expected_id:
+            log.warning(
+                f"Special token ID mismatch: {token} "
+                f"expected={expected_id}, actual={actual_id}"
+            )
+
+    # Save
+    tokenizer_path = output_dir / "slm_tokenizer.json"
+    tokenizer.save(str(tokenizer_path))
+    log.info(f"Tokenizer saved to {tokenizer_path}")
+
+    # Save vocab and merges separately for inspection
+    tokenizer.model.save(str(output_dir))
+    log.info(f"Vocab and merges saved to {output_dir}")
+
+    # Save special token definitions
+    special_tokens_path = output_dir / "special_tokens.json"
+    with open(special_tokens_path, "w") as f:
+        json.dump(
+            {token: i for i, token in enumerate(SPECIAL_TOKENS)},
+            f, indent=2
+        )
+    log.info(f"Special tokens saved to {special_tokens_path}")
+
+    # Save as HuggingFace PreTrainedTokenizerFast for transformers compatibility
+    _save_as_hf_tokenizer(tokenizer, output_dir)
+
+    # Print vocab stats
+    vocab = tokenizer.get_vocab()
+    log.info(f"Final vocab size: {len(vocab):,}")
+    log.info(f"Special tokens verified: {len(SPECIAL_TOKENS)}")
 
 
-def validate_tokenizer(model_path: str):
-    """Quick sanity checks on the trained tokenizer."""
-    sp = spm.SentencePieceProcessor()
-    sp.Load(f"{model_path}.model")
+def _save_as_hf_tokenizer(tokenizer, output_dir: Path) -> None:
+    """
+    Save the tokenizer as a HuggingFace PreTrainedTokenizerFast.
 
-    logger.info(f"Validating tokenizer ({sp.GetPieceSize():,} vocab)")
+    This enables use with AutoTokenizer and the full transformers ecosystem.
+    """
+    try:
+        from transformers import PreTrainedTokenizerFast
 
-    test_cases = [
-        "The quick brown fox jumps over the lazy dog.",
-        "def fibonacci(n: int) -> int:\n    if n <= 1:\n        return n\n    return fibonacci(n-1) + fibonacci(n-2)",
-        "Hello! How can I help you today?",
-        "<|user|> What is Python? <|assistant|> Python is a high-level programming language.",
-    ]
+        hf_tokenizer = PreTrainedTokenizerFast(
+            tokenizer_object=tokenizer,
+            bos_token="<BOS>",
+            eos_token="<EOS>",
+            unk_token="<UNK>",
+            pad_token="<PAD>",
+            additional_special_tokens=SPECIAL_TOKENS[4:],  # chat/code/tool tokens
+        )
+        hf_tokenizer.save_pretrained(str(output_dir))
+        log.info(f"HuggingFace tokenizer saved to {output_dir}")
+    except Exception as e:
+        log.warning(f"Could not save HF tokenizer: {e}")
 
-    for text in test_cases:
-        tokens = sp.EncodeAsIds(text)
-        decoded = sp.DecodeIds(tokens)
-        logger.info(f"  Input:   {text[:60]}{'...' if len(text) > 60 else ''}")
-        logger.info(f"  Tokens:  {len(tokens)} | First 10: {tokens[:10]}")
-        logger.info(f"  Decoded: {decoded[:60]}{'...' if len(decoded) > 60 else ''}")
-        logger.info("")
 
-    # Check special tokens are present
-    special_tokens = ["<|system|>", "<|user|>", "<|assistant|>", "<|code|>"]
-    for tok in special_tokens:
-        tok_id = sp.PieceToId(tok)
-        logger.info(f"  Special token '{tok}' → id={tok_id}")
-
+# ── CLI ────────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Train SLM BPE Tokenizer")
-    parser.add_argument("--config", required=True, help="Path to tokenizer.yaml")
-    parser.add_argument("--input-dir", required=True, help="Directory of curated JSONL files")
-    parser.add_argument("--output-dir", required=True, help="Output directory for tokenizer files")
-    parser.add_argument("--sample-size", type=int, default=10_000_000, help="Number of sentences to sample")
-    parser.add_argument("--skip-sampling", action="store_true", help="Skip sampling if training_sample.txt exists")
+    parser = argparse.ArgumentParser(description="Train SLM BPE tokenizer")
+    parser.add_argument(
+        "--input",
+        type=Path,
+        default=DATA_DIR / "validated" / "train.jsonl",
+        help="Input JSONL file (default: data/validated/train.jsonl)",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=TOKENIZER_DIR,
+        help="Output directory (default: data/tokenizer)",
+    )
+    parser.add_argument(
+        "--vocab-size",
+        type=int,
+        default=32_000,
+        help="Vocabulary size (default: 32000)",
+    )
+    parser.add_argument(
+        "--min-frequency",
+        type=int,
+        default=2,
+        help="Minimum token frequency (default: 2)",
+    )
     args = parser.parse_args()
 
-    with open(args.config) as f:
-        config = yaml.safe_load(f)
+    if not args.input.exists():
+        log.error(f"Input file not found: {args.input}")
+        log.error("Run: python validation/scripts/validate.py")
+        sys.exit(1)
 
-    input_dir = Path(args.input_dir)
-    output_dir = Path(args.output_dir)
-    sample_file = output_dir / "training_sample.txt"
-    complete_marker = output_dir / ".complete"
+    train_tokenizer(
+        input_path=args.input,
+        output_dir=args.output,
+        vocab_size=args.vocab_size,
+        min_frequency=args.min_frequency,
+    )
 
-    # Step 1: Sample text
-    if args.skip_sampling and sample_file.exists():
-        logger.info(f"Skipping sampling — using existing {sample_file}")
-    else:
-        logger.info("Sampling text from curated documents...")
-        sample_text_from_jsonl(input_dir, sample_file, args.sample_size)
-
-    # Step 2: Train tokenizer
-    model_prefix = train_tokenizer(config, str(sample_file), output_dir)
-
-    # Step 3: Validate
-    validate_tokenizer(model_prefix)
-
-    logger.info(f"Tokenizer saved to {output_dir}/")
-    logger.info(f"  Model:  slm_tokenizer.model")
-    logger.info(f"  Vocab:  slm_tokenizer.vocab")
-
-    # Step 4: Write completion marker
-    complete_marker.touch()
-    logger.info(f"✓ Completion marker written: {complete_marker}")
+    log.info("Tokenizer training complete.")
+    log.info(f"Next step: python tokenizer/test_tokenizer.py")
 
 
 if __name__ == "__main__":
