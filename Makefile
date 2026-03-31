@@ -1,13 +1,25 @@
 # SLM Pipeline Makefile
 # ----------------------
 # Usage:
-#   make <target>              # run a stage
-#   make <target> SIZE=350m    # run for a specific model size (125m, 350m, 1b)
+#   make <target>                                        # defaults: SIZE=125m, GPUS=1
+#   make <target> SIZE=350m                              # different model size
+#   make <target> GPUS=4                                 # multi-GPU
+#   make <target> CONFIG=pretrain/configs/gpt_125m.yaml  # explicit config override
 #
 # Full pipeline:
-#   make all SIZE=125m
+#   make all SIZE=125m GPUS=4
 
-SIZE ?= 125m
+SIZE   ?= 125m
+GPUS   ?= 1
+
+# Config defaults — overridable with CONFIG=path/to/config.yaml
+PRETRAIN_CONFIG ?= pretrain/configs/gpt_$(SIZE).yaml
+SFT_CHAT_CONFIG ?= finetune/configs/sft_chat_$(SIZE).yaml
+SFT_CODE_CONFIG ?= finetune/configs/sft_code_$(SIZE).yaml
+DPO_CONFIG      ?= alignment/configs/dpo_$(SIZE).yaml
+
+# accelerate launch with GPU count
+ACCELERATE = accelerate launch --num_processes $(GPUS)
 
 .PHONY: all curate validate tokenizer tokenize \
         pretrain prepare-sft sft sft-code \
@@ -17,7 +29,7 @@ SIZE ?= 125m
 # ── Full pipeline ──────────────────────────────────────────────────────────────
 
 all: curate validate tokenizer tokenize pretrain prepare-sft sft sft-code prepare-dpo dpo
-	@echo "Pipeline complete for slm-$(SIZE)"
+	@echo "Pipeline complete for slm-$(SIZE) on $(GPUS) GPU(s)"
 
 # ── Stage 1: Data curation ────────────────────────────────────────────────────
 
@@ -65,13 +77,13 @@ tokenize:
 	python pretrain/data/tokenize.py --workers 8 --verify
 
 pretrain:
-	@echo "==> Stage 4b: Pretraining ($(SIZE))"
-	accelerate launch pretrain/train.py \
-		--config pretrain/configs/gpt_$(SIZE).yaml
+	@echo "==> Stage 4b: Pretraining ($(SIZE), $(GPUS) GPU(s), config=$(PRETRAIN_CONFIG))"
+	$(ACCELERATE) pretrain/train.py \
+		--config $(PRETRAIN_CONFIG)
 
 pretrain-resume:
-	accelerate launch pretrain/train.py \
-		--config pretrain/configs/gpt_$(SIZE).yaml \
+	$(ACCELERATE) pretrain/train.py \
+		--config $(PRETRAIN_CONFIG) \
 		--resume
 
 # ── Stage 5: SFT ──────────────────────────────────────────────────────────────
@@ -81,23 +93,23 @@ prepare-sft:
 	python finetune/data/prepare_sft.py --stage both
 
 sft:
-	@echo "==> Stage 5b: Chat SFT ($(SIZE))"
-	accelerate launch finetune/train_sft.py \
-		--config finetune/configs/sft_chat_$(SIZE).yaml
+	@echo "==> Stage 5b: Chat SFT ($(SIZE), $(GPUS) GPU(s), config=$(SFT_CHAT_CONFIG))"
+	$(ACCELERATE) finetune/train_sft.py \
+		--config $(SFT_CHAT_CONFIG)
 
 sft-resume:
-	accelerate launch finetune/train_sft.py \
-		--config finetune/configs/sft_chat_$(SIZE).yaml \
+	$(ACCELERATE) finetune/train_sft.py \
+		--config $(SFT_CHAT_CONFIG) \
 		--resume
 
 sft-code:
-	@echo "==> Stage 5c: Code SFT ($(SIZE))"
-	accelerate launch finetune/train_sft.py \
-		--config finetune/configs/sft_code_$(SIZE).yaml
+	@echo "==> Stage 5c: Code SFT ($(SIZE), $(GPUS) GPU(s), config=$(SFT_CODE_CONFIG))"
+	$(ACCELERATE) finetune/train_sft.py \
+		--config $(SFT_CODE_CONFIG)
 
 sft-code-resume:
-	accelerate launch finetune/train_sft.py \
-		--config finetune/configs/sft_code_$(SIZE).yaml \
+	$(ACCELERATE) finetune/train_sft.py \
+		--config $(SFT_CODE_CONFIG) \
 		--resume
 
 # ── Stage 6: DPO ──────────────────────────────────────────────────────────────
@@ -107,13 +119,13 @@ prepare-dpo:
 	python alignment/data/prepare_dpo.py
 
 dpo:
-	@echo "==> Stage 6b: DPO alignment ($(SIZE))"
-	accelerate launch alignment/train_dpo.py \
-		--config alignment/configs/dpo_$(SIZE).yaml
+	@echo "==> Stage 6b: DPO alignment ($(SIZE), $(GPUS) GPU(s), config=$(DPO_CONFIG))"
+	$(ACCELERATE) alignment/train_dpo.py \
+		--config $(DPO_CONFIG)
 
 dpo-resume:
-	accelerate launch alignment/train_dpo.py \
-		--config alignment/configs/dpo_$(SIZE).yaml \
+	$(ACCELERATE) alignment/train_dpo.py \
+		--config $(DPO_CONFIG) \
 		--resume
 
 # ── Stage 7: Evaluation ───────────────────────────────────────────────────────
@@ -180,7 +192,7 @@ help:
 	@echo "SLM Pipeline"
 	@echo "============"
 	@echo ""
-	@echo "Usage: make <target> [SIZE=125m|350m|1b]"
+	@echo "Usage: make <target> [SIZE=125m|350m|1b] [GPUS=N] [CONFIG=path/to/config.yaml]"
 	@echo ""
 	@echo "Pipeline stages:"
 	@echo "  curate          Stage 1  — download and curate data"
@@ -197,21 +209,23 @@ help:
 	@echo "  export          Stage 8  — push to HuggingFace Hub"
 	@echo ""
 	@echo "Utilities:"
-	@echo "  install         Install dependencies (pip)"
-	@echo "  install-uv      Install dependencies (uv)"
-	@echo "  install-conda   Install dependencies (conda)"
-	@echo "  install-kenlm   Install KenLM from source"
+	@echo "  install            Install dependencies (pip)"
+	@echo "  install-uv         Install dependencies (uv)"
+	@echo "  install-conda      Install dependencies (conda)"
+	@echo "  install-kenlm      Install KenLM from source"
 	@echo "  accelerate-config  Configure accelerate for multi-GPU"
-	@echo "  s3-upload       Upload curated data to S3"
-	@echo "  s3-download     Download curated data from S3"
-	@echo "  s3-list         List S3 contents"
-	@echo "  clean           Remove cache files"
-	@echo "  clean-data      Remove all data directories"
-	@echo "  clean-results   Remove all training results"
+	@echo "  s3-upload          Upload curated data to S3"
+	@echo "  s3-download        Download curated data from S3"
+	@echo "  s3-list            List S3 contents"
+	@echo "  clean              Remove cache files"
+	@echo "  clean-data         Remove all data directories"
+	@echo "  clean-results      Remove all training results"
 	@echo ""
 	@echo "Examples:"
-	@echo "  make all SIZE=125m"
-	@echo "  make pretrain SIZE=350m"
-	@echo "  make sft SIZE=1b"
-	@echo "  make dpo SIZE=125m"
+	@echo "  make all SIZE=125m GPUS=2                                    # pipeline validation run"
+	@echo "  make pretrain SIZE=125m GPUS=4                               # 125M on 4x A100"
+	@echo "  make pretrain SIZE=350m GPUS=6                               # 350M on 6x H100"
+	@echo "  make pretrain CONFIG=pretrain/configs/gpt_1b.yaml GPUS=8    # 1B explicit config"
+	@echo "  make sft SIZE=125m GPUS=4"
+	@echo "  make dpo SIZE=125m GPUS=2"
 	@echo ""
