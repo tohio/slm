@@ -189,6 +189,8 @@ make sft-code        # Stage 5: code SFT
 make dpo             # Stage 6: DPO alignment
 make eval            # Stage 7: evaluate on benchmarks
 make export          # Stage 8: export to HuggingFace Hub
+make serve           # Stage 10: launch vLLM server (Hub model)
+make serve-local     # Stage 10: launch vLLM server (local checkpoint)
 ```
 
 **Multi-GPU training**

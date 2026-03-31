@@ -23,7 +23,7 @@ ACCELERATE = accelerate launch --num_processes $(GPUS)
 
 .PHONY: all curate validate tokenizer tokenize \
         pretrain prepare-sft sft sft-code \
-        prepare-dpo dpo eval export \
+        prepare-dpo dpo eval export serve serve-local \
         clean help
 
 # ── Full pipeline ──────────────────────────────────────────────────────────────
@@ -140,6 +140,16 @@ export:
 	@echo "==> Stage 8: Export to HuggingFace Hub ($(SIZE))"
 	python export/export.py --model results/slm-$(SIZE)-dpo/final --size $(SIZE)
 
+# ── Stage 10: Serve ──────────────────────────────────────────────────────────
+
+serve:
+	@echo "==> Stage 10: Serve ($(SIZE))"
+	MODEL=tohio/slm-$(SIZE) ./serve/serve.sh
+
+serve-local:
+	@echo "==> Stage 10: Serve local checkpoint ($(SIZE))"
+	MODEL=results/slm-$(SIZE)-dpo/final ./serve/serve.sh
+
 # ── S3 utilities ──────────────────────────────────────────────────────────────
 
 s3-upload:
@@ -207,6 +217,8 @@ help:
 	@echo "  dpo             Stage 6b — DPO alignment"
 	@echo "  eval            Stage 7  — benchmark evaluation"
 	@echo "  export          Stage 8  — push to HuggingFace Hub"
+	@echo "  serve           Stage 10 — launch vLLM server (Hub model)"
+	@echo "  serve-local     Stage 10 — launch vLLM server (local checkpoint)"
 	@echo ""
 	@echo "Utilities:"
 	@echo "  install            Install dependencies (pip)"
