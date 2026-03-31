@@ -181,12 +181,28 @@ cp .env.sample .env
 make curate          # Stage 1: download and curate data
 make validate        # Stage 2: quality filter and validate
 make tokenizer       # Stage 3: train tokenizer
-make pretrain        # Stage 4: pretrain slm-125m
-make sft             # Stage 5: supervised fine-tuning
+make tokenize        # Stage 4a: tokenize dataset
+make pretrain        # Stage 4b: pretrain slm-125m (single GPU)
+make pretrain GPUS=4 # Stage 4b: pretrain on 4 GPUs
+make sft             # Stage 5: chat SFT
+make sft-code        # Stage 5: code SFT
 make dpo             # Stage 6: DPO alignment
 make eval            # Stage 7: evaluate on benchmarks
 make export          # Stage 8: export to HuggingFace Hub
-make serve           # Stage 10: launch vLLM server
+```
+
+**Multi-GPU training**
+
+```bash
+# Specify GPU count with GPUS=N
+make pretrain SIZE=125m GPUS=4
+make pretrain SIZE=350m GPUS=6
+make pretrain SIZE=1b   GPUS=8
+
+# Override config directly
+make pretrain CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
+make sft      CONFIG=finetune/configs/sft_chat_125m.yaml GPUS=4
+make dpo      CONFIG=alignment/configs/dpo_125m.yaml GPUS=2
 ```
 
 **Interactive chat**
