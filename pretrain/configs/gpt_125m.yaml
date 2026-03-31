@@ -1,0 +1,42 @@
+name: slm-125m
+wandb_project: slm
+
+model:
+  vocab_size: 32000
+  hidden_size: 768
+  num_hidden_layers: 12
+  num_attention_heads: 12
+  num_key_value_heads: 4
+  max_position_embeddings: 2048
+  rope_theta: 10000.0
+  rms_norm_eps: 1.0e-5
+  initializer_range: 0.02
+  tie_word_embeddings: true
+
+data:
+  val_fraction: 0.005
+
+training:
+  max_steps: 150000         # ~3B tokens at global_batch=32, seq=2048
+  warmup_steps: 2000
+  micro_batch_size: 4
+  gradient_accumulation_steps: 8   # effective global batch = 4 * 8 = 32
+  precision: bf16
+  gradient_clip_val: 1.0
+  gradient_checkpointing: false
+  eval_steps: 1000
+  save_steps: 1000
+  save_total_limit: 3
+  log_steps: 10
+  num_workers: 4
+  seed: 42
+  lr_scheduler: cosine
+  report_to:
+    - wandb
+
+optimizer:
+  lr: 3.0e-4
+  weight_decay: 0.1
+  beta1: 0.9
+  beta2: 0.95
+  eps: 1.0e-8
