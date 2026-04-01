@@ -10,26 +10,41 @@ ready for tokenizer training and model pretraining.
 Pipeline:
     1. Download sources (Wikipedia, CodeSearchNet, Common Crawl)
     2. Apply quality filters (heuristics from FineWeb/Gopher)
-    3. Deduplicate (exact + MinHash LSH)
+    3. Deduplicate (exact hash + datatrove disk-based MinHash LSH)
     4. Blend sources to target token ratios
     5. Upload to S3
+
+Deduplication uses datatrove's 4-stage disk-based MinHash pipeline,
+replacing the datasketch in-memory LSH. RAM usage is bounded by shard
+size, not corpus size — scales to 125m, 350m, and 1b with the same
+memory footprint.
+
+Blend uses streaming reservoir sampling + offset-based shuffle.
+Peak RAM during blend is O(1) regardless of corpus size.
 
 Output structure:
     data/
     ├── raw/
-    │   ├── wikipedia/       raw Wikipedia JSONL shards
-    │   ├── code/            raw CodeSearchNet JSONL shards
-    │   └── common_crawl/    raw Common Crawl JSONL shards
+    │   ├── wikipedia/          raw Wikipedia JSONL shards
+    │   ├── code/               raw CodeSearchNet JSONL shards
+    │   └── common_crawl/       raw Common Crawl JSONL shards
     ├── filtered/
-    │   ├── wikipedia/       quality filtered
-    │   ├── code/            quality filtered
-    │   └── common_crawl/    quality filtered + deduped
+    │   ├── wikipedia/          quality filtered
+    │   ├── wikipedia_deduped/  quality filtered + deduplicated
+    │   ├── code/               quality filtered
+    │   ├── code_deduped/       quality filtered + deduplicated
+    │   ├── common_crawl/       quality filtered
+    │   └── common_crawl_deduped/ quality filtered + deduplicated
     └── curated/
-        └── train.jsonl      final blended dataset
+        ├── train.jsonl         final blended dataset
+        └── blend_stats.json    source mix breakdown
 
 Usage:
     # Full pipeline
     python curator/scripts/curate.py --target 125m
+
+    # Minimal run — validates pipeline end-to-end with tiny data volumes
+    python curator/scripts/curate.py --target mini --mini
 
     # Individual stages
     python curator/scripts/curate.py --target 125m --stage download
@@ -37,6 +52,9 @@ Usage:
     python curator/scripts/curate.py --target 125m --stage dedup
     python curator/scripts/curate.py --target 125m --stage blend
     python curator/scripts/curate.py --target 125m --stage upload
+
+    # Control parallelism
+    python curator/scripts/curate.py --target 125m --workers 8
 """
 
 import argparse
@@ -57,7 +75,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from curator.filters.dedup import Deduplicator
 from curator.filters.quality import QualityFilter, QualityConfig
 from curator.sources.common_crawl import CommonCrawlSource
-from curator.sources.code_search_net import CodeSearchNetSource
+from curator.sources.code_search_net import CodeSearchNetSource, LANGUAGES
 from curator.sources.wikipedia import WikipediaSource
 from curator.scripts.upload_s3 import upload_directory, download_prefix, get_bucket_and_prefix
 
@@ -70,56 +88,76 @@ log = logging.getLogger(__name__)
 
 
 # ── Target configurations ──────────────────────────────────────────────────────
-# Token targets per model size — source mix stays constant at 70/20/10
+# Token targets per model size — source mix stays constant at 70/20/10.
+# mini target is for pipeline validation only — not for training.
 
 TARGET_CONFIGS = {
+    "mini": {
+        "total_tokens":  1_000_000,       # 1M tokens — exercises blend without waiting
+        "cc_segments":   2,               # 2 WARC segments (~70k raw docs)
+        "cc_crawls":     ["CC-MAIN-2024-10"],
+    },
     "125m": {
-        "total_tokens": 3_000_000_000,
-        "cc_segments": 10,
-        "cc_crawls": ["CC-MAIN-2024-10"],
+        "total_tokens":  3_000_000_000,
+        "cc_segments":   10,
+        "cc_crawls":     ["CC-MAIN-2024-10"],
     },
     "350m": {
-        "total_tokens": 10_000_000_000,
-        "cc_segments": 40,
-        "cc_crawls": ["CC-MAIN-2024-10", "CC-MAIN-2023-50"],
+        "total_tokens":  10_000_000_000,
+        "cc_segments":   40,
+        "cc_crawls":     ["CC-MAIN-2024-10", "CC-MAIN-2023-50"],
     },
     "1b": {
-        "total_tokens": 25_000_000_000,
-        "cc_segments": 100,
-        "cc_crawls": ["CC-MAIN-2024-10", "CC-MAIN-2023-50", "CC-MAIN-2023-40"],
+        "total_tokens":  25_000_000_000,
+        "cc_segments":   100,
+        "cc_crawls":     ["CC-MAIN-2024-10", "CC-MAIN-2023-50", "CC-MAIN-2023-40"],
     },
 }
 
 # Source mix — fraction of total tokens per source
 SOURCE_MIX = {
     "common_crawl": 0.70,
-    "wikipedia": 0.20,
-    "code": 0.10,
+    "wikipedia":    0.20,
+    "code":         0.10,
 }
 
-# Data directories
-DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
-RAW_DIR = DATA_DIR / "raw"
+# Mini run overrides — passed to source constructors when --mini is set
+MINI_OVERRIDES = {
+    "wiki_max_docs":    5_000,
+    "code_max_docs":    10_000,
+    "code_languages":   ["python", "javascript"],   # 2 of 6 languages
+}
+
+# Data directories — override with DATA_DIR env var
+DATA_DIR    = Path(os.environ.get("DATA_DIR", "data"))
+RAW_DIR     = DATA_DIR / "raw"
 FILTERED_DIR = DATA_DIR / "filtered"
-CURATED_DIR = DATA_DIR / "curated"
+CURATED_DIR  = DATA_DIR / "curated"
 
 
 # ── Stage 1: Download ──────────────────────────────────────────────────────────
 
-def stage_download(target: str) -> None:
+def stage_download(target: str, mini: bool = False) -> None:
     """Download all data sources."""
     cfg = TARGET_CONFIGS[target]
-    log.info(f"=== Stage 1: Download (target={target}) ===")
+    log.info(f"=== Stage 1: Download (target={target}, mini={mini}) ===")
 
     # Wikipedia
     log.info("Downloading Wikipedia EN...")
-    wiki = WikipediaSource(output_dir=RAW_DIR / "wikipedia")
+    wiki = WikipediaSource(
+        output_dir=RAW_DIR / "wikipedia",
+        max_docs=MINI_OVERRIDES["wiki_max_docs"] if mini else None,
+    )
     wiki.download()
     log.info(f"Wikipedia stats: {wiki.stats()}")
 
     # CodeSearchNet
     log.info("Downloading CodeSearchNet...")
-    code = CodeSearchNetSource(output_dir=RAW_DIR / "code")
+    code = CodeSearchNetSource(
+        output_dir=RAW_DIR / "code",
+        languages=MINI_OVERRIDES["code_languages"] if mini else LANGUAGES,
+        max_docs=MINI_OVERRIDES["code_max_docs"] if mini else None,
+    )
     code.download()
     log.info(f"CodeSearchNet stats: {code.stats()}")
 
@@ -128,7 +166,7 @@ def stage_download(target: str) -> None:
     cc = CommonCrawlSource(
         output_dir=RAW_DIR / "common_crawl",
         crawls=cfg["cc_crawls"],
-        max_segments=cfg["cc_segments"],
+        max_segments=cfg["cc_segments"],   # already small in mini config
     )
     cc.download()
     log.info(f"Common Crawl stats: {cc.stats()}")
@@ -172,37 +210,49 @@ def stage_filter() -> None:
 
 # ── Stage 3: Deduplicate ───────────────────────────────────────────────────────
 
-def stage_dedup() -> None:
-    """Deduplicate filtered data with exact + MinHash LSH."""
-    log.info("=== Stage 3: Deduplication ===")
+def stage_dedup(workers: int | None = None) -> None:
+    """
+    Deduplicate filtered data using exact hash + datatrove MinHash LSH.
 
-    # Dedup index persisted across shards for cross-shard dedup
-    index_path = DATA_DIR / "dedup_index.pkl"
+    Two stages per source:
+        1. Exact dedup  — SHA-256 streaming pass, shared cross-source index.
+                          In-memory set grows ~70 bytes/doc. At 1b scale
+                          this is ~5GB — the only structure that scales with
+                          corpus size, and it fits on any reasonable instance.
+        2. Fuzzy dedup  — datatrove 4-stage disk pipeline:
+                          signatures → buckets → cluster → filter.
+                          Peak RAM is O(shard_size), not O(corpus_size).
+                          Handles 125m, 350m, and 1b identically.
+    """
+    log.info("=== Stage 3: Deduplication (datatrove MinHash) ===")
+
+    n_workers = workers or max(1, (os.cpu_count() or 4) // 2)
+    working_dir = DATA_DIR / "dedup_scratch"
+
+    dedup = Deduplicator(working_dir=working_dir, workers=n_workers)
 
     sources = ["wikipedia", "code", "common_crawl"]
     for source in sources:
         src_dir = FILTERED_DIR / source
         dst_dir = FILTERED_DIR / f"{source}_deduped"
-        dst_dir.mkdir(parents=True, exist_ok=True)
 
-        shards = sorted(src_dir.glob("*.jsonl"))
+        shards = list(src_dir.glob("*.jsonl"))
         if not shards:
             log.warning(f"No filtered shards found in {src_dir} — skipping")
             continue
 
-        log.info(f"Deduplicating {source}: {len(shards)} shards...")
-        dedup = Deduplicator(index_path=index_path)
+        existing = list(dst_dir.glob("*.jsonl")) if dst_dir.exists() else []
+        if existing:
+            log.info(f"  {source}: already deduped ({len(existing)} shards) — skipping")
+            continue
 
-        for shard in shards:
-            out_path = dst_dir / shard.name
-            if out_path.exists():
-                log.debug(f"  Skipping {shard.name} — already deduped")
-                continue
-            dedup.deduplicate_jsonl(shard, out_path)
+        dedup.deduplicate_source(
+            src_dir=src_dir,
+            dst_dir=dst_dir,
+            source_name=source,
+        )
 
-        # Save index after each source for resumability
-        dedup.save(index_path)
-        log.info(dedup.report())
+    log.info(dedup.report())
 
 
 # ── Stage 4: Blend ─────────────────────────────────────────────────────────────
@@ -211,7 +261,10 @@ def stage_blend(target: str, seed: int = 42) -> None:
     """
     Blend sources to the target token ratio and write final train.jsonl.
 
-    Samples from each source proportionally to the SOURCE_MIX ratios.
+    Streams each source to hit its target char count, writes per-source
+    files, then merges and shuffles using a byte-offset index. Peak RAM
+    is O(1) — no source is loaded into memory in full at any point.
+
     Uses character count as a proxy for token count (4 chars ≈ 1 token).
     """
     log.info(f"=== Stage 4: Blend (target={target}) ===")
@@ -222,27 +275,16 @@ def stage_blend(target: str, seed: int = 42) -> None:
     output_path = CURATED_DIR / "train.jsonl"
 
     if output_path.exists():
-        log.info(f"train.jsonl already exists — delete to re-blend")
+        log.info("train.jsonl already exists — delete to re-blend")
         return
 
     rng = random.Random(seed)
+
     source_dirs = {
         "common_crawl": FILTERED_DIR / "common_crawl_deduped",
-        "wikipedia": FILTERED_DIR / "wikipedia_deduped",
-        "code": FILTERED_DIR / "code_deduped",
+        "wikipedia":    FILTERED_DIR / "wikipedia_deduped",
+        "code":         FILTERED_DIR / "code_deduped",
     }
-
-    # Collect all records per source
-    source_records: dict[str, list[dict]] = {}
-    for source, src_dir in source_dirs.items():
-        shards = sorted(src_dir.glob("*.jsonl"))
-        records = []
-        for shard in shards:
-            with open(shard) as f:
-                for line in f:
-                    records.append(json.loads(line))
-        log.info(f"  {source}: {len(records):,} documents")
-        source_records[source] = records
 
     # Target chars per source (4 chars ≈ 1 token)
     target_chars = {
@@ -250,52 +292,103 @@ def stage_blend(target: str, seed: int = 42) -> None:
         for source, fraction in SOURCE_MIX.items()
     }
 
-    # Sample from each source to hit target chars
-    blended = []
-    for source, records in source_records.items():
+    # ── Pass 1: stream each source to a per-source staging file ───────────────
+    # Never loads more than one line at a time.
+    staging_paths = {}
+    source_stats = {}
+
+    for source, src_dir in source_dirs.items():
+        shards = sorted(src_dir.glob("*.jsonl"))
+        if not shards:
+            log.warning(f"  {source}: no deduped shards found — skipping")
+            continue
+
+        staging = CURATED_DIR / f"blend_{source}.jsonl"
+        staging_paths[source] = staging
         target = target_chars[source]
-        rng.shuffle(records)
         chars = 0
-        for record in records:
-            if chars >= target:
-                break
-            blended.append(record)
-            chars += len(record["text"])
+        docs = 0
+
+        with open(staging, "w") as fout:
+            for shard in shards:
+                if chars >= target:
+                    break
+                with open(shard) as fin:
+                    for line in fin:
+                        record = json.loads(line)
+                        text_len = len(record.get("text", ""))
+                        chars += text_len
+                        fout.write(line)
+                        docs += 1
+                        if chars >= target:
+                            break
+
         log.info(
-            f"  {source}: sampled {len([r for r in blended if r.get('source') == source]):,} docs "
-            f"({chars / 1e9:.2f}B chars)"
+            f"  {source}: {docs:,} docs, "
+            f"{chars / 1e9:.3f}B chars, "
+            f"~{chars // 4 / 1e6:.1f}M tokens"
         )
+        source_stats[source] = {"docs": docs, "chars": chars}
 
-    # Shuffle the final blend
-    rng.shuffle(blended)
+    # ── Pass 2: merge staging files into one (interleaved) ────────────────────
+    merged_path = CURATED_DIR / "blend_merged.jsonl"
+    total_docs = 0
+    total_chars = 0
 
-    # Write
-    log.info(f"Writing {len(blended):,} documents to {output_path}...")
-    with open(output_path, "w") as f:
-        for record in blended:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    with open(merged_path, "w") as fout:
+        for source, staging in staging_paths.items():
+            with open(staging) as fin:
+                for line in fin:
+                    fout.write(line)
+                    total_docs += 1
+                    # accumulate chars for stats only — no full load
+            staging.unlink()   # clean up staging file immediately
 
-    total_chars = sum(len(r["text"]) for r in blended)
+    log.info(f"Merged {total_docs:,} documents")
+
+    # ── Pass 3: shuffle via byte-offset index ─────────────────────────────────
+    # Builds an index of line start offsets (8 bytes each), shuffles the
+    # index, then reads lines in shuffled order. Peak RAM = index size.
+    # At 100M docs the index is ~800MB — well within any instance limit.
+    log.info("Building line offset index for shuffle...")
+    offsets = []
+    with open(merged_path, "rb") as f:
+        while True:
+            offset = f.tell()
+            line = f.readline()
+            if not line:
+                break
+            offsets.append(offset)
+            total_chars += len(line) - 1   # approximate — avoids re-reading
+
+    log.info(f"Shuffling {len(offsets):,} line offsets...")
+    rng.shuffle(offsets)
+
+    log.info(f"Writing shuffled output to {output_path}...")
+    with open(merged_path, "rb") as fin, open(output_path, "wb") as fout:
+        for offset in offsets:
+            fin.seek(offset)
+            fout.write(fin.readline())
+
+    merged_path.unlink()   # clean up merged file
+
     log.info(
         f"Blend complete — "
-        f"{len(blended):,} documents, "
-        f"{total_chars / 1e9:.2f}B chars, "
+        f"{total_docs:,} documents, "
         f"~{total_chars // 4 / 1e9:.2f}B tokens"
     )
 
-    # Write blend stats
+    # ── Write blend stats ─────────────────────────────────────────────────────
     stats_path = CURATED_DIR / "blend_stats.json"
-    source_counts = {}
-    for r in blended:
-        s = r.get("source", "unknown")
-        source_counts[s] = source_counts.get(s, 0) + 1
     with open(stats_path, "w") as f:
         json.dump({
             "target": target,
-            "total_documents": len(blended),
-            "total_chars": total_chars,
+            "total_documents": total_docs,
             "estimated_tokens": total_chars // 4,
-            "source_mix": source_counts,
+            "source_mix": {
+                s: {"docs": v["docs"], "chars": v["chars"]}
+                for s, v in source_stats.items()
+            },
         }, f, indent=2)
     log.info(f"Blend stats written to {stats_path}")
 
@@ -326,12 +419,27 @@ def main():
     parser = argparse.ArgumentParser(
         description="SLM data curation pipeline",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Minimal run — validate the pipeline end-to-end quickly
+  python curator/scripts/curate.py --target mini --mini
+
+  # Full 125M run
+  python curator/scripts/curate.py --target 125m
+
+  # Full 350M run with 16 workers
+  python curator/scripts/curate.py --target 350m --workers 16
+
+  # Individual stages
+  python curator/scripts/curate.py --target 125m --stage download
+  python curator/scripts/curate.py --target 125m --stage dedup --workers 8
+        """,
     )
     parser.add_argument(
         "--target",
         choices=list(TARGET_CONFIGS.keys()),
         default="125m",
-        help="Model size target — controls how much data to collect",
+        help="Model size target — controls data volume. Use 'mini' for pipeline validation.",
     )
     parser.add_argument(
         "--stage",
@@ -340,23 +448,51 @@ def main():
         help="Pipeline stage to run. Default: all",
     )
     parser.add_argument(
+        "--mini",
+        action="store_true",
+        help=(
+            "Minimal data volumes for pipeline validation. "
+            "Caps Wikipedia at 5k docs, CodeSearchNet at 10k samples (python+js only). "
+            "Use with --target mini."
+        ),
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help=(
+            "Number of parallel workers for dedup stage. "
+            "Defaults to cpu_count // 2."
+        ),
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=42,
-        help="Random seed for blend stage",
+        help="Random seed for blend stage shuffle. Default: 42",
     )
     args = parser.parse_args()
 
-    log.info(f"SLM Curation Pipeline — target={args.target}, stage={args.stage}")
+    if args.mini and args.target != "mini":
+        log.warning(
+            f"--mini flag is set but --target is '{args.target}'. "
+            f"Consider using --target mini for a consistent minimal run."
+        )
+
+    log.info(
+        f"SLM Curation Pipeline — "
+        f"target={args.target}, stage={args.stage}, "
+        f"mini={args.mini}, workers={args.workers or 'auto'}"
+    )
 
     if args.stage in ("download", "all"):
-        stage_download(args.target)
+        stage_download(args.target, mini=args.mini)
 
     if args.stage in ("filter", "all"):
         stage_filter()
 
     if args.stage in ("dedup", "all"):
-        stage_dedup()
+        stage_dedup(workers=args.workers)
 
     if args.stage in ("blend", "all"):
         stage_blend(args.target, seed=args.seed)

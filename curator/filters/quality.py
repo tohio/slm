@@ -1,295 +1,248 @@
 """
-curator/sources/common_crawl.py
----------------------------------
-Common Crawl data source.
+curator/filters/quality.py
+---------------------------
+Quality heuristic filters for pretraining data.
 
-Downloads WARC files from Common Crawl S3, extracts clean text using
-trafilatura, filters to English, and writes to sharded JSONL.
+Applies a set of rule-based quality signals to filter out low-quality
+documents before tokenization. These heuristics are adapted from
+FineWeb, RedPajama, and Dolma — the most widely used open LLM
+pretraining pipelines.
 
-Common Crawl is the largest freely available web crawl — petabytes of
-raw HTML from billions of web pages. Quality varies significantly, so
-aggressive filtering is applied in the validation stage.
+Filters are composable — each returns True to keep, False to discard.
+The QualityFilter class runs all filters and tracks rejection reasons.
 
-This module handles only extraction — filtering and dedup happen in
-curator/filters/.
+Heuristics applied:
+    - Minimum/maximum document length
+    - Minimum mean word length (filters gibberish)
+    - Maximum symbol-to-word ratio (filters SEO spam)
+    - Maximum bullet point ratio (filters list-heavy content)
+    - Maximum ellipsis ratio (filters truncated content)
+    - Minimum alphabetic character ratio (filters numeric/code spam)
+    - Repeated line deduplication within document
+    - Stop word presence (filters non-English content that slipped through)
 
-Output: JSONL with one document per line:
-    {
-        "text": "...",
-        "source": "common_crawl",
-        "url": "...",
-        "crawl": "CC-MAIN-2024-10",
-        "language": "en"
-    }
-
-Target contribution: ~2.1B tokens (~70% of 3B token 125M training mix).
-
-Common Crawl crawl IDs: https://commoncrawl.org/the-data/get-started/
-    Recent crawls: CC-MAIN-2024-10, CC-MAIN-2023-50, CC-MAIN-2023-40 ...
-
-Usage:
-    from curator.sources.common_crawl import CommonCrawlSource
-    source = CommonCrawlSource(
-        output_dir=Path("data/raw/common_crawl"),
-        crawls=["CC-MAIN-2024-10"],
-        max_segments=5,
-    )
-    source.download()
+Reference:
+    FineWeb: https://huggingface.co/spaces/HuggingFaceFW/blogpost-fineweb-v1
+    Gopher: Rae et al. (2021) — https://arxiv.org/abs/2112.11446
 """
 
-import gzip
-import json
 import logging
-import os
-import time
-from io import BytesIO
-from pathlib import Path
-from typing import Iterator
-
-import boto3
-import requests
-import trafilatura
-from botocore import UNSIGNED
-from botocore.config import Config
-from langdetect import detect, LangDetectException
-from tqdm import tqdm
-from warcio.archiveiterator import ArchiveIterator
+import re
+from dataclasses import dataclass, field
 
 log = logging.getLogger(__name__)
 
-# Common Crawl S3 bucket — public, no credentials needed
-CC_BUCKET = "commoncrawl"
-CC_PATHS_URL = "https://data.commoncrawl.org/crawl-data/{crawl}/warc.paths.gz"
-
-# Default crawls to use — recent, high quality
-DEFAULT_CRAWLS = [
-    "CC-MAIN-2024-10",
-    "CC-MAIN-2023-50",
-]
+# English stop words — presence indicates natural language
+EN_STOP_WORDS = {
+    "the", "be", "to", "of", "and", "a", "in", "that", "have",
+    "it", "for", "not", "on", "with", "he", "as", "you", "do",
+    "at", "this", "but", "his", "by", "from", "they", "we",
+    "say", "her", "she", "or", "an", "will", "my", "one", "all",
+}
 
 
-class CommonCrawlSource:
+@dataclass
+class QualityConfig:
+    """Configuration for quality filter thresholds."""
+    # Document length
+    min_chars: int = 200
+    max_chars: int = 100_000
+
+    # Word-level signals
+    min_mean_word_length: float = 3.0
+    max_mean_word_length: float = 10.0
+
+    # Symbol ratio — symbols / words
+    max_symbol_to_word_ratio: float = 0.1
+
+    # Bullet point ratio — lines starting with bullet / total lines
+    max_bullet_ratio: float = 0.9
+
+    # Ellipsis ratio — lines ending with ... / total lines
+    max_ellipsis_ratio: float = 0.3
+
+    # Alphabetic character ratio — alpha chars / total chars
+    min_alpha_ratio: float = 0.7
+
+    # Repeated lines — fraction of lines that are duplicates
+    max_repeated_line_ratio: float = 0.3
+
+    # Stop word check — minimum number of EN stop words in first 100 words
+    min_stop_words: int = 2
+
+    # Sources that skip certain filters
+    skip_alpha_ratio_sources: list[str] = field(default_factory=lambda: ["code"])
+    skip_stop_word_sources: list[str] = field(default_factory=lambda: ["code"])
+
+
+class QualityFilter:
     """
-    Downloads and extracts text from Common Crawl WARC files.
-
-    Uses trafilatura for text extraction — it removes boilerplate,
-    navigation, ads, and other non-content HTML elements, leaving
-    clean article text.
-
-    Language detection via langdetect filters to English only.
+    Applies heuristic quality filters to a document.
 
     Args:
-        output_dir: Directory to write output JSONL files.
-        crawls: List of Common Crawl crawl IDs to use.
-        max_segments: Maximum WARC segments to process per crawl.
-            Each segment is ~1GB and contains ~35k documents.
-            Set to None to process all segments (very large).
-        min_text_length: Minimum extracted text character length.
-        shard_size: Number of documents per output JSONL shard.
-        num_workers: Number of parallel WARC processing workers.
+        config: QualityConfig with filter thresholds.
+
+    Example::
+
+        filter = QualityFilter()
+        record = {"text": "...", "source": "common_crawl"}
+        kept, reason = filter.check(record)
+        if not kept:
+            print(f"Rejected: {reason}")
     """
 
-    SOURCE_TAG = "common_crawl"
+    def __init__(self, config: QualityConfig | None = None):
+        self.config = config or QualityConfig()
+        self.stats = {
+            "total": 0,
+            "kept": 0,
+            "rejected": {},
+        }
 
-    def __init__(
-        self,
-        output_dir: Path,
-        crawls: list[str] = DEFAULT_CRAWLS,
-        max_segments: int | None = 10,
-        min_text_length: int = 300,
-        shard_size: int = 50_000,
-        num_workers: int = 4,
-    ):
-        self.output_dir = Path(output_dir)
-        self.crawls = crawls
-        self.max_segments = max_segments
-        self.min_text_length = min_text_length
-        self.shard_size = shard_size
-        self.num_workers = num_workers
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-
-        # Public S3 client — Common Crawl is publicly accessible
-        self.s3 = boto3.client(
-            "s3",
-            config=Config(signature_version=UNSIGNED),
-            region_name="us-east-1",
-        )
-
-    def download(self) -> list[Path]:
+    def check(self, record: dict) -> tuple[bool, str | None]:
         """
-        Download and process Common Crawl WARCs.
+        Run all quality filters on a document.
+
+        Args:
+            record: Dict with at least a "text" key and optional "source".
 
         Returns:
-            List of paths to output JSONL files.
+            (True, None) if the document passes all filters.
+            (False, reason) if the document is rejected.
         """
-        output_files = []
-        shard_idx = 0
-        buffer = []
-        total_written = 0
-        total_skipped = 0
+        self.stats["total"] += 1
+        text = record.get("text", "")
+        source = record.get("source", "")
 
-        for crawl in self.crawls:
-            log.info(f"Processing crawl: {crawl}")
-            warc_paths = self._get_warc_paths(crawl)
+        checks = [
+            self._check_length,
+            self._check_mean_word_length,
+            self._check_symbol_ratio,
+            self._check_bullet_ratio,
+            self._check_ellipsis_ratio,
+            self._check_repeated_lines,
+        ]
 
-            if self.max_segments is not None:
-                warc_paths = warc_paths[: self.max_segments]
-                log.info(f"  Limited to {len(warc_paths)} segments")
+        # Source-conditional checks
+        if source not in self.config.skip_alpha_ratio_sources:
+            checks.append(self._check_alpha_ratio)
+        if source not in self.config.skip_stop_word_sources:
+            checks.append(self._check_stop_words)
 
-            for warc_path in tqdm(warc_paths, desc=f"{crawl}", unit="segment"):
-                for record in self._process_warc(warc_path, crawl):
-                    if record is None:
-                        total_skipped += 1
-                        continue
+        for check in checks:
+            passed, reason = check(text)
+            if not passed:
+                self.stats["rejected"][reason] = self.stats["rejected"].get(reason, 0) + 1
+                return False, reason
 
-                    buffer.append(record)
+        self.stats["kept"] += 1
+        return True, None
 
-                    if len(buffer) >= self.shard_size:
-                        path = self._write_shard(buffer, shard_idx)
-                        output_files.append(path)
-                        shard_idx += 1
-                        total_written += len(buffer)
-                        buffer = []
+    def filter_batch(self, records: list[dict]) -> list[dict]:
+        """Filter a list of records, returning only those that pass."""
+        return [r for r in records if self.check(r)[0]]
 
-        if buffer:
-            path = self._write_shard(buffer, shard_idx)
-            output_files.append(path)
-            total_written += len(buffer)
+    def reset_stats(self) -> None:
+        """Reset filter statistics."""
+        self.stats = {"total": 0, "kept": 0, "rejected": {}}
 
-        log.info(
-            f"Common Crawl complete — "
-            f"written: {total_written:,}, "
-            f"skipped: {total_skipped:,}, "
-            f"shards: {len(output_files)}"
+    def report(self) -> str:
+        """Return a human-readable filter report."""
+        total = self.stats["total"]
+        kept = self.stats["kept"]
+        rejected = total - kept
+        lines = [
+            f"Quality filter report:",
+            f"  Total:    {total:>10,}",
+            f"  Kept:     {kept:>10,}  ({100 * kept / max(total, 1):.1f}%)",
+            f"  Rejected: {rejected:>10,}  ({100 * rejected / max(total, 1):.1f}%)",
+            f"  Rejection reasons:",
+        ]
+        for reason, count in sorted(self.stats["rejected"].items(), key=lambda x: -x[1]):
+            lines.append(f"    {reason:<40} {count:>8,}  ({100 * count / max(total, 1):.1f}%)")
+        return "\n".join(lines)
+
+    # ── Individual filter methods ──────────────────────────────────────────────
+
+    def _check_length(self, text: str) -> tuple[bool, str | None]:
+        n = len(text)
+        if n < self.config.min_chars:
+            return False, "too_short"
+        if n > self.config.max_chars:
+            return False, "too_long"
+        return True, None
+
+    def _check_mean_word_length(self, text: str) -> tuple[bool, str | None]:
+        words = text.split()
+        if not words:
+            return False, "no_words"
+        mean_len = sum(len(w) for w in words) / len(words)
+        if mean_len < self.config.min_mean_word_length:
+            return False, "mean_word_too_short"
+        if mean_len > self.config.max_mean_word_length:
+            return False, "mean_word_too_long"
+        return True, None
+
+    def _check_symbol_ratio(self, text: str) -> tuple[bool, str | None]:
+        words = text.split()
+        if not words:
+            return False, "no_words"
+        symbols = sum(1 for c in text if c in "#$%&*+/<=>@\\^_`|~")
+        ratio = symbols / len(words)
+        if ratio > self.config.max_symbol_to_word_ratio:
+            return False, "high_symbol_ratio"
+        return True, None
+
+    def _check_bullet_ratio(self, text: str) -> tuple[bool, str | None]:
+        lines = [l for l in text.split("\n") if l.strip()]
+        if not lines:
+            return False, "no_lines"
+        bullet_lines = sum(
+            1 for l in lines
+            if l.strip().startswith(("•", "-", "*", "·", "–", "—", "▪", "◦"))
         )
-        return output_files
+        ratio = bullet_lines / len(lines)
+        if ratio > self.config.max_bullet_ratio:
+            return False, "high_bullet_ratio"
+        return True, None
 
-    def _get_warc_paths(self, crawl: str) -> list[str]:
-        """
-        Fetch the list of WARC segment paths for a given crawl.
+    def _check_ellipsis_ratio(self, text: str) -> tuple[bool, str | None]:
+        lines = [l for l in text.split("\n") if l.strip()]
+        if not lines:
+            return False, "no_lines"
+        ellipsis_lines = sum(1 for l in lines if l.rstrip().endswith("..."))
+        ratio = ellipsis_lines / len(lines)
+        if ratio > self.config.max_ellipsis_ratio:
+            return False, "high_ellipsis_ratio"
+        return True, None
 
-        Downloads the gzipped paths file from Common Crawl's index.
-        """
-        url = CC_PATHS_URL.format(crawl=crawl)
-        log.info(f"Fetching WARC paths from {url}")
-        try:
-            response = requests.get(url, timeout=30)
-            response.raise_for_status()
-            content = gzip.decompress(response.content).decode("utf-8")
-            paths = [line.strip() for line in content.splitlines() if line.strip()]
-            log.info(f"  Found {len(paths):,} WARC segments")
-            return paths
-        except Exception as e:
-            log.error(f"Failed to fetch WARC paths for {crawl}: {e}")
-            return []
+    def _check_alpha_ratio(self, text: str) -> tuple[bool, str | None]:
+        if not text:
+            return False, "empty"
+        alpha = sum(1 for c in text if c.isalpha())
+        ratio = alpha / len(text)
+        if ratio < self.config.min_alpha_ratio:
+            return False, "low_alpha_ratio"
+        return True, None
 
-    def _process_warc(self, warc_path: str, crawl: str) -> Iterator[dict | None]:
-        """
-        Stream and process a single WARC segment from S3.
+    def _check_repeated_lines(self, text: str) -> tuple[bool, str | None]:
+        lines = [l.strip() for l in text.split("\n") if l.strip()]
+        if len(lines) < 4:
+            return True, None
+        seen = set()
+        duplicates = 0
+        for line in lines:
+            if line in seen:
+                duplicates += 1
+            seen.add(line)
+        ratio = duplicates / len(lines)
+        if ratio > self.config.max_repeated_line_ratio:
+            return False, "high_repeated_lines"
+        return True, None
 
-        Downloads the WARC in streaming mode, iterates over HTTP response
-        records, extracts text with trafilatura, and yields clean records.
-        """
-        try:
-            response = self.s3.get_object(Bucket=CC_BUCKET, Key=warc_path)
-            stream = response["Body"]
-
-            for record in ArchiveIterator(stream):
-                # Only process HTTP response records
-                if record.rec_type != "response":
-                    continue
-
-                url = record.rec_headers.get_header("WARC-Target-URI", "")
-                content_type = record.http_headers.get_header("Content-Type", "")
-
-                # Only process HTML
-                if "text/html" not in content_type:
-                    continue
-
-                try:
-                    html = record.content_stream().read()
-                    text = self._extract_text(html, url)
-                    if text is None:
-                        yield None
-                        continue
-
-                    yield {
-                        "text": text,
-                        "source": self.SOURCE_TAG,
-                        "url": url,
-                        "crawl": crawl,
-                        "language": "en",
-                    }
-
-                except Exception:
-                    yield None
-
-        except Exception as e:
-            log.warning(f"Failed to process {warc_path}: {e}")
-
-    def _extract_text(self, html: bytes, url: str) -> str | None:
-        """
-        Extract clean text from HTML using trafilatura.
-
-        trafilatura removes boilerplate (navigation, ads, footers),
-        extracts the main content, and returns clean text. Returns None
-        if extraction fails or the text doesn't meet quality thresholds.
-        """
-        try:
-            text = trafilatura.extract(
-                html,
-                url=url,
-                include_comments=False,
-                include_tables=True,
-                no_fallback=False,
-                favor_precision=True,
-            )
-        except Exception:
-            return None
-
-        if text is None or len(text) < self.min_text_length:
-            return None
-
-        # Language detection — filter to English only
-        try:
-            lang = detect(text[:500])  # detect on first 500 chars for speed
-            if lang != "en":
-                return None
-        except LangDetectException:
-            return None
-
-        return text.strip()
-
-    def _write_shard(self, records: list[dict], shard_idx: int) -> Path:
-        """Write a list of records to a JSONL shard file."""
-        path = self.output_dir / f"cc_{shard_idx:04d}.jsonl"
-        with open(path, "w", encoding="utf-8") as f:
-            for record in records:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        log.debug(f"Wrote shard {shard_idx}: {len(records):,} documents → {path}")
-        return path
-
-    def stats(self) -> dict:
-        """Return stats about already-downloaded shards."""
-        shards = sorted(self.output_dir.glob("cc_*.jsonl"))
-        total_docs = 0
-        total_chars = 0
-        crawl_counts: dict[str, int] = {}
-
-        for shard in shards:
-            with open(shard) as f:
-                for line in f:
-                    record = json.loads(line)
-                    total_docs += 1
-                    total_chars += len(record["text"])
-                    crawl = record.get("crawl", "unknown")
-                    crawl_counts[crawl] = crawl_counts.get(crawl, 0) + 1
-
-        return {
-            "shards": len(shards),
-            "documents": total_docs,
-            "total_chars": total_chars,
-            "avg_chars_per_doc": total_chars // max(total_docs, 1),
-            "estimated_tokens": total_chars // 4,
-            "by_crawl": crawl_counts,
-        }
+    def _check_stop_words(self, text: str) -> tuple[bool, str | None]:
+        words = set(text.lower().split()[:100])
+        count = len(words & EN_STOP_WORDS)
+        if count < self.config.min_stop_words:
+            return False, "insufficient_stop_words"
+        return True, None
