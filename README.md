@@ -73,14 +73,13 @@ slm/
 │   ├── sources/
 │   │   ├── wikipedia.py          Wikipedia EN via HuggingFace datasets
 │   │   ├── code_search_net.py    CodeSearchNet via HuggingFace datasets
-│   │   └── common_crawl.py       Common Crawl WARCs via S3 + trafilatura
+│   │   └── common_crawl.py       Common Crawl WARCs via HTTPS + trafilatura
 │   ├── filters/
 │   │   ├── quality.py            Heuristic quality filters (FineWeb/Gopher-style)
 │   │   └── dedup.py              Exact + datatrove disk-based MinHash deduplication
 │   └── scripts/
 │       ├── curate.py             Main pipeline entry point
 │       └── upload_s3.py          S3 upload/download utilities
-│
 │
 ├── validation/                   Stage 2: data validation
 │   └── scripts/validate.py       Quality filter + perplexity filtering
@@ -136,7 +135,8 @@ slm/
 │   └── screenshots/              Pipeline stage screenshots
 │
 ├── infra/
-│   └── setup_gpu_instance.sh     GPU instance bootstrap — install deps, pull data from S3
+│   ├── setup.sh                  CPU instance bootstrap — curation environment
+│   └── setup_gpu_instance.sh     GPU instance bootstrap — training environment
 │
 ├── Makefile                      Full pipeline automation
 ├── requirements.txt              Python dependencies
@@ -149,12 +149,24 @@ slm/
 ## Getting Started
 
 **Prerequisites**
-- Python 3.10+
+- Python 3.12+
 - CUDA-capable GPU (H100 or A100 recommended for pretraining)
 - AWS account (S3 for data storage)
 - Weights & Biases account
 
 **Installation**
+
+On a fresh Ubuntu 22.04 cloud instance (recommended):
+```bash
+git clone https://github.com/tohio/slm.git /data/slm
+cd /data/slm
+
+# Default data dir (repo/data)
+make setup
+
+# Custom data dir — recommended when using a separate EBS volume
+make setup-data-dir DATA_DIR=/data/slm/data
+```
 
 Using pip:
 ```bash
@@ -179,35 +191,64 @@ Using conda:
 ```bash
 git clone https://github.com/tohio/slm.git
 cd slm
-conda create -n slm python=3.10 -y
+conda create -n slm python=3.12 -y
 conda activate slm
 pip install -r requirements.txt
 cp .env.sample .env
 # Add your credentials to .env
 ```
 
+Then fill in credentials in `.env`:
+```
+S3_BUCKET=your-bucket
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+WANDB_API_KEY=...
+HF_TOKEN=...
+```
+
+**Validate the pipeline with a mini run (~30 min)**
+
+Before committing to a full run, validate the pipeline end to end:
+
+```bash
+source .venv/bin/activate
+make curate-mini
+```
+
+This caps Wikipedia at 5k docs, CodeSearchNet at 10k samples, and Common
+Crawl at 2 WARC segments. Exercises every stage without the wait.
+
 **Run the full pipeline**
 
 ```bash
-make curate          # Stage 1: download and curate data
-make validate        # Stage 2: quality filter and validate
-make tokenizer       # Stage 3: train tokenizer
-make tokenize        # Stage 4a: tokenize dataset
-make pretrain        # Stage 4b: pretrain slm-125m (single GPU)
-make pretrain GPUS=4 # Stage 4b: pretrain on 4 GPUs
-make sft             # Stage 5: chat SFT
-make sft-code        # Stage 5: code SFT
-make dpo             # Stage 6: DPO alignment
-make eval            # Stage 7: evaluate on benchmarks
-make export          # Stage 8: export to HuggingFace Hub
-make serve           # Stage 10: launch vLLM server (Hub model)
-make serve-local     # Stage 10: launch vLLM server (local checkpoint)
+make curate SIZE=125m WORKERS=16   # Stage 1: download and curate data
+make validate                       # Stage 2: quality filter and validate
+make tokenizer                      # Stage 3: train tokenizer
+make tokenize                       # Stage 4a: tokenize dataset
+make pretrain GPUS=4                # Stage 4b: pretrain slm-125m
+make sft GPUS=4                     # Stage 5: chat SFT
+make sft-code GPUS=4                # Stage 5: code SFT
+make dpo GPUS=2                     # Stage 6: DPO alignment
+make eval                           # Stage 7: evaluate on benchmarks
+make export                         # Stage 8: export to HuggingFace Hub
+make serve                          # Stage 10: launch vLLM server (Hub model)
+make serve-local                    # Stage 10: launch vLLM server (local checkpoint)
+```
+
+**Run curation sub-stages individually**
+
+```bash
+make curate-download SIZE=125m
+make curate-filter   SIZE=125m
+make curate-dedup    SIZE=125m WORKERS=16
+make curate-blend    SIZE=125m
+make curate-upload   SIZE=125m
 ```
 
 **Multi-GPU training**
 
 ```bash
-# Specify GPU count with GPUS=N
 make pretrain SIZE=125m GPUS=4
 make pretrain SIZE=350m GPUS=6
 make pretrain SIZE=1b   GPUS=8
@@ -226,6 +267,31 @@ python inference/chat.py --model tohio/slm-125m
 
 ---
 
+## Infrastructure
+
+Recommended instance specs per target:
+
+| Target | Instance | RAM | Est. runtime |
+|---|---|---|---|
+| mini (validation) | Any CPU | 4GB+ | ~30–45 min |
+| 125m | `c8g.4xlarge` (16 vCPU) | 32GB | ~6–8 hrs |
+| 350m | `c8g.4xlarge` (16 vCPU) | 32GB | ~18–24 hrs |
+| 1b | `c8g.8xlarge` (32 vCPU) | 64GB | ~48–72 hrs |
+
+Run curation on AWS spot in `us-east-1` to minimise Common Crawl egress
+latency. Attach an EBS volume (`gp3`, 500GB) for `DATA_DIR` so data
+survives spot interruptions — the pipeline is fully resumable at every stage.
+
+Use `tmux` to keep the pipeline running through SSM session timeouts:
+```bash
+tmux new -s curate
+source .venv/bin/activate
+make curate SIZE=125m WORKERS=16
+# Ctrl+B, D to detach — tmux attach -t curate to reattach
+```
+
+---
+
 ## Key Design Decisions
 
 **Why from scratch?** Starting from an existing checkpoint is the right production choice. We start from scratch deliberately — it exercises every stage of the pipeline and provides full visibility into how data quality and tokenizer design interact with training dynamics.
@@ -239,6 +305,10 @@ python inference/chat.py --model tohio/slm-125m
 **Why sequential SFT (chat → code)?** Sequential fine-tuning produces independently evaluable checkpoints at each stage, making regressions immediately visible. The code SFT uses a lower learning rate to reduce catastrophic forgetting of chat capability.
 
 **Why vLLM for serving?** PagedAttention enables continuous batching and efficient KV cache management. The OpenAI-compatible API means any client built against the OpenAI SDK works out of the box — no custom client code.
+
+**Why datatrove for dedup instead of datasketch?** datasketch's `MinHashLSH` is in-memory — at 350m scale it requires ~32GB RAM, at 1b it requires ~85GB and cannot fit on a single instance. datatrove's disk-based pipeline uses a sort-based approach where RAM usage is bounded by shard size, not corpus size. Same approach used by FineWeb at trillion-token scale.
+
+**Why HTTPS for Common Crawl instead of S3?** Direct S3 access to the `commoncrawl` bucket fails on EC2 instances with IAM roles attached — the instance role credentials are rejected by the bucket policy. HTTPS via `data.commoncrawl.org` works reliably regardless of instance credentials.
 
 ---
 
