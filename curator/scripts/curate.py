@@ -129,10 +129,33 @@ MINI_OVERRIDES = {
 }
 
 # Data directories — override with DATA_DIR env var
-DATA_DIR    = Path(os.environ.get("DATA_DIR", "data"))
-RAW_DIR     = DATA_DIR / "raw"
+DATA_DIR     = Path(os.environ.get("DATA_DIR", "data"))
+RAW_DIR      = DATA_DIR / "raw"
 FILTERED_DIR = DATA_DIR / "filtered"
 CURATED_DIR  = DATA_DIR / "curated"
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+def flatten_datatrove_record(record: dict) -> dict:
+    """
+    Flatten datatrove's document format back to a flat dict.
+
+    datatrove wraps documents as:
+        {"text": "...", "id": "...", "metadata": {"source": ..., "url": ..., ...}}
+
+    We flatten this back to:
+        {"text": "...", "source": ..., "url": ..., ...}
+
+    Plain JSONL records (not processed by datatrove) are returned unchanged.
+    """
+    if "metadata" in record and isinstance(record["metadata"], dict):
+        flat = {"text": record.get("text", "")}
+        flat.update(record["metadata"])
+        # drop datatrove internals
+        flat.pop("file_path", None)
+        return flat
+    return record
 
 
 # ── Stage 1: Download ──────────────────────────────────────────────────────────
@@ -166,7 +189,7 @@ def stage_download(target: str, mini: bool = False) -> None:
     cc = CommonCrawlSource(
         output_dir=RAW_DIR / "common_crawl",
         crawls=cfg["cc_crawls"],
-        max_segments=cfg["cc_segments"],   # already small in mini config
+        max_segments=cfg["cc_segments"],
     )
     cc.download()
     log.info(f"Common Crawl stats: {cc.stats()}")
@@ -216,13 +239,8 @@ def stage_dedup(workers: int | None = None) -> None:
 
     Two stages per source:
         1. Exact dedup  — SHA-256 streaming pass, shared cross-source index.
-                          In-memory set grows ~70 bytes/doc. At 1b scale
-                          this is ~5GB — the only structure that scales with
-                          corpus size, and it fits on any reasonable instance.
-        2. Fuzzy dedup  — datatrove 4-stage disk pipeline:
-                          signatures → buckets → cluster → filter.
+        2. Fuzzy dedup  — datatrove 4-stage disk pipeline.
                           Peak RAM is O(shard_size), not O(corpus_size).
-                          Handles 125m, 350m, and 1b identically.
     """
     log.info("=== Stage 3: Deduplication (datatrove MinHash) ===")
 
@@ -262,8 +280,12 @@ def stage_blend(target: str, seed: int = 42) -> None:
     Blend sources to the target token ratio and write final train.jsonl.
 
     Streams each source to hit its target char count, writes per-source
-    files, then merges and shuffles using a byte-offset index. Peak RAM
-    is O(1) — no source is loaded into memory in full at any point.
+    staging files, then merges and shuffles using a byte-offset index.
+    Peak RAM is O(1) — no source is loaded into memory in full at any point.
+
+    Handles both plain JSONL (from filter stage) and datatrove's wrapped
+    format {"text": ..., "id": ..., "metadata": {...}}, flattening both
+    to a consistent {"text": ..., "source": ..., ...} output format.
 
     Uses character count as a proxy for token count (4 chars ≈ 1 token).
     """
@@ -293,7 +315,6 @@ def stage_blend(target: str, seed: int = 42) -> None:
     }
 
     # ── Pass 1: stream each source to a per-source staging file ───────────────
-    # Never loads more than one line at a time.
     staging_paths = {}
     source_stats = {}
 
@@ -316,9 +337,12 @@ def stage_blend(target: str, seed: int = 42) -> None:
                 with open(shard) as fin:
                     for line in fin:
                         record = json.loads(line)
-                        text_len = len(record.get("text", ""))
-                        chars += text_len
-                        fout.write(line)
+
+                        # Flatten datatrove format if needed
+                        record = flatten_datatrove_record(record)
+
+                        chars += len(record.get("text", ""))
+                        fout.write(json.dumps(record, ensure_ascii=False) + "\n")
                         docs += 1
                         if chars >= target:
                             break
@@ -341,15 +365,11 @@ def stage_blend(target: str, seed: int = 42) -> None:
                 for line in fin:
                     fout.write(line)
                     total_docs += 1
-                    # accumulate chars for stats only — no full load
-            staging.unlink()   # clean up staging file immediately
+            staging.unlink()
 
     log.info(f"Merged {total_docs:,} documents")
 
     # ── Pass 3: shuffle via byte-offset index ─────────────────────────────────
-    # Builds an index of line start offsets (8 bytes each), shuffles the
-    # index, then reads lines in shuffled order. Peak RAM = index size.
-    # At 100M docs the index is ~800MB — well within any instance limit.
     log.info("Building line offset index for shuffle...")
     offsets = []
     with open(merged_path, "rb") as f:
@@ -359,7 +379,7 @@ def stage_blend(target: str, seed: int = 42) -> None:
             if not line:
                 break
             offsets.append(offset)
-            total_chars += len(line) - 1   # approximate — avoids re-reading
+            total_chars += len(line) - 1
 
     log.info(f"Shuffling {len(offsets):,} line offsets...")
     rng.shuffle(offsets)
@@ -370,7 +390,7 @@ def stage_blend(target: str, seed: int = 42) -> None:
             fin.seek(offset)
             fout.write(fin.readline())
 
-    merged_path.unlink()   # clean up merged file
+    merged_path.unlink()
 
     log.info(
         f"Blend complete — "
