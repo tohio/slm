@@ -45,8 +45,8 @@ class WikipediaSource:
             the full dataset.
     """
 
-    DATASET_NAME = "wikipedia"
-    DATASET_CONFIG = "20220301.en"
+    DATASET_NAME = "wikimedia/wikipedia"
+    DATASET_CONFIG = "20231101.en"
     SOURCE_TAG = "wikipedia"
 
     def __init__(
