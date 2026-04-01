@@ -3,8 +3,9 @@ curator/sources/common_crawl.py
 ---------------------------------
 Common Crawl data source.
 
-Downloads WARC files from Common Crawl S3, extracts clean text using
-trafilatura, filters to English, and writes to sharded JSONL.
+Downloads WARC files from Common Crawl via HTTPS (data.commoncrawl.org),
+extracts clean text using trafilatura, filters to English, and writes to
+sharded JSONL.
 
 Common Crawl is the largest freely available web crawl — petabytes of
 raw HTML from billions of web pages. Quality varies significantly, so
@@ -12,6 +13,12 @@ aggressive filtering is applied in the validation stage.
 
 This module handles only extraction — filtering and dedup happen in
 curator/filters/.
+
+Note: WARCs are fetched via HTTPS rather than direct S3 access. Direct
+S3 access to the commoncrawl bucket fails when the instance has an IAM
+role attached, as boto3 uses the role credentials which are rejected by
+the bucket policy. HTTPS via CloudFront works reliably regardless of
+instance credentials.
 
 Output: JSONL with one document per line:
     {
@@ -40,26 +47,20 @@ Usage:
 import gzip
 import json
 import logging
-import os
-import time
-from io import BytesIO
 from pathlib import Path
 from typing import Iterator
 
-import boto3
 import requests
 import trafilatura
-from botocore import UNSIGNED
-from botocore.config import Config
 from langdetect import detect, LangDetectException
 from tqdm import tqdm
 from warcio.archiveiterator import ArchiveIterator
 
 log = logging.getLogger(__name__)
 
-# Common Crawl S3 bucket — public, no credentials needed
-CC_BUCKET = "commoncrawl"
-CC_PATHS_URL = "https://data.commoncrawl.org/crawl-data/{crawl}/warc.paths.gz"
+# Common Crawl base URL — HTTPS via CloudFront, no credentials needed
+CC_BASE_URL = "https://data.commoncrawl.org"
+CC_PATHS_URL = f"{CC_BASE_URL}/crawl-data/{{crawl}}/warc.paths.gz"
 
 # Default crawls to use — recent, high quality
 DEFAULT_CRAWLS = [
@@ -71,6 +72,10 @@ DEFAULT_CRAWLS = [
 class CommonCrawlSource:
     """
     Downloads and extracts text from Common Crawl WARC files.
+
+    Fetches WARCs via HTTPS (data.commoncrawl.org) rather than direct S3
+    access. This avoids IAM credential conflicts on EC2 instances with
+    attached roles.
 
     Uses trafilatura for text extraction — it removes boilerplate,
     navigation, ads, and other non-content HTML elements, leaving
@@ -107,13 +112,6 @@ class CommonCrawlSource:
         self.shard_size = shard_size
         self.num_workers = num_workers
         self.output_dir.mkdir(parents=True, exist_ok=True)
-
-        # Public S3 client — Common Crawl is publicly accessible
-        self.s3 = boto3.client(
-            "s3",
-            config=Config(signature_version=UNSIGNED),
-            region_name="us-east-1",
-        )
 
     def download(self) -> list[Path]:
         """
@@ -185,21 +183,22 @@ class CommonCrawlSource:
 
     def _process_warc(self, warc_path: str, crawl: str) -> Iterator[dict | None]:
         """
-        Stream and process a single WARC segment from S3.
+        Stream and process a single WARC segment via HTTPS.
 
         Downloads the WARC in streaming mode, iterates over HTTP response
         records, extracts text with trafilatura, and yields clean records.
         """
+        url = f"{CC_BASE_URL}/{warc_path}"
         try:
-            response = self.s3.get_object(Bucket=CC_BUCKET, Key=warc_path)
-            stream = response["Body"]
+            response = requests.get(url, stream=True, timeout=60)
+            response.raise_for_status()
 
-            for record in ArchiveIterator(stream):
+            for record in ArchiveIterator(response.raw):
                 # Only process HTTP response records
                 if record.rec_type != "response":
                     continue
 
-                url = record.rec_headers.get_header("WARC-Target-URI", "")
+                target_url = record.rec_headers.get_header("WARC-Target-URI", "")
                 content_type = record.http_headers.get_header("Content-Type", "")
 
                 # Only process HTML
@@ -208,7 +207,7 @@ class CommonCrawlSource:
 
                 try:
                     html = record.content_stream().read()
-                    text = self._extract_text(html, url)
+                    text = self._extract_text(html, target_url)
                     if text is None:
                         yield None
                         continue
@@ -216,7 +215,7 @@ class CommonCrawlSource:
                     yield {
                         "text": text,
                         "source": self.SOURCE_TAG,
-                        "url": url,
+                        "url": target_url,
                         "crawl": crawl,
                         "language": "en",
                     }
