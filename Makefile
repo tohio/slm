@@ -92,7 +92,7 @@ tokenizer-test:
 
 tokenize:
 	@echo "==> Stage 4a: Tokenize dataset"
-	python pretrain/data/tokenize.py --workers 8 --verify
+	python pretrain/data/tokenize_data.py --workers 8 --verify
 
 pretrain:
 	@echo "==> Stage 4b: Pretraining ($(SIZE), $(GPUS) GPU(s), config=$(PRETRAIN_CONFIG))"

@@ -81,7 +81,7 @@ class PretrainingDataset(Dataset):
         if not self.bin_path.exists():
             raise FileNotFoundError(
                 f"Tokenized dataset not found: {self.bin_path}\n"
-                f"Run: python pretrain/data/tokenize.py"
+                f"Run: python pretrain/data/tokenize_data.py"
             )
 
         # Load metadata

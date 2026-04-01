@@ -91,7 +91,7 @@ slm/
 ├── pretrain/                     Stage 4: pretraining
 │   ├── configs/                  gpt_125m.yaml, gpt_350m.yaml, gpt_1b.yaml
 │   ├── data/
-│   │   ├── tokenize.py           JSONL → uint16 memory-mapped binary
+│   │   ├── tokenize_data.py           JSONL → uint16 memory-mapped binary
 │   │   └── dataset.py            PretrainingDataset wrapping .bin file
 │   └── train.py                  Pretraining loop
 │

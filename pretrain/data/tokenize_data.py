@@ -1,5 +1,5 @@
 """
-pretrain/data/tokenize.py
+pretrain/data/tokenize_data.py
 --------------------------
 Tokenize the validated JSONL dataset into a memory-mapped binary file
 for efficient pretraining.
@@ -24,9 +24,9 @@ Output:
     data/tokenized/train.json   — metadata (n_tokens, n_docs, vocab_size)
 
 Usage:
-    python pretrain/data/tokenize.py
-    python pretrain/data/tokenize.py --input data/validated/train.jsonl
-    python pretrain/data/tokenize.py --workers 8
+    python pretrain/data/tokenize_data.py
+    python pretrain/data/tokenize_data.py --input data/validated/train.jsonl
+    python pretrain/data/tokenize_data.py --workers 8
 """
 
 import argparse
