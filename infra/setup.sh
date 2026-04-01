@@ -69,8 +69,10 @@ sudo apt-get install -y \
     tmux \
     htop \
     nvme-cli \
-    make
-
+    make \
+    cmake \
+    libboost-all-dev
+    
 # Add deadsnakes PPA if python3.12 not available
 if ! command -v python3.12 &>/dev/null; then
     echo "  python3.12 not found — adding deadsnakes PPA..."
