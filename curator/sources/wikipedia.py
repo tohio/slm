@@ -40,6 +40,9 @@ class WikipediaSource:
             than this are skipped — typically stubs or disambiguation pages.
         num_proc: Number of processes for parallel processing.
         shard_size: Number of articles per output JSONL shard.
+        max_docs: Maximum number of articles to write. None = no limit.
+            Used for mini runs to validate the pipeline without downloading
+            the full dataset.
     """
 
     DATASET_NAME = "wikipedia"
@@ -52,11 +55,13 @@ class WikipediaSource:
         min_length: int = 1000,
         num_proc: int = 4,
         shard_size: int = 100_000,
+        max_docs: int | None = None,
     ):
         self.output_dir = Path(output_dir)
         self.min_length = min_length
         self.num_proc = num_proc
         self.shard_size = shard_size
+        self.max_docs = max_docs
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def download(self) -> list[Path]:
@@ -74,6 +79,9 @@ class WikipediaSource:
             trust_remote_code=True,
         )
         log.info(f"Wikipedia: {len(dataset):,} articles loaded")
+
+        if self.max_docs:
+            log.info(f"Wikipedia: capped at {self.max_docs:,} articles (mini run)")
 
         output_files = []
         shard_idx = 0
@@ -95,6 +103,9 @@ class WikipediaSource:
                 "url": article.get("url", ""),
             }
             buffer.append(record)
+
+            if self.max_docs and total_written + len(buffer) >= self.max_docs:
+                break
 
             if len(buffer) >= self.shard_size:
                 path = self._write_shard(buffer, shard_idx)
@@ -162,5 +173,5 @@ class WikipediaSource:
             "articles": total_articles,
             "total_chars": total_chars,
             "avg_chars_per_article": total_chars // max(total_articles, 1),
-            "estimated_tokens": total_chars // 4,  # rough estimate: 4 chars per token
+            "estimated_tokens": total_chars // 4,
         }

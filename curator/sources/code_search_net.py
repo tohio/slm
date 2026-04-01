@@ -69,6 +69,9 @@ class CodeSearchNetSource:
         min_docstring_length: Minimum docstring character length. Default: 20.
         splits: Dataset splits to use. Default: all (train + valid + test).
         shard_size: Number of samples per output JSONL shard.
+        max_docs: Maximum number of samples to write. None = no limit.
+            Used for mini runs to validate the pipeline without downloading
+            the full dataset.
     """
 
     DATASET_NAME = "code_search_net"
@@ -82,6 +85,7 @@ class CodeSearchNetSource:
         min_docstring_length: int = 20,
         splits: list[str] = ["train", "validation", "test"],
         shard_size: int = 100_000,
+        max_docs: int | None = None,
     ):
         self.output_dir = Path(output_dir)
         self.languages = languages
@@ -89,6 +93,7 @@ class CodeSearchNetSource:
         self.min_docstring_length = min_docstring_length
         self.splits = splits
         self.shard_size = shard_size
+        self.max_docs = max_docs
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def download(self) -> list[Path]:
@@ -124,6 +129,9 @@ class CodeSearchNetSource:
         dataset = concatenate_datasets(all_datasets)
         log.info(f"CodeSearchNet total: {len(dataset):,} samples across {len(self.languages)} languages")
 
+        if self.max_docs:
+            log.info(f"CodeSearchNet: capped at {self.max_docs:,} samples (mini run)")
+
         output_files = []
         shard_idx = 0
         buffer = []
@@ -137,6 +145,9 @@ class CodeSearchNetSource:
                 continue
 
             buffer.append(record)
+
+            if self.max_docs and total_written + len(buffer) >= self.max_docs:
+                break
 
             if len(buffer) >= self.shard_size:
                 path = self._write_shard(buffer, shard_idx)
