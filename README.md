@@ -70,9 +70,17 @@ slm/
 │   └── model.py                  SLMModel + SLMForCausalLM
 │
 ├── curator/                      Stage 1: data curation
-│   ├── sources/                  Wikipedia, CodeSearchNet, Common Crawl
-│   ├── filters/                  Quality heuristics + MinHash deduplication
-│   └── scripts/                  curate.py pipeline + upload_s3.py
+│   ├── sources/
+│   │   ├── wikipedia.py          Wikipedia EN via HuggingFace datasets
+│   │   ├── code_search_net.py    CodeSearchNet via HuggingFace datasets
+│   │   └── common_crawl.py       Common Crawl WARCs via S3 + trafilatura
+│   ├── filters/
+│   │   ├── quality.py            Heuristic quality filters (FineWeb/Gopher-style)
+│   │   └── dedup.py              Exact + datatrove disk-based MinHash deduplication
+│   └── scripts/
+│       ├── curate.py             Main pipeline entry point
+│       └── upload_s3.py          S3 upload/download utilities
+│
 │
 ├── validation/                   Stage 2: data validation
 │   └── scripts/validate.py       Quality filter + perplexity filtering
