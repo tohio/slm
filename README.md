@@ -43,7 +43,7 @@ The model is a dense decoder-only transformer with a modern architecture:
 
 | Stage | Tool |
 |---|---|
-| Data curation | HuggingFace `datasets` + custom scripts |
+| Data curation | HuggingFace `datasets` + `datatrove` + custom scripts |
 | Data validation | `datatrove` |
 | Tokenizer | HuggingFace `tokenizers` (BPE) |
 | Pretraining | HuggingFace `accelerate` + `transformers` |
