@@ -68,7 +68,8 @@ sudo apt-get install -y \
     curl \
     tmux \
     htop \
-    nvme-cli
+    nvme-cli \
+    make
 
 # Add deadsnakes PPA if python3.12 not available
 if ! command -v python3.12 &>/dev/null; then
