@@ -21,6 +21,12 @@ Heuristics applied:
     - Repeated line deduplication within document
     - Stop word presence (filters non-English content that slipped through)
 
+Source-conditional filter skips:
+    code source skips: symbol_ratio, mean_word_length, alpha_ratio, stop_words
+    These filters are designed for natural language and incorrectly reject
+    valid code — symbol-heavy syntax, long identifiers, and lack of stop
+    words are all normal properties of code, not quality signals.
+
 Reference:
     FineWeb: https://huggingface.co/spaces/HuggingFaceFW/blogpost-fineweb-v1
     Gopher: Rae et al. (2021) — https://arxiv.org/abs/2112.11446
@@ -70,7 +76,11 @@ class QualityConfig:
     # Stop word check — minimum number of EN stop words in first 100 words
     min_stop_words: int = 2
 
-    # Sources that skip certain filters
+    # Sources that skip certain filters.
+    # Code skips symbol_ratio, mean_word_length, alpha_ratio, and stop_words
+    # because these are natural properties of code, not quality signals.
+    skip_symbol_ratio_sources: list[str] = field(default_factory=lambda: ["code"])
+    skip_mean_word_length_sources: list[str] = field(default_factory=lambda: ["code"])
     skip_alpha_ratio_sources: list[str] = field(default_factory=lambda: ["code"])
     skip_stop_word_sources: list[str] = field(default_factory=lambda: ["code"])
 
@@ -114,16 +124,19 @@ class QualityFilter:
         text = record.get("text", "")
         source = record.get("source", "")
 
+        # Length and bullet/ellipsis checks apply to all sources
         checks = [
             self._check_length,
-            self._check_mean_word_length,
-            self._check_symbol_ratio,
             self._check_bullet_ratio,
             self._check_ellipsis_ratio,
             self._check_repeated_lines,
         ]
 
-        # Source-conditional checks
+        # Source-conditional checks — skipped for code
+        if source not in self.config.skip_mean_word_length_sources:
+            checks.append(self._check_mean_word_length)
+        if source not in self.config.skip_symbol_ratio_sources:
+            checks.append(self._check_symbol_ratio)
         if source not in self.config.skip_alpha_ratio_sources:
             checks.append(self._check_alpha_ratio)
         if source not in self.config.skip_stop_word_sources:
