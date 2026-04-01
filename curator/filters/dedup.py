@@ -125,14 +125,8 @@ def run_minhash_dedup(
     """
     Run datatrove's 4-stage disk-based MinHash deduplication.
 
-    Stages:
-        1. Signatures  — MinHash each document, write signatures to disk
-        2. Buckets     — LSH bucketing of signatures, write (bucket, doc) pairs
-        3. Cluster     — find duplicate clusters via union-find on sorted pairs
-        4. Filter      — stream input, drop clustered duplicates, write output
-
-    All intermediate data lives on disk. RAM usage is bounded by shard size,
-    not corpus size. This is the same approach used by FineWeb and RedPajama.
+    Output is written as uncompressed JSONL (compression=None) so the
+    blend stage can read it directly without gzip handling.
 
     Args:
         input_dir:   Directory of JSONL shards to deduplicate.
@@ -152,7 +146,6 @@ def run_minhash_dedup(
     cluster_dir = working_dir / "clusters"
     logs_dir    = working_dir / "logs"
 
-    # Infer task count from number of input shards if not specified
     shards = list(input_dir.glob("*.jsonl"))
     if not shards:
         log.warning(f"No JSONL shards found in {input_dir} — skipping minhash dedup")
@@ -191,12 +184,12 @@ def run_minhash_dedup(
                 config=MINHASH_CONFIG,
             ),
         ],
-        tasks=MINHASH_CONFIG.num_buckets,  # one task per bucket
+        tasks=MINHASH_CONFIG.num_buckets,
         workers=workers,
         logging_dir=str(logs_dir / "buckets"),
     ).run()
 
-    # Stage 3 — Cluster (find connected components of duplicates)
+    # Stage 3 — Cluster
     log.info("Stage 3/4: Clustering duplicates...")
     LocalPipelineExecutor(
         pipeline=[
@@ -206,11 +199,11 @@ def run_minhash_dedup(
                 config=MINHASH_CONFIG,
             ),
         ],
-        tasks=1,  # clustering must be single-task (global union-find)
+        tasks=1,
         logging_dir=str(logs_dir / "clusters"),
     ).run()
 
-    # Stage 4 — Filter: stream input, drop duplicates, write output
+    # Stage 4 — Filter: write uncompressed JSONL
     log.info("Stage 4/4: Filtering duplicates...")
     output_dir.mkdir(parents=True, exist_ok=True)
     LocalPipelineExecutor(
@@ -221,11 +214,13 @@ def run_minhash_dedup(
                 exclusion_writer=JsonlWriter(
                     str(working_dir / "removed"),
                     output_filename="${rank}.jsonl",
+                    compression=None,
                 ),
             ),
             JsonlWriter(
                 str(output_dir),
                 output_filename="${rank}.jsonl",
+                compression=None,
             ),
         ],
         tasks=n_tasks,
@@ -257,23 +252,6 @@ class Deduplicator:
         working_dir: Scratch directory for datatrove intermediate state.
         workers:     CPU workers for parallel stages. Default: cpu_count / 2.
         threshold:   Jaccard similarity threshold. Default: 0.8.
-
-    Usage::
-
-        dedup = Deduplicator(working_dir=Path("data/dedup_scratch"))
-
-        # Exact dedup a source's shards first
-        seen = dedup.exact_dedup_source(
-            src_dir=Path("data/filtered/wikipedia"),
-            dst_dir=Path("data/exact_deduped/wikipedia"),
-        )
-
-        # Then fuzzy dedup the exact-deduped output
-        dedup.minhash_dedup_source(
-            src_dir=Path("data/exact_deduped/wikipedia"),
-            dst_dir=Path("data/deduped/wikipedia"),
-            source_name="wikipedia",
-        )
     """
 
     def __init__(
@@ -286,28 +264,10 @@ class Deduplicator:
         self.workers = workers or max(1, (os.cpu_count() or 4) // 2)
         self.threshold = threshold
         self.seen_hashes: set[str] = set()
-
         self._stats: dict[str, dict] = {}
 
-    def exact_dedup_source(
-        self,
-        src_dir: Path,
-        dst_dir: Path,
-    ) -> dict:
-        """
-        Exact-dedup all JSONL shards in src_dir, writing to dst_dir.
-
-        The seen_hashes set is shared across all calls to this method,
-        enabling cross-source exact dedup (a Wikipedia article that also
-        appears in CC will be caught).
-
-        Args:
-            src_dir: Source directory of JSONL shards.
-            dst_dir: Output directory for exact-deduped shards.
-
-        Returns:
-            Aggregated stats dict.
-        """
+    def exact_dedup_source(self, src_dir: Path, dst_dir: Path) -> dict:
+        """Exact-dedup all JSONL shards in src_dir, writing to dst_dir."""
         dst_dir.mkdir(parents=True, exist_ok=True)
         shards = sorted(src_dir.glob("*.jsonl"))
 
@@ -316,8 +276,8 @@ class Deduplicator:
             return {}
 
         log.info(f"Exact dedup: {src_dir.name} ({len(shards)} shards)...")
-
         agg = {"total": 0, "kept": 0, "exact_duplicates": 0}
+
         for shard in tqdm(shards, desc=f"Exact dedup {src_dir.name}", unit="shard"):
             out = dst_dir / shard.name
             if out.exists():
@@ -335,20 +295,8 @@ class Deduplicator:
         )
         return agg
 
-    def minhash_dedup_source(
-        self,
-        src_dir: Path,
-        dst_dir: Path,
-        source_name: str,
-    ) -> None:
-        """
-        Fuzzy-dedup a source's shards using datatrove MinHash pipeline.
-
-        Args:
-            src_dir:     Exact-deduped shards (input to minhash).
-            dst_dir:     Final deduplicated output shards.
-            source_name: Used to namespace the working directory.
-        """
+    def minhash_dedup_source(self, src_dir: Path, dst_dir: Path, source_name: str) -> None:
+        """Fuzzy-dedup a source's shards using datatrove MinHash pipeline."""
         working = self.working_dir / source_name
         run_minhash_dedup(
             input_dir=src_dir,
@@ -357,45 +305,18 @@ class Deduplicator:
             workers=self.workers,
         )
 
-    def deduplicate_source(
-        self,
-        src_dir: Path,
-        dst_dir: Path,
-        source_name: str,
-    ) -> None:
-        """
-        Full two-stage dedup for a single source: exact then fuzzy.
-
-        Intermediate exact-deduped files are written to a temp directory
-        inside working_dir and cleaned up after minhash dedup completes.
-
-        Args:
-            src_dir:     Filtered JSONL shards for this source.
-            dst_dir:     Final deduplicated output directory.
-            source_name: Source name (wikipedia, code, common_crawl).
-        """
+    def deduplicate_source(self, src_dir: Path, dst_dir: Path, source_name: str) -> None:
+        """Full two-stage dedup for a single source: exact then fuzzy."""
         exact_dir = self.working_dir / source_name / "exact_deduped"
-
         log.info(f"=== Deduplicating {source_name} ===")
-
-        # Stage 1: exact
         self.exact_dedup_source(src_dir=src_dir, dst_dir=exact_dir)
-
-        # Stage 2: minhash fuzzy
-        self.minhash_dedup_source(
-            src_dir=exact_dir,
-            dst_dir=dst_dir,
-            source_name=source_name,
-        )
-
+        self.minhash_dedup_source(src_dir=exact_dir, dst_dir=dst_dir, source_name=source_name)
         log.info(f"Deduplication complete for {source_name} → {dst_dir}")
 
     def report(self) -> str:
         """Human-readable summary of exact dedup stats."""
-        total_seen = len(self.seen_hashes)
-        lines = [
-            "Deduplication report:",
-            f"  Exact hash index size: {total_seen:>10,} documents",
-            f"  (Fuzzy dedup stats available in datatrove logs)",
-        ]
-        return "\n".join(lines)
+        return (
+            f"Deduplication report:\n"
+            f"  Exact hash index size: {len(self.seen_hashes):>10,} documents\n"
+            f"  (Fuzzy dedup stats available in datatrove logs)"
+        )

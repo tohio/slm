@@ -1,7 +1,6 @@
 # ── Core ──────────────────────────────────────────────────────────────────────
 torch>=2.2.0
 torchvision>=0.17.0
-
 # ── HuggingFace ───────────────────────────────────────────────────────────────
 transformers>=4.40.0
 datasets>=2.19.0
@@ -10,35 +9,29 @@ accelerate>=0.30.0
 trl>=0.8.6
 evaluate>=0.4.0
 huggingface-hub>=0.23.0
-
 # ── Data curation ─────────────────────────────────────────────────────────────
 trafilatura>=1.9.0
 langdetect>=1.0.9
 warcio>=1.7.4
-datasketch>=1.6.4
-datatrove>=0.2.0
-
+datatrove[processing]>=0.2.0
+orjson>=3.9.0
+spacy>=3.7.0
 # ── Validation ────────────────────────────────────────────────────────────────
 # kenlm — install from source (not on PyPI)
 # pip install https://github.com/kpu/kenlm/archive/master.zip
-
 # ── AWS / S3 ──────────────────────────────────────────────────────────────────
 boto3>=1.34.0
 botocore>=1.34.0
-
 # ── Experiment tracking ───────────────────────────────────────────────────────
 wandb>=0.17.0
-
 # ── Evaluation ────────────────────────────────────────────────────────────────
 lm-eval>=0.4.2
-
 # ── Utilities ─────────────────────────────────────────────────────────────────
 numpy>=1.26.0
 tqdm>=4.66.0
 pyyaml>=6.0.1
 python-dotenv>=1.0.0
 requests>=2.31.0
-
 # ── Notebooks ─────────────────────────────────────────────────────────────────
 jupyter>=1.0.0
 ipykernel>=6.29.0

@@ -4,13 +4,15 @@
 #   make <target>                                        # defaults: SIZE=125m, GPUS=1
 #   make <target> SIZE=350m                              # different model size
 #   make <target> GPUS=4                                 # multi-GPU
+#   make <target> WORKERS=16                             # parallel workers for dedup
 #   make <target> CONFIG=pretrain/configs/gpt_125m.yaml  # explicit config override
 #
 # Full pipeline:
 #   make all SIZE=125m GPUS=4
 
-SIZE   ?= 125m
-GPUS   ?= 1
+SIZE    ?= 125m
+GPUS    ?= 1
+WORKERS ?=
 
 # Config defaults — overridable with CONFIG=path/to/config.yaml
 PRETRAIN_CONFIG ?= pretrain/configs/gpt_$(SIZE).yaml
@@ -21,10 +23,19 @@ DPO_CONFIG      ?= alignment/configs/dpo_$(SIZE).yaml
 # accelerate launch with GPU count
 ACCELERATE = accelerate launch --num_processes $(GPUS)
 
-.PHONY: all curate validate tokenizer tokenize \
+# Optional workers flag for dedup
+ifdef WORKERS
+  WORKERS_FLAG = --workers $(WORKERS)
+else
+  WORKERS_FLAG =
+endif
+
+.PHONY: all curate curate-mini curate-download curate-filter curate-dedup \
+        curate-blend curate-upload validate tokenizer tokenize \
         pretrain prepare-sft sft sft-code \
         prepare-dpo dpo eval export serve serve-local \
-        clean help
+        setup install install-uv install-conda install-kenlm \
+        accelerate-config clean clean-data clean-results clean-logs help
 
 # ── Full pipeline ──────────────────────────────────────────────────────────────
 
@@ -35,7 +46,11 @@ all: curate validate tokenizer tokenize pretrain prepare-sft sft sft-code prepar
 
 curate:
 	@echo "==> Stage 1: Curation (target=$(SIZE))"
-	python curator/scripts/curate.py --target $(SIZE)
+	python curator/scripts/curate.py --target $(SIZE) $(WORKERS_FLAG)
+
+curate-mini:
+	@echo "==> Stage 1: Mini curation run (pipeline validation)"
+	python curator/scripts/curate.py --target mini --mini $(WORKERS_FLAG)
 
 curate-download:
 	python curator/scripts/curate.py --target $(SIZE) --stage download
@@ -44,7 +59,7 @@ curate-filter:
 	python curator/scripts/curate.py --target $(SIZE) --stage filter
 
 curate-dedup:
-	python curator/scripts/curate.py --target $(SIZE) --stage dedup
+	python curator/scripts/curate.py --target $(SIZE) --stage dedup $(WORKERS_FLAG)
 
 curate-blend:
 	python curator/scripts/curate.py --target $(SIZE) --stage blend
@@ -163,6 +178,14 @@ s3-list:
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
 
+setup:
+	@echo "==> Running instance setup..."
+	bash infra/setup.sh
+
+setup-data-dir:
+	@echo "==> Running instance setup with custom data dir..."
+	bash infra/setup.sh --data-dir $(DATA_DIR)
+
 install:
 	pip install -r requirements.txt
 
@@ -170,7 +193,7 @@ install-uv:
 	uv venv && source .venv/bin/activate && uv pip install -r requirements.txt
 
 install-conda:
-	conda create -n slm python=3.10 -y && \
+	conda create -n slm python=3.12 -y && \
 	conda activate slm && \
 	pip install -r requirements.txt
 
@@ -183,7 +206,7 @@ accelerate-config:
 # ── Clean ─────────────────────────────────────────────────────────────────────
 
 clean-data:
-	rm -rf data/raw data/filtered data/curated data/validated data/tokenized data/sft data/dpo
+	rm -rf data/raw data/filtered data/curated data/validated data/tokenized data/sft data/dpo data/dedup_scratch
 
 clean-results:
 	rm -rf results/
@@ -202,9 +225,17 @@ help:
 	@echo "SLM Pipeline"
 	@echo "============"
 	@echo ""
-	@echo "Usage: make <target> [SIZE=125m|350m|1b] [GPUS=N] [CONFIG=path/to/config.yaml]"
+	@echo "Usage: make <target> [SIZE=125m|350m|1b] [GPUS=N] [WORKERS=N]"
+	@echo ""
+	@echo "Setup:"
+	@echo "  setup              Bootstrap a fresh instance (run once)"
+	@echo "  setup-data-dir     Bootstrap with custom data dir: make setup-data-dir DATA_DIR=/data/slm/data"
+	@echo "  install            Install dependencies (pip)"
+	@echo "  install-uv         Install dependencies (uv)"
+	@echo "  install-conda      Install dependencies (conda)"
 	@echo ""
 	@echo "Pipeline stages:"
+	@echo "  curate-mini     Stage 1  — mini run to validate pipeline (~30 min)"
 	@echo "  curate          Stage 1  — download and curate data"
 	@echo "  validate        Stage 2  — quality filter and validate"
 	@echo "  tokenizer       Stage 3  — train BPE tokenizer"
@@ -220,10 +251,14 @@ help:
 	@echo "  serve           Stage 10 — launch vLLM server (Hub model)"
 	@echo "  serve-local     Stage 10 — launch vLLM server (local checkpoint)"
 	@echo ""
+	@echo "Curation sub-stages:"
+	@echo "  curate-download    Download raw data only"
+	@echo "  curate-filter      Quality filter only"
+	@echo "  curate-dedup       Deduplication only"
+	@echo "  curate-blend       Blend to train.jsonl only"
+	@echo "  curate-upload      Upload to S3 only"
+	@echo ""
 	@echo "Utilities:"
-	@echo "  install            Install dependencies (pip)"
-	@echo "  install-uv         Install dependencies (uv)"
-	@echo "  install-conda      Install dependencies (conda)"
 	@echo "  install-kenlm      Install KenLM from source"
 	@echo "  accelerate-config  Configure accelerate for multi-GPU"
 	@echo "  s3-upload          Upload curated data to S3"
@@ -234,10 +269,12 @@ help:
 	@echo "  clean-results      Remove all training results"
 	@echo ""
 	@echo "Examples:"
-	@echo "  make all SIZE=125m GPUS=2                                    # pipeline validation run"
-	@echo "  make pretrain SIZE=125m GPUS=4                               # 125M on 4x A100"
-	@echo "  make pretrain SIZE=350m GPUS=6                               # 350M on 6x H100"
-	@echo "  make pretrain CONFIG=pretrain/configs/gpt_1b.yaml GPUS=8    # 1B explicit config"
+	@echo "  make curate-mini                                             # validate pipeline"
+	@echo "  make curate SIZE=125m WORKERS=16                            # full 125M curation"
+	@echo "  make all SIZE=125m GPUS=2                                   # full pipeline"
+	@echo "  make pretrain SIZE=125m GPUS=4                              # 125M on 4x A100"
+	@echo "  make pretrain SIZE=350m GPUS=6                              # 350M on 6x H100"
+	@echo "  make pretrain CONFIG=pretrain/configs/gpt_1b.yaml GPUS=8   # 1B explicit config"
 	@echo "  make sft SIZE=125m GPUS=4"
 	@echo "  make dpo SIZE=125m GPUS=2"
 	@echo ""
