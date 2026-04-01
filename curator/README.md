@@ -40,7 +40,7 @@ curator/
 ├── sources/
 │   ├── wikipedia.py         Wikipedia EN via HuggingFace datasets
 │   ├── code_search_net.py   CodeSearchNet via HuggingFace datasets
-│   └── common_crawl.py      Common Crawl WARCs via S3 + trafilatura
+│   └── common_crawl.py      Common Crawl WARCs via HTTPS + trafilatura
 ├── filters/
 │   ├── quality.py           Heuristic quality filters (FineWeb/Gopher-style)
 │   └── dedup.py             Exact + datatrove disk-based MinHash deduplication
@@ -149,19 +149,21 @@ data/
 
 ## Quality Filters
 
-Heuristics adapted from FineWeb and Gopher applied to all sources:
+Heuristics adapted from FineWeb and Gopher. Filters marked ✗ are skipped for the
+code source — symbol-heavy syntax, long identifiers, and absence of stop words are
+normal properties of code, not quality signals.
 
-| Filter | Threshold | Catches |
-|---|---|---|
-| Min length | 200 chars | Stubs, empty pages |
-| Max length | 100k chars | Extremely long documents |
-| Mean word length | 3–10 chars | Gibberish, SEO spam |
-| Symbol ratio | < 10% symbols/words | Symbol-heavy spam |
-| Bullet ratio | < 90% bullet lines | Pure list content |
-| Ellipsis ratio | < 30% ellipsis lines | Truncated content |
-| Alpha ratio | > 70% alpha chars | Numeric/code spam (skipped for code source) |
-| Repeated lines | < 30% duplicates | Boilerplate, repeated content |
-| Stop words | ≥ 2 EN stop words | Non-English content (skipped for code source) |
+| Filter | Threshold | Catches | Skipped for code |
+|---|---|---|---|
+| Min length | 200 chars | Stubs, empty pages | |
+| Max length | 100k chars | Extremely long documents | |
+| Mean word length | 3–10 chars | Gibberish, SEO spam | ✗ |
+| Symbol ratio | < 10% symbols/words | Symbol-heavy spam | ✗ |
+| Bullet ratio | < 90% bullet lines | Pure list content | |
+| Ellipsis ratio | < 30% ellipsis lines | Truncated content | |
+| Alpha ratio | > 70% alpha chars | Numeric/code spam | ✗ |
+| Repeated lines | < 30% duplicates | Boilerplate, repeated content | |
+| Stop words | ≥ 2 EN stop words | Non-English content | ✗ |
 
 ---
 
@@ -221,11 +223,11 @@ Recommended hardware for each model size:
 | Target | Instance | RAM | Est. runtime |
 |---|---|---|---|
 | `mini` | Any | 4GB+ | ~30–45 min |
-| `125m` | `c5.4xlarge` (16 vCPU) | 32GB | ~6–8 hrs |
-| `350m` | `c5.4xlarge` (16 vCPU) | 32GB | ~18–24 hrs |
-| `1b` | `c5.9xlarge` (36 vCPU) | 72GB | ~48–72 hrs |
+| `125m` | `c8g.4xlarge` (16 vCPU) | 32GB | ~6–8 hrs |
+| `350m` | `c8g.4xlarge` (16 vCPU) | 32GB | ~18–24 hrs |
+| `1b` | `c8g.8xlarge` (32 vCPU) | 64GB | ~48–72 hrs |
 
-All runs on AWS spot in `us-east-1` to minimize Common Crawl egress latency. Attach an EBS volume for `data/` so it survives spot interruptions — the pipeline is fully resumable at every stage.
+All runs on AWS spot in `us-east-1` to minimize Common Crawl egress latency. Attach an EBS volume (`gp3`, 500GB) for `data/` so it survives spot interruptions — the pipeline is fully resumable at every stage.
 
 **Parallelism:** The `--workers` flag controls the number of parallel workers in the dedup stage. Set it to the number of available CPU cores. Filter and download are currently single-threaded per shard.
 
@@ -240,6 +242,8 @@ All runs on AWS spot in `us-east-1` to minimize Common Crawl egress latency. Att
 **Why 70/20/10?** Following empirical findings from The Pile, RedPajama, and FineWeb — web data dominates for scale, Wikipedia provides quality signal, and 10% code is sufficient for the base model before code SFT.
 
 **Why trafilatura over BeautifulSoup?** trafilatura is specifically designed for main content extraction from web pages. It handles boilerplate removal (navigation, ads, footers) significantly better than generic HTML parsers.
+
+**Why HTTPS for Common Crawl instead of S3?** Direct S3 access to the `commoncrawl` bucket fails on EC2 instances with IAM roles attached — the instance role credentials are rejected by the bucket policy. HTTPS via `data.commoncrawl.org` works reliably regardless of instance credentials.
 
 **Why datatrove for dedup instead of datasketch?** datasketch's `MinHashLSH` is an in-memory data structure. At 350m scale the index requires ~32GB RAM; at 1b it requires ~85GB and cannot fit on a single instance. datatrove's disk-based pipeline uses a sort-based approach (signatures → buckets → cluster → filter) where RAM usage is bounded by shard size, not corpus size. This is the same approach used by FineWeb and RedPajama at trillion-token scale.
 
