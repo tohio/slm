@@ -11,10 +11,11 @@
 #   1. Installs system dependencies (Python 3.12, gcc, build tools)
 #   2. Creates a Python virtual environment
 #   3. Installs Python dependencies
-#   4. Downloads the spaCy English model
-#   5. Creates the required data directory structure
-#   6. Configures .env with correct paths
-#   7. Validates the environment
+#   4. Installs KenLM Python bindings (required for validation)
+#   5. Downloads the spaCy English model
+#   6. Creates the required data directory structure
+#   7. Configures .env with correct paths
+#   8. Validates the environment
 #
 # Assumptions:
 #   - Ubuntu 22.04
@@ -94,13 +95,22 @@ echo ""
 echo "==> Installing Python dependencies..."
 pip install -r "${REPO_DIR}/requirements.txt"
 
-# ── 4. spaCy English model ────────────────────────────────────────────────────
+# ── 4. KenLM Python bindings ──────────────────────────────────────────────────
+# KenLM is not on PyPI — must be built from source.
+# Required for the perplexity filter in the validation stage.
+
+echo ""
+echo "==> Installing KenLM Python bindings..."
+pip install https://github.com/kpu/kenlm/archive/master.zip
+echo "  KenLM installed"
+
+# ── 5. spaCy English model ────────────────────────────────────────────────────
 
 echo ""
 echo "==> Downloading spaCy English model..."
 python -m spacy download en_core_web_sm
 
-# ── 5. Data directory structure ───────────────────────────────────────────────
+# ── 6. Data directory structure ───────────────────────────────────────────────
 
 echo ""
 echo "==> Creating data directory structure at $DATA_DIR..."
@@ -113,12 +123,13 @@ mkdir -p \
     "${DATA_DIR}/dedup_scratch" \
     "${DATA_DIR}/validated" \
     "${DATA_DIR}/tokenized" \
+    "${DATA_DIR}/models" \
     "${HF_CACHE_DIR}"
 
 echo "  Created: $DATA_DIR"
 echo "  Created: $HF_CACHE_DIR"
 
-# ── 6. Configure .env ─────────────────────────────────────────────────────────
+# ── 7. Configure .env ─────────────────────────────────────────────────────────
 
 echo ""
 echo "==> Configuring .env..."
@@ -154,7 +165,7 @@ echo "  DATA_DIR=${DATA_DIR}"
 echo "  HF_HOME=${HF_CACHE_DIR}"
 echo "  HF_DATASETS_CACHE=${HF_CACHE_DIR}"
 
-# ── 7. Shell profile ──────────────────────────────────────────────────────────
+# ── 8. Shell profile ──────────────────────────────────────────────────────────
 
 echo ""
 echo "==> Adding environment variables to ~/.bashrc..."
@@ -178,7 +189,7 @@ export HF_HOME="${HF_CACHE_DIR}"
 export HF_DATASETS_CACHE="${HF_CACHE_DIR}"
 export DATA_DIR="${DATA_DIR}"
 
-# ── 8. Validate ───────────────────────────────────────────────────────────────
+# ── 9. Validate ───────────────────────────────────────────────────────────────
 
 echo ""
 echo "==> Validating environment..."
@@ -192,7 +203,7 @@ packages = [
     'torch', 'transformers', 'datasets', 'tokenizers',
     'accelerate', 'trl', 'trafilatura', 'langdetect',
     'warcio', 'datatrove', 'orjson', 'spacy',
-    'boto3', 'dotenv', 'tqdm', 'requests',
+    'boto3', 'dotenv', 'tqdm', 'requests', 'kenlm',
 ]
 missing = []
 for pkg in packages:
@@ -212,7 +223,8 @@ python -c "import spacy; spacy.load('en_core_web_sm'); print('  spaCy en_core_we
     || { echo "  MISSING spaCy model — run: python -m spacy download en_core_web_sm"; ERRORS=$((ERRORS + 1)); }
 
 # Check data directories
-for dir in "${DATA_DIR}/raw" "${DATA_DIR}/filtered" "${DATA_DIR}/curated" "${HF_CACHE_DIR}"; do
+for dir in "${DATA_DIR}/raw" "${DATA_DIR}/filtered" "${DATA_DIR}/curated" \
+           "${DATA_DIR}/validated" "${DATA_DIR}/models" "${HF_CACHE_DIR}"; do
     if [ -d "$dir" ]; then
         echo "  OK: $dir"
     else
@@ -220,6 +232,14 @@ for dir in "${DATA_DIR}/raw" "${DATA_DIR}/filtered" "${DATA_DIR}/curated" "${HF_
         ERRORS=$((ERRORS + 1))
     fi
 done
+
+# Check KenLM model — warn only, not a hard error (downloaded separately)
+if [ -f "${DATA_DIR}/models/en.arpa.bin" ]; then
+    echo "  OK: KenLM model found"
+else
+    echo "  WARNING: KenLM model not found — run: make download-kenlm-model"
+    echo "           Required before running: make validate"
+fi
 
 # Check .env required variables
 echo ""
@@ -246,7 +266,8 @@ if [ "$ERRORS" -eq 0 ]; then
     echo "  1. Fill in missing values in ${ENV_FILE}"
     echo "  2. source ~/.bashrc  (or open a new shell)"
     echo "  3. source ${VENV_DIR}/bin/activate"
-    echo "  4. python curator/scripts/curate.py --target mini --mini --stage download"
+    echo "  4. make download-kenlm-model"
+    echo "  5. make curate-mini"
     echo ""
 else
     echo "========================================"

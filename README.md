@@ -173,6 +173,7 @@ Using pip:
 git clone https://github.com/tohio/slm.git
 cd slm
 pip install -r requirements.txt
+pip install https://github.com/kpu/kenlm/archive/master.zip
 cp .env.sample .env
 # Add your credentials to .env
 ```
@@ -183,6 +184,7 @@ git clone https://github.com/tohio/slm.git
 cd slm
 uv venv && source .venv/bin/activate
 uv pip install -r requirements.txt
+pip install https://github.com/kpu/kenlm/archive/master.zip
 cp .env.sample .env
 # Add your credentials to .env
 ```
@@ -194,6 +196,7 @@ cd slm
 conda create -n slm python=3.12 -y
 conda activate slm
 pip install -r requirements.txt
+pip install https://github.com/kpu/kenlm/archive/master.zip
 cp .env.sample .env
 # Add your credentials to .env
 ```
@@ -222,7 +225,9 @@ Crawl at 2 WARC segments. Exercises every stage without the wait.
 **Run the full pipeline**
 
 ```bash
-make curate SIZE=125m WORKERS=16   # Stage 1: download and curate data
+make curate SIZE=125m WORKERS=16    # Stage 1: download and curate data
+make curate-upload SIZE=125m        # Stage 1: push curated data to S3
+make download-kenlm-model           # one-time: download KenLM model (~4GB)
 make validate                       # Stage 2: quality filter and validate
 make tokenizer                      # Stage 3: train tokenizer
 make tokenize                       # Stage 4a: tokenize dataset

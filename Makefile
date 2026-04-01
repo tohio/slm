@@ -13,6 +13,7 @@
 SIZE    ?= 125m
 GPUS    ?= 1
 WORKERS ?=
+DATA_DIR ?= data
 
 # Config defaults — overridable with CONFIG=path/to/config.yaml
 PRETRAIN_CONFIG ?= pretrain/configs/gpt_$(SIZE).yaml
@@ -34,12 +35,13 @@ endif
         curate-blend curate-upload validate tokenizer tokenize \
         pretrain prepare-sft sft sft-code \
         prepare-dpo dpo eval export serve serve-local \
-        setup install install-uv install-conda install-kenlm \
-        accelerate-config clean clean-data clean-results clean-logs help
+        setup setup-data-dir install install-uv install-conda install-kenlm \
+        download-kenlm-model accelerate-config \
+        clean clean-data clean-results clean-logs help
 
 # ── Full pipeline ──────────────────────────────────────────────────────────────
 
-all: curate validate tokenizer tokenize pretrain prepare-sft sft sft-code prepare-dpo dpo
+all: curate curate-upload validate tokenizer tokenize pretrain prepare-sft sft sft-code prepare-dpo dpo
 	@echo "Pipeline complete for slm-$(SIZE) on $(GPUS) GPU(s)"
 
 # ── Stage 1: Data curation ────────────────────────────────────────────────────
@@ -65,6 +67,7 @@ curate-blend:
 	python curator/scripts/curate.py --target $(SIZE) --stage blend
 
 curate-upload:
+	@echo "==> Stage 1: Upload curated data to S3 (target=$(SIZE))"
 	python curator/scripts/curate.py --target $(SIZE) --stage upload
 
 # ── Stage 2: Validation ───────────────────────────────────────────────────────
@@ -200,6 +203,14 @@ install-conda:
 install-kenlm:
 	pip install https://github.com/kpu/kenlm/archive/master.zip
 
+download-kenlm-model:
+	@echo "==> Downloading KenLM English model (~4GB)..."
+	mkdir -p $(DATA_DIR)/models
+	wget -q --show-progress \
+		https://dl.fbaipublicfiles.com/cc_net/lm/en.arpa.bin \
+		-O $(DATA_DIR)/models/en.arpa.bin
+	@echo "  Saved to $(DATA_DIR)/models/en.arpa.bin"
+
 accelerate-config:
 	accelerate config
 
@@ -225,31 +236,34 @@ help:
 	@echo "SLM Pipeline"
 	@echo "============"
 	@echo ""
-	@echo "Usage: make <target> [SIZE=125m|350m|1b] [GPUS=N] [WORKERS=N]"
+	@echo "Usage: make <target> [SIZE=125m|350m|1b] [GPUS=N] [WORKERS=N] [DATA_DIR=path]"
 	@echo ""
 	@echo "Setup:"
-	@echo "  setup              Bootstrap a fresh instance (run once)"
-	@echo "  setup-data-dir     Bootstrap with custom data dir: make setup-data-dir DATA_DIR=/data/slm/data"
-	@echo "  install            Install dependencies (pip)"
-	@echo "  install-uv         Install dependencies (uv)"
-	@echo "  install-conda      Install dependencies (conda)"
+	@echo "  setup                  Bootstrap a fresh instance (run once)"
+	@echo "  setup-data-dir         Bootstrap with custom data dir: make setup-data-dir DATA_DIR=/data/slm/data"
+	@echo "  download-kenlm-model   Download KenLM English model (~4GB) for validation"
+	@echo "  install                Install dependencies (pip)"
+	@echo "  install-uv             Install dependencies (uv)"
+	@echo "  install-conda          Install dependencies (conda)"
+	@echo "  install-kenlm          Install KenLM Python bindings from source"
 	@echo ""
 	@echo "Pipeline stages:"
-	@echo "  curate-mini     Stage 1  — mini run to validate pipeline (~30 min)"
-	@echo "  curate          Stage 1  — download and curate data"
-	@echo "  validate        Stage 2  — quality filter and validate"
-	@echo "  tokenizer       Stage 3  — train BPE tokenizer"
-	@echo "  tokenize        Stage 4a — tokenize dataset to binary"
-	@echo "  pretrain        Stage 4b — pretrain from scratch"
-	@echo "  prepare-sft     Stage 5a — download SFT datasets"
-	@echo "  sft             Stage 5b — chat supervised fine-tuning"
-	@echo "  sft-code        Stage 5c — code supervised fine-tuning"
-	@echo "  prepare-dpo     Stage 6a — download DPO datasets"
-	@echo "  dpo             Stage 6b — DPO alignment"
-	@echo "  eval            Stage 7  — benchmark evaluation"
-	@echo "  export          Stage 8  — push to HuggingFace Hub"
-	@echo "  serve           Stage 10 — launch vLLM server (Hub model)"
-	@echo "  serve-local     Stage 10 — launch vLLM server (local checkpoint)"
+	@echo "  curate-mini        Stage 1  — mini run to validate pipeline (~30 min)"
+	@echo "  curate             Stage 1  — download and curate data"
+	@echo "  curate-upload      Stage 1  — upload curated data to S3"
+	@echo "  validate           Stage 2  — quality filter and validate"
+	@echo "  tokenizer          Stage 3  — train BPE tokenizer"
+	@echo "  tokenize           Stage 4a — tokenize dataset to binary"
+	@echo "  pretrain           Stage 4b — pretrain from scratch"
+	@echo "  prepare-sft        Stage 5a — download SFT datasets"
+	@echo "  sft                Stage 5b — chat supervised fine-tuning"
+	@echo "  sft-code           Stage 5c — code supervised fine-tuning"
+	@echo "  prepare-dpo        Stage 6a — download DPO datasets"
+	@echo "  dpo                Stage 6b — DPO alignment"
+	@echo "  eval               Stage 7  — benchmark evaluation"
+	@echo "  export             Stage 8  — push to HuggingFace Hub"
+	@echo "  serve              Stage 10 — launch vLLM server (Hub model)"
+	@echo "  serve-local        Stage 10 — launch vLLM server (local checkpoint)"
 	@echo ""
 	@echo "Curation sub-stages:"
 	@echo "  curate-download    Download raw data only"
@@ -259,7 +273,6 @@ help:
 	@echo "  curate-upload      Upload to S3 only"
 	@echo ""
 	@echo "Utilities:"
-	@echo "  install-kenlm      Install KenLM from source"
 	@echo "  accelerate-config  Configure accelerate for multi-GPU"
 	@echo "  s3-upload          Upload curated data to S3"
 	@echo "  s3-download        Download curated data from S3"
@@ -271,6 +284,8 @@ help:
 	@echo "Examples:"
 	@echo "  make curate-mini                                             # validate pipeline"
 	@echo "  make curate SIZE=125m WORKERS=16                            # full 125M curation"
+	@echo "  make curate-upload SIZE=125m                                # push to S3"
+	@echo "  make download-kenlm-model DATA_DIR=/data/slm/data          # get KenLM model"
 	@echo "  make all SIZE=125m GPUS=2                                   # full pipeline"
 	@echo "  make pretrain SIZE=125m GPUS=4                              # 125M on 4x A100"
 	@echo "  make pretrain SIZE=350m GPUS=6                              # 350M on 6x H100"
