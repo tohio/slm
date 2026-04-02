@@ -275,13 +275,17 @@ if [ "$ERRORS" -eq 0 ]; then
         echo "  2. source ~/.bashrc  (or open a new shell)"
         echo "  3. source ${VENV_DIR}/bin/activate"
         echo "  4. make download-kenlm-model DATA_DIR=${DATA_DIR}"
-        echo "  5. make curate-mini"
+        echo "  5. Start curation (pick one):"
     else
         echo "  1. source ~/.bashrc  (or open a new shell)"
         echo "  2. source ${VENV_DIR}/bin/activate"
         echo "  3. make download-kenlm-model DATA_DIR=${DATA_DIR}"
-        echo "  4. make curate-mini"
+        echo "  4. Start curation (pick one):"
     fi
+    echo "       make curate-mini                        # validate pipeline (~30 min)"
+    echo "       make curate SIZE=125m WORKERS=16        # full 125M run (~6-8 hrs)"
+    echo "       make curate SIZE=350m WORKERS=16        # full 350M run (~18-24 hrs)"
+    echo "       make curate SIZE=1b   WORKERS=32        # full 1B run (~48-72 hrs)"
     echo ""
 else
     echo "========================================"
