@@ -26,6 +26,12 @@ S3 upload path structure:
     {S3_PREFIX}/{target}/{date}/curated/
     e.g. slm/data/125m/2026-04-02/curated/train.jsonl
 
+CC segment calibration (empirical, from 125m run):
+    10 segments → ~127k raw docs → ~84k deduped → ~60M tokens
+    ~6M tokens per segment after filtering and dedup
+    Target CC tokens = total_tokens * 0.70 (SOURCE_MIX)
+    Segments needed  = target_cc_tokens / 6M
+
 Output structure:
     data/
     ├── raw/
@@ -95,26 +101,34 @@ log = logging.getLogger(__name__)
 # ── Target configurations ──────────────────────────────────────────────────────
 # Token targets per model size — source mix stays constant at 70/20/10.
 # mini target is for pipeline validation only — not for training.
+#
+# CC segment counts are calibrated from empirical observation:
+#   10 segments → ~6M tokens after filtering and dedup (~600k tokens/segment)
+#   Target CC tokens = total_tokens * 0.70
+#   Segments needed  = target_cc_tokens / 600k
+#
+# For diversity, 350m and 1b spread segments across multiple crawls.
+# Each CC crawl has ~90k WARC segments — well above our segment counts.
 
 TARGET_CONFIGS = {
     "mini": {
-        "total_tokens":  1_000_000,       # 1M tokens — exercises blend without waiting
-        "cc_segments":   2,               # 2 WARC segments (~70k raw docs)
+        "total_tokens":  1_000_000,       # 1M tokens — pipeline validation only
+        "cc_segments":   2,               # 2 WARC segments
         "cc_crawls":     ["CC-MAIN-2024-10"],
     },
     "125m": {
-        "total_tokens":  3_000_000_000,
-        "cc_segments":   10,
+        "total_tokens":  3_000_000_000,   # 3B tokens
+        "cc_segments":   350,             # 350 segments × ~6M tokens = ~2.1B CC tokens
         "cc_crawls":     ["CC-MAIN-2024-10"],
     },
     "350m": {
-        "total_tokens":  10_000_000_000,
-        "cc_segments":   40,
+        "total_tokens":  10_000_000_000,  # 10B tokens
+        "cc_segments":   600,             # 600 segments × 2 crawls × ~6M = ~7.2B CC tokens
         "cc_crawls":     ["CC-MAIN-2024-10", "CC-MAIN-2023-50"],
     },
     "1b": {
-        "total_tokens":  25_000_000_000,
-        "cc_segments":   100,
+        "total_tokens":  25_000_000_000,  # 25B tokens
+        "cc_segments":   1_000,           # 1000 segments × 3 crawls × ~6M = ~18B CC tokens
         "cc_crawls":     ["CC-MAIN-2024-10", "CC-MAIN-2023-50", "CC-MAIN-2023-40"],
     },
 }
