@@ -161,6 +161,12 @@ On a fresh Ubuntu 22.04 cloud instance (recommended):
 git clone https://github.com/tohio/slm.git /data/slm
 cd /data/slm
 
+# Populate credentials before running setup
+cp .env.sample .env
+
+# fill in S3_BUCKET, AWS credentials, WANDB_API_KEY, HF_TOKEN
+vi .env  
+
 # make is the only manual prerequisite — setup handles everything else
 sudo apt install -y make
 
