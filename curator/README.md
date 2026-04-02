@@ -9,7 +9,7 @@ Data curation pipeline for SLM pretraining. Downloads raw data from three source
 ```
 Wikipedia EN        ──┐
 CodeSearchNet       ──┤──► quality filter ──► dedup ──► blend ──► train.jsonl ──► S3
-Common Crawl WARCs  ──┘                               
+Common Crawl WARCs  ──┘
 ```
 
 ---
@@ -101,17 +101,29 @@ python curator/scripts/curate.py --target 125m --stage blend
 python curator/scripts/curate.py --target 125m --stage upload
 ```
 
-**S3 utilities**
+**S3 upload**
+
+Use `make curate-upload` or the stage directly — the upload automatically creates a
+versioned path by target and date:
 
 ```bash
-# Upload curated data to S3
-python curator/scripts/upload_s3.py upload --src data/curated --dst curated
+# Recommended — versioned upload
+make curate-upload SIZE=125m
 
-# Download curated data from S3
-python curator/scripts/upload_s3.py download --src curated --dst data/curated
+# Or directly
+python curator/scripts/curate.py --target 125m --stage upload
+```
 
-# List S3 contents
-python curator/scripts/upload_s3.py list --prefix curated
+For manual S3 operations (listing, downloading specific runs):
+
+```bash
+# List all uploads
+python curator/scripts/upload_s3.py list
+
+# Download a specific run
+python curator/scripts/upload_s3.py download \
+    --src 125m/2026-04-02/curated \
+    --dst data/curated
 ```
 
 ---
@@ -144,6 +156,34 @@ data/
     ├── train.jsonl             final blended dataset
     └── blend_stats.json        source mix breakdown
 ```
+
+---
+
+## S3 Structure
+
+Each upload is versioned by target and date, so multiple runs never overwrite each other:
+
+```
+s3://your-bucket/slm/data/
+├── 125m/
+│   ├── 2026-04-02/
+│   │   ├── curated/train.jsonl
+│   │   └── curated/blend_stats.json
+│   └── 2026-04-15/
+│       ├── curated/train.jsonl
+│       └── curated/blend_stats.json
+├── 350m/
+│   └── 2026-04-20/
+│       ├── curated/train.jsonl
+│       └── curated/blend_stats.json
+└── mini/
+    └── 2026-04-01/
+        ├── curated/train.jsonl
+        └── curated/blend_stats.json
+```
+
+Re-uploading on the same day overwrites that day's run. Runs on different days
+are preserved independently.
 
 ---
 
@@ -248,5 +288,7 @@ All runs on AWS spot in `us-east-1` to minimize Common Crawl egress latency. Att
 **Why datatrove for dedup instead of datasketch?** datasketch's `MinHashLSH` is an in-memory data structure. At 350m scale the index requires ~32GB RAM; at 1b it requires ~85GB and cannot fit on a single instance. datatrove's disk-based pipeline uses a sort-based approach (signatures → buckets → cluster → filter) where RAM usage is bounded by shard size, not corpus size. This is the same approach used by FineWeb and RedPajama at trillion-token scale.
 
 **Why streaming blend?** The original implementation loaded all deduped records into RAM before sampling — at 350m scale this requires ~90GB and OOMs on any standard instance. The streaming approach hits the same token targets with constant memory by sampling per shard and shuffling via a byte-offset index.
+
+**Why versioned S3 uploads?** Each run is uploaded to `{target}/{date}/curated/` so multiple runs never overwrite each other. This makes it safe to re-run curation with different parameters or data sources and compare results, and allows rolling back to a previous run if issues are found during training.
 
 **Why per-stage resumability?** Curation runs take hours to days on spot instances that can be interrupted with 2 minutes notice. Each stage checks for existing output before processing — safe to interrupt and restart without reprocessing completed work.
