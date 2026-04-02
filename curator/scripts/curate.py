@@ -22,6 +22,10 @@ memory footprint.
 Blend uses streaming reservoir sampling + offset-based shuffle.
 Peak RAM during blend is O(1) regardless of corpus size.
 
+S3 upload path structure:
+    {S3_PREFIX}/{target}/{date}/curated/
+    e.g. slm/data/125m/2026-04-02/curated/train.jsonl
+
 Output structure:
     data/
     ├── raw/
@@ -63,6 +67,7 @@ import logging
 import os
 import random
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -415,19 +420,35 @@ def stage_blend(target: str, seed: int = 42) -> None:
 
 # ── Stage 5: Upload ────────────────────────────────────────────────────────────
 
-def stage_upload() -> None:
-    """Upload curated data to S3."""
+def stage_upload(target: str) -> None:
+    """
+    Upload curated data to S3 under a versioned path.
+
+    S3 path structure:
+        {S3_PREFIX}/{target}/{date}/curated/
+        e.g. slm/data/125m/2026-04-02/curated/train.jsonl
+
+    Each run gets its own dated folder per target, so multiple runs
+    never overwrite each other. Files within a single day's run are
+    overwritten if re-uploaded.
+    """
     log.info("=== Stage 5: Upload to S3 ===")
     bucket, prefix = get_bucket_and_prefix()
 
+    date = datetime.now().strftime("%Y-%m-%d")
+    dst_prefix = f"{target}/{date}/curated"
+    s3_path = f"s3://{bucket}/{prefix}/{dst_prefix}/"
+
+    log.info(f"Uploading to {s3_path}")
+
     upload_directory(
         src=CURATED_DIR,
-        dst_prefix="curated",
+        dst_prefix=dst_prefix,
         bucket=bucket,
         prefix=prefix,
-        overwrite=False,
+        overwrite=True,
     )
-    log.info("Upload complete")
+    log.info(f"Upload complete → {s3_path}")
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
@@ -518,7 +539,7 @@ Examples:
         stage_blend(args.target, seed=args.seed)
 
     if args.stage in ("upload", "all"):
-        stage_upload()
+        stage_upload(args.target)
 
     log.info("Pipeline complete.")
 
