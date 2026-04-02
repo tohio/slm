@@ -240,18 +240,22 @@ done
 if [ -f "${DATA_DIR}/models/en.arpa.bin" ]; then
     echo "  OK: KenLM model found"
 else
-    echo "  WARNING: KenLM model not found — run: make download-kenlm-model"
+    echo "  WARNING: KenLM model not found — run: make download-kenlm-model DATA_DIR=${DATA_DIR}"
     echo "           Required before running: make validate"
 fi
 
-# Check .env required variables
+# Check .env required variables — warnings only, not hard errors.
+# Credentials must be populated before running the pipeline but are
+# not required for setup itself to succeed.
 echo ""
 echo "==> Checking .env variables..."
 REQUIRED_VARS=("S3_BUCKET" "AWS_ACCESS_KEY_ID" "AWS_SECRET_ACCESS_KEY" "WANDB_API_KEY" "HF_TOKEN")
+MISSING_CREDS=0
 for var in "${REQUIRED_VARS[@]}"; do
-    value=$(grep "^${var}=" "$ENV_FILE" | cut -d'=' -f2)
+    value=$(grep "^${var}=" "$ENV_FILE" | cut -d'=' -f2 || true)
     if [ -z "$value" ]; then
         echo "  WARNING: ${var} is not set in .env — required before running pipeline"
+        MISSING_CREDS=$((MISSING_CREDS + 1))
     else
         echo "  OK: ${var} is set"
     fi
@@ -266,11 +270,18 @@ if [ "$ERRORS" -eq 0 ]; then
     echo "========================================"
     echo ""
     echo "Next steps:"
-    echo "  1. Fill in missing values in ${ENV_FILE}"
-    echo "  2. source ~/.bashrc  (or open a new shell)"
-    echo "  3. source ${VENV_DIR}/bin/activate"
-    echo "  4. make download-kenlm-model"
-    echo "  5. make curate-mini"
+    if [ "$MISSING_CREDS" -gt 0 ]; then
+        echo "  1. Fill in missing credentials in ${ENV_FILE}"
+        echo "  2. source ~/.bashrc  (or open a new shell)"
+        echo "  3. source ${VENV_DIR}/bin/activate"
+        echo "  4. make download-kenlm-model DATA_DIR=${DATA_DIR}"
+        echo "  5. make curate-mini"
+    else
+        echo "  1. source ~/.bashrc  (or open a new shell)"
+        echo "  2. source ${VENV_DIR}/bin/activate"
+        echo "  3. make download-kenlm-model DATA_DIR=${DATA_DIR}"
+        echo "  4. make curate-mini"
+    fi
     echo ""
 else
     echo "========================================"
