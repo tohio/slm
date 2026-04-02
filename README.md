@@ -161,11 +161,14 @@ On a fresh Ubuntu 22.04 cloud instance (recommended):
 git clone https://github.com/tohio/slm.git /data/slm
 cd /data/slm
 
-# Default data dir (repo/data)
-make setup
+# make is the only manual prerequisite — setup handles everything else
+sudo apt install -y make
 
 # Custom data dir — recommended when using a separate EBS volume
 make setup-data-dir DATA_DIR=/data/slm/data
+
+# Default data dir (repo/data) — use if no separate EBS volume
+# make setup
 ```
 
 Using pip:

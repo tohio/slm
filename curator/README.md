@@ -8,8 +8,8 @@ Data curation pipeline for SLM pretraining. Downloads raw data from three source
 
 ```
 Wikipedia EN        ──┐
-CodeSearchNet       ──┤──► quality filter ──► dedup ──┐
-Common Crawl WARCs  ──┘                               ├──► blend ──► train.jsonl ──► S3
+CodeSearchNet       ──┤──► quality filter ──► dedup ──► blend ──► train.jsonl ──► S3
+Common Crawl WARCs  ──┘                               
 ```
 
 ---
