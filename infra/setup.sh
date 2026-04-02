@@ -56,7 +56,15 @@ echo ""
 # ── 1. System dependencies ────────────────────────────────────────────────────
 
 echo "==> Installing system dependencies..."
+
+# Add deadsnakes PPA before attempting to install python3.12.
+# Ubuntu 22.04's default apt repos may not have python3.12 — the PPA
+# must be added first regardless of whether python3.12 is already present.
+echo "  Adding deadsnakes PPA for Python 3.12..."
+sudo apt-get install -y software-properties-common -qq
+sudo add-apt-repository ppa:deadsnakes/ppa -y
 sudo apt-get update -qq
+
 sudo apt-get install -y \
     python3.12 \
     python3.12-venv \
@@ -64,22 +72,14 @@ sudo apt-get install -y \
     gcc \
     g++ \
     build-essential \
+    make \
+    cmake \
+    libboost-all-dev \
     git \
     curl \
     tmux \
     htop \
-    nvme-cli \
-    make \
-    cmake \
-    libboost-all-dev
-    
-# Add deadsnakes PPA if python3.12 not available
-if ! command -v python3.12 &>/dev/null; then
-    echo "  python3.12 not found — adding deadsnakes PPA..."
-    sudo add-apt-repository ppa:deadsnakes/ppa -y
-    sudo apt-get update -qq
-    sudo apt-get install -y python3.12 python3.12-venv python3.12-dev
-fi
+    nvme-cli
 
 echo "  Python: $(python3.12 --version)"
 echo "  GCC:    $(gcc --version | head -1)"
