@@ -60,13 +60,29 @@ import time
 from pathlib import Path
 from typing import Iterator
 
+import fasttext
 import requests
 import trafilatura
-from langdetect import detect, LangDetectException
 from tqdm import tqdm
 from warcio.archiveiterator import ArchiveIterator
 
 log = logging.getLogger(__name__)
+
+# fasttext language identification model — loaded once at import time.
+# Download: wget https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.ftz
+# ~1MB, covers 176 languages, ~1000x faster than langdetect.
+_FT_MODEL_PATH = "data/models/lid.176.ftz"
+try:
+    _FT_MODEL = fasttext.load_model(_FT_MODEL_PATH)
+    # Suppress fasttext's noisy warning about newlines in input
+    fasttext.FastText.eprint = lambda *args, **kwargs: None
+except Exception as _e:
+    raise RuntimeError(
+        f"fasttext model not found at {_FT_MODEL_PATH}. "
+        f"Download it with:\n"
+        f"  wget https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.ftz "
+        f"-O {_FT_MODEL_PATH}"
+    ) from _e
 
 # Common Crawl base URL — HTTPS via CloudFront, no credentials needed
 CC_BASE_URL = "https://data.commoncrawl.org"
@@ -95,7 +111,7 @@ class CommonCrawlSource:
     navigation, ads, and other non-content HTML elements, leaving
     clean article text.
 
-    Language detection via langdetect filters to English only.
+    Language detection via fasttext filters to English only.
 
     Resume behaviour:
         Progress is tracked per segment in cc_progress.json. On restart,
@@ -407,11 +423,14 @@ class CommonCrawlSource:
         if text is None or len(text) < self.min_text_length:
             return None
 
-        # Language detection on first 500 chars for speed
+        # Language detection on first 500 chars for speed.
+        # fasttext requires no newlines in input — replace before predicting.
+        # Returns ("__label__en", confidence) — check label only.
         try:
-            if detect(text[:500]) != "en":
+            labels, _ = _FT_MODEL.predict(text[:500].replace("\n", " "))
+            if labels[0] != "__label__en":
                 return None
-        except LangDetectException:
+        except Exception:
             return None
 
         return text.strip()

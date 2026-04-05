@@ -11,7 +11,7 @@ evaluate>=0.4.0
 huggingface-hub>=0.23.0
 # ── Data curation ─────────────────────────────────────────────────────────────
 trafilatura>=1.9.0
-langdetect>=1.0.9
+fasttext-wheel>=0.9.2
 warcio>=1.7.4
 datatrove[processing]>=0.2.0
 orjson>=3.9.0

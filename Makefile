@@ -36,7 +36,7 @@ endif
         pretrain prepare-sft sft sft-code \
         prepare-dpo dpo eval export serve serve-local \
         setup setup-data-dir install install-uv install-conda install-kenlm \
-        download-kenlm-model accelerate-config \
+        download-kenlm-model download-fasttext-model accelerate-config \
         clean clean-data clean-results clean-logs help
 
 # ── Full pipeline ──────────────────────────────────────────────────────────────
@@ -211,6 +211,14 @@ download-kenlm-model:
 		-O $(DATA_DIR)/models/en.arpa.bin
 	@echo "  Saved to $(DATA_DIR)/models/en.arpa.bin"
 
+download-fasttext-model:
+	@echo "==> Downloading fasttext language identification model (~1MB)..."
+	mkdir -p $(DATA_DIR)/models
+	wget -q --show-progress \
+		https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.ftz \
+		-O $(DATA_DIR)/models/lid.176.ftz
+	@echo "  Saved to $(DATA_DIR)/models/lid.176.ftz"
+
 accelerate-config:
 	accelerate config
 
@@ -242,6 +250,7 @@ help:
 	@echo "  setup                  Bootstrap a fresh instance (run once)"
 	@echo "  setup-data-dir         Bootstrap with custom data dir: make setup-data-dir DATA_DIR=/data/slm/data"
 	@echo "  download-kenlm-model   Download KenLM English model (~4GB) for validation"
+	@echo "  download-fasttext-model Download fasttext language ID model (~1MB) for curation"
 	@echo "  install                Install dependencies (pip)"
 	@echo "  install-uv             Install dependencies (uv)"
 	@echo "  install-conda          Install dependencies (conda)"
@@ -286,6 +295,7 @@ help:
 	@echo "  make curate SIZE=125m WORKERS=16                            # full 125M curation"
 	@echo "  make curate-upload SIZE=125m                                # push to S3"
 	@echo "  make download-kenlm-model DATA_DIR=/data/slm/data          # get KenLM model"
+	@echo "  make download-fasttext-model DATA_DIR=/data/slm/data       # get fasttext model"
 	@echo "  make all SIZE=125m GPUS=2                                   # full pipeline"
 	@echo "  make pretrain SIZE=125m GPUS=4                              # 125M on 4x A100"
 	@echo "  make pretrain SIZE=350m GPUS=6                              # 350M on 6x H100"

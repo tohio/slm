@@ -225,6 +225,7 @@ Before committing to a full run, validate the pipeline end to end:
 
 ```bash
 source .venv/bin/activate
+make download-fasttext-model        # one-time: download fasttext language ID model (~1MB)
 make curate-mini
 ```
 
@@ -234,9 +235,10 @@ Crawl at 2 WARC segments. Exercises every stage without the wait.
 **Run the full pipeline**
 
 ```bash
+make download-fasttext-model        # one-time: download fasttext language ID model (~1MB)
+make download-kenlm-model           # one-time: download KenLM model (~4GB)
 make curate SIZE=125m WORKERS=16    # Stage 1: download and curate data
 make curate-upload SIZE=125m        # Stage 1: push curated data to S3
-make download-kenlm-model           # one-time: download KenLM model (~4GB)
 make validate                       # Stage 2: quality filter and validate
 make tokenizer                      # Stage 3: train tokenizer
 make tokenize                       # Stage 4a: tokenize dataset
@@ -285,12 +287,12 @@ python inference/chat.py --model tohio/slm-125m
 
 Recommended instance specs per target:
 
-| Target | Instance | RAM | Est. runtime |
+| Target | Instance | RAM | Est. curation runtime |
 |---|---|---|---|
 | mini (validation) | Any CPU | 4GB+ | ~30–45 min |
-| 125m | `c8g.4xlarge` (16 vCPU) | 32GB | ~6–8 hrs |
-| 350m | `c8g.4xlarge` (16 vCPU) | 32GB | ~18–24 hrs |
-| 1b | `c8g.8xlarge` (32 vCPU) | 64GB | ~48–72 hrs |
+| 125m | `c8g.4xlarge` (16 vCPU) | 32GB | ~12–16 hrs |
+| 350m | `c8g.4xlarge` (16 vCPU) | 32GB | ~40–50 hrs |
+| 1b | `c8g.8xlarge` (32 vCPU) | 64GB | ~96–120 hrs |
 
 Run curation on AWS spot in `us-east-1` to minimise Common Crawl egress
 latency. Attach an EBS volume (`gp3`, 500GB) for `DATA_DIR` so data
@@ -323,6 +325,8 @@ make curate SIZE=125m WORKERS=16
 **Why datatrove for dedup instead of datasketch?** datasketch's `MinHashLSH` is in-memory — at 350m scale it requires ~32GB RAM, at 1b it requires ~85GB and cannot fit on a single instance. datatrove's disk-based pipeline uses a sort-based approach where RAM usage is bounded by shard size, not corpus size. Same approach used by FineWeb at trillion-token scale.
 
 **Why HTTPS for Common Crawl instead of S3?** Direct S3 access to the `commoncrawl` bucket fails on EC2 instances with IAM roles attached — the instance role credentials are rejected by the bucket policy. HTTPS via `data.commoncrawl.org` works reliably regardless of instance credentials.
+
+**Why fasttext for language detection instead of langdetect?** Language detection runs on every document in the Common Crawl pipeline — at 125m scale that is tens of millions of HTML pages. `langdetect` is pure Python and adds ~5–10ms per document, which compounds to 50–100+ hours of wall time on a single instance. fasttext's language identification model (`lid.176.ftz`) is C-backed, covers 176 languages, and runs ~1000x faster with equivalent accuracy. The model file is ~1MB and is downloaded once via `make download-fasttext-model`.
 
 ---
 
