@@ -27,9 +27,9 @@ Token targets scale proportionally for larger models:
 | Model | Total tokens | CC segments |
 |---|---|---|
 | `mini` | 1M | 2 |
-| `slm-125m` | 3B | 10 |
-| `slm-350m` | 10B | 40 |
-| `slm-1b` | 25B | 100 |
+| `slm-125m` | 3B | 350 |
+| `slm-350m` | 10B | 1,200 (600 × 2 crawls) |
+| `slm-1b` | 25B | 3,000 (1,000 × 3 crawls) |
 
 ---
 
@@ -59,6 +59,9 @@ curator/
 pip install -r requirements.txt
 cp .env.sample .env
 # Set S3_BUCKET, AWS credentials, DATA_DIR in .env
+
+# Download the fasttext language ID model (~1MB) — required before first run
+make download-fasttext-model
 ```
 
 **Minimal run — validate the pipeline before committing to a full run**
@@ -136,6 +139,7 @@ data/
 │   ├── wikipedia/              raw Wikipedia JSONL shards
 │   ├── code/                   raw CodeSearchNet JSONL shards
 │   └── common_crawl/           raw Common Crawl JSONL shards
+│       └── cc_progress.json    segment-level resume tracker (delete to re-download)
 ├── filtered/
 │   ├── wikipedia/              quality filtered
 │   ├── wikipedia_deduped/      + deduplicated
@@ -260,18 +264,18 @@ Each record in the final `train.jsonl`:
 
 Recommended hardware for each model size:
 
-| Target | Instance | RAM | Est. runtime |
+| Target | Instance | RAM | Est. curation runtime |
 |---|---|---|---|
 | `mini` | Any | 4GB+ | ~30–45 min |
-| `125m` | `c8g.4xlarge` (16 vCPU) | 32GB | ~6–8 hrs |
-| `350m` | `c8g.4xlarge` (16 vCPU) | 32GB | ~18–24 hrs |
-| `1b` | `c8g.8xlarge` (32 vCPU) | 64GB | ~48–72 hrs |
+| `125m` | `c8g.4xlarge` (16 vCPU) | 32GB | ~12–16 hrs |
+| `350m` | `c8g.4xlarge` (16 vCPU) | 32GB | ~40–50 hrs |
+| `1b` | `c8g.8xlarge` (32 vCPU) | 64GB | ~96–120 hrs |
 
 All runs on AWS spot in `us-east-1` to minimize Common Crawl egress latency. Attach an EBS volume (`gp3`, 500GB) for `data/` so it survives spot interruptions — the pipeline is fully resumable at every stage.
 
 **Parallelism:** The `--workers` flag controls the number of parallel workers in the dedup stage. Set it to the number of available CPU cores. Filter and download are currently single-threaded per shard.
 
-**Spot interruption:** Each stage skips shards that already exist on disk. A spot interruption mid-stage loses at most one shard of work. Restart the exact same command and it picks up where it left off.
+**Spot interruption:** The Common Crawl download stage tracks progress at the segment level in `data/raw/common_crawl/cc_progress.json`. Each fully completed WARC segment is recorded there — a spot interruption loses at most one segment of work (~35k docs). Restart the exact same command and it resumes from the next unprocessed segment. Filter, dedup, and blend stages skip shards that already exist on disk.
 
 ---
 
@@ -292,3 +296,5 @@ All runs on AWS spot in `us-east-1` to minimize Common Crawl egress latency. Att
 **Why versioned S3 uploads?** Each run is uploaded to `{target}/{date}/curated/` so multiple runs never overwrite each other. This makes it safe to re-run curation with different parameters or data sources and compare results, and allows rolling back to a previous run if issues are found during training.
 
 **Why per-stage resumability?** Curation runs take hours to days on spot instances that can be interrupted with 2 minutes notice. Each stage checks for existing output before processing — safe to interrupt and restart without reprocessing completed work.
+
+**Why fasttext for language detection instead of langdetect?** Language detection runs on every document in the Common Crawl pipeline — tens of millions of HTML pages at 125m scale. `langdetect` is pure Python and adds ~5–10ms per document, compounding to 50–100+ hours of wall time on a single instance. fasttext's language identification model (`lid.176.ftz`) is C-backed, covers 176 languages, and runs ~1000x faster with equivalent accuracy. The model file is ~1MB and downloaded once via `make download-fasttext-model`.
