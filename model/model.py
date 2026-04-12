@@ -22,21 +22,25 @@ Design:
     - KV cache support for efficient autoregressive generation
     - Compatible with HuggingFace generate(), trl, lm-evaluation-harness, vLLM
 
-Compatibility:
-    - transformers >= 4.50: SLMForCausalLM inherits from GenerationMixin
-      directly to preserve generate() and related methods, as PreTrainedModel
+Compatibility (transformers v5):
+    - SLMForCausalLM inherits from GenerationMixin directly — PreTrainedModel
       no longer inherits from GenerationMixin from v4.50 onwards.
-    - post_init() is called only in SLMForCausalLM (which has the LM head
-      and tied weights), not in SLMModel, to avoid tied weights resolution
-      errors in the base model.
+    - Weight tying is handled via tie_weights() override rather than
+      _tied_weights_keys, which changed behaviour in v5.
+    - past_key_values supports both legacy list[tuple] format and v5
+      DynamicCache objects for full compatibility with trl and vLLM.
+    - prepare_inputs_for_generation accepts cache_position (added in v5).
+    - use_cache is forced False when gradient checkpointing is enabled.
+    - post_init() is called only in SLMForCausalLM, not SLMModel.
 """
 
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
 from torch.nn import CrossEntropyLoss
 from transformers import PreTrainedModel
+from transformers.cache_utils import Cache, DynamicCache
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 
@@ -68,13 +72,12 @@ class SLMModel(PreTrainedModel):
             [SLMDecoderBlock(config, layer_idx=i) for i in range(config.num_hidden_layers)]
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-
         self.gradient_checkpointing = False
 
-        # Note: post_init() is intentionally NOT called here. SLMModel has no
-        # LM head and no tied weights — calling post_init() triggers tied weight
-        # resolution in transformers >= 4.50 which errors on the base model.
-        # post_init() is called in SLMForCausalLM where tied weights are defined.
+        # post_init() is intentionally NOT called here. SLMModel has no LM head
+        # and no tied weights. Calling post_init() on the base model triggers
+        # tied weight resolution in transformers v5 which errors without a head.
+        # post_init() is called in SLMForCausalLM where it belongs.
 
     def get_input_embeddings(self) -> nn.Embedding:
         return self.embed_tokens
@@ -90,21 +93,42 @@ class SLMModel(PreTrainedModel):
         self,
         input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[list[tuple[torch.Tensor, torch.Tensor]]] = None,
+        past_key_values: Optional[Union[Cache, list[tuple[torch.Tensor, torch.Tensor]]]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
     ) -> BaseModelOutputWithPast:
         use_cache = use_cache if use_cache is not None else self.config.use_cache
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        # Gradient checkpointing and use_cache are mutually exclusive
+        if self.gradient_checkpointing and self.training:
+            if use_cache:
+                use_cache = False
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds
 
+        # Normalise past_key_values — accept both legacy list[tuple] and
+        # v5 DynamicCache. Convert legacy format to per-layer None sentinels.
         if past_key_values is None:
             past_key_values = [None] * len(self.layers)
+        elif isinstance(past_key_values, Cache):
+            # DynamicCache passed by v5 generate() — convert to list of tuples
+            # for compatibility with our layer interface
+            legacy_cache = []
+            for i in range(len(self.layers)):
+                if past_key_values.get_seq_length(i) > 0:
+                    legacy_cache.append((
+                        past_key_values.key_cache[i],
+                        past_key_values.value_cache[i],
+                    ))
+                else:
+                    legacy_cache.append(None)
+            past_key_values = legacy_cache
 
         next_cache = [] if use_cache else None
         all_hidden_states = [] if output_hidden_states else None
@@ -156,9 +180,8 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
     Adds a linear LM head on top of SLMModel. When tie_word_embeddings=True
     (default), the LM head weight is tied to the input embedding weight.
 
-    Inherits from GenerationMixin directly to preserve generate() and related
-    methods — required from transformers >= 4.50 where PreTrainedModel no
-    longer inherits from GenerationMixin.
+    Inherits from GenerationMixin directly — required from transformers v4.50+
+    where PreTrainedModel no longer inherits from GenerationMixin.
 
     Compatible with:
         - HuggingFace generate() — autoregressive text generation
@@ -189,13 +212,15 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.post_init()
 
-    def tie_weights(self) -> None:
+    def tie_weights(self, **kwargs) -> None:
         """
         Tie LM head weights to input embeddings when tie_word_embeddings=True.
 
-        Called automatically by post_init(). Overrides the default HuggingFace
-        implementation to avoid _tied_weights_keys resolution which changed
-        behaviour in transformers v5 and errors on list-based tied key specs.
+        Called automatically by post_init() and init_weights(). Overrides the
+        default HuggingFace implementation to bypass _tied_weights_keys
+        resolution which changed in transformers v5 and errors on list-based
+        key specs. Accepts **kwargs for forward compatibility (v5 passes
+        recompute_mapping=False).
         """
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
@@ -222,12 +247,13 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         self,
         input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[list[tuple[torch.Tensor, torch.Tensor]]] = None,
+        past_key_values: Optional[Union[Cache, list[tuple[torch.Tensor, torch.Tensor]]]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
     ) -> CausalLMOutputWithPast:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
@@ -239,6 +265,7 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
             use_cache=use_cache,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            cache_position=cache_position,
         )
 
         hidden_states = outputs[0]
@@ -268,13 +295,20 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
     def prepare_inputs_for_generation(
         self,
         input_ids: torch.LongTensor,
-        past_key_values: Optional[list] = None,
+        past_key_values: Optional[Union[Cache, list]] = None,
         attention_mask: Optional[torch.Tensor] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
+        cache_position: Optional[torch.LongTensor] = None,
         **kwargs,
     ) -> dict:
-        """Called by HuggingFace generate() at each decoding step."""
+        """
+        Called by HuggingFace generate() at each decoding step.
+
+        Accepts cache_position (added in transformers v5) and past_key_values
+        as either legacy list[tuple] or DynamicCache for full v5 compatibility.
+        """
         if past_key_values is not None:
+            # Only pass the last token when using KV cache
             input_ids = input_ids[:, -1:]
 
         if inputs_embeds is not None and past_key_values is None:
@@ -284,17 +318,27 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
 
         model_inputs.update({
             "past_key_values": past_key_values,
-            "use_cache": kwargs.get("use_cache"),
+            "use_cache": kwargs.get("use_cache", True),
             "attention_mask": attention_mask,
+            "cache_position": cache_position,
         })
         return model_inputs
 
-    @staticmethod
     def _reorder_cache(
-        past_key_values: list[tuple[torch.Tensor, torch.Tensor]],
+        self,
+        past_key_values: Union[Cache, list[tuple[torch.Tensor, torch.Tensor]]],
         beam_idx: torch.Tensor,
-    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
-        """Reorder KV cache for beam search."""
+    ) -> Union[Cache, list[tuple[torch.Tensor, torch.Tensor]]]:
+        """
+        Reorder KV cache for beam search.
+
+        Handles both v5 DynamicCache objects and legacy list[tuple] format.
+        Made an instance method (not static) for v5 compatibility.
+        """
+        if isinstance(past_key_values, Cache):
+            past_key_values.reorder_cache(beam_idx)
+            return past_key_values
+        # Legacy list[tuple] format
         return [
             (k.index_select(0, beam_idx), v.index_select(0, beam_idx))
             for k, v in past_key_values
