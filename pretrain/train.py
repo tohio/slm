@@ -23,6 +23,7 @@ import os
 import sys
 from pathlib import Path
 
+import torch
 import yaml
 from dotenv import load_dotenv
 
@@ -52,6 +53,13 @@ def build_training_args(cfg: dict, output_dir: Path, resume: bool):
     train_cfg = cfg["training"]
     optim_cfg = cfg["optimizer"]
 
+    # bf16/fp16 only when CUDA is available — avoids warnings on CPU runs
+    # (e.g. make pretrain-mini on a CPU curation instance)
+    has_cuda = torch.cuda.is_available()
+    precision = train_cfg.get("precision", "bf16")
+    use_bf16 = has_cuda and precision == "bf16"
+    use_fp16 = has_cuda and precision == "fp16"
+
     return TrainingArguments(
         output_dir=str(output_dir),
 
@@ -75,12 +83,12 @@ def build_training_args(cfg: dict, output_dir: Path, resume: bool):
         # LR schedule
         lr_scheduler_type=train_cfg.get("lr_scheduler", "cosine"),
 
-        # Precision
-        bf16=train_cfg.get("precision", "bf16") == "bf16",
-        fp16=train_cfg.get("precision", "bf16") == "fp16",
+        # Precision — only enable on GPU
+        bf16=use_bf16,
+        fp16=use_fp16,
 
-        # Evaluation
-        evaluation_strategy="steps",
+        # Evaluation — eval_strategy replaces evaluation_strategy in transformers v5
+        eval_strategy="steps",
         eval_steps=train_cfg.get("eval_steps", 1000),
         save_strategy="steps",
         save_steps=train_cfg.get("save_steps", 1000),
@@ -95,7 +103,7 @@ def build_training_args(cfg: dict, output_dir: Path, resume: bool):
 
         # Misc
         dataloader_num_workers=train_cfg.get("num_workers", 4),
-        dataloader_pin_memory=True,
+        dataloader_pin_memory=has_cuda,  # pin_memory only useful with CUDA
         remove_unused_columns=False,
         seed=train_cfg.get("seed", 42),
 
@@ -139,6 +147,7 @@ def main():
     log.info(f"Config:     {args.config}")
     log.info(f"Model:      {model_name}")
     log.info(f"Output:     {output_dir}")
+    log.info(f"Device:     {'cuda' if torch.cuda.is_available() else 'cpu'}")
 
     # ── Model ─────────────────────────────────────────────────────────────────
     from model import SLMConfig, SLMForCausalLM
