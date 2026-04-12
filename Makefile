@@ -44,7 +44,7 @@ endif
         pretrain pretrain-mini pretrain-resume prepare-sft sft sft-mini sft-resume sft-code sft-code-mini sft-code-resume \
         prepare-dpo dpo dpo-resume eval export serve serve-local \
         export export-base export-instruct export-chat \
-        setup setup-data-dir install install-gpu install-uv install-conda install-kenlm \
+        setup setup-data-dir setup-gpu install install-gpu install-uv install-conda install-kenlm \
         download-kenlm-model download-fasttext-model accelerate-config accelerate-config-single accelerate-config-multi \
         s3-upload s3-download s3-list \
         clean clean-data clean-results clean-logs help
@@ -283,6 +283,18 @@ download-fasttext-model:
 accelerate-config:
 	accelerate config
 
+accelerate-config-single:
+	@echo "==> Configuring accelerate for single GPU..."
+	mkdir -p ~/.cache/huggingface/accelerate
+	cp accelerate_configs/single_gpu.yaml ~/.cache/huggingface/accelerate/default_config.yaml
+	@echo "  Single GPU config active"
+
+accelerate-config-multi:
+	@echo "==> Configuring accelerate for multi-GPU ($(GPUS) GPUs)..."
+	mkdir -p ~/.cache/huggingface/accelerate
+	cat accelerate_configs/multi_gpu.yaml | sed 's/num_processes: 8/num_processes: $(GPUS)/' > ~/.cache/huggingface/accelerate/default_config.yaml
+	@echo "  Multi-GPU config active ($(GPUS) processes)"
+
 # ── Clean ─────────────────────────────────────────────────────────────────────
 
 clean-data:
@@ -310,7 +322,8 @@ help:
 	@echo "For full target documentation see: docs/COMMANDS.md"
 	@echo ""
 	@echo "One-time setup:"
-	@echo "  setup                    Bootstrap a fresh instance"
+	@echo "  setup                    Bootstrap a fresh CPU curation instance"
+	@echo "  setup-gpu                Bootstrap a GPU training instance (run after each preemptible restart)"
 	@echo "  setup-data-dir           Bootstrap with custom data dir"
 	@echo "  download-fasttext-model  Download fasttext language ID model (~1MB)"
 	@echo "  download-kenlm-model     Download KenLM English model (~4GB)"

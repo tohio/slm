@@ -150,7 +150,7 @@ slm/
 │
 ├── infra/
 │   ├── setup.sh                  CPU instance bootstrap — curation environment
-│   └── setup_gpu_instance.sh     GPU instance bootstrap — training environment
+│   └── setup_gpu_instance.sh     GPU instance bootstrap — safe to re-run after preemptible restart
 │
 ├── accelerate_configs/           Accelerate launch configs for GPU training
 │   ├── single_gpu.yaml           Single GPU — mini validation runs
@@ -260,8 +260,7 @@ Crawl at 2 WARC segments. Exercises every stage without the wait.
 # ── One-time setup ────────────────────────────────────────────────────────────
 make download-fasttext-model DATA_DIR=/data/slm/data   # fasttext language ID model (~1MB)
 make download-kenlm-model    DATA_DIR=/data/slm/data   # KenLM perplexity model (~4GB)
-make accelerate-config-single                           # single GPU — mini validation
-make accelerate-config-multi GPUS=8                     # multi-GPU — full training
+make setup-gpu DATA_DIR=/data/slm/data              # GPU instance setup (run once, or after restart)
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 make curate SIZE=125m WORKERS=16    # Stage 1: download, curate, upload to S3
