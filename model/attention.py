@@ -223,15 +223,22 @@ class GroupedQueryAttention(nn.Module):
             k = k.repeat_interleave(self.num_query_groups, dim=1)
             v = v.repeat_interleave(self.num_query_groups, dim=1)
 
-        # Prepare attention mask
-        attn_mask = self._prepare_mask(attention_mask, q, k.shape[2])
+        # During training use is_causal=True and ignore the attention_mask.
+        # The Trainer passes a 2D padding mask but for decoder-only causal LM
+        # the causal mask is sufficient — padding tokens in the loss are already
+        # handled by the label masking in SFTTrainer. Using the padding mask
+        # combined with causal masking produces all-inf rows for short sequences
+        # which causes NaN loss.
+        # During inference (past_key_value is not None) we use the explicit mask.
+        use_causal = self.training or attention_mask is None
+        attn_mask = None if use_causal else self._prepare_mask(attention_mask, q, k.shape[2])
 
         dropout_p = self.attention_dropout if self.training else 0.0
         attn_output = F.scaled_dot_product_attention(
             q, k, v,
             attn_mask=attn_mask,
             dropout_p=dropout_p,
-            is_causal=attn_mask is None,
+            is_causal=use_causal,
         )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
