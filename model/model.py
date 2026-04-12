@@ -21,6 +21,14 @@ Design:
     - Pre-norm throughout
     - KV cache support for efficient autoregressive generation
     - Compatible with HuggingFace generate(), trl, lm-evaluation-harness, vLLM
+
+Compatibility:
+    - transformers >= 4.50: SLMForCausalLM inherits from GenerationMixin
+      directly to preserve generate() and related methods, as PreTrainedModel
+      no longer inherits from GenerationMixin from v4.50 onwards.
+    - post_init() is called only in SLMForCausalLM (which has the LM head
+      and tied weights), not in SLMModel, to avoid tied weights resolution
+      errors in the base model.
 """
 
 from typing import Optional
@@ -29,6 +37,7 @@ import torch
 import torch.nn as nn
 from torch.nn import CrossEntropyLoss
 from transformers import PreTrainedModel
+from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 
 from .block import SLMDecoderBlock
@@ -62,7 +71,10 @@ class SLMModel(PreTrainedModel):
 
         self.gradient_checkpointing = False
 
-        self.post_init()
+        # Note: post_init() is intentionally NOT called here. SLMModel has no
+        # LM head and no tied weights — calling post_init() triggers tied weight
+        # resolution in transformers >= 4.50 which errors on the base model.
+        # post_init() is called in SLMForCausalLM where tied weights are defined.
 
     def get_input_embeddings(self) -> nn.Embedding:
         return self.embed_tokens
@@ -137,12 +149,16 @@ class SLMModel(PreTrainedModel):
         )
 
 
-class SLMForCausalLM(PreTrainedModel):
+class SLMForCausalLM(PreTrainedModel, GenerationMixin):
     """
     SLM with a language modelling head for causal (autoregressive) generation.
 
     Adds a linear LM head on top of SLMModel. When tie_word_embeddings=True
     (default), the LM head weight is tied to the input embedding weight.
+
+    Inherits from GenerationMixin directly to preserve generate() and related
+    methods — required from transformers >= 4.50 where PreTrainedModel no
+    longer inherits from GenerationMixin.
 
     Compatible with:
         - HuggingFace generate() — autoregressive text generation
