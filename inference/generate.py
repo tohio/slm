@@ -38,11 +38,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 def load_model_and_tokenizer(model_path: str):
     """Load model and tokenizer from local path or Hub."""
-    from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedTokenizerFast
-    from pathlib import Path
     import torch
+    from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedTokenizerFast
 
-    # Register custom model if loading from local path
     local_path = Path(model_path)
     if local_path.exists():
         from model import SLMConfig, SLMForCausalLM
@@ -52,19 +50,16 @@ def load_model_and_tokenizer(model_path: str):
     log.info(f"Loading model from {model_path}...")
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         device_map="auto",
     )
     model.eval()
 
-    # Load tokenizer
-    tokenizer_path = local_path / "tokenizer" if local_path.exists() else model_path
-    if not (local_path / "tokenizer").exists() and local_path.exists():
-        tokenizer_path = model_path
+    tokenizer_path = local_path / "tokenizer" if (local_path / "tokenizer").exists() else model_path
     tokenizer = PreTrainedTokenizerFast.from_pretrained(str(tokenizer_path))
-    tokenizer.pad_token = "<PAD>"
+    tokenizer.pad_token    = "<PAD>"
     tokenizer.pad_token_id = 0
-    tokenizer.eos_token = "<EOS>"
+    tokenizer.eos_token    = "<EOS>"
     tokenizer.eos_token_id = 3
 
     n_params = sum(p.numel() for p in model.parameters())
@@ -124,10 +119,9 @@ def generate(
             eos_token_id=tokenizer.eos_token_id,
         )
 
-    # Strip input tokens from output
     input_lengths = inputs["input_ids"].shape[1]
     completions = []
-    for i, output in enumerate(outputs):
+    for output in outputs:
         new_tokens = output[input_lengths:]
         completion = tokenizer.decode(new_tokens, skip_special_tokens=True)
         completions.append(completion.strip())
@@ -137,20 +131,19 @@ def generate(
 
 def main():
     parser = argparse.ArgumentParser(description="SLM text generation")
-    parser.add_argument("--model", type=str, required=True, help="Model path or Hub ID")
-    parser.add_argument("--input", type=Path, default=None, help="Input prompts file (one per line)")
-    parser.add_argument("--output", type=Path, default=None, help="Output JSONL file")
-    parser.add_argument("--max-new-tokens", type=int, default=256)
-    parser.add_argument("--temperature", type=float, default=0.8)
-    parser.add_argument("--top-p", type=float, default=0.95)
-    parser.add_argument("--top-k", type=int, default=50)
-    parser.add_argument("--greedy", action="store_true", help="Use greedy decoding")
-    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--model",          type=str,  required=True, help="Model path or Hub ID")
+    parser.add_argument("--input",          type=Path, default=None,  help="Input prompts file (one per line)")
+    parser.add_argument("--output",         type=Path, default=None,  help="Output JSONL file")
+    parser.add_argument("--max-new-tokens", type=int,  default=256)
+    parser.add_argument("--temperature",    type=float, default=0.8)
+    parser.add_argument("--top-p",          type=float, default=0.95)
+    parser.add_argument("--top-k",          type=int,  default=50)
+    parser.add_argument("--greedy",         action="store_true", help="Use greedy decoding")
+    parser.add_argument("--batch-size",     type=int,  default=4)
     args = parser.parse_args()
 
     model, tokenizer = load_model_and_tokenizer(args.model)
 
-    # Read prompts
     if args.input:
         prompts = [l.strip() for l in open(args.input) if l.strip()]
     else:
@@ -162,10 +155,8 @@ def main():
 
     log.info(f"Generating {len(prompts)} completions...")
 
-    # Output file
     out_file = open(args.output, "w") if args.output else None
 
-    # Process in batches
     for i in range(0, len(prompts), args.batch_size):
         batch = prompts[i : i + args.batch_size]
         completions = generate(
