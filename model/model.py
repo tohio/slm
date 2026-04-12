@@ -25,8 +25,9 @@ Design:
 Compatibility (transformers v5):
     - SLMForCausalLM inherits from GenerationMixin directly — PreTrainedModel
       no longer inherits from GenerationMixin from v4.50 onwards.
-    - Weight tying is handled via tie_weights() override rather than
-      _tied_weights_keys, which changed behaviour in v5.
+    - Weight tying uses both _tied_weights_keys (for save_pretrained serialisation)
+      and tie_weights() override (for actual parameter sharing). Both are required
+      in transformers v5.
     - past_key_values supports both legacy list[tuple] format and v5
       DynamicCache objects for full compatibility with trl and vLLM.
     - prepare_inputs_for_generation accepts cache_position (added in v5).
@@ -206,6 +207,12 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
 
+    # _tied_weights_keys tells save_pretrained which weights are shared
+    # so it can correctly handle them during serialisation. Required in
+    # transformers v5 — without it save_pretrained raises RuntimeError
+    # on shared tensors. The actual tying is done in tie_weights() below.
+    _tied_weights_keys = ["lm_head.weight"]
+
     def __init__(self, config: SLMConfig):
         super().__init__(config)
         self.model = SLMModel(config)
@@ -217,10 +224,12 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         Tie LM head weights to input embeddings when tie_word_embeddings=True.
 
         Called automatically by post_init() and init_weights(). Overrides the
-        default HuggingFace implementation to bypass _tied_weights_keys
-        resolution which changed in transformers v5 and errors on list-based
-        key specs. Accepts **kwargs for forward compatibility (v5 passes
-        recompute_mapping=False).
+        default HuggingFace implementation to handle the actual weight tying.
+        Accepts **kwargs for forward compatibility (v5 passes recompute_mapping=False).
+
+        Note: _tied_weights_keys is still defined as a class variable so that
+        save_pretrained knows which tensors are shared and handles serialisation
+        correctly. tie_weights() handles the actual parameter sharing.
         """
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
