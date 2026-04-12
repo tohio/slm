@@ -180,6 +180,19 @@ def main():
     tokenizer.bos_token    = "<BOS>"
     tokenizer.bos_token_id = 2
 
+    # Set chat template so DPOTrainer can use apply_chat_template for
+    # conversational format data (list of message dicts). This ensures
+    # consistent tokenization at prompt/response boundaries.
+    if not tokenizer.chat_template:
+        tokenizer.chat_template = (
+            "{% for message in messages %}"
+            "{% if message['role'] == 'system' %}<|system|>{{ message['content'] }}<|endofturn|>"
+            "{% elif message['role'] == 'user' %}<|user|>{{ message['content'] }}<|endofturn|>"
+            "{% elif message['role'] == 'assistant' %}<|assistant|>{{ message['content'] }}<|endofturn|>"
+            "{% endif %}{% endfor %}"
+            "{% if add_generation_prompt %}<|assistant|>{% endif %}"
+        )
+
     # ── Dataset ───────────────────────────────────────────────────────────────
     data_cfg   = cfg["data"]
     # Expand $DATA_DIR env var in dataset paths

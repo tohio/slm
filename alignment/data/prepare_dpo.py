@@ -8,15 +8,17 @@ Blends three complementary sources:
     2. Intel/orca_dpo_pairs      — synthetic Orca preference pairs
     3. argilla/dpo-mix-7k        — curated high quality mix
 
-Output format — one preference pair per line:
+Output format — conversational format for trl DPOTrainer:
     {
-        "prompt":   "<|system|>...<|user|>...<|endofturn|><|assistant|>",
-        "chosen":   "<assistant response that was preferred>",
-        "rejected": "<assistant response that was not preferred>",
+        "prompt":   [{"role": "system", "content": "..."}, {"role": "user", "content": "..."}],
+        "chosen":   [{"role": "assistant", "content": "preferred response"}],
+        "rejected": [{"role": "assistant", "content": "rejected response"}],
         "source":   "hh-rlhf | orca | argilla"
     }
 
-This format is directly consumed by trl DPOTrainer.
+trl DPOTrainer detects list inputs and uses apply_chat_template, which
+tokenizes the full conversation consistently — avoiding BPE boundary
+mismatch warnings that occur with plain string prompts.
 
 Usage:
     python alignment/data/prepare_dpo.py
@@ -46,31 +48,31 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
-DPO_DIR = DATA_DIR / "dpo"
+DPO_DIR  = DATA_DIR / "dpo"
 
 DEFAULT_SYSTEM = "You are a helpful, harmless, and honest assistant."
 
 
-def format_prompt(system: str, user: str) -> str:
-    """Format a prompt in the SLM chat template.
-    
-    Note: prompt ends with '<|assistant|> ' (trailing space) so that BPE
-    tokenization of prompt alone matches the start of prompt+response.
-    Without the space, trl DPOTrainer sees a mismatch because the tokenizer
-    merges '<|assistant|>' differently when followed immediately by text.
-    Chosen/rejected responses should be lstrip'd to remove leading whitespace.
-    """
-    system = system.strip() or DEFAULT_SYSTEM
-    return f"<|system|>{system}<|endofturn|><|user|>{user.strip()}<|endofturn|><|assistant|> "
+def make_prompt(system: str, user: str) -> list[dict]:
+    """Return prompt as a list of message dicts for trl conversational format."""
+    return [
+        {"role": "system", "content": (system or DEFAULT_SYSTEM).strip()},
+        {"role": "user",   "content": user.strip()},
+    ]
 
 
-def extract_text(value, field: str = "") -> str:
+def make_response(content: str) -> list[dict]:
+    """Return a single assistant message dict."""
+    return [{"role": "assistant", "content": content.strip()}]
+
+
+def extract_text(value) -> str:
     """
     Safely extract a string from a field that may be:
       - str: return as-is
       - list of dicts with 'content': return last content value
       - list of str: return last element
-      - None or missing: return ""
+      - None: return ""
     """
     if value is None:
         return ""
@@ -97,16 +99,6 @@ def write_jsonl(records: list[dict], path: Path) -> None:
 # ── Source 1: Anthropic/hh-rlhf ───────────────────────────────────────────────
 
 def prepare_hh_rlhf(max_examples: int = 50_000) -> list[dict]:
-    """
-    Format Anthropic/hh-rlhf preference pairs.
-
-    hh-rlhf contains human-written conversations where annotators
-    chose between two assistant responses. Covers helpfulness and
-    harmlessness preference signals.
-
-    Format: each example has 'chosen' and 'rejected' full conversation strings.
-    We extract the last user/assistant turn as the preference pair.
-    """
     from datasets import load_dataset
 
     log.info("Loading Anthropic/hh-rlhf...")
@@ -117,7 +109,7 @@ def prepare_hh_rlhf(max_examples: int = 50_000) -> list[dict]:
     skipped = 0
 
     for example in dataset:
-        chosen = extract_text(example.get("chosen"))
+        chosen   = extract_text(example.get("chosen"))
         rejected = extract_text(example.get("rejected"))
 
         if not chosen or not rejected:
@@ -129,16 +121,16 @@ def prepare_hh_rlhf(max_examples: int = 50_000) -> list[dict]:
             skipped += 1
             continue
 
-        prompt, chosen_resp, rejected_resp = parsed
+        prompt_msgs, chosen_resp, rejected_resp = parsed
 
         if not chosen_resp or not rejected_resp or chosen_resp == rejected_resp:
             skipped += 1
             continue
 
         records.append({
-            "prompt":   prompt,
-            "chosen":   chosen_resp.lstrip(),
-            "rejected": rejected_resp.lstrip(),
+            "prompt":   prompt_msgs,
+            "chosen":   make_response(chosen_resp),
+            "rejected": make_response(rejected_resp),
             "source":   "hh-rlhf",
         })
 
@@ -150,28 +142,23 @@ def prepare_hh_rlhf(max_examples: int = 50_000) -> list[dict]:
 
 
 def _parse_hh_rlhf(chosen: str, rejected: str) -> tuple | None:
-    """
-    Parse the hh-rlhf conversation format into (prompt, chosen, rejected).
-
-    hh-rlhf format:
-        Human: <user turn>\n\nAssistant: <response>\n\nHuman: ...\n\nAssistant: <final>
-    """
+    """Parse hh-rlhf into (prompt_messages, chosen_response, rejected_response)."""
     import re
 
     def extract_turns(text):
         turns = re.split(r"\n\nHuman: |\n\nAssistant: ", text)
         return [t.strip() for t in turns if t.strip()]
 
-    chosen_turns = extract_turns(chosen)
+    chosen_turns   = extract_turns(chosen)
     rejected_turns = extract_turns(rejected)
 
     if len(chosen_turns) < 2:
         return None
 
-    chosen_response = chosen_turns[-1]
+    chosen_response   = chosen_turns[-1]
     rejected_response = rejected_turns[-1] if rejected_turns else ""
-
     conversation_turns = chosen_turns[:-1]
+
     if not conversation_turns:
         return None
 
@@ -180,30 +167,12 @@ def _parse_hh_rlhf(chosen: str, rejected: str) -> tuple | None:
         role = "user" if i % 2 == 0 else "assistant"
         messages.append({"role": role, "content": turn})
 
-    parts = []
-    for msg in messages:
-        if msg["role"] == "system":
-            parts.append(f"<|system|>{msg['content']}<|endofturn|>")
-        elif msg["role"] == "user":
-            parts.append(f"<|user|>{msg['content']}<|endofturn|>")
-        elif msg["role"] == "assistant":
-            parts.append(f"<|assistant|>{msg['content']}<|endofturn|>")
-    parts.append("<|assistant|> ")
-    prompt = "".join(parts)
-
-    return prompt, chosen_response, rejected_response
+    return messages, chosen_response, rejected_response
 
 
 # ── Source 2: Intel/orca_dpo_pairs ────────────────────────────────────────────
 
 def prepare_orca_dpo(max_examples: int = 30_000) -> list[dict]:
-    """
-    Format Intel/orca_dpo_pairs preference pairs.
-
-    Orca DPO pairs are high-quality synthetic preference pairs generated
-    by comparing GPT-4 responses (chosen) vs GPT-3.5 responses (rejected)
-    on complex reasoning tasks.
-    """
     from datasets import load_dataset
 
     log.info("Loading Intel/orca_dpo_pairs...")
@@ -224,9 +193,9 @@ def prepare_orca_dpo(max_examples: int = 30_000) -> list[dict]:
             continue
 
         records.append({
-            "prompt":   format_prompt(system, question),
-            "chosen":   chosen.lstrip(),
-            "rejected": rejected.lstrip(),
+            "prompt":   make_prompt(system, question),
+            "chosen":   make_response(chosen),
+            "rejected": make_response(rejected),
             "source":   "orca",
         })
 
@@ -240,14 +209,6 @@ def prepare_orca_dpo(max_examples: int = 30_000) -> list[dict]:
 # ── Source 3: argilla/dpo-mix-7k ──────────────────────────────────────────────
 
 def prepare_argilla_dpo() -> list[dict]:
-    """
-    Format argilla/dpo-mix-7k preference pairs.
-
-    A carefully curated mix of 7k high-quality DPO pairs from multiple
-    sources, filtered for quality. Small but high signal.
-
-    Fields may be strings or lists of message dicts — extract_text handles both.
-    """
     from datasets import load_dataset
 
     log.info("Loading argilla/dpo-mix-7k...")
@@ -268,9 +229,9 @@ def prepare_argilla_dpo() -> list[dict]:
             continue
 
         records.append({
-            "prompt":   format_prompt(system, instruction),
-            "chosen":   chosen.lstrip(),
-            "rejected": rejected.lstrip(),
+            "prompt":   make_prompt(system, instruction),
+            "chosen":   make_response(chosen),
+            "rejected": make_response(rejected),
             "source":   "argilla",
         })
 
@@ -285,7 +246,6 @@ def blend_and_split(
     val_fraction: float = 0.05,
     seed: int = 42,
 ) -> tuple[list[dict], list[dict]]:
-    """Shuffle and split into train/val."""
     rng = random.Random(seed)
     rng.shuffle(records)
     n_val = max(500, int(len(records) * val_fraction))
@@ -296,11 +256,7 @@ def blend_and_split(
 
 def main():
     parser = argparse.ArgumentParser(description="Prepare DPO datasets")
-    parser.add_argument(
-        "--source",
-        choices=["all", "hh-rlhf", "orca", "argilla"],
-        default="all",
-    )
+    parser.add_argument("--source", choices=["all", "hh-rlhf", "orca", "argilla"], default="all")
     parser.add_argument("--val-fraction", type=float, default=0.05)
     args = parser.parse_args()
 
@@ -315,10 +271,8 @@ def main():
 
     if args.source in ("all", "hh-rlhf"):
         all_records.extend(prepare_hh_rlhf())
-
     if args.source in ("all", "orca"):
         all_records.extend(prepare_orca_dpo())
-
     if args.source in ("all", "argilla"):
         all_records.extend(prepare_argilla_dpo())
 
