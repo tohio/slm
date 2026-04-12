@@ -300,18 +300,18 @@ python inference/chat.py --model tohio/slm-125m
 
 ## Infrastructure
 
-Recommended instance specs per target:
+### Data Curation (CPU)
 
-| Target | Instance | RAM | Est. curation runtime |
+Stages 1–4a (download, filter, dedup, blend, validate, tokenize) run on CPU instances. No GPU required.
+
+| Target | Instance | RAM | Est. runtime |
 |---|---|---|---|
 | mini (validation) | Any CPU | 4GB+ | ~30–45 min |
 | 125m | `c8g.4xlarge` (16 vCPU) | 32GB | ~12–16 hrs |
 | 350m | `c8g.4xlarge` (16 vCPU) | 32GB | ~40–50 hrs |
 | 1b | `c8g.8xlarge` (32 vCPU) | 64GB | ~96–120 hrs |
 
-Run curation on AWS spot in `us-east-1` to minimise Common Crawl egress
-latency. Attach an EBS volume (`gp3`, 500GB) for `DATA_DIR` so data
-survives spot interruptions — the pipeline is fully resumable at every stage.
+Run curation on AWS spot in `us-east-1` to minimise Common Crawl egress latency. Attach an EBS volume (`gp3`, 500GB) for `DATA_DIR` so data survives spot interruptions — the pipeline is fully resumable at every stage.
 
 Use `tmux` to keep the pipeline running through SSM session timeouts:
 ```bash
@@ -319,6 +319,20 @@ tmux new -s curate
 make curate SIZE=125m WORKERS=16
 # Ctrl+B, D to detach — tmux attach -t curate to reattach
 ```
+
+### Training (GPU)
+
+Stages 4b–6 (pretrain, SFT, DPO) require a CUDA-capable GPU instance. Recommended specs:
+
+| Target | Instance | GPUs | VRAM | Est. pretrain runtime |
+|---|---|---|---|---|
+| 125m | `g5.12xlarge` (4× A10G) | 4 | 96GB | ~12–18 hrs |
+| 350m | `p4d.24xlarge` (8× A100 40GB) | 8 | 320GB | ~24–36 hrs |
+| 1b | `p4d.24xlarge` (8× A100 40GB) | 8 | 320GB | ~72–96 hrs |
+
+SFT and DPO runtimes are roughly 20–30% of pretraining time at the same model size. Use spot instances where possible — all training loops support `--resume` from the last checkpoint.
+
+Run `make accelerate-config` once on the GPU instance before training to configure multi-GPU settings.
 
 ---
 

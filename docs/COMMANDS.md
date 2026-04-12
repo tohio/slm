@@ -606,6 +606,31 @@ make clean-logs
 
 ---
 
+## Infrastructure
+
+### Data Curation (CPU) — Stages 1–4a
+
+| Target | Instance | RAM | Est. runtime |
+|---|---|---|---|
+| mini (validation) | Any CPU | 4GB+ | ~30–45 min |
+| 125m | `c8g.4xlarge` (16 vCPU) | 32GB | ~12–16 hrs |
+| 350m | `c8g.4xlarge` (16 vCPU) | 32GB | ~40–50 hrs |
+| 1b | `c8g.8xlarge` (32 vCPU) | 64GB | ~96–120 hrs |
+
+Run on AWS spot in `us-east-1` to minimise Common Crawl egress latency. Attach an EBS volume (`gp3`, 500GB) for `DATA_DIR` so data survives spot interruptions.
+
+### Training (GPU) — Stages 4b–6
+
+| Target | Instance | GPUs | VRAM | Est. pretrain runtime |
+|---|---|---|---|---|
+| 125m | `g5.12xlarge` (4× A10G) | 4 | 96GB | ~12–18 hrs |
+| 350m | `p4d.24xlarge` (8× A100 40GB) | 8 | 320GB | ~24–36 hrs |
+| 1b | `p4d.24xlarge` (8× A100 40GB) | 8 | 320GB | ~72–96 hrs |
+
+SFT and DPO runtimes are roughly 20–30% of pretraining time at the same model size. All training loops support `--resume` from the last checkpoint. Run `make accelerate-config` once on the GPU instance before training.
+
+---
+
 ## Full Pipeline Reference
 
 Correct end-to-end sequence for a fresh run:
