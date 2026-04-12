@@ -25,9 +25,10 @@ Design:
 Compatibility (transformers v5):
     - SLMForCausalLM inherits from GenerationMixin directly — PreTrainedModel
       no longer inherits from GenerationMixin from v4.50 onwards.
-    - Weight tying uses tie_weights() for actual parameter sharing and
-      get_expanded_tied_weights_keys() override to correctly signal shared
-      tensors to save_pretrained, bypassing the broken v5 dict resolution.
+    - Weight tying: tie_weights() does the actual sharing; all_tied_weights_keys
+      is set directly as a set after post_init so save_pretrained correctly
+      handles shared tensors. get_expanded_tied_weights_keys is overridden to
+      return the keys without going through the broken v5 dict resolution.
     - past_key_values supports both legacy list[tuple] format and v5
       DynamicCache objects for full compatibility with trl and vLLM.
     - prepare_inputs_for_generation accepts cache_position (added in v5).
@@ -102,27 +103,29 @@ class SLMModel(PreTrainedModel):
         cache_position: Optional[torch.LongTensor] = None,
     ) -> BaseModelOutputWithPast:
         use_cache = use_cache if use_cache is not None else self.config.use_cache
-        return_dict = return_dict if return_dict is not None else getattr(self.config, 'return_dict', getattr(self.config, 'use_return_dict', True))
+        return_dict = return_dict if return_dict is not None else getattr(
+            self.config, 'return_dict', getattr(self.config, 'use_return_dict', True)
+        )
 
         # Gradient checkpointing and use_cache are mutually exclusive
-        if self.gradient_checkpointing and self.training:
-            if use_cache:
-                use_cache = False
+        if self.gradient_checkpointing and self.training and use_cache:
+            use_cache = False
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds
 
         # Normalise past_key_values — accept both legacy list[tuple] and
-        # v5 DynamicCache. Convert legacy format to per-layer None sentinels.
+        # v5 DynamicCache. Convert to per-layer sentinels for our layer interface.
         if past_key_values is None:
             past_key_values = [None] * len(self.layers)
         elif isinstance(past_key_values, Cache):
-            # DynamicCache passed by v5 generate() — convert to list of tuples
-            # for compatibility with our layer interface
+            # DynamicCache passed by v5 generate() — extract per-layer KV tuples.
+            # get_seq_length() in v5 takes no layer argument.
             legacy_cache = []
+            total_cached = past_key_values.get_seq_length()
             for i in range(len(self.layers)):
-                if past_key_values.get_seq_length(i) > 0:
+                if total_cached > 0 and i < len(past_key_values.key_cache):
                     legacy_cache.append((
                         past_key_values.key_cache[i],
                         past_key_values.value_cache[i],
@@ -131,21 +134,24 @@ class SLMModel(PreTrainedModel):
                     legacy_cache.append(None)
             past_key_values = legacy_cache
 
-        next_cache = [] if use_cache else None
-        all_hidden_states = [] if output_hidden_states else None
+        next_cache: list | None = [] if use_cache else None
+        all_hidden_states: list | None = [] if output_hidden_states else None
 
         for layer, past_kv in zip(self.layers, past_key_values):
             if output_hidden_states:
                 all_hidden_states.append(hidden_states)
 
             if self.gradient_checkpointing and self.training:
-                hidden_states, layer_kv = self._gradient_checkpointing_func(
+                layer_out = self._gradient_checkpointing_func(
                     layer.__call__,
                     hidden_states,
                     attention_mask,
-                    None,
-                    False,
+                    None,   # past_key_value
+                    False,  # use_cache
                 )
+                # Layer returns (hidden_states, kv) — unpack safely
+                hidden_states = layer_out[0]
+                layer_kv = layer_out[1] if len(layer_out) > 1 else None
             else:
                 hidden_states, layer_kv = layer(
                     hidden_states,
@@ -212,6 +218,13 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         self.model = SLMModel(config)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.post_init()
+        # Set all_tied_weights_keys as a set after post_init so save_pretrained
+        # correctly identifies shared tensors during serialisation.
+        # post_init → get_expanded_tied_weights_keys populates this, but our
+        # override returns a list which v5's set() conversion handles. We set
+        # it explicitly here as a set to be unambiguous.
+        if config.tie_word_embeddings:
+            self.all_tied_weights_keys = {"lm_head.weight"}
 
     def tie_weights(self, **kwargs) -> None:
         """
@@ -225,11 +238,12 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
 
     def get_expanded_tied_weights_keys(self, **kwargs) -> list[str]:
         """
-        Override to bypass transformers v5's tied weights resolution which
-        expects _tied_weights_keys to be a dict but the list format errors.
+        Override to bypass transformers v5's tied weights key resolution.
 
-        Returns the tied weight keys directly so save_pretrained correctly
-        identifies shared tensors without going through the broken resolution.
+        The default implementation in v5 calls tied_mapping.keys() expecting
+        a dict — we return the list of tied keys directly instead.
+        all_tied_weights_keys is also set directly in __init__ as a set to
+        ensure save_pretrained works correctly regardless.
         """
         if self.config.tie_word_embeddings:
             return ["lm_head.weight"]
@@ -265,7 +279,9 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
     ) -> CausalLMOutputWithPast:
-        return_dict = return_dict if return_dict is not None else getattr(self.config, 'return_dict', getattr(self.config, 'use_return_dict', True))
+        return_dict = return_dict if return_dict is not None else getattr(
+            self.config, 'return_dict', getattr(self.config, 'use_return_dict', True)
+        )
 
         outputs = self.model(
             input_ids=input_ids,
@@ -318,7 +334,6 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         as either legacy list[tuple] or DynamicCache for full v5 compatibility.
         """
         if past_key_values is not None:
-            # Only pass the last token when using KV cache
             input_ids = input_ids[:, -1:]
 
         if inputs_embeds is not None and past_key_values is None:
@@ -343,12 +358,11 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         Reorder KV cache for beam search.
 
         Handles both v5 DynamicCache objects and legacy list[tuple] format.
-        Made an instance method (not static) for v5 compatibility.
+        Instance method (not static) as required by v5.
         """
         if isinstance(past_key_values, Cache):
             past_key_values.reorder_cache(beam_idx)
             return past_key_values
-        # Legacy list[tuple] format
         return [
             (k.index_select(0, beam_idx), v.index_select(0, beam_idx))
             for k, v in past_key_values
