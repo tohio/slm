@@ -43,6 +43,7 @@ endif
         tokenizer tokenizer-test tokenize tokenize-upload tokenize-download \
         pretrain pretrain-mini pretrain-resume prepare-sft sft sft-resume sft-code sft-code-resume \
         prepare-dpo dpo dpo-resume eval export serve serve-local \
+        export export-base export-instruct export-chat \
         setup setup-data-dir install install-uv install-conda install-kenlm \
         download-kenlm-model download-fasttext-model accelerate-config \
         s3-upload s3-download s3-list \
@@ -180,9 +181,20 @@ eval:
 
 # ── Stage 8: Export ───────────────────────────────────────────────────────────
 
-export:
-	@echo "==> Stage 8: Export to HuggingFace Hub ($(SIZE))"
-	$(PYTHON) export/export.py --model results/slm-$(SIZE)-dpo/final --size $(SIZE)
+export: export-base export-instruct export-chat
+	@echo "All variants exported for slm-$(SIZE)"
+
+export-base:
+	@echo "==> Stage 8: Export base model ($(SIZE))"
+	$(PYTHON) export/export.py --size $(SIZE) --variant base
+
+export-instruct:
+	@echo "==> Stage 8: Export instruct model ($(SIZE))"
+	$(PYTHON) export/export.py --size $(SIZE) --variant instruct
+
+export-chat:
+	@echo "==> Stage 8: Export chat model ($(SIZE))"
+	$(PYTHON) export/export.py --size $(SIZE) --variant chat
 
 # ── Stage 10: Serve ───────────────────────────────────────────────────────────
 
@@ -302,7 +314,10 @@ help:
 	@echo "  prepare-dpo        Stage 6a — download DPO datasets"
 	@echo "  dpo                Stage 6b — DPO alignment"
 	@echo "  eval               Stage 7  — benchmark evaluation"
-	@echo "  export             Stage 8  — push to HuggingFace Hub"
+	@echo "  export             Stage 8  — push all variants to HuggingFace Hub"
+	@echo "  export-base        Stage 8  — push base model only"
+	@echo "  export-instruct    Stage 8  — push instruct model only"
+	@echo "  export-chat        Stage 8  — push chat model only"
 	@echo "  serve              Stage 10 — launch vLLM server (Hub model)"
 	@echo "  serve-local        Stage 10 — launch vLLM server (local checkpoint)"
 	@echo ""

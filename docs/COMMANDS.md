@@ -528,14 +528,53 @@ make eval SIZE=125m
 
 ### `make export`
 
-Exports the final DPO checkpoint to HuggingFace Hub as `tohio/slm-$(SIZE)`. Generates a model card automatically.
+Exports all three model variants to HuggingFace Hub. Runs `export-base`, `export-instruct`, and `export-chat` in sequence. Generates a model card for each variant automatically.
 
 ```bash
 make export SIZE=125m
 ```
 
-**Requires:** `results/slm-$(SIZE)-dpo/final`, `HF_TOKEN` in `.env`.
+**Requires:** All three checkpoints present, `HF_TOKEN` in `.env`.
+**Produces:** `tohio/slm-$(SIZE)`, `tohio/slm-$(SIZE)-instruct`, `tohio/slm-$(SIZE)-chat` on Hub.
+
+---
+
+### `make export-base`
+
+Exports the base pretrained checkpoint to `tohio/slm-{size}`.
+
+```bash
+make export-base SIZE=125m
+```
+
+**Requires:** `results/slm-$(SIZE)/final`, `HF_TOKEN` in `.env`.
 **Produces:** `tohio/slm-$(SIZE)` on HuggingFace Hub.
+
+---
+
+### `make export-instruct`
+
+Exports the instruction-tuned checkpoint (chat SFT + code SFT) to `tohio/slm-{size}-instruct`.
+
+```bash
+make export-instruct SIZE=125m
+```
+
+**Requires:** `results/slm-$(SIZE)-chat-code/final`, `HF_TOKEN` in `.env`.
+**Produces:** `tohio/slm-$(SIZE)-instruct` on HuggingFace Hub.
+
+---
+
+### `make export-chat`
+
+Exports the DPO-aligned checkpoint to `tohio/slm-{size}-chat`.
+
+```bash
+make export-chat SIZE=125m
+```
+
+**Requires:** `results/slm-$(SIZE)-dpo/final`, `HF_TOKEN` in `.env`.
+**Produces:** `tohio/slm-$(SIZE)-chat` on HuggingFace Hub.
 
 ---
 

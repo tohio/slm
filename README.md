@@ -10,7 +10,7 @@ Most LLM projects start from a pretrained checkpoint. This one doesn't. SLM is b
 
 The pipeline is modular and independently runnable at each stage. Every design decision is documented and justified.
 
-**Models:** `tohio/slm-125m` · `tohio/slm-350m` · `tohio/slm-1b`
+**Models:** `tohio/slm-125m` · `tohio/slm-125m-instruct` · `tohio/slm-125m-chat` · `tohio/slm-350m` · `tohio/slm-350m-instruct` · `tohio/slm-350m-chat` · `tohio/slm-1b` · `tohio/slm-1b-instruct` · `tohio/slm-1b-chat`
 
 ![Architecture](docs/architecture.svg)
 
@@ -274,7 +274,9 @@ make dpo      GPUS=2                # Stage 6b: DPO alignment
 
 # ── Ship ──────────────────────────────────────────────────────────────────────
 make eval                           # Stage 7: evaluate on benchmarks
-make export                         # Stage 8: export to HuggingFace Hub
+make export-base SIZE=125m          # Stage 8: push base model
+make export-instruct SIZE=125m      # Stage 8: push instruct model
+make export-chat SIZE=125m          # Stage 8: push chat model
 make serve                          # Stage 10: launch vLLM server
 ```
 
@@ -352,28 +354,6 @@ Run `make accelerate-config` once on the GPU instance before training to configu
 
 ---
 
-## Key Design Decisions
-
-**Why from scratch?** Starting from an existing checkpoint is the right production choice. We start from scratch deliberately — it exercises every stage of the pipeline and provides full visibility into how data quality and tokenizer design interact with training dynamics.
-
-**Why a custom tokenizer?** A tokenizer trained on your specific data mix encodes domain patterns more efficiently. Special tokens (`<|user|>`, `<|assistant|>`, `<|code|>`, `<|endofturn|>`) are baked in from the start, giving the model a clean chat template without retrofitting.
-
-**Why GQA over MHA?** At inference time, KV cache is the primary memory bottleneck. GQA reduces KV heads from 12 to 4 (125m) — a 3x reduction in KV memory with negligible quality loss. Directly improves throughput in vLLM.
-
-**Why DPO over PPO?** At small model scale, PPO's actor-critic setup requires multiple models simultaneously and is sensitive to reward scaling. DPO achieves comparable alignment with a simpler training loop and no separate reward model.
-
-**Why sequential SFT (chat → code)?** Sequential fine-tuning produces independently evaluable checkpoints at each stage, making regressions immediately visible. The code SFT uses a lower learning rate to reduce catastrophic forgetting of chat capability.
-
-**Why vLLM for serving?** PagedAttention enables continuous batching and efficient KV cache management. The OpenAI-compatible API means any client built against the OpenAI SDK works out of the box — no custom client code.
-
-**Why datatrove for dedup instead of datasketch?** datasketch's `MinHashLSH` is in-memory — at 350m scale it requires ~32GB RAM, at 1b it requires ~85GB and cannot fit on a single instance. datatrove's disk-based pipeline uses a sort-based approach where RAM usage is bounded by shard size, not corpus size. Same approach used by FineWeb at trillion-token scale.
-
-**Why HTTPS for Common Crawl instead of S3?** Direct S3 access to the `commoncrawl` bucket fails on EC2 instances with IAM roles attached — the instance role credentials are rejected by the bucket policy. HTTPS via `data.commoncrawl.org` works reliably regardless of instance credentials.
-
-**Why fasttext for language detection instead of langdetect?** Language detection runs on every document in the Common Crawl pipeline — at 125m scale that is tens of millions of HTML pages. `langdetect` is pure Python and adds ~5–10ms per document, which compounds to 50–100+ hours of wall time on a single instance. fasttext's language identification model (`lid.176.ftz`) is C-backed, covers 176 languages, and runs ~1000x faster with equivalent accuracy. The model file is ~1MB and is downloaded once via `make download-fasttext-model`.
-
----
-
 ## Screenshots
 
 Captured at each pipeline stage as proof of a working end-to-end run.
@@ -409,6 +389,28 @@ Models are evaluated on standard benchmarks via `lm-evaluation-harness`:
 | MMLU | Broad knowledge |
 | TruthfulQA | Factual accuracy |
 | HumanEval | Code generation |
+
+---
+
+## Key Design Decisions
+
+**Why from scratch?** Starting from an existing checkpoint is the right production choice. We start from scratch deliberately — it exercises every stage of the pipeline and provides full visibility into how data quality and tokenizer design interact with training dynamics.
+
+**Why a custom tokenizer?** A tokenizer trained on your specific data mix encodes domain patterns more efficiently. Special tokens (`<|user|>`, `<|assistant|>`, `<|code|>`, `<|endofturn|>`) are baked in from the start, giving the model a clean chat template without retrofitting.
+
+**Why GQA over MHA?** At inference time, KV cache is the primary memory bottleneck. GQA reduces KV heads from 12 to 4 (125m) — a 3x reduction in KV memory with negligible quality loss. Directly improves throughput in vLLM.
+
+**Why DPO over PPO?** At small model scale, PPO's actor-critic setup requires multiple models simultaneously and is sensitive to reward scaling. DPO achieves comparable alignment with a simpler training loop and no separate reward model.
+
+**Why sequential SFT (chat → code)?** Sequential fine-tuning produces independently evaluable checkpoints at each stage, making regressions immediately visible. The code SFT uses a lower learning rate to reduce catastrophic forgetting of chat capability.
+
+**Why vLLM for serving?** PagedAttention enables continuous batching and efficient KV cache management. The OpenAI-compatible API means any client built against the OpenAI SDK works out of the box — no custom client code.
+
+**Why datatrove for dedup instead of datasketch?** datasketch's `MinHashLSH` is in-memory — at 350m scale it requires ~32GB RAM, at 1b it requires ~85GB and cannot fit on a single instance. datatrove's disk-based pipeline uses a sort-based approach where RAM usage is bounded by shard size, not corpus size. Same approach used by FineWeb at trillion-token scale.
+
+**Why HTTPS for Common Crawl instead of S3?** Direct S3 access to the `commoncrawl` bucket fails on EC2 instances with IAM roles attached — the instance role credentials are rejected by the bucket policy. HTTPS via `data.commoncrawl.org` works reliably regardless of instance credentials.
+
+**Why fasttext for language detection instead of langdetect?** Language detection runs on every document in the Common Crawl pipeline — at 125m scale that is tens of millions of HTML pages. `langdetect` is pure Python and adds ~5–10ms per document, which compounds to 50–100+ hours of wall time on a single instance. fasttext's language identification model (`lid.176.ftz`) is C-backed, covers 176 languages, and runs ~1000x faster with equivalent accuracy. The model file is ~1MB and is downloaded once via `make download-fasttext-model`.
 
 ---
 
