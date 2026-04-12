@@ -187,6 +187,13 @@ def main():
     train_dataset = load_dataset_from_jsonl(train_path)
     val_dataset   = load_dataset_from_jsonl(val_path)
 
+    # Optionally truncate for mini validation runs
+    max_samples = data_cfg.get("max_samples")
+    if max_samples:
+        train_dataset = train_dataset.select(range(min(max_samples, len(train_dataset))))
+        val_dataset   = val_dataset.select(range(min(max_samples // 10, len(val_dataset))))
+        log.info(f"Truncated to {max_samples} train / {len(val_dataset)} val (max_samples set)")
+
     log.info(f"Train: {len(train_dataset):,} examples")
     log.info(f"Val:   {len(val_dataset):,} examples")
 
