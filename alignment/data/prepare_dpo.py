@@ -52,9 +52,16 @@ DEFAULT_SYSTEM = "You are a helpful, harmless, and honest assistant."
 
 
 def format_prompt(system: str, user: str) -> str:
-    """Format a prompt in the SLM chat template."""
+    """Format a prompt in the SLM chat template.
+    
+    Note: prompt ends with '<|assistant|> ' (trailing space) so that BPE
+    tokenization of prompt alone matches the start of prompt+response.
+    Without the space, trl DPOTrainer sees a mismatch because the tokenizer
+    merges '<|assistant|>' differently when followed immediately by text.
+    Chosen/rejected responses should be lstrip'd to remove leading whitespace.
+    """
     system = system.strip() or DEFAULT_SYSTEM
-    return f"<|system|>{system}<|endofturn|><|user|>{user.strip()}<|endofturn|><|assistant|>"
+    return f"<|system|>{system}<|endofturn|><|user|>{user.strip()}<|endofturn|><|assistant|> "
 
 
 def extract_text(value, field: str = "") -> str:
@@ -129,10 +136,10 @@ def prepare_hh_rlhf(max_examples: int = 50_000) -> list[dict]:
             continue
 
         records.append({
-            "prompt": prompt,
-            "chosen": chosen_resp,
-            "rejected": rejected_resp,
-            "source": "hh-rlhf",
+            "prompt":   prompt,
+            "chosen":   chosen_resp.lstrip(),
+            "rejected": rejected_resp.lstrip(),
+            "source":   "hh-rlhf",
         })
 
         if len(records) >= max_examples:
@@ -181,7 +188,7 @@ def _parse_hh_rlhf(chosen: str, rejected: str) -> tuple | None:
             parts.append(f"<|user|>{msg['content']}<|endofturn|>")
         elif msg["role"] == "assistant":
             parts.append(f"<|assistant|>{msg['content']}<|endofturn|>")
-    parts.append("<|assistant|>")
+    parts.append("<|assistant|> ")
     prompt = "".join(parts)
 
     return prompt, chosen_response, rejected_response
@@ -218,8 +225,8 @@ def prepare_orca_dpo(max_examples: int = 30_000) -> list[dict]:
 
         records.append({
             "prompt":   format_prompt(system, question),
-            "chosen":   chosen,
-            "rejected": rejected,
+            "chosen":   chosen.lstrip(),
+            "rejected": rejected.lstrip(),
             "source":   "orca",
         })
 
@@ -262,8 +269,8 @@ def prepare_argilla_dpo() -> list[dict]:
 
         records.append({
             "prompt":   format_prompt(system, instruction),
-            "chosen":   chosen,
-            "rejected": rejected,
+            "chosen":   chosen.lstrip(),
+            "rejected": rejected.lstrip(),
             "source":   "argilla",
         })
 
