@@ -84,8 +84,8 @@ BENCHMARKS = {
     },
 }
 
-ALL_TASKS = list(BENCHMARKS.keys())
-QUICK_TASKS = ["hellaswag", "arc_easy", "arc_challenge"]  # fast subset for smoke tests
+ALL_TASKS   = list(BENCHMARKS.keys())
+QUICK_TASKS = ["hellaswag", "arc_easy", "arc_challenge"]
 
 
 def run_evaluation(
@@ -99,30 +99,22 @@ def run_evaluation(
     """
     Run lm-evaluation-harness on the given model and tasks.
 
-    Args:
-        model_path: Path to HuggingFace model checkpoint.
-        tasks: List of task names to evaluate.
-        num_fewshot_override: Override few-shot count for all tasks.
-        batch_size: Evaluation batch size.
-        device: Device to run on.
-        limit: Limit number of examples per task (for quick testing).
-
-    Returns:
-        Dict of results keyed by task name.
+    Registers SLMConfig and SLMForCausalLM with the AutoModel classes
+    before creating the HFLM wrapper so lm-eval can load the checkpoint.
     """
     try:
-        import lm_eval
         from lm_eval import evaluator
         from lm_eval.models.huggingface import HFLM
     except ImportError:
-        raise ImportError(
-            "lm-eval not installed. Install with: pip install lm-eval"
-        )
+        raise ImportError("lm-eval not installed. Install with: pip install lm-eval")
 
-    from transformers import AutoConfig
+    from transformers import AutoConfig, AutoModelForCausalLM
     from model import SLMConfig, SLMForCausalLM
 
+    # Register custom model so AutoModelForCausalLM (used internally by HFLM)
+    # can load the checkpoint without raising "Unrecognized configuration class".
     AutoConfig.register("slm", SLMConfig)
+    AutoModelForCausalLM.register(SLMConfig, SLMForCausalLM)
 
     log.info(f"Loading model from {model_path}...")
     lm = HFLM(
@@ -131,7 +123,7 @@ def run_evaluation(
         batch_size=batch_size,
     )
 
-    task_names = []
+    task_names  = []
     fewshot_map = {}
     for task_key in tasks:
         if task_key not in BENCHMARKS:
@@ -176,14 +168,14 @@ def format_results(results: dict, tasks: list[str], model_name: str) -> str:
             continue
         benchmark = BENCHMARKS[task_key]
         task_name = benchmark["task"]
-        metric = benchmark["metric"]
+        metric    = benchmark["metric"]
 
         if task_name in task_results:
-            score = task_results[task_name].get(metric, task_results[task_name].get(f"{metric},none", "N/A"))
-            if isinstance(score, float):
-                score_str = f"{score:.4f}"
-            else:
-                score_str = str(score)
+            score = task_results[task_name].get(
+                metric,
+                task_results[task_name].get(f"{metric},none", "N/A")
+            )
+            score_str = f"{score:.4f}" if isinstance(score, float) else str(score)
         else:
             score_str = "N/A"
 
@@ -198,19 +190,19 @@ def format_results(results: dict, tasks: list[str], model_name: str) -> str:
 def save_results(results: dict, model_path: Path, tasks: list[str]) -> Path:
     """Save evaluation results to JSON."""
     model_name = model_path.parent.name if model_path.name == "final" else model_path.name
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir = EVAL_RESULTS_DIR / model_name
+    timestamp  = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_dir    = EVAL_RESULTS_DIR / model_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
     out_path = out_dir / f"eval_{timestamp}.json"
     with open(out_path, "w") as f:
         json.dump({
-            "model": str(model_path),
+            "model":      str(model_path),
             "model_name": model_name,
-            "tasks": tasks,
-            "timestamp": timestamp,
-            "results": results.get("results", {}),
-            "config": results.get("config", {}),
+            "tasks":      tasks,
+            "timestamp":  timestamp,
+            "results":    results.get("results", {}),
+            "config":     results.get("config", {}),
         }, f, indent=2)
 
     log.info(f"Results saved to {out_path}")
@@ -219,49 +211,20 @@ def save_results(results: dict, model_path: Path, tasks: list[str]) -> Path:
 
 def main():
     parser = argparse.ArgumentParser(description="SLM Benchmark Evaluation")
-    parser.add_argument(
-        "--model",
-        type=Path,
-        required=True,
-        help="Path to model checkpoint",
-    )
-    parser.add_argument(
-        "--tasks",
-        type=str,
-        default="all",
-        help=f"Comma-separated tasks or 'all' or 'quick'. Available: {', '.join(ALL_TASKS)}",
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=8,
-        help="Evaluation batch size",
-    )
-    parser.add_argument(
-        "--num-fewshot",
-        type=int,
-        default=None,
-        help="Override few-shot count for all tasks",
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="cuda",
-        help="Device (cuda/cpu)",
-    )
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=None,
-        help="Limit examples per task (for quick testing)",
-    )
+    parser.add_argument("--model",      type=Path, required=True, help="Path to model checkpoint")
+    parser.add_argument("--tasks",      type=str,  default="all",
+                        help=f"Comma-separated tasks or 'all' or 'quick'. Available: {', '.join(ALL_TASKS)}")
+    parser.add_argument("--batch-size", type=int,  default=8)
+    parser.add_argument("--num-fewshot",type=int,  default=None)
+    parser.add_argument("--device",     type=str,  default="cuda")
+    parser.add_argument("--limit",      type=int,  default=None,
+                        help="Limit examples per task (for quick testing)")
     args = parser.parse_args()
 
     if not args.model.exists():
         log.error(f"Model not found: {args.model}")
         sys.exit(1)
 
-    # Parse tasks
     if args.tasks == "all":
         tasks = ALL_TASKS
     elif args.tasks == "quick":
