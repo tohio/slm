@@ -17,16 +17,16 @@ on what the model should generate, not what it reads.
 
 Usage:
     # Chat SFT
-    python finetune/train_sft.py --config finetune/configs/sft_chat.yaml
+    python finetune/train_sft.py --config finetune/configs/sft_chat_125m.yaml
 
     # Code SFT
-    python finetune/train_sft.py --config finetune/configs/sft_code.yaml
+    python finetune/train_sft.py --config finetune/configs/sft_code_125m.yaml
 
     # Multi-GPU
-    accelerate launch finetune/train_sft.py --config finetune/configs/sft_chat.yaml
+    accelerate launch finetune/train_sft.py --config finetune/configs/sft_chat_125m.yaml
 
     # Resume
-    python finetune/train_sft.py --config finetune/configs/sft_chat.yaml --resume
+    python finetune/train_sft.py --config finetune/configs/sft_chat_125m.yaml --resume
 """
 
 import argparse
@@ -36,6 +36,7 @@ import os
 import sys
 from pathlib import Path
 
+import torch
 import yaml
 from dotenv import load_dotenv
 
@@ -50,7 +51,7 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
+DATA_DIR    = Path(os.environ.get("DATA_DIR", "data"))
 RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", "results"))
 
 
@@ -74,6 +75,11 @@ def build_training_args(cfg: dict, output_dir: Path):
     train_cfg = cfg["training"]
     optim_cfg = cfg["optimizer"]
 
+    has_cuda = torch.cuda.is_available()
+    precision = train_cfg.get("precision", "bf16")
+    use_bf16  = has_cuda and precision == "bf16"
+    use_fp16  = has_cuda and precision == "fp16"
+
     return TrainingArguments(
         output_dir=str(output_dir),
         num_train_epochs=train_cfg.get("epochs", 3),
@@ -88,18 +94,21 @@ def build_training_args(cfg: dict, output_dir: Path):
         adam_beta2=optim_cfg.get("beta2", 0.98),
         max_grad_norm=train_cfg.get("gradient_clip_val", 1.0),
         lr_scheduler_type=train_cfg.get("lr_scheduler", "cosine"),
-        bf16=train_cfg.get("precision", "bf16") == "bf16",
-        evaluation_strategy="steps",
+        # Precision — only enable on GPU
+        bf16=use_bf16,
+        fp16=use_fp16,
+        # Evaluation — eval_strategy replaces evaluation_strategy in transformers v5
+        eval_strategy="steps",
         eval_steps=train_cfg.get("eval_steps", 200),
         save_strategy="steps",
         save_steps=train_cfg.get("save_steps", 200),
         save_total_limit=train_cfg.get("save_total_limit", 3),
-        load_best_model_at_end=True,
-        metric_for_best_model="eval_loss",
+        load_best_model_at_end=False,
         logging_steps=train_cfg.get("log_steps", 10),
         report_to=train_cfg.get("report_to", ["wandb"]),
         run_name=cfg.get("name", "slm-sft"),
         dataloader_num_workers=train_cfg.get("num_workers", 4),
+        dataloader_pin_memory=has_cuda,
         remove_unused_columns=False,
         seed=train_cfg.get("seed", 42),
         gradient_checkpointing=train_cfg.get("gradient_checkpointing", False),
@@ -108,28 +117,14 @@ def build_training_args(cfg: dict, output_dir: Path):
 
 def main():
     parser = argparse.ArgumentParser(description="SLM Supervised Fine-Tuning")
-    parser.add_argument(
-        "--config",
-        type=Path,
-        required=True,
-        help="Path to SFT config YAML",
-    )
-    parser.add_argument(
-        "--base-model",
-        type=Path,
-        default=None,
-        help="Path to base model (overrides config)",
-    )
-    parser.add_argument(
-        "--resume",
-        action="store_true",
-        help="Resume from latest checkpoint",
-    )
+    parser.add_argument("--config", type=Path, required=True, help="Path to SFT config YAML")
+    parser.add_argument("--base-model", type=Path, default=None, help="Override base model path")
+    parser.add_argument("--resume", action="store_true", help="Resume from latest checkpoint")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    model_name = cfg["name"]
-    output_dir = RESULTS_DIR / model_name
+    model_name     = cfg["name"]
+    output_dir     = RESULTS_DIR / model_name
     base_model_path = args.base_model or Path(cfg["model"]["base_model_path"])
 
     log.info(f"=== SLM Supervised Fine-Tuning ===")
@@ -137,6 +132,7 @@ def main():
     log.info(f"Name:       {model_name}")
     log.info(f"Base model: {base_model_path}")
     log.info(f"Output:     {output_dir}")
+    log.info(f"Device:     {'cuda' if torch.cuda.is_available() else 'cpu'}")
 
     # ── Model ─────────────────────────────────────────────────────────────────
     from transformers import AutoConfig
@@ -157,17 +153,17 @@ def main():
         tokenizer_path = DATA_DIR / "tokenizer"
 
     tokenizer = PreTrainedTokenizerFast.from_pretrained(str(tokenizer_path))
-    tokenizer.pad_token = "<PAD>"
+    tokenizer.pad_token    = "<PAD>"
     tokenizer.pad_token_id = 0
-    tokenizer.eos_token = "<EOS>"
+    tokenizer.eos_token    = "<EOS>"
     tokenizer.eos_token_id = 3
-    tokenizer.bos_token = "<BOS>"
+    tokenizer.bos_token    = "<BOS>"
     tokenizer.bos_token_id = 2
 
     # ── Dataset ───────────────────────────────────────────────────────────────
-    data_cfg = cfg["data"]
+    data_cfg   = cfg["data"]
     train_path = Path(data_cfg["train_path"])
-    val_path = Path(data_cfg["val_path"])
+    val_path   = Path(data_cfg["val_path"])
 
     if not train_path.exists():
         log.error(f"Training data not found: {train_path}")
@@ -176,27 +172,13 @@ def main():
 
     log.info(f"Loading dataset from {train_path}...")
     train_dataset = load_dataset_from_jsonl(train_path)
-    val_dataset = load_dataset_from_jsonl(val_path)
+    val_dataset   = load_dataset_from_jsonl(val_path)
 
     log.info(f"Train: {len(train_dataset):,} examples")
     log.info(f"Val:   {len(val_dataset):,} examples")
 
     # ── Training args ─────────────────────────────────────────────────────────
     training_args = build_training_args(cfg, output_dir)
-
-    # ── SFTTrainer ────────────────────────────────────────────────────────────
-    from trl import SFTTrainer
-
-    trainer = SFTTrainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset,
-        eval_dataset=val_dataset,
-        tokenizer=tokenizer,
-        dataset_text_field="text",
-        max_seq_length=cfg["model"].get("max_seq_length", 2048),
-        packing=data_cfg.get("packing", False),
-    )
 
     # ── W&B ───────────────────────────────────────────────────────────────────
     if "wandb" in training_args.report_to:
@@ -211,6 +193,21 @@ def main():
                 **cfg,
             },
         )
+
+    # ── SFTTrainer ────────────────────────────────────────────────────────────
+    from trl import SFTTrainer, SFTConfig
+
+    # processing_class replaces tokenizer in trl >= 0.9
+    trainer = SFTTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset,
+        processing_class=tokenizer,
+        dataset_text_field="text",
+        max_seq_length=cfg["model"].get("max_seq_length", 2048),
+        packing=data_cfg.get("packing", False),
+    )
 
     # ── Train ─────────────────────────────────────────────────────────────────
     log.info("Starting SFT...")
@@ -227,7 +224,7 @@ def main():
 
     log.info(f"Model saved to {final_dir}")
     log.info("SFT complete.")
-    log.info(f"Next step: make dpo" if "chat" in model_name else "make sft-code")
+    log.info(f"Next step: {'make dpo' if 'chat-code' in model_name else 'make sft-code'}")
 
 
 if __name__ == "__main__":

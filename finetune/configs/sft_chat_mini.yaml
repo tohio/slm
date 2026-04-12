@@ -1,0 +1,35 @@
+name: slm-mini-chat
+wandb_project: slm-mini
+
+model:
+  base_model_path: results/slm-mini/final
+  max_seq_length: 1024
+
+data:
+  train_path: data/sft/chat/train.jsonl
+  val_path: data/sft/chat/val.jsonl
+  packing: false
+
+training:
+  max_steps: 50               # enough to validate the training loop
+  warmup_steps: 5
+  micro_batch_size: 2
+  gradient_accumulation_steps: 2
+  precision: bf16
+  gradient_clip_val: 1.0
+  gradient_checkpointing: false
+  eval_steps: 25
+  save_steps: 50
+  save_total_limit: 1
+  log_steps: 5
+  num_workers: 2
+  seed: 42
+  lr_scheduler: cosine
+  report_to:
+    - wandb
+
+optimizer:
+  lr: 1.0e-5
+  weight_decay: 0.01
+  beta1: 0.9
+  beta2: 0.98

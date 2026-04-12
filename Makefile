@@ -41,7 +41,7 @@ endif
 .PHONY: all curate curate-mini curate-download curate-filter curate-dedup \
         curate-blend curate-upload validate validate-upload validate-datatrove \
         tokenizer tokenizer-test tokenize tokenize-upload tokenize-download \
-        pretrain pretrain-mini pretrain-resume prepare-sft sft sft-resume sft-code sft-code-resume \
+        pretrain pretrain-mini pretrain-resume prepare-sft sft sft-mini sft-resume sft-code sft-code-mini sft-code-resume \
         prepare-dpo dpo dpo-resume eval export serve serve-local \
         export export-base export-instruct export-chat \
         setup setup-data-dir install install-uv install-conda install-kenlm \
@@ -147,6 +147,11 @@ sft-resume:
 		--config $(SFT_CHAT_CONFIG) \
 		--resume
 
+sft-mini:
+	@echo "==> Stage 5b: Mini chat SFT (pipeline validation)"
+	$(ACCELERATE) finetune/train_sft.py \
+		--config finetune/configs/sft_chat_mini.yaml
+
 sft-code:
 	@echo "==> Stage 5c: Code SFT ($(SIZE), $(GPUS) GPU(s), config=$(SFT_CODE_CONFIG))"
 	$(ACCELERATE) finetune/train_sft.py \
@@ -156,6 +161,11 @@ sft-code-resume:
 	$(ACCELERATE) finetune/train_sft.py \
 		--config $(SFT_CODE_CONFIG) \
 		--resume
+
+sft-code-mini:
+	@echo "==> Stage 5c: Mini code SFT (pipeline validation)"
+	$(ACCELERATE) finetune/train_sft.py \
+		--config finetune/configs/sft_code_mini.yaml
 
 # ── Stage 6: DPO ──────────────────────────────────────────────────────────────
 
@@ -172,6 +182,11 @@ dpo-resume:
 	$(ACCELERATE) alignment/train_dpo.py \
 		--config $(DPO_CONFIG) \
 		--resume
+
+dpo-mini:
+	@echo "==> Stage 6b: Mini DPO (pipeline validation)"
+	$(ACCELERATE) alignment/train_dpo.py \
+		--config alignment/configs/dpo_mini.yaml
 
 # ── Stage 7: Evaluation ───────────────────────────────────────────────────────
 
@@ -308,6 +323,9 @@ help:
 	@echo "  tokenize-download  Stage 4a — download tokenized binary from S3"
 	@echo "  pretrain           Stage 4b — pretrain from scratch"
 	@echo "  pretrain-mini      Stage 4b — mini pretrain run for pipeline validation"
+	@echo "  sft-mini           Stage 5b — mini chat SFT for pipeline validation"
+	@echo "  sft-code-mini      Stage 5c — mini code SFT for pipeline validation"
+	@echo "  dpo-mini           Stage 6b — mini DPO for pipeline validation"
 	@echo "  prepare-sft        Stage 5a — download SFT datasets"
 	@echo "  sft                Stage 5b — chat supervised fine-tuning"
 	@echo "  sft-code           Stage 5c — code supervised fine-tuning"

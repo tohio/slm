@@ -371,9 +371,28 @@ Captured at each pipeline stage as proof of a working end-to-end run.
 | `docs/screenshots/09_vllm_curl.png` | Stage 10 | `curl` request to vLLM server with response |
 | `docs/screenshots/10_hf_hub.png` | Stage 8 | HuggingFace Hub model page for `tohio/slm-125m` |
 
+### Stage 1 — Data Curation
+
+Source mix breakdown from `blend_stats.json` — confirming the 70/20/10 Wikipedia / Common Crawl / code split.
+
 ![Blend stats](docs/screenshots/01_blend_stats.png)
+
+### Stage 4b — Pretraining
+
+W&B loss curve showing steady convergence over the full pretraining run.
+
 ![Pretraining loss](docs/screenshots/04_pretrain_loss.png)
+
+### Stage 7 — Evaluation
+
+Benchmark results across HellaSwag, ARC, MMLU, TruthfulQA, and HumanEval.
+
 ![Eval results](docs/screenshots/07_eval_results.png)
+
+### Stage 9 — Inference
+
+Multi-turn chat session via `inference/chat.py` using the aligned chat model.
+
 ![Chat session](docs/screenshots/08_chat_session.png)
 
 ---
