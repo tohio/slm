@@ -269,6 +269,7 @@ make validate-upload SIZE=125m      # Stage 2: push validated data to S3
 
 # ── Tokenizer ─────────────────────────────────────────────────────────────────
 make tokenizer                      # Stage 3: train BPE tokenizer
+make tokenizer-upload               # Stage 3: push tokenizer to S3
 make tokenize                       # Stage 4a: tokenize to binary
 make tokenize-upload SIZE=125m      # Stage 4a: push tokenized binary to S3
 

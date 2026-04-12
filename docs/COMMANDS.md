@@ -411,6 +411,34 @@ make tokenize-download SIZE=125m DATE=2026-04-12
 
 ---
 
+### `make tokenizer-upload`
+
+Uploads `DATA_DIR/tokenizer/` to S3 at the `tokenizer/` prefix. Run on the CPU curation instance after `make tokenizer`. The tokenizer is needed on the GPU instance for SFT and DPO — without it, `from_pretrained` fails.
+
+```bash
+make tokenizer-upload
+```
+
+**Requires:** `data/tokenizer/` produced by `make tokenizer`.
+**Produces:** `s3://your-bucket/slm/data/tokenizer/`
+**Run on:** CPU curation instance after tokenizer training.
+
+---
+
+### `make tokenizer-download`
+
+Downloads the tokenizer from S3 to `DATA_DIR/tokenizer/`. Run on the GPU instance before SFT or DPO.
+
+```bash
+make tokenizer-download
+```
+
+**Requires:** A prior `make tokenizer-upload` run.
+**Produces:** `DATA_DIR/tokenizer/`
+**Run on:** GPU training instance before `make sft`.
+
+---
+
 ### `make pretrain-mini`
 
 Runs a minimal pretraining pass using `pretrain/configs/gpt_mini.yaml` — a 6-layer, 384-hidden model trained for 500 steps. Use this to validate the full training loop (data loading, optimizer, logging, checkpointing) before committing to an expensive full pretraining run.
