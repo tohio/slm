@@ -181,7 +181,6 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
 
     config_class = SLMConfig
     base_model_prefix = "model"
-    _tied_weights_keys = ["lm_head.weight"]
     supports_gradient_checkpointing = True
 
     def __init__(self, config: SLMConfig):
@@ -189,6 +188,17 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         self.model = SLMModel(config)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.post_init()
+
+    def tie_weights(self) -> None:
+        """
+        Tie LM head weights to input embeddings when tie_word_embeddings=True.
+
+        Called automatically by post_init(). Overrides the default HuggingFace
+        implementation to avoid _tied_weights_keys resolution which changed
+        behaviour in transformers v5 and errors on list-based tied key specs.
+        """
+        if self.config.tie_word_embeddings:
+            self.lm_head.weight = self.model.embed_tokens.weight
 
     def get_input_embeddings(self) -> nn.Embedding:
         return self.model.embed_tokens
