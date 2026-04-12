@@ -9,11 +9,17 @@
 #
 # Full pipeline:
 #   make all SIZE=125m GPUS=4
+#
+# See docs/COMMANDS.md for full target documentation.
 
 SIZE    ?= 125m
 GPUS    ?= 1
 WORKERS ?=
 DATA_DIR ?= data
+
+# Use the venv python by default so make targets work without activating the venv.
+# Override with: make pretrain PYTHON=python3
+PYTHON ?= .venv/bin/python
 
 # Config defaults — overridable with CONFIG=path/to/config.yaml
 PRETRAIN_CONFIG ?= pretrain/configs/gpt_$(SIZE).yaml
@@ -32,67 +38,73 @@ else
 endif
 
 .PHONY: all curate curate-mini curate-download curate-filter curate-dedup \
-        curate-blend curate-upload validate tokenizer tokenize \
-        pretrain prepare-sft sft sft-code \
-        prepare-dpo dpo eval export serve serve-local \
+        curate-blend curate-upload validate validate-upload validate-datatrove \
+        tokenizer tokenizer-test tokenize \
+        pretrain pretrain-resume prepare-sft sft sft-resume sft-code sft-code-resume \
+        prepare-dpo dpo dpo-resume eval export serve serve-local \
         setup setup-data-dir install install-uv install-conda install-kenlm \
         download-kenlm-model download-fasttext-model accelerate-config \
+        s3-upload s3-download s3-list \
         clean clean-data clean-results clean-logs help
 
 # ── Full pipeline ──────────────────────────────────────────────────────────────
 
-all: curate curate-upload validate tokenizer tokenize pretrain prepare-sft sft sft-code prepare-dpo dpo
+all: curate validate tokenizer tokenize pretrain prepare-sft sft sft-code prepare-dpo dpo
 	@echo "Pipeline complete for slm-$(SIZE) on $(GPUS) GPU(s)"
 
 # ── Stage 1: Data curation ────────────────────────────────────────────────────
 
 curate:
 	@echo "==> Stage 1: Curation (target=$(SIZE))"
-	python curator/scripts/curate.py --target $(SIZE) $(WORKERS_FLAG)
+	$(PYTHON) curator/scripts/curate.py --target $(SIZE) $(WORKERS_FLAG)
 
 curate-mini:
 	@echo "==> Stage 1: Mini curation run (pipeline validation)"
-	python curator/scripts/curate.py --target mini --mini $(WORKERS_FLAG)
+	$(PYTHON) curator/scripts/curate.py --target mini --mini $(WORKERS_FLAG)
 
 curate-download:
-	python curator/scripts/curate.py --target $(SIZE) --stage download
+	$(PYTHON) curator/scripts/curate.py --target $(SIZE) --stage download
 
 curate-filter:
-	python curator/scripts/curate.py --target $(SIZE) --stage filter
+	$(PYTHON) curator/scripts/curate.py --target $(SIZE) --stage filter
 
 curate-dedup:
-	python curator/scripts/curate.py --target $(SIZE) --stage dedup $(WORKERS_FLAG)
+	$(PYTHON) curator/scripts/curate.py --target $(SIZE) --stage dedup $(WORKERS_FLAG)
 
 curate-blend:
-	python curator/scripts/curate.py --target $(SIZE) --stage blend
+	$(PYTHON) curator/scripts/curate.py --target $(SIZE) --stage blend
 
 curate-upload:
 	@echo "==> Stage 1: Upload curated data to S3 (target=$(SIZE))"
-	python curator/scripts/curate.py --target $(SIZE) --stage upload
+	$(PYTHON) curator/scripts/curate.py --target $(SIZE) --stage upload
 
 # ── Stage 2: Validation ───────────────────────────────────────────────────────
 
 validate:
 	@echo "==> Stage 2: Validation"
-	python validation/scripts/validate.py
+	$(PYTHON) validation/scripts/validate.py
+
+validate-upload:
+	@echo "==> Stage 2: Upload validated data to S3 (target=$(SIZE))"
+	$(PYTHON) validation/scripts/upload_validated.py --target $(SIZE)
 
 validate-datatrove:
-	python validation/scripts/validate.py --use-datatrove
+	$(PYTHON) validation/scripts/validate.py --use-datatrove
 
 # ── Stage 3: Tokenizer ────────────────────────────────────────────────────────
 
 tokenizer:
 	@echo "==> Stage 3: Tokenizer training"
-	python tokenizer/train_tokenizer.py
+	$(PYTHON) tokenizer/train_tokenizer.py
 
 tokenizer-test:
-	python tokenizer/test_tokenizer.py
+	$(PYTHON) tokenizer/test_tokenizer.py
 
 # ── Stage 4: Pretrain ─────────────────────────────────────────────────────────
 
 tokenize:
 	@echo "==> Stage 4a: Tokenize dataset"
-	python pretrain/data/tokenize_data.py --workers 8 --verify
+	$(PYTHON) pretrain/data/tokenize_data.py --workers 8 --verify
 
 pretrain:
 	@echo "==> Stage 4b: Pretraining ($(SIZE), $(GPUS) GPU(s), config=$(PRETRAIN_CONFIG))"
@@ -108,7 +120,7 @@ pretrain-resume:
 
 prepare-sft:
 	@echo "==> Stage 5a: Prepare SFT data"
-	python finetune/data/prepare_sft.py --stage both
+	$(PYTHON) finetune/data/prepare_sft.py --stage both
 
 sft:
 	@echo "==> Stage 5b: Chat SFT ($(SIZE), $(GPUS) GPU(s), config=$(SFT_CHAT_CONFIG))"
@@ -134,7 +146,7 @@ sft-code-resume:
 
 prepare-dpo:
 	@echo "==> Stage 6a: Prepare DPO data"
-	python alignment/data/prepare_dpo.py
+	$(PYTHON) alignment/data/prepare_dpo.py
 
 dpo:
 	@echo "==> Stage 6b: DPO alignment ($(SIZE), $(GPUS) GPU(s), config=$(DPO_CONFIG))"
@@ -150,15 +162,15 @@ dpo-resume:
 
 eval:
 	@echo "==> Stage 7: Evaluation ($(SIZE))"
-	python eval/eval.py --model results/slm-$(SIZE)-dpo/final
+	$(PYTHON) eval/eval.py --model results/slm-$(SIZE)-dpo/final
 
 # ── Stage 8: Export ───────────────────────────────────────────────────────────
 
 export:
 	@echo "==> Stage 8: Export to HuggingFace Hub ($(SIZE))"
-	python export/export.py --model results/slm-$(SIZE)-dpo/final --size $(SIZE)
+	$(PYTHON) export/export.py --model results/slm-$(SIZE)-dpo/final --size $(SIZE)
 
-# ── Stage 10: Serve ──────────────────────────────────────────────────────────
+# ── Stage 10: Serve ───────────────────────────────────────────────────────────
 
 serve:
 	@echo "==> Stage 10: Serve ($(SIZE))"
@@ -171,13 +183,13 @@ serve-local:
 # ── S3 utilities ──────────────────────────────────────────────────────────────
 
 s3-upload:
-	python curator/scripts/upload_s3.py upload --src data/curated --dst curated
+	$(PYTHON) curator/scripts/upload_s3.py upload --src data/curated --dst curated
 
 s3-download:
-	python curator/scripts/upload_s3.py download --src curated --dst data/curated
+	$(PYTHON) curator/scripts/upload_s3.py download --src curated --dst data/curated
 
 s3-list:
-	python curator/scripts/upload_s3.py list
+	$(PYTHON) curator/scripts/upload_s3.py list
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
 
@@ -246,21 +258,24 @@ help:
 	@echo ""
 	@echo "Usage: make <target> [SIZE=125m|350m|1b] [GPUS=N] [WORKERS=N] [DATA_DIR=path]"
 	@echo ""
-	@echo "Setup:"
-	@echo "  setup                  Bootstrap a fresh instance (run once)"
-	@echo "  setup-data-dir         Bootstrap with custom data dir: make setup-data-dir DATA_DIR=/data/slm/data"
-	@echo "  download-kenlm-model   Download KenLM English model (~4GB) for validation"
-	@echo "  download-fasttext-model Download fasttext language ID model (~1MB) for curation"
-	@echo "  install                Install dependencies (pip)"
-	@echo "  install-uv             Install dependencies (uv)"
-	@echo "  install-conda          Install dependencies (conda)"
-	@echo "  install-kenlm          Install KenLM Python bindings from source"
+	@echo "For full target documentation see: docs/COMMANDS.md"
 	@echo ""
-	@echo "Pipeline stages:"
-	@echo "  curate-mini        Stage 1  — mini run to validate pipeline (~30 min)"
-	@echo "  curate             Stage 1  — download and curate data"
-	@echo "  curate-upload      Stage 1  — upload curated data to S3"
-	@echo "  validate           Stage 2  — quality filter and validate"
+	@echo "One-time setup:"
+	@echo "  setup                    Bootstrap a fresh instance"
+	@echo "  setup-data-dir           Bootstrap with custom data dir"
+	@echo "  download-fasttext-model  Download fasttext language ID model (~1MB)"
+	@echo "  download-kenlm-model     Download KenLM English model (~4GB)"
+	@echo "  accelerate-config        Configure accelerate for multi-GPU"
+	@echo "  install                  Install dependencies (pip)"
+	@echo "  install-uv               Install dependencies (uv)"
+	@echo "  install-conda            Install dependencies (conda)"
+	@echo "  install-kenlm            Install KenLM Python bindings from source"
+	@echo ""
+	@echo "Pipeline:"
+	@echo "  curate             Stage 1  — download, curate, and upload to S3"
+	@echo "  curate-mini        Stage 1  — mini run for pipeline validation (~30 min)"
+	@echo "  validate           Stage 2  — perplexity filter and validate"
+	@echo "  validate-upload    Stage 2  — upload validated data to S3"
 	@echo "  tokenizer          Stage 3  — train BPE tokenizer"
 	@echo "  tokenize           Stage 4a — tokenize dataset to binary"
 	@echo "  pretrain           Stage 4b — pretrain from scratch"
@@ -279,27 +294,31 @@ help:
 	@echo "  curate-filter      Quality filter only"
 	@echo "  curate-dedup       Deduplication only"
 	@echo "  curate-blend       Blend to train.jsonl only"
-	@echo "  curate-upload      Upload to S3 only"
+	@echo "  curate-upload      Upload curated data to S3 only"
 	@echo ""
-	@echo "Utilities:"
-	@echo "  accelerate-config  Configure accelerate for multi-GPU"
-	@echo "  s3-upload          Upload curated data to S3"
+	@echo "Resume targets:"
+	@echo "  pretrain-resume    Resume pretraining from last checkpoint"
+	@echo "  sft-resume         Resume chat SFT from last checkpoint"
+	@echo "  sft-code-resume    Resume code SFT from last checkpoint"
+	@echo "  dpo-resume         Resume DPO from last checkpoint"
+	@echo ""
+	@echo "S3 utilities:"
+	@echo "  s3-upload          Upload curated data to S3 (unversioned)"
 	@echo "  s3-download        Download curated data from S3"
 	@echo "  s3-list            List S3 contents"
-	@echo "  clean              Remove cache files"
+	@echo ""
+	@echo "Clean:"
+	@echo "  clean              Remove cache files and logs"
 	@echo "  clean-data         Remove all data directories"
 	@echo "  clean-results      Remove all training results"
+	@echo "  clean-logs         Remove logs directory"
 	@echo ""
 	@echo "Examples:"
-	@echo "  make curate-mini                                             # validate pipeline"
-	@echo "  make curate SIZE=125m WORKERS=16                            # full 125M curation"
-	@echo "  make curate-upload SIZE=125m                                # push to S3"
-	@echo "  make download-kenlm-model DATA_DIR=/data/slm/data          # get KenLM model"
-	@echo "  make download-fasttext-model DATA_DIR=/data/slm/data       # get fasttext model"
-	@echo "  make all SIZE=125m GPUS=2                                   # full pipeline"
-	@echo "  make pretrain SIZE=125m GPUS=4                              # 125M on 4x A100"
-	@echo "  make pretrain SIZE=350m GPUS=6                              # 350M on 6x H100"
-	@echo "  make pretrain CONFIG=pretrain/configs/gpt_1b.yaml GPUS=8   # 1B explicit config"
+	@echo "  make curate SIZE=125m WORKERS=16"
+	@echo "  make pretrain SIZE=125m GPUS=4"
+	@echo "  make pretrain CONFIG=pretrain/configs/gpt_1b.yaml GPUS=8"
 	@echo "  make sft SIZE=125m GPUS=4"
 	@echo "  make dpo SIZE=125m GPUS=2"
+	@echo "  make download-kenlm-model DATA_DIR=/data/slm/data"
+	@echo "  make download-fasttext-model DATA_DIR=/data/slm/data"
 	@echo ""

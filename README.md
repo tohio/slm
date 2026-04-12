@@ -82,7 +82,9 @@ slm/
 │       └── upload_s3.py          S3 upload/download utilities
 │
 ├── validation/                   Stage 2: data validation
-│   └── scripts/validate.py       Quality filter + perplexity filtering
+│   └── scripts/
+│       ├── validate.py           Quality filter + perplexity filtering
+│       └── upload_validated.py   Upload validated data to S3 (versioned by target + date)
 │
 ├── tokenizer/                    Stage 3: tokenizer training
 │   ├── train_tokenizer.py        BPE tokenizer — 32k vocab, 16 special tokens
@@ -91,7 +93,7 @@ slm/
 ├── pretrain/                     Stage 4: pretraining
 │   ├── configs/                  gpt_125m.yaml, gpt_350m.yaml, gpt_1b.yaml
 │   ├── data/
-│   │   ├── tokenize_data.py           JSONL → uint16 memory-mapped binary
+│   │   ├── tokenize_data.py      JSONL → uint16 memory-mapped binary
 │   │   └── dataset.py            PretrainingDataset wrapping .bin file
 │   └── train.py                  Pretraining loop
 │
@@ -131,6 +133,7 @@ slm/
 │   └── 09_inference_exploration.ipynb
 │
 ├── docs/
+│   ├── COMMANDS.md               Full make target reference
 │   ├── architecture.svg          Pipeline architecture diagram
 │   └── screenshots/              Pipeline stage screenshots
 │
@@ -165,7 +168,7 @@ cd /data/slm
 cp .env.sample .env
 
 # fill in S3_BUCKET, AWS credentials, WANDB_API_KEY, HF_TOKEN
-vi .env  
+vi .env
 
 # make is the only manual prerequisite — setup handles everything else
 sudo apt install -y make
@@ -224,7 +227,6 @@ HF_TOKEN=...
 Before committing to a full run, validate the pipeline end to end:
 
 ```bash
-source .venv/bin/activate
 make download-fasttext-model        # one-time: download fasttext language ID model (~1MB)
 make curate-mini
 ```
@@ -235,22 +237,35 @@ Crawl at 2 WARC segments. Exercises every stage without the wait.
 **Run the full pipeline**
 
 ```bash
-make download-fasttext-model        # one-time: download fasttext language ID model (~1MB)
-make download-kenlm-model           # one-time: download KenLM model (~4GB)
-make curate SIZE=125m WORKERS=16    # Stage 1: download and curate data
-make curate-upload SIZE=125m        # Stage 1: push curated data to S3
-make validate                       # Stage 2: quality filter and validate
-make tokenizer                      # Stage 3: train tokenizer
-make tokenize                       # Stage 4a: tokenize dataset
+# ── One-time setup ────────────────────────────────────────────────────────────
+make download-fasttext-model DATA_DIR=/data/slm/data   # fasttext language ID model (~1MB)
+make download-kenlm-model    DATA_DIR=/data/slm/data   # KenLM perplexity model (~4GB)
+make accelerate-config                                  # GPU instance only
+
+# ── Data ──────────────────────────────────────────────────────────────────────
+make curate SIZE=125m WORKERS=16    # Stage 1: download, curate, upload to S3
+make validate                       # Stage 2: perplexity filter
+make validate-upload SIZE=125m      # Stage 2: push validated data to S3
+
+# ── Tokenizer ─────────────────────────────────────────────────────────────────
+make tokenizer                      # Stage 3: train BPE tokenizer
+make tokenize                       # Stage 4a: tokenize to binary
+
+# ── Training ──────────────────────────────────────────────────────────────────
 make pretrain GPUS=4                # Stage 4b: pretrain slm-125m
-make sft GPUS=4                     # Stage 5: chat SFT
-make sft-code GPUS=4                # Stage 5: code SFT
-make dpo GPUS=2                     # Stage 6: DPO alignment
+make prepare-sft                    # Stage 5a: download SFT datasets
+make sft      GPUS=4                # Stage 5b: chat SFT
+make sft-code GPUS=4                # Stage 5c: code SFT
+make prepare-dpo                    # Stage 6a: download DPO datasets
+make dpo      GPUS=2                # Stage 6b: DPO alignment
+
+# ── Ship ──────────────────────────────────────────────────────────────────────
 make eval                           # Stage 7: evaluate on benchmarks
 make export                         # Stage 8: export to HuggingFace Hub
-make serve                          # Stage 10: launch vLLM server (Hub model)
-make serve-local                    # Stage 10: launch vLLM server (local checkpoint)
+make serve                          # Stage 10: launch vLLM server
 ```
+
+For full documentation of every `make` target see [docs/COMMANDS.md](docs/COMMANDS.md).
 
 **Run curation sub-stages individually**
 
@@ -301,7 +316,6 @@ survives spot interruptions — the pipeline is fully resumable at every stage.
 Use `tmux` to keep the pipeline running through SSM session timeouts:
 ```bash
 tmux new -s curate
-source .venv/bin/activate
 make curate SIZE=125m WORKERS=16
 # Ctrl+B, D to detach — tmux attach -t curate to reattach
 ```

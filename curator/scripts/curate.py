@@ -345,13 +345,18 @@ def stage_blend(target: str, seed: int = 42) -> None:
 
         staging = CURATED_DIR / f"blend_{source}.jsonl"
         staging_paths[source] = staging
-        target = target_chars[source]
+
+        # Use a distinct variable name to avoid shadowing the outer `target`
+        # (the model size string e.g. "125m"). The original code reused `target`
+        # here, which caused blend_stats.json to record the last source's char
+        # target (an int) instead of the model size string.
+        source_char_target = target_chars[source]
         chars = 0
         docs = 0
 
         with open(staging, "w") as fout:
             for shard in shards:
-                if chars >= target:
+                if chars >= source_char_target:
                     break
                 with open(shard) as fin:
                     for line in fin:
@@ -363,7 +368,7 @@ def stage_blend(target: str, seed: int = 42) -> None:
                         chars += len(record.get("text", ""))
                         fout.write(json.dumps(record, ensure_ascii=False) + "\n")
                         docs += 1
-                        if chars >= target:
+                        if chars >= source_char_target:
                             break
 
         log.info(
@@ -418,10 +423,14 @@ def stage_blend(target: str, seed: int = 42) -> None:
     )
 
     # ── Write blend stats ─────────────────────────────────────────────────────
+    # Note: `target` here is the model size string (e.g. "125m"), not a char
+    # count. Previously a variable name collision caused this to be written as
+    # the last source's char target (an int) instead of the model size string.
     stats_path = CURATED_DIR / "blend_stats.json"
     with open(stats_path, "w") as f:
         json.dump({
             "target": target,
+            "target_tokens": total_tokens,
             "total_documents": total_docs,
             "estimated_tokens": total_chars // 4,
             "source_mix": {
