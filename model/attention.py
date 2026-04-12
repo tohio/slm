@@ -228,14 +228,24 @@ class GroupedQueryAttention(nn.Module):
             v = v.repeat_interleave(self.num_query_groups, dim=1)
 
         # Attention mask
-        attn_mask = self._prepare_mask(attention_mask, q, k.shape[2])
+        # During training: use padding mask combined with causal mask.
+        # During inference: always use is_causal=True and ignore the attention
+        # mask — transformers v5 passes various mask formats during generation
+        # that conflict with our custom mask handling. Causal masking is always
+        # correct for decoder-only generation.
+        if self.training and attention_mask is not None:
+            attn_mask = self._prepare_mask(attention_mask, q, k.shape[2])
+            is_causal = False
+        else:
+            attn_mask = None
+            is_causal = True
 
         dropout_p = self.attention_dropout if self.training else 0.0
         attn_output = F.scaled_dot_product_attention(
             q, k, v,
             attn_mask=attn_mask,
             dropout_p=dropout_p,
-            is_causal=attn_mask is None,
+            is_causal=is_causal,
         )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
