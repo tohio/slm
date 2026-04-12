@@ -1,247 +1,345 @@
 """
-pretrain/train.py
------------------
-Pretraining entry point using HuggingFace Trainer.
+model/model.py
+--------------
+SLMModel and SLMForCausalLM — the full model registered with HuggingFace.
 
-Trains SLMForCausalLM from scratch on the tokenized memory-mapped
-dataset. Supports single-GPU and multi-GPU training via accelerate.
+SLMModel: the core transformer (embeddings + decoder stack + final norm).
+SLMForCausalLM: adds the language model head and loss computation.
 
-Usage:
-    # Single GPU
-    python pretrain/train.py --config pretrain/configs/gpt_125m.yaml
+Registering with AutoModel/AutoModelForCausalLM means the model can be
+loaded, saved, and used with the full HuggingFace ecosystem:
 
-    # Multi-GPU (accelerate)
-    accelerate launch pretrain/train.py --config pretrain/configs/gpt_125m.yaml
+    from transformers import AutoModelForCausalLM
+    model = AutoModelForCausalLM.from_pretrained("tohio/slm-125m")
 
-    # Resume from checkpoint
-    python pretrain/train.py --config pretrain/configs/gpt_125m.yaml --resume
+Tied embeddings: the LM head weight is shared with the input embedding
+weight. This reduces parameters and has been shown to improve performance
+at small model scales.
+
+Design:
+    - No bias anywhere
+    - Pre-norm throughout
+    - KV cache support for efficient autoregressive generation
+    - Compatible with HuggingFace generate(), trl, lm-evaluation-harness, vLLM
+
+Compatibility (transformers v5):
+    - SLMForCausalLM inherits from GenerationMixin directly — PreTrainedModel
+      no longer inherits from GenerationMixin from v4.50 onwards.
+    - Weight tying is handled via tie_weights() override rather than
+      _tied_weights_keys, which changed behaviour in v5.
+    - past_key_values supports both legacy list[tuple] format and v5
+      DynamicCache objects for full compatibility with trl and vLLM.
+    - prepare_inputs_for_generation accepts cache_position (added in v5).
+    - use_cache is forced False when gradient checkpointing is enabled.
+    - post_init() is called only in SLMForCausalLM, not SLMModel.
 """
 
-import argparse
-import logging
-import os
-import sys
-from pathlib import Path
+from typing import Optional, Union
 
 import torch
-import yaml
-from dotenv import load_dotenv
+import torch.nn as nn
+from torch.nn import CrossEntropyLoss
+from transformers import PreTrainedModel
+from transformers.cache_utils import Cache, DynamicCache
+from transformers.generation import GenerationMixin
+from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 
-load_dotenv()
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-log = logging.getLogger(__name__)
-
-DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
-RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", "results"))
+from .block import SLMDecoderBlock
+from .config import SLMConfig
+from .norm import RMSNorm
 
 
-def load_config(config_path: Path) -> dict:
-    with open(config_path) as f:
-        return yaml.safe_load(f)
+class SLMModel(PreTrainedModel):
+    """
+    The core SLM transformer — embeddings, decoder stack, final norm.
 
+    Does not include the LM head — use SLMForCausalLM for language modelling.
 
-def build_training_args(cfg: dict, output_dir: Path, resume: bool):
-    from transformers import TrainingArguments
+    Args:
+        config (SLMConfig): Model configuration.
+    """
 
-    train_cfg = cfg["training"]
-    optim_cfg = cfg["optimizer"]
+    config_class = SLMConfig
+    base_model_prefix = "model"
+    supports_gradient_checkpointing = True
 
-    # bf16/fp16 only when CUDA is available — avoids warnings on CPU runs
-    # (e.g. make pretrain-mini on a CPU curation instance)
-    has_cuda = torch.cuda.is_available()
-    precision = train_cfg.get("precision", "bf16")
-    use_bf16 = has_cuda and precision == "bf16"
-    use_fp16 = has_cuda and precision == "fp16"
+    def __init__(self, config: SLMConfig):
+        super().__init__(config)
+        self.config = config
 
-    return TrainingArguments(
-        output_dir=str(output_dir),
+        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
+        self.layers = nn.ModuleList(
+            [SLMDecoderBlock(config, layer_idx=i) for i in range(config.num_hidden_layers)]
+        )
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.gradient_checkpointing = False
 
-        # Steps
-        max_steps=train_cfg["max_steps"],
-        warmup_steps=train_cfg.get("warmup_steps", 2000),
+        # post_init() is intentionally NOT called here. SLMModel has no LM head
+        # and no tied weights. Calling post_init() on the base model triggers
+        # tied weight resolution in transformers v5 which errors without a head.
+        # post_init() is called in SLMForCausalLM where it belongs.
 
-        # Batch size
-        per_device_train_batch_size=train_cfg["micro_batch_size"],
-        per_device_eval_batch_size=train_cfg["micro_batch_size"],
-        gradient_accumulation_steps=train_cfg.get("gradient_accumulation_steps", 1),
+    def get_input_embeddings(self) -> nn.Embedding:
+        return self.embed_tokens
 
-        # Optimizer
-        learning_rate=optim_cfg["lr"],
-        weight_decay=optim_cfg.get("weight_decay", 0.1),
-        adam_beta1=optim_cfg.get("beta1", 0.9),
-        adam_beta2=optim_cfg.get("beta2", 0.95),
-        adam_epsilon=optim_cfg.get("eps", 1e-8),
-        max_grad_norm=train_cfg.get("gradient_clip_val", 1.0),
+    def set_input_embeddings(self, value: nn.Embedding) -> None:
+        self.embed_tokens = value
 
-        # LR schedule
-        lr_scheduler_type=train_cfg.get("lr_scheduler", "cosine"),
+    def _set_gradient_checkpointing(self, module: nn.Module, value: bool = False) -> None:
+        if isinstance(module, SLMModel):
+            module.gradient_checkpointing = value
 
-        # Precision — only enable on GPU
-        bf16=use_bf16,
-        fp16=use_fp16,
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        past_key_values: Optional[Union[Cache, list[tuple[torch.Tensor, torch.Tensor]]]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+    ) -> BaseModelOutputWithPast:
+        use_cache = use_cache if use_cache is not None else self.config.use_cache
+        return_dict = return_dict if return_dict is not None else getattr(self.config, 'return_dict', getattr(self.config, 'use_return_dict', True))
 
-        # Evaluation — eval_strategy replaces evaluation_strategy in transformers v5
-        eval_strategy="steps",
-        eval_steps=train_cfg.get("eval_steps", 1000),
-        save_strategy="steps",
-        save_steps=train_cfg.get("save_steps", 1000),
-        save_total_limit=train_cfg.get("save_total_limit", 3),
-        load_best_model_at_end=False,
+        # Gradient checkpointing and use_cache are mutually exclusive
+        if self.gradient_checkpointing and self.training:
+            if use_cache:
+                use_cache = False
 
-        # Logging
-        logging_strategy="steps",
-        logging_steps=train_cfg.get("log_steps", 10),
-        report_to=train_cfg.get("report_to", ["wandb"]),
-        run_name=cfg.get("name", "slm-pretrain"),
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_tokens(input_ids)
+        hidden_states = inputs_embeds
 
-        # Misc
-        dataloader_num_workers=train_cfg.get("num_workers", 4),
-        dataloader_pin_memory=has_cuda,  # pin_memory only useful with CUDA
-        remove_unused_columns=False,
-        seed=train_cfg.get("seed", 42),
+        # Normalise past_key_values — accept both legacy list[tuple] and
+        # v5 DynamicCache. Convert legacy format to per-layer None sentinels.
+        if past_key_values is None:
+            past_key_values = [None] * len(self.layers)
+        elif isinstance(past_key_values, Cache):
+            # DynamicCache passed by v5 generate() — convert to list of tuples
+            # for compatibility with our layer interface
+            legacy_cache = []
+            for i in range(len(self.layers)):
+                if past_key_values.get_seq_length(i) > 0:
+                    legacy_cache.append((
+                        past_key_values.key_cache[i],
+                        past_key_values.value_cache[i],
+                    ))
+                else:
+                    legacy_cache.append(None)
+            past_key_values = legacy_cache
 
-        # Gradient checkpointing
-        gradient_checkpointing=train_cfg.get("gradient_checkpointing", False),
-    )
+        next_cache = [] if use_cache else None
+        all_hidden_states = [] if output_hidden_states else None
 
+        for layer, past_kv in zip(self.layers, past_key_values):
+            if output_hidden_states:
+                all_hidden_states.append(hidden_states)
 
-def main():
-    parser = argparse.ArgumentParser(description="SLM Pretraining")
-    parser.add_argument(
-        "--config",
-        type=Path,
-        required=True,
-        help="Path to training config YAML",
-    )
-    parser.add_argument(
-        "--resume",
-        action="store_true",
-        help="Resume from latest checkpoint",
-    )
-    parser.add_argument(
-        "--data-dir",
-        type=Path,
-        default=DATA_DIR,
-        help="Data directory override",
-    )
-    parser.add_argument(
-        "--results-dir",
-        type=Path,
-        default=RESULTS_DIR,
-        help="Results directory override",
-    )
-    args = parser.parse_args()
+            if self.gradient_checkpointing and self.training:
+                hidden_states, layer_kv = self._gradient_checkpointing_func(
+                    layer.__call__,
+                    hidden_states,
+                    attention_mask,
+                    None,
+                    False,
+                )
+            else:
+                hidden_states, layer_kv = layer(
+                    hidden_states,
+                    attention_mask=attention_mask,
+                    past_key_value=past_kv,
+                    use_cache=use_cache,
+                )
 
-    cfg = load_config(args.config)
-    model_name = cfg["name"]
-    output_dir = args.results_dir / model_name
+            if use_cache:
+                next_cache.append(layer_kv)
 
-    log.info(f"=== SLM Pretraining ===")
-    log.info(f"Config:     {args.config}")
-    log.info(f"Model:      {model_name}")
-    log.info(f"Output:     {output_dir}")
-    log.info(f"Device:     {'cuda' if torch.cuda.is_available() else 'cpu'}")
+        hidden_states = self.norm(hidden_states)
 
-    # ── Model ─────────────────────────────────────────────────────────────────
-    from model import SLMConfig, SLMForCausalLM
+        if output_hidden_states:
+            all_hidden_states.append(hidden_states)
 
-    model_cfg_dict = cfg["model"]
-    model_config = SLMConfig(
-        vocab_size=model_cfg_dict["vocab_size"],
-        hidden_size=model_cfg_dict["hidden_size"],
-        intermediate_size=model_cfg_dict.get("intermediate_size"),
-        num_hidden_layers=model_cfg_dict["num_hidden_layers"],
-        num_attention_heads=model_cfg_dict["num_attention_heads"],
-        num_key_value_heads=model_cfg_dict["num_key_value_heads"],
-        max_position_embeddings=model_cfg_dict["max_position_embeddings"],
-        rope_theta=model_cfg_dict.get("rope_theta", 10000.0),
-        rms_norm_eps=model_cfg_dict.get("rms_norm_eps", 1e-5),
-        initializer_range=model_cfg_dict.get("initializer_range", 0.02),
-        tie_word_embeddings=model_cfg_dict.get("tie_word_embeddings", True),
-    )
+        if not return_dict:
+            return tuple(
+                v for v in [hidden_states, next_cache, all_hidden_states] if v is not None
+            )
 
-    log.info(f"Initializing model from scratch...")
-    model = SLMForCausalLM(model_config)
-    n_params = sum(p.numel() for p in model.parameters())
-    log.info(f"Parameters: {n_params:,} ({n_params / 1e6:.1f}M)")
-
-    # ── Dataset ───────────────────────────────────────────────────────────────
-    from pretrain.data.dataset import PretrainingDatasetWithValidation
-
-    bin_path = args.data_dir / "tokenized" / "train.bin"
-    seq_len = model_cfg_dict["max_position_embeddings"]
-
-    log.info(f"Loading dataset from {bin_path}")
-    splits = PretrainingDatasetWithValidation(
-        bin_path=bin_path,
-        seq_len=seq_len,
-        val_fraction=cfg["data"].get("val_fraction", 0.005),
-    )
-
-    log.info(f"Train examples: {len(splits.train):,}")
-    log.info(f"Val examples:   {len(splits.val):,}")
-
-    budget = splits.train.token_budget()
-    log.info(f"Training tokens: {budget['total_training_tokens'] / 1e9:.2f}B")
-
-    # ── Training args ─────────────────────────────────────────────────────────
-    training_args = build_training_args(cfg, output_dir, resume=args.resume)
-
-    # ── W&B ───────────────────────────────────────────────────────────────────
-    if "wandb" in training_args.report_to:
-        import wandb
-        wandb.init(
-            project=cfg.get("wandb_project", "slm"),
-            name=model_name,
-            config={
-                "model": model_cfg_dict,
-                "training": cfg["training"],
-                "optimizer": cfg["optimizer"],
-                "n_params": n_params,
-                "n_train_tokens": budget["total_training_tokens"],
-            },
+        return BaseModelOutputWithPast(
+            last_hidden_state=hidden_states,
+            past_key_values=next_cache,
+            hidden_states=all_hidden_states,
         )
 
-    # ── Trainer ───────────────────────────────────────────────────────────────
-    from transformers import Trainer
 
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=splits.train,
-        eval_dataset=splits.val,
-    )
+class SLMForCausalLM(PreTrainedModel, GenerationMixin):
+    """
+    SLM with a language modelling head for causal (autoregressive) generation.
 
-    # ── Train ─────────────────────────────────────────────────────────────────
-    log.info("Starting training...")
-    trainer.train(resume_from_checkpoint=args.resume)
+    Adds a linear LM head on top of SLMModel. When tie_word_embeddings=True
+    (default), the LM head weight is tied to the input embedding weight.
 
-    # ── Save ──────────────────────────────────────────────────────────────────
-    log.info("Saving final model...")
-    trainer.save_model(str(output_dir / "final"))
-    model_config.save_pretrained(str(output_dir / "final"))
+    Inherits from GenerationMixin directly — required from transformers v4.50+
+    where PreTrainedModel no longer inherits from GenerationMixin.
 
-    # Copy tokenizer alongside model
-    import shutil
-    tokenizer_dir = args.data_dir / "tokenizer"
-    if tokenizer_dir.exists():
-        shutil.copytree(
-            tokenizer_dir,
-            output_dir / "final" / "tokenizer",
-            dirs_exist_ok=True,
+    Compatible with:
+        - HuggingFace generate() — autoregressive text generation
+        - trl SFTTrainer / DPOTrainer — supervised fine-tuning and alignment
+        - lm-evaluation-harness — benchmark evaluation
+        - vLLM — production serving
+
+    Args:
+        config (SLMConfig): Model configuration.
+
+    Example::
+
+        from model.config import SLM_125M
+        from model.model import SLMForCausalLM
+
+        model = SLMForCausalLM(SLM_125M)
+        inputs = tokenizer("Hello world", return_tensors="pt")
+        output = model.generate(**inputs, max_new_tokens=50)
+    """
+
+    config_class = SLMConfig
+    base_model_prefix = "model"
+    supports_gradient_checkpointing = True
+
+    def __init__(self, config: SLMConfig):
+        super().__init__(config)
+        self.model = SLMModel(config)
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.post_init()
+
+    def tie_weights(self, **kwargs) -> None:
+        """
+        Tie LM head weights to input embeddings when tie_word_embeddings=True.
+
+        Called automatically by post_init() and init_weights(). Overrides the
+        default HuggingFace implementation to bypass _tied_weights_keys
+        resolution which changed in transformers v5 and errors on list-based
+        key specs. Accepts **kwargs for forward compatibility (v5 passes
+        recompute_mapping=False).
+        """
+        if self.config.tie_word_embeddings:
+            self.lm_head.weight = self.model.embed_tokens.weight
+
+    def get_input_embeddings(self) -> nn.Embedding:
+        return self.model.embed_tokens
+
+    def set_input_embeddings(self, value: nn.Embedding) -> None:
+        self.model.embed_tokens = value
+
+    def get_output_embeddings(self) -> nn.Linear:
+        return self.lm_head
+
+    def set_output_embeddings(self, new_embeddings: nn.Linear) -> None:
+        self.lm_head = new_embeddings
+
+    def get_decoder(self) -> SLMModel:
+        return self.model
+
+    def set_decoder(self, decoder: SLMModel) -> None:
+        self.model = decoder
+
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        past_key_values: Optional[Union[Cache, list[tuple[torch.Tensor, torch.Tensor]]]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+    ) -> CausalLMOutputWithPast:
+        return_dict = return_dict if return_dict is not None else getattr(self.config, 'return_dict', getattr(self.config, 'use_return_dict', True))
+
+        outputs = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+            cache_position=cache_position,
         )
 
-    log.info(f"Model saved to {output_dir / 'final'}")
-    log.info("Pretraining complete.")
-    log.info(f"Next step: make sft")
+        hidden_states = outputs[0]
+        logits = self.lm_head(hidden_states)
+        logits = logits.float()  # upcast to float32 for loss stability
 
+        loss = None
+        if labels is not None:
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            loss = CrossEntropyLoss()(
+                shift_logits.view(-1, self.config.vocab_size),
+                shift_labels.view(-1),
+            )
 
-if __name__ == "__main__":
-    main()
+        if not return_dict:
+            output = (logits,) + outputs[1:]
+            return (loss,) + output if loss is not None else output
+
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+        )
+
+    def prepare_inputs_for_generation(
+        self,
+        input_ids: torch.LongTensor,
+        past_key_values: Optional[Union[Cache, list]] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        **kwargs,
+    ) -> dict:
+        """
+        Called by HuggingFace generate() at each decoding step.
+
+        Accepts cache_position (added in transformers v5) and past_key_values
+        as either legacy list[tuple] or DynamicCache for full v5 compatibility.
+        """
+        if past_key_values is not None:
+            # Only pass the last token when using KV cache
+            input_ids = input_ids[:, -1:]
+
+        if inputs_embeds is not None and past_key_values is None:
+            model_inputs = {"inputs_embeds": inputs_embeds}
+        else:
+            model_inputs = {"input_ids": input_ids}
+
+        model_inputs.update({
+            "past_key_values": past_key_values,
+            "use_cache": kwargs.get("use_cache", True),
+            "attention_mask": attention_mask,
+            "cache_position": cache_position,
+        })
+        return model_inputs
+
+    def _reorder_cache(
+        self,
+        past_key_values: Union[Cache, list[tuple[torch.Tensor, torch.Tensor]]],
+        beam_idx: torch.Tensor,
+    ) -> Union[Cache, list[tuple[torch.Tensor, torch.Tensor]]]:
+        """
+        Reorder KV cache for beam search.
+
+        Handles both v5 DynamicCache objects and legacy list[tuple] format.
+        Made an instance method (not static) for v5 compatibility.
+        """
+        if isinstance(past_key_values, Cache):
+            past_key_values.reorder_cache(beam_idx)
+            return past_key_values
+        # Legacy list[tuple] format
+        return [
+            (k.index_select(0, beam_idx), v.index_select(0, beam_idx))
+            for k, v in past_key_values
+        ]
