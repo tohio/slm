@@ -163,8 +163,8 @@ def main():
 
     # ── Dataset ───────────────────────────────────────────────────────────────
     data_cfg   = cfg["data"]
-    train_path = Path(data_cfg["train_path"])
-    val_path   = Path(data_cfg["val_path"])
+    train_path = Path(os.path.expandvars(data_cfg["train_path"]))
+    val_path   = Path(os.path.expandvars(data_cfg["val_path"]))
 
     if not train_path.exists():
         log.error(f"DPO data not found: {train_path}")

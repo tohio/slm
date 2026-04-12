@@ -123,9 +123,12 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    model_name     = cfg["name"]
-    output_dir     = RESULTS_DIR / model_name
-    base_model_path = args.base_model or Path(cfg["model"]["base_model_path"])
+    model_name      = cfg["name"]
+    output_dir      = RESULTS_DIR / model_name
+    # Expand environment variables in config paths (e.g. $DATA_DIR, $RESULTS_DIR)
+    base_model_path = args.base_model or Path(
+        os.path.expandvars(cfg["model"]["base_model_path"])
+    )
 
     log.info(f"=== SLM Supervised Fine-Tuning ===")
     log.info(f"Config:     {args.config}")
@@ -162,8 +165,8 @@ def main():
 
     # ── Dataset ───────────────────────────────────────────────────────────────
     data_cfg   = cfg["data"]
-    train_path = Path(data_cfg["train_path"])
-    val_path   = Path(data_cfg["val_path"])
+    train_path = Path(os.path.expandvars(data_cfg["train_path"]))
+    val_path   = Path(os.path.expandvars(data_cfg["val_path"]))
 
     if not train_path.exists():
         log.error(f"Training data not found: {train_path}")

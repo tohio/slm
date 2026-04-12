@@ -2,12 +2,12 @@ name: slm-mini-chat-code
 wandb_project: slm-mini
 
 model:
-  base_model_path: results/slm-mini-chat/final
+  base_model_path: $RESULTS_DIR/slm-mini-chat/final
   max_seq_length: 1024
 
 data:
-  train_path: data/sft/code/train.jsonl
-  val_path: data/sft/code/val.jsonl
+  train_path: $DATA_DIR/sft/code/train.jsonl
+  val_path: $DATA_DIR/sft/code/val.jsonl
   packing: false
 
 training:
