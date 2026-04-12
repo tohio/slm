@@ -15,8 +15,13 @@
 SIZE    ?= 125m
 GPUS    ?= 1
 WORKERS ?=
-DATA_DIR ?= data
 DATE     ?= $(shell date +%Y-%m-%d)
+
+# DATA_DIR — read from .env if not set in environment.
+# This ensures make targets use the correct path without requiring
+# the user to export DATA_DIR manually after each login.
+DATA_DIR ?= $(shell grep -v '^\#' .env 2>/dev/null | grep '^DATA_DIR=' | head -1 | cut -d= -f2 | tr -d ' ')
+DATA_DIR ?= data
 
 # Use the venv python by default so make targets work without activating the venv.
 # Override with: make pretrain PYTHON=python3
@@ -252,6 +257,10 @@ setup:
 setup-data-dir:
 	@echo "==> Running instance setup with custom data dir..."
 	bash infra/setup.sh --data-dir $(DATA_DIR)
+
+setup-gpu:
+	@echo "==> Running GPU instance setup (DATA_DIR=$(DATA_DIR))..."
+	bash infra/setup_gpu_instance.sh --data-dir $(DATA_DIR)
 
 install:
 	python3 -m venv .venv
