@@ -157,7 +157,9 @@ class GroupedQueryAttention(nn.Module):
 
         Handles:
             None  — no mask, caller uses is_causal=True
-            2D (batch, kv_len) — padding mask (1=keep, 0=pad), combined with causal
+            2D (batch, kv_len) — padding mask (1=keep, 0=pad)
+                During training: combined with causal mask → 4D additive
+                During generation (q_len=1): only padding matters, no causal needed
             4D (batch, 1, q_len, kv_len) — full additive mask, dtype normalised
         """
         if attention_mask is None:
@@ -166,11 +168,19 @@ class GroupedQueryAttention(nn.Module):
         bsz, q_len = q.shape[0], q.shape[2]
 
         if attention_mask.dim() == 2:
-            causal = torch.ones(q_len, kv_len, dtype=torch.bool, device=q.device).tril()
-            pad = attention_mask[:, None, None, :].bool()
-            combined = causal.unsqueeze(0) & pad
-            mask = torch.zeros(bsz, 1, q_len, kv_len, dtype=q.dtype, device=q.device)
-            return mask.masked_fill(~combined, float("-inf"))
+            if q_len == 1:
+                # Generation step — single query token attending to all cached keys.
+                # No causal mask needed (trivially causal). Just apply padding mask.
+                pad = attention_mask[:, None, None, :].bool()  # (batch, 1, 1, kv_len)
+                mask = torch.zeros(bsz, 1, 1, kv_len, dtype=q.dtype, device=q.device)
+                return mask.masked_fill(~pad, float("-inf"))
+            else:
+                # Training / prefill — combine padding mask with causal mask
+                causal = torch.ones(q_len, kv_len, dtype=torch.bool, device=q.device).tril()
+                pad = attention_mask[:, None, None, :].bool()
+                combined = causal.unsqueeze(0) & pad
+                mask = torch.zeros(bsz, 1, q_len, kv_len, dtype=q.dtype, device=q.device)
+                return mask.masked_fill(~combined, float("-inf"))
 
         if attention_mask.dtype == torch.bool:
             mask = torch.zeros_like(attention_mask, dtype=q.dtype)
