@@ -125,7 +125,7 @@ def prepare_chat(val_fraction: float = 0.02) -> None:
     skipped = 0
 
     for example in dataset:
-        conversations = example.get("conversations", [])
+        conversations = example.get("conversations") or []
         if not conversations:
             skipped += 1
             continue
@@ -133,8 +133,8 @@ def prepare_chat(val_fraction: float = 0.02) -> None:
         # Convert from OpenHermes format (role=human/gpt) to SLM format
         messages = []
 
-        # Add system prompt if present
-        system = example.get("system_prompt", "").strip()
+        # Add system prompt if present — use `or ""` to handle None values
+        system = (example.get("system_prompt") or "").strip()
         if system:
             messages.append({"role": "system", "content": system})
         else:
@@ -142,8 +142,9 @@ def prepare_chat(val_fraction: float = 0.02) -> None:
 
         valid = True
         for turn in conversations:
-            role = turn.get("from", turn.get("role", "")).lower()
-            content = turn.get("value", turn.get("content", "")).strip()
+            # Use `or ""` to handle None values in role and content fields
+            role = (turn.get("from") or turn.get("role") or "").lower()
+            content = (turn.get("value") or turn.get("content") or "").strip()
 
             if not content:
                 valid = False
@@ -213,8 +214,9 @@ def prepare_code(val_fraction: float = 0.05) -> None:
     skipped = 0
 
     for example in dataset:
-        instruction = example.get("problem", "").strip()
-        solution = example.get("solution", "").strip()
+        # Use `or ""` to handle None values
+        instruction = (example.get("problem") or "").strip()
+        solution = (example.get("solution") or "").strip()
 
         if not instruction or not solution:
             skipped += 1
@@ -222,11 +224,9 @@ def prepare_code(val_fraction: float = 0.05) -> None:
 
         # Wrap solution in code tags if it looks like code
         if any(kw in solution for kw in ["def ", "class ", "import ", "function ", "```"]):
-            # Extract code blocks if already formatted with backticks
             if "```" in solution:
                 assistant_content = solution
             else:
-                lang = _detect_language(solution)
                 assistant_content = f"<|code|>\n{solution}\n<|endofcode|>"
         else:
             assistant_content = solution
