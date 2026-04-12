@@ -57,6 +57,28 @@ def format_prompt(system: str, user: str) -> str:
     return f"<|system|>{system}<|endofturn|><|user|>{user.strip()}<|endofturn|><|assistant|>"
 
 
+def extract_text(value, field: str = "") -> str:
+    """
+    Safely extract a string from a field that may be:
+      - str: return as-is
+      - list of dicts with 'content': return last content value
+      - list of str: return last element
+      - None or missing: return ""
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        if not value:
+            return ""
+        last = value[-1]
+        if isinstance(last, dict):
+            return last.get("content", "") or ""
+        return str(last)
+    return str(value)
+
+
 def write_jsonl(records: list[dict], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
@@ -88,14 +110,13 @@ def prepare_hh_rlhf(max_examples: int = 50_000) -> list[dict]:
     skipped = 0
 
     for example in dataset:
-        chosen = example.get("chosen", "")
-        rejected = example.get("rejected", "")
+        chosen = extract_text(example.get("chosen"))
+        rejected = extract_text(example.get("rejected"))
 
         if not chosen or not rejected:
             skipped += 1
             continue
 
-        # Extract the final exchange — last Human/Assistant pair
         parsed = _parse_hh_rlhf(chosen, rejected)
         if parsed is None:
             skipped += 1
@@ -103,11 +124,7 @@ def prepare_hh_rlhf(max_examples: int = 50_000) -> list[dict]:
 
         prompt, chosen_resp, rejected_resp = parsed
 
-        if not chosen_resp or not rejected_resp:
-            skipped += 1
-            continue
-
-        if chosen_resp == rejected_resp:
+        if not chosen_resp or not rejected_resp or chosen_resp == rejected_resp:
             skipped += 1
             continue
 
@@ -144,24 +161,18 @@ def _parse_hh_rlhf(chosen: str, rejected: str) -> tuple | None:
     if len(chosen_turns) < 2:
         return None
 
-    # Build prompt from all turns except the last assistant response
-    # The last turn in chosen is the preferred response
     chosen_response = chosen_turns[-1]
     rejected_response = rejected_turns[-1] if rejected_turns else ""
 
-    # Reconstruct the conversation up to the last user message
     conversation_turns = chosen_turns[:-1]
     if not conversation_turns:
         return None
 
-    # Format as SLM chat template
-    messages = []
-    messages.append({"role": "system", "content": DEFAULT_SYSTEM})
+    messages = [{"role": "system", "content": DEFAULT_SYSTEM}]
     for i, turn in enumerate(conversation_turns):
         role = "user" if i % 2 == 0 else "assistant"
         messages.append({"role": role, "content": turn})
 
-    # Build prompt string
     parts = []
     for msg in messages:
         if msg["role"] == "system":
@@ -196,26 +207,20 @@ def prepare_orca_dpo(max_examples: int = 30_000) -> list[dict]:
     skipped = 0
 
     for example in dataset:
-        system = example.get("system", DEFAULT_SYSTEM).strip()
-        question = example.get("question", "").strip()
-        chosen = example.get("chosen", "").strip()
-        rejected = example.get("rejected", "").strip()
+        system   = extract_text(example.get("system")) or DEFAULT_SYSTEM
+        question = extract_text(example.get("question")).strip()
+        chosen   = extract_text(example.get("chosen")).strip()
+        rejected = extract_text(example.get("rejected")).strip()
 
-        if not question or not chosen or not rejected:
+        if not question or not chosen or not rejected or chosen == rejected:
             skipped += 1
             continue
-
-        if chosen == rejected:
-            skipped += 1
-            continue
-
-        prompt = format_prompt(system, question)
 
         records.append({
-            "prompt": prompt,
-            "chosen": chosen,
+            "prompt":   format_prompt(system, question),
+            "chosen":   chosen,
             "rejected": rejected,
-            "source": "orca",
+            "source":   "orca",
         })
 
         if len(records) >= max_examples:
@@ -233,6 +238,8 @@ def prepare_argilla_dpo() -> list[dict]:
 
     A carefully curated mix of 7k high-quality DPO pairs from multiple
     sources, filtered for quality. Small but high signal.
+
+    Fields may be strings or lists of message dicts — extract_text handles both.
     """
     from datasets import load_dataset
 
@@ -244,32 +251,20 @@ def prepare_argilla_dpo() -> list[dict]:
     skipped = 0
 
     for example in dataset:
-        system = example.get("system", DEFAULT_SYSTEM) or DEFAULT_SYSTEM
-        instruction = example.get("instruction", "").strip()
-        chosen = example.get("chosen", "").strip()
-        rejected = example.get("rejected", "").strip()
+        system      = extract_text(example.get("system")) or DEFAULT_SYSTEM
+        instruction = extract_text(example.get("instruction")).strip()
+        chosen      = extract_text(example.get("chosen")).strip()
+        rejected    = extract_text(example.get("rejected")).strip()
 
-        # Handle nested format
-        if isinstance(chosen, list):
-            chosen = chosen[-1].get("content", "") if chosen else ""
-        if isinstance(rejected, list):
-            rejected = rejected[-1].get("content", "") if rejected else ""
-
-        if not instruction or not chosen or not rejected:
+        if not instruction or not chosen or not rejected or chosen == rejected:
             skipped += 1
             continue
-
-        if chosen == rejected:
-            skipped += 1
-            continue
-
-        prompt = format_prompt(system, instruction)
 
         records.append({
-            "prompt": prompt,
-            "chosen": chosen,
+            "prompt":   format_prompt(system, instruction),
+            "chosen":   chosen,
             "rejected": rejected,
-            "source": "argilla",
+            "source":   "argilla",
         })
 
     log.info(f"  argilla: {len(records):,} kept, {skipped:,} skipped")
@@ -303,7 +298,7 @@ def main():
     args = parser.parse_args()
 
     train_path = DPO_DIR / "train.jsonl"
-    val_path = DPO_DIR / "val.jsonl"
+    val_path   = DPO_DIR / "val.jsonl"
 
     if train_path.exists() and val_path.exists():
         log.info(f"DPO data already exists at {DPO_DIR}")
@@ -322,7 +317,6 @@ def main():
 
     log.info(f"Total records: {len(all_records):,}")
 
-    # Source breakdown
     from collections import Counter
     source_counts = Counter(r["source"] for r in all_records)
     for source, count in source_counts.items():
@@ -333,11 +327,10 @@ def main():
     write_jsonl(train_records, train_path)
     write_jsonl(val_records, val_path)
 
-    # Save stats
     stats = {
-        "total": len(all_records),
-        "train": len(train_records),
-        "val": len(val_records),
+        "total":   len(all_records),
+        "train":   len(train_records),
+        "val":     len(val_records),
         "sources": dict(source_counts),
     }
     with open(DPO_DIR / "stats.json", "w") as f:
