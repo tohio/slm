@@ -50,46 +50,27 @@ class RotaryEmbedding(nn.Module):
         self.max_position_embeddings = config.max_position_embeddings
         self.base = config.rope_theta
 
-        # Inverse frequencies — shape: (head_dim / 2,)
         inv_freq = 1.0 / (
             self.base
             ** (torch.arange(0, self.head_dim, 2, dtype=torch.float32) / self.head_dim)
         )
         self.register_buffer("inv_freq", inv_freq, persistent=False)
-
-        # Precompute cos/sin for all positions
         self._build_cache(self.max_position_embeddings)
 
     def _build_cache(self, seq_len: int) -> None:
         positions = torch.arange(seq_len, dtype=torch.float32)
-        # Outer product: (seq_len, head_dim/2)
         freqs = torch.outer(positions, self.inv_freq)
-        # Concatenate to get (seq_len, head_dim)
         emb = torch.cat([freqs, freqs], dim=-1)
         self.register_buffer("cos_cached", emb.cos(), persistent=False)
         self.register_buffer("sin_cached", emb.sin(), persistent=False)
 
     def forward(self, seq_len: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Returns cos and sin matrices for positions [0, seq_len).
-
-        Returns:
-            cos: (seq_len, head_dim)
-            sin: (seq_len, head_dim)
-        """
         if seq_len > self.max_position_embeddings:
             self._build_cache(seq_len)
         return self.cos_cached[:seq_len], self.sin_cached[:seq_len]
 
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
-    """
-    Rotate the second half of the last dimension to implement RoPE.
-
-    Splits x into two halves along the last dimension, negates the
-    second half and swaps: [-x2, x1]. Combined with cos/sin application
-    this produces the RoPE rotation.
-    """
     x1 = x[..., : x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat([-x2, x1], dim=-1)
@@ -101,22 +82,8 @@ def apply_rotary_emb(
     cos: torch.Tensor,
     sin: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Apply RoPE rotation to query and key tensors.
-
-    Args:
-        q: Query tensor of shape (batch, heads, seq_len, head_dim)
-        k: Key tensor of shape (batch, kv_heads, seq_len, head_dim)
-        cos: Cosine matrix of shape (seq_len, head_dim)
-        sin: Sine matrix of shape (seq_len, head_dim)
-
-    Returns:
-        Rotated (q, k) tensors of the same shape.
-    """
-    # Broadcast cos/sin over batch and head dimensions
-    cos = cos.unsqueeze(0).unsqueeze(0)  # (1, 1, seq_len, head_dim)
+    cos = cos.unsqueeze(0).unsqueeze(0)
     sin = sin.unsqueeze(0).unsqueeze(0)
-
     q_rot = (q * cos) + (rotate_half(q) * sin)
     k_rot = (k * cos) + (rotate_half(k) * sin)
     return q_rot, k_rot
@@ -156,13 +123,58 @@ class GroupedQueryAttention(nn.Module):
         self.head_dim = config.head_dim
         self.attention_dropout = config.attention_dropout
 
-        # Projections — no bias
         self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
         self.k_proj = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
         self.v_proj = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
 
         self.rotary_emb = RotaryEmbedding(config)
+
+    def _prepare_mask(
+        self,
+        attention_mask: Optional[torch.Tensor],
+        q: torch.Tensor,
+        kv_len: int,
+    ) -> Optional[torch.Tensor]:
+        """
+        Normalise attention_mask to a 4D float additive mask compatible with
+        F.scaled_dot_product_attention, handling all formats the Trainer may pass:
+
+            None:
+                No mask — caller uses is_causal=True for causal masking.
+            2D (batch, kv_len):
+                Padding mask from HuggingFace Trainer (1=keep, 0=pad).
+                Combined with a causal mask and expanded to 4D.
+            4D (batch, 1, q_len, kv_len):
+                Full additive mask — convert dtype if needed.
+        """
+        if attention_mask is None:
+            return None
+
+        bsz, q_len = q.shape[0], q.shape[2]
+
+        if attention_mask.dim() == 2:
+            # 2D padding mask → combine with causal mask → 4D additive mask
+            # causal: (q_len, kv_len), True where position is allowed
+            causal = torch.ones(q_len, kv_len, dtype=torch.bool, device=q.device).tril()
+            # padding: (batch, kv_len) → (batch, 1, 1, kv_len)
+            pad = attention_mask[:, None, None, :].bool()
+            # combined: causal AND not padding
+            combined = causal.unsqueeze(0) & pad  # (batch, 1, q_len, kv_len)
+            # additive: 0.0 = keep, -inf = mask out
+            mask = torch.zeros(bsz, 1, q_len, kv_len, dtype=q.dtype, device=q.device)
+            mask = mask.masked_fill(~combined, float("-inf"))
+            return mask
+
+        # 4D mask — ensure correct dtype
+        if attention_mask.dtype == torch.bool:
+            mask = torch.zeros_like(attention_mask, dtype=q.dtype)
+            return mask.masked_fill(~attention_mask, float("-inf"))
+
+        if attention_mask.dtype != q.dtype:
+            return attention_mask.to(dtype=q.dtype)
+
+        return attention_mask
 
     def forward(
         self,
@@ -174,23 +186,20 @@ class GroupedQueryAttention(nn.Module):
         """
         Args:
             hidden_states: (batch, seq_len, hidden_size)
-            attention_mask: Optional causal mask (batch, 1, seq_len, seq_len).
-                            May arrive as bool, float, or int — normalised below.
-            past_key_value: Optional cached (key, value) from previous steps
-            use_cache: Whether to return updated KV cache
+            attention_mask: Optional mask — see _prepare_mask for handled formats.
+            past_key_value: Optional cached (key, value) from previous steps.
+            use_cache: Whether to return updated KV cache.
 
         Returns:
             output: (batch, seq_len, hidden_size)
-            past_key_value: Updated KV cache if use_cache else None
+            past_key_value: Updated KV cache if use_cache else None.
         """
         bsz, q_len, _ = hidden_states.shape
 
-        # Project to Q, K, V
         q = self.q_proj(hidden_states)
         k = self.k_proj(hidden_states)
         v = self.v_proj(hidden_states)
 
-        # Reshape to (batch, heads, seq_len, head_dim)
         q = q.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         k = k.view(bsz, q_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
         v = v.view(bsz, q_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
@@ -200,13 +209,8 @@ class GroupedQueryAttention(nn.Module):
         if past_key_value is not None:
             kv_seq_len += past_key_value[0].shape[2]
         cos, sin = self.rotary_emb(kv_seq_len)
-        # Slice cos/sin for current positions only (handles KV cache offset)
         offset = kv_seq_len - q_len
-        q, k = apply_rotary_emb(
-            q, k,
-            cos[offset:offset + q_len],
-            sin[offset:offset + q_len],
-        )
+        q, k = apply_rotary_emb(q, k, cos[offset:offset + q_len], sin[offset:offset + q_len])
 
         # Append to KV cache
         if past_key_value is not None:
@@ -214,37 +218,22 @@ class GroupedQueryAttention(nn.Module):
             v = torch.cat([past_key_value[1], v], dim=2)
         past_key_value = (k, v) if use_cache else None
 
-        # Expand KV heads to match Q heads for GQA
-        # (batch, kv_heads, seq_len, head_dim) → (batch, num_heads, seq_len, head_dim)
+        # Expand KV heads for GQA
         if self.num_kv_heads != self.num_heads:
             k = k.repeat_interleave(self.num_query_groups, dim=1)
             v = v.repeat_interleave(self.num_query_groups, dim=1)
 
-        # Normalise attention mask dtype for F.scaled_dot_product_attention.
-        # The SFTTrainer passes an int64 mask; SDPA requires bool or a float
-        # mask matching the query dtype. Convert once here so the rest of the
-        # code doesn't need to worry about what dtype arrives.
-        if attention_mask is not None:
-            if attention_mask.dtype == torch.bool:
-                # bool mask: True = keep, False = mask out
-                # SDPA additive convention: 0 = keep, -inf = mask out
-                attention_mask = torch.zeros_like(attention_mask, dtype=q.dtype).masked_fill(
-                    ~attention_mask, float("-inf")
-                )
-            elif attention_mask.dtype != q.dtype:
-                attention_mask = attention_mask.to(dtype=q.dtype)
+        # Prepare attention mask
+        attn_mask = self._prepare_mask(attention_mask, q, k.shape[2])
 
-        # Scaled dot-product attention
-        # Dispatches to FlashAttention 2 when available (torch >= 2.0)
         dropout_p = self.attention_dropout if self.training else 0.0
         attn_output = F.scaled_dot_product_attention(
             q, k, v,
-            attn_mask=attention_mask,
+            attn_mask=attn_mask,
             dropout_p=dropout_p,
-            is_causal=attention_mask is None,  # use causal mask if no explicit mask
+            is_causal=attn_mask is None,
         )
 
-        # Reshape and project output
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.view(bsz, q_len, self.num_heads * self.head_dim)
         attn_output = self.o_proj(attn_output)
