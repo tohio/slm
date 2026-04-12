@@ -119,7 +119,7 @@ def build_sft_args(cfg: dict, output_dir: Path):
         gradient_checkpointing=train_cfg.get("gradient_checkpointing", False),
         # SFT-specific fields
         dataset_text_field="text",
-        max_seq_length=cfg["model"].get("max_seq_length", 2048),
+        max_length=cfg["model"].get("max_seq_length", 2048),
         packing=cfg["data"].get("packing", False),
     )
 
