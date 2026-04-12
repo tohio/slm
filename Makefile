@@ -1,324 +1,290 @@
-# SLM Pipeline Makefile
-# ----------------------
-# Usage:
-#   make <target>                                        # defaults: SIZE=125m, GPUS=1
-#   make <target> SIZE=350m                              # different model size
-#   make <target> GPUS=4                                 # multi-GPU
-#   make <target> WORKERS=16                             # parallel workers for dedup
-#   make <target> CONFIG=pretrain/configs/gpt_125m.yaml  # explicit config override
-#
-# Full pipeline:
-#   make all SIZE=125m GPUS=4
-#
-# See docs/COMMANDS.md for full target documentation.
-
-SIZE    ?= 125m
-GPUS    ?= 1
-WORKERS ?=
-DATA_DIR ?= data
-
-# Use the venv python by default so make targets work without activating the venv.
-# Override with: make pretrain PYTHON=python3
-PYTHON ?= .venv/bin/python
-
-# Config defaults — overridable with CONFIG=path/to/config.yaml
-PRETRAIN_CONFIG ?= pretrain/configs/gpt_$(SIZE).yaml
-SFT_CHAT_CONFIG ?= finetune/configs/sft_chat_$(SIZE).yaml
-SFT_CODE_CONFIG ?= finetune/configs/sft_code_$(SIZE).yaml
-DPO_CONFIG      ?= alignment/configs/dpo_$(SIZE).yaml
-
-# accelerate launch with GPU count
-ACCELERATE = accelerate launch --num_processes $(GPUS)
-
-# Optional workers flag for dedup
-ifdef WORKERS
-  WORKERS_FLAG = --workers $(WORKERS)
-else
-  WORKERS_FLAG =
-endif
-
-.PHONY: all curate curate-mini curate-download curate-filter curate-dedup \
-        curate-blend curate-upload validate validate-upload validate-datatrove \
-        tokenizer tokenizer-test tokenize \
-        pretrain pretrain-resume prepare-sft sft sft-resume sft-code sft-code-resume \
-        prepare-dpo dpo dpo-resume eval export serve serve-local \
-        setup setup-data-dir install install-uv install-conda install-kenlm \
-        download-kenlm-model download-fasttext-model accelerate-config \
-        s3-upload s3-download s3-list \
-        clean clean-data clean-results clean-logs help
-
-# ── Full pipeline ──────────────────────────────────────────────────────────────
-
-all: curate validate tokenizer tokenize pretrain prepare-sft sft sft-code prepare-dpo dpo
-	@echo "Pipeline complete for slm-$(SIZE) on $(GPUS) GPU(s)"
-
-# ── Stage 1: Data curation ────────────────────────────────────────────────────
-
-curate:
-	@echo "==> Stage 1: Curation (target=$(SIZE))"
-	$(PYTHON) curator/scripts/curate.py --target $(SIZE) $(WORKERS_FLAG)
-
-curate-mini:
-	@echo "==> Stage 1: Mini curation run (pipeline validation)"
-	$(PYTHON) curator/scripts/curate.py --target mini --mini $(WORKERS_FLAG)
-
-curate-download:
-	$(PYTHON) curator/scripts/curate.py --target $(SIZE) --stage download
-
-curate-filter:
-	$(PYTHON) curator/scripts/curate.py --target $(SIZE) --stage filter
-
-curate-dedup:
-	$(PYTHON) curator/scripts/curate.py --target $(SIZE) --stage dedup $(WORKERS_FLAG)
-
-curate-blend:
-	$(PYTHON) curator/scripts/curate.py --target $(SIZE) --stage blend
-
-curate-upload:
-	@echo "==> Stage 1: Upload curated data to S3 (target=$(SIZE))"
-	$(PYTHON) curator/scripts/curate.py --target $(SIZE) --stage upload
-
-# ── Stage 2: Validation ───────────────────────────────────────────────────────
-
-validate:
-	@echo "==> Stage 2: Validation"
-	$(PYTHON) validation/scripts/validate.py
-
-validate-upload:
-	@echo "==> Stage 2: Upload validated data to S3 (target=$(SIZE))"
-	$(PYTHON) validation/scripts/upload_validated.py --target $(SIZE)
-
-validate-datatrove:
-	$(PYTHON) validation/scripts/validate.py --use-datatrove
-
-# ── Stage 3: Tokenizer ────────────────────────────────────────────────────────
-
-tokenizer:
-	@echo "==> Stage 3: Tokenizer training"
-	$(PYTHON) tokenizer/train_tokenizer.py
-
-tokenizer-test:
-	$(PYTHON) tokenizer/test_tokenizer.py
-
-# ── Stage 4: Pretrain ─────────────────────────────────────────────────────────
-
-tokenize:
-	@echo "==> Stage 4a: Tokenize dataset"
-	$(PYTHON) pretrain/data/tokenize_data.py --workers 8 --verify
-
-pretrain:
-	@echo "==> Stage 4b: Pretraining ($(SIZE), $(GPUS) GPU(s), config=$(PRETRAIN_CONFIG))"
-	$(ACCELERATE) pretrain/train.py \
-		--config $(PRETRAIN_CONFIG)
-
-pretrain-resume:
-	$(ACCELERATE) pretrain/train.py \
-		--config $(PRETRAIN_CONFIG) \
-		--resume
-
-# ── Stage 5: SFT ──────────────────────────────────────────────────────────────
-
-prepare-sft:
-	@echo "==> Stage 5a: Prepare SFT data"
-	$(PYTHON) finetune/data/prepare_sft.py --stage both
-
-sft:
-	@echo "==> Stage 5b: Chat SFT ($(SIZE), $(GPUS) GPU(s), config=$(SFT_CHAT_CONFIG))"
-	$(ACCELERATE) finetune/train_sft.py \
-		--config $(SFT_CHAT_CONFIG)
-
-sft-resume:
-	$(ACCELERATE) finetune/train_sft.py \
-		--config $(SFT_CHAT_CONFIG) \
-		--resume
-
-sft-code:
-	@echo "==> Stage 5c: Code SFT ($(SIZE), $(GPUS) GPU(s), config=$(SFT_CODE_CONFIG))"
-	$(ACCELERATE) finetune/train_sft.py \
-		--config $(SFT_CODE_CONFIG)
-
-sft-code-resume:
-	$(ACCELERATE) finetune/train_sft.py \
-		--config $(SFT_CODE_CONFIG) \
-		--resume
-
-# ── Stage 6: DPO ──────────────────────────────────────────────────────────────
-
-prepare-dpo:
-	@echo "==> Stage 6a: Prepare DPO data"
-	$(PYTHON) alignment/data/prepare_dpo.py
-
-dpo:
-	@echo "==> Stage 6b: DPO alignment ($(SIZE), $(GPUS) GPU(s), config=$(DPO_CONFIG))"
-	$(ACCELERATE) alignment/train_dpo.py \
-		--config $(DPO_CONFIG)
-
-dpo-resume:
-	$(ACCELERATE) alignment/train_dpo.py \
-		--config $(DPO_CONFIG) \
-		--resume
-
-# ── Stage 7: Evaluation ───────────────────────────────────────────────────────
-
-eval:
-	@echo "==> Stage 7: Evaluation ($(SIZE))"
-	$(PYTHON) eval/eval.py --model results/slm-$(SIZE)-dpo/final
-
-# ── Stage 8: Export ───────────────────────────────────────────────────────────
-
-export:
-	@echo "==> Stage 8: Export to HuggingFace Hub ($(SIZE))"
-	$(PYTHON) export/export.py --model results/slm-$(SIZE)-dpo/final --size $(SIZE)
-
-# ── Stage 10: Serve ───────────────────────────────────────────────────────────
-
-serve:
-	@echo "==> Stage 10: Serve ($(SIZE))"
-	MODEL=tohio/slm-$(SIZE) ./serve/serve.sh
-
-serve-local:
-	@echo "==> Stage 10: Serve local checkpoint ($(SIZE))"
-	MODEL=results/slm-$(SIZE)-dpo/final ./serve/serve.sh
-
-# ── S3 utilities ──────────────────────────────────────────────────────────────
-
-s3-upload:
-	$(PYTHON) curator/scripts/upload_s3.py upload --src data/curated --dst curated
-
-s3-download:
-	$(PYTHON) curator/scripts/upload_s3.py download --src curated --dst data/curated
-
-s3-list:
-	$(PYTHON) curator/scripts/upload_s3.py list
-
-# ── Setup ─────────────────────────────────────────────────────────────────────
-
-setup:
-	@echo "==> Running instance setup..."
-	bash infra/setup.sh
-
-setup-data-dir:
-	@echo "==> Running instance setup with custom data dir..."
-	bash infra/setup.sh --data-dir $(DATA_DIR)
-
-install:
-	pip install -r requirements.txt
-
-install-uv:
-	uv venv && source .venv/bin/activate && uv pip install -r requirements.txt
-
-install-conda:
-	conda create -n slm python=3.12 -y && \
-	conda activate slm && \
-	pip install -r requirements.txt
-
-install-kenlm:
-	pip install https://github.com/kpu/kenlm/archive/master.zip
-
-download-kenlm-model:
-	@echo "==> Downloading KenLM English model (~4GB)..."
-	mkdir -p $(DATA_DIR)/models
-	wget -q --show-progress \
-		https://dl.fbaipublicfiles.com/cc_net/lm/en.arpa.bin \
-		-O $(DATA_DIR)/models/en.arpa.bin
-	@echo "  Saved to $(DATA_DIR)/models/en.arpa.bin"
-
-download-fasttext-model:
-	@echo "==> Downloading fasttext language identification model (~1MB)..."
-	mkdir -p $(DATA_DIR)/models
-	wget -q --show-progress \
-		https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.ftz \
-		-O $(DATA_DIR)/models/lid.176.ftz
-	@echo "  Saved to $(DATA_DIR)/models/lid.176.ftz"
-
-accelerate-config:
-	accelerate config
-
-# ── Clean ─────────────────────────────────────────────────────────────────────
-
-clean-data:
-	rm -rf data/raw data/filtered data/curated data/validated data/tokenized data/sft data/dpo data/dedup_scratch
-
-clean-results:
-	rm -rf results/
-
-clean-logs:
-	rm -rf logs/
-
-clean: clean-logs
-	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-	find . -type f -name "*.pyc" -delete 2>/dev/null || true
-
-# ── Help ──────────────────────────────────────────────────────────────────────
-
-help:
-	@echo ""
-	@echo "SLM Pipeline"
-	@echo "============"
-	@echo ""
-	@echo "Usage: make <target> [SIZE=125m|350m|1b] [GPUS=N] [WORKERS=N] [DATA_DIR=path]"
-	@echo ""
-	@echo "For full target documentation see: docs/COMMANDS.md"
-	@echo ""
-	@echo "One-time setup:"
-	@echo "  setup                    Bootstrap a fresh instance"
-	@echo "  setup-data-dir           Bootstrap with custom data dir"
-	@echo "  download-fasttext-model  Download fasttext language ID model (~1MB)"
-	@echo "  download-kenlm-model     Download KenLM English model (~4GB)"
-	@echo "  accelerate-config        Configure accelerate for multi-GPU"
-	@echo "  install                  Install dependencies (pip)"
-	@echo "  install-uv               Install dependencies (uv)"
-	@echo "  install-conda            Install dependencies (conda)"
-	@echo "  install-kenlm            Install KenLM Python bindings from source"
-	@echo ""
-	@echo "Pipeline:"
-	@echo "  curate             Stage 1  — download, curate, and upload to S3"
-	@echo "  curate-mini        Stage 1  — mini run for pipeline validation (~30 min)"
-	@echo "  validate           Stage 2  — perplexity filter and validate"
-	@echo "  validate-upload    Stage 2  — upload validated data to S3"
-	@echo "  tokenizer          Stage 3  — train BPE tokenizer"
-	@echo "  tokenize           Stage 4a — tokenize dataset to binary"
-	@echo "  pretrain           Stage 4b — pretrain from scratch"
-	@echo "  prepare-sft        Stage 5a — download SFT datasets"
-	@echo "  sft                Stage 5b — chat supervised fine-tuning"
-	@echo "  sft-code           Stage 5c — code supervised fine-tuning"
-	@echo "  prepare-dpo        Stage 6a — download DPO datasets"
-	@echo "  dpo                Stage 6b — DPO alignment"
-	@echo "  eval               Stage 7  — benchmark evaluation"
-	@echo "  export             Stage 8  — push to HuggingFace Hub"
-	@echo "  serve              Stage 10 — launch vLLM server (Hub model)"
-	@echo "  serve-local        Stage 10 — launch vLLM server (local checkpoint)"
-	@echo ""
-	@echo "Curation sub-stages:"
-	@echo "  curate-download    Download raw data only"
-	@echo "  curate-filter      Quality filter only"
-	@echo "  curate-dedup       Deduplication only"
-	@echo "  curate-blend       Blend to train.jsonl only"
-	@echo "  curate-upload      Upload curated data to S3 only"
-	@echo ""
-	@echo "Resume targets:"
-	@echo "  pretrain-resume    Resume pretraining from last checkpoint"
-	@echo "  sft-resume         Resume chat SFT from last checkpoint"
-	@echo "  sft-code-resume    Resume code SFT from last checkpoint"
-	@echo "  dpo-resume         Resume DPO from last checkpoint"
-	@echo ""
-	@echo "S3 utilities:"
-	@echo "  s3-upload          Upload curated data to S3 (unversioned)"
-	@echo "  s3-download        Download curated data from S3"
-	@echo "  s3-list            List S3 contents"
-	@echo ""
-	@echo "Clean:"
-	@echo "  clean              Remove cache files and logs"
-	@echo "  clean-data         Remove all data directories"
-	@echo "  clean-results      Remove all training results"
-	@echo "  clean-logs         Remove logs directory"
-	@echo ""
-	@echo "Examples:"
-	@echo "  make curate SIZE=125m WORKERS=16"
-	@echo "  make pretrain SIZE=125m GPUS=4"
-	@echo "  make pretrain CONFIG=pretrain/configs/gpt_1b.yaml GPUS=8"
-	@echo "  make sft SIZE=125m GPUS=4"
-	@echo "  make dpo SIZE=125m GPUS=2"
-	@echo "  make download-kenlm-model DATA_DIR=/data/slm/data"
-	@echo "  make download-fasttext-model DATA_DIR=/data/slm/data"
-	@echo ""
+"""
+pretrain/data/tokenize_data.py
+--------------------------
+Tokenize the validated JSONL dataset into a memory-mapped binary file
+for efficient pretraining.
+
+Tokenizes once, saves to disk as a flat array of uint16 token IDs.
+During training, the dataset is loaded with np.memmap — zero-copy,
+constant memory regardless of dataset size, and much faster than
+tokenizing on the fly.
+
+Format:
+    Single flat binary file of uint16 token IDs.
+    Documents are concatenated with EOS token as separator.
+    No padding — sequences are packed end-to-end.
+
+    [doc1_tok1, doc1_tok2, ..., doc1_tokN, EOS,
+     doc2_tok1, doc2_tok2, ..., doc2_tokM, EOS, ...]
+
+    uint16 supports vocab sizes up to 65,535 — sufficient for 32k vocab.
+
+Output:
+    data/tokenized/train.bin    — token IDs as uint16
+    data/tokenized/train.json   — metadata (n_tokens, n_docs, vocab_size)
+
+Usage:
+    python pretrain/data/tokenize_data.py
+    python pretrain/data/tokenize_data.py --input data/validated/train.jsonl
+    python pretrain/data/tokenize_data.py --workers 8
+"""
+
+import argparse
+import json
+import logging
+import multiprocessing as mp
+import os
+import sys
+from pathlib import Path
+
+import numpy as np
+from dotenv import load_dotenv
+from tqdm import tqdm
+
+load_dotenv()
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger(__name__)
+
+DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
+TOKENIZED_DIR = DATA_DIR / "tokenized"
+
+
+def tokenize_document(args: tuple) -> list[int]:
+    """
+    Tokenize a single document. Designed to run in a worker process.
+
+    Args:
+        args: (text, tokenizer_path, eos_id)
+
+    Returns:
+        List of token IDs with EOS appended.
+    """
+    text, tokenizer_path, eos_id = args
+    # Import inside worker to avoid serialization issues
+    from tokenizers import Tokenizer
+    tokenizer = Tokenizer.from_file(tokenizer_path)
+    encoded = tokenizer.encode(text)
+    return encoded.ids + [eos_id]
+
+
+def tokenize_dataset(
+    input_path: Path,
+    output_dir: Path,
+    tokenizer_path: Path,
+    eos_id: int = 3,
+    workers: int = 4,
+    split: str = "train",
+    shard_size: int = 100_000,
+) -> dict:
+    """
+    Tokenize a JSONL dataset to a memory-mapped binary file.
+
+    Uses multiprocessing to parallelize tokenization across documents.
+    Writes in shards to avoid holding all tokens in memory.
+
+    Args:
+        input_path: Path to validated JSONL file.
+        output_dir: Directory to write output files.
+        tokenizer_path: Path to slm_tokenizer.json.
+        eos_id: EOS token ID used as document separator. Default: 3.
+        workers: Number of parallel tokenization workers.
+        split: Dataset split name (used in output filenames).
+        shard_size: Number of documents to tokenize per batch.
+
+    Returns:
+        Metadata dict with n_tokens, n_docs, vocab_size.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    bin_path = output_dir / f"{split}.bin"
+    meta_path = output_dir / f"{split}.json"
+
+    if bin_path.exists() and meta_path.exists():
+        log.info(f"Already tokenized: {bin_path}")
+        with open(meta_path) as f:
+            return json.load(f)
+
+    log.info(f"Tokenizing {input_path} → {bin_path}")
+    log.info(f"Workers: {workers}, Shard size: {shard_size:,}")
+
+    # Count documents for progress bar
+    log.info("Counting documents...")
+    n_docs = sum(1 for _ in open(input_path))
+    log.info(f"Total documents: {n_docs:,}")
+
+    # Write tokens in shards using a memory-mapped array
+    # We don't know total tokens upfront — write to a temp list then save
+    all_tokens = []
+    n_processed = 0
+
+    tokenizer_path_str = str(tokenizer_path)
+
+    with open(input_path) as f:
+        shard = []
+        for line in tqdm(f, total=n_docs, desc="Reading", unit="doc"):
+            record = json.loads(line)
+            text = record.get("text", "").strip()
+            if text:
+                shard.append((text, tokenizer_path_str, eos_id))
+
+            if len(shard) >= shard_size:
+                tokens = _process_shard(shard, workers)
+                all_tokens.extend(tokens)
+                n_processed += len(shard)
+                shard = []
+
+        # Process remaining
+        if shard:
+            tokens = _process_shard(shard, workers)
+            all_tokens.extend(tokens)
+            n_processed += len(shard)
+
+    n_tokens = len(all_tokens)
+    log.info(f"Total tokens: {n_tokens:,} ({n_tokens / 1e9:.2f}B)")
+    log.info(f"Total documents: {n_processed:,}")
+    log.info(f"Avg tokens per document: {n_tokens // max(n_processed, 1):,}")
+
+    # Save as uint16 memory-mapped array
+    log.info(f"Writing binary file: {bin_path}")
+    arr = np.array(all_tokens, dtype=np.uint16)
+    arr.tofile(str(bin_path))
+
+    # Save metadata
+    meta = {
+        "n_tokens": n_tokens,
+        "n_docs": n_processed,
+        "eos_id": eos_id,
+        "dtype": "uint16",
+        "split": split,
+        "input": str(input_path),
+        "tokenizer": str(tokenizer_path),
+    }
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+
+    log.info(f"Metadata saved: {meta_path}")
+    log.info(f"Binary size: {bin_path.stat().st_size / 1e9:.2f} GB")
+
+    return meta
+
+
+def _process_shard(shard: list[tuple], workers: int) -> list[int]:
+    """Tokenize a shard of documents using multiprocessing."""
+    if workers <= 1:
+        from tokenizers import Tokenizer
+        tokenizer = Tokenizer.from_file(shard[0][1])
+        tokens = []
+        for text, _, eos_id in shard:
+            encoded = tokenizer.encode(text)
+            tokens.extend(encoded.ids + [eos_id])
+        return tokens
+
+    with mp.Pool(workers) as pool:
+        results = pool.map(tokenize_document, shard)
+
+    tokens = []
+    for result in results:
+        tokens.extend(result)
+    return tokens
+
+
+def verify_dataset(bin_path: Path, meta_path: Path) -> None:
+    """Quick sanity check on the tokenized dataset."""
+    with open(meta_path) as f:
+        meta = json.load(f)
+
+    arr = np.memmap(str(bin_path), dtype=np.uint16, mode="r")
+
+    log.info("=== Dataset Verification ===")
+    log.info(f"  File:         {bin_path}")
+    log.info(f"  Shape:        {arr.shape}")
+    log.info(f"  N tokens:     {len(arr):,} (expected {meta['n_tokens']:,})")
+    log.info(f"  Min token ID: {arr.min()}")
+    log.info(f"  Max token ID: {arr.max()}")
+    log.info(f"  EOS count:    {(arr == meta['eos_id']).sum():,} (≈ n_docs)")
+    log.info(f"  First 20 IDs: {arr[:20].tolist()}")
+
+    assert len(arr) == meta["n_tokens"], "Token count mismatch"
+    log.info("  ✓ Verification passed")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Tokenize dataset for pretraining")
+    parser.add_argument(
+        "--input",
+        type=Path,
+        default=DATA_DIR / "validated" / "train.jsonl",
+        help="Input JSONL file",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=TOKENIZED_DIR,
+        help="Output directory",
+    )
+    parser.add_argument(
+        "--tokenizer",
+        type=Path,
+        default=DATA_DIR / "tokenizer" / "slm_tokenizer.json",
+        help="Tokenizer JSON file",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=max(1, mp.cpu_count() - 2),
+        help="Number of parallel workers",
+    )
+    parser.add_argument(
+        "--split",
+        type=str,
+        default="train",
+        help="Split name (train/val)",
+    )
+    parser.add_argument(
+        "--verify",
+        action="store_true",
+        help="Verify output after tokenization",
+    )
+    args = parser.parse_args()
+
+    if not args.input.exists():
+        log.error(f"Input not found: {args.input}")
+        log.error("Run: python validation/scripts/validate.py")
+        sys.exit(1)
+
+    if not args.tokenizer.exists():
+        log.error(f"Tokenizer not found: {args.tokenizer}")
+        log.error("Run: python tokenizer/train_tokenizer.py")
+        sys.exit(1)
+
+    log.info(f"Input:     {args.input}")
+    log.info(f"Output:    {args.output}")
+    log.info(f"Tokenizer: {args.tokenizer}")
+    log.info(f"Workers:   {args.workers}")
+
+    meta = tokenize_dataset(
+        input_path=args.input,
+        output_dir=args.output,
+        tokenizer_path=args.tokenizer,
+        workers=args.workers,
+        split=args.split,
+    )
+
+    if args.verify:
+        verify_dataset(
+            bin_path=args.output / f"{args.split}.bin",
+            meta_path=args.output / f"{args.split}.json",
+        )
+
+    log.info("Tokenization complete.")
+    log.info(f"Next step: python pretrain/train.py")
+
+
+if __name__ == "__main__":
+    main()

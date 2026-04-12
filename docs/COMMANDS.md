@@ -1,665 +1,290 @@
-# SLM Pipeline — Command Reference
-
-Complete reference for all `make` targets. For a high-level overview of the pipeline see the [README](README.md).
-
----
-
-## Variables
-
-All targets accept these variables as overrides:
-
-| Variable | Default | Description |
-|---|---|---|
-| `SIZE` | `125m` | Model size target — controls data volume and config selection. One of `125m`, `350m`, `1b`. |
-| `GPUS` | `1` | Number of GPUs for `accelerate launch`. Used by `pretrain`, `sft`, `sft-code`, `dpo`. |
-| `WORKERS` | _(cpu_count // 2)_ | Parallel workers for the dedup stage. |
-| `DATA_DIR` | `data` | Root data directory. Override when using a separate EBS volume. |
-| `CONFIG` | _(derived from SIZE)_ | Explicit path to a YAML config file. Overrides the SIZE-derived default. |
-
----
-
-## One-Time Setup
-
-These targets are run once per instance before the pipeline starts.
-
----
-
-### `make setup`
-
-Bootstraps a fresh Ubuntu instance for curation. Installs system dependencies, configures the environment, and sets up the default data directory at `repo/data`.
-
-```bash
-make setup
-```
-
-**Use instead:** `make setup-data-dir` when using a separate EBS volume (recommended).
-
----
-
-### `make setup-data-dir`
-
-Same as `setup` but configures a custom data directory. Use when data lives on a separate EBS volume so it survives spot interruptions.
-
-```bash
-make setup-data-dir DATA_DIR=/data/slm/data
-```
-
-**Produces:** Configured instance with `DATA_DIR` set in the environment.
-
----
-
-### `make install`
-
-Installs Python dependencies from `requirements.txt` using pip.
-
-```bash
-make install
-```
-
----
-
-### `make install-uv`
-
-Installs Python dependencies using `uv` (faster alternative to pip). Creates a `.venv` virtualenv first.
-
-```bash
-make install-uv
-```
-
----
-
-### `make install-conda`
-
-Creates a conda environment named `slm` and installs dependencies.
-
-```bash
-make install-conda
-```
-
----
-
-### `make install-kenlm`
-
-Installs the KenLM Python bindings from source. Required for the validation stage. KenLM is not on PyPI so this cannot be included in `requirements.txt`.
-
-```bash
-make install-kenlm
-```
-
-**Must run before:** `make validate` or `make download-kenlm-model`.
-
----
-
-### `make download-fasttext-model`
-
-Downloads the fasttext language identification model (`lid.176.ftz`, ~1MB) to `DATA_DIR/models/`. Required by the Common Crawl download stage for English language filtering.
-
-```bash
-make download-fasttext-model
-make download-fasttext-model DATA_DIR=/data/slm/data
-```
-
-**Produces:** `data/models/lid.176.ftz`
-**Must run before:** Any `curate` or `curate-download` target.
-
----
-
-### `make download-kenlm-model`
-
-Downloads the KenLM English language model (`en.arpa.bin`, ~4GB) to `DATA_DIR/models/`. Required by the validation stage for perplexity filtering.
-
-```bash
-make download-kenlm-model
-make download-kenlm-model DATA_DIR=/data/slm/data
-```
-
-**Produces:** `data/models/en.arpa.bin`
-**Must run before:** `make validate`.
-
----
-
-### `make accelerate-config`
-
-Launches the interactive `accelerate config` wizard. Run once on a GPU instance before any distributed training target (`pretrain`, `sft`, `sft-code`, `dpo`).
-
-```bash
-make accelerate-config
-```
-
----
-
-## Stage 1 — Data Curation
-
-Downloads raw data from three sources (Wikipedia, CodeSearchNet, Common Crawl), applies quality filters, deduplicates, blends to target token ratios, and uploads to S3.
-
----
-
-### `make curate`
-
-Runs the full curation pipeline end-to-end: download → filter → dedup → blend → upload to S3.
-
-```bash
-make curate SIZE=125m WORKERS=16
-make curate SIZE=350m WORKERS=32
-```
-
-**Requires:** fasttext model downloaded, AWS credentials in `.env`, S3 bucket configured.
-**Produces:** `data/curated/train.jsonl`, `data/curated/blend_stats.json`, uploaded to S3.
-**Note:** Already includes the S3 upload step — do not follow with `make curate-upload`.
-
----
-
-### `make curate-mini`
-
-Runs a minimal curation pipeline for pipeline validation. Caps Wikipedia at 5k docs, CodeSearchNet at 10k samples (Python + JS only), and Common Crawl at 2 WARC segments. Total runtime ~30–45 min.
-
-```bash
-make curate-mini
-```
-
-**Use for:** Validating the full pipeline end-to-end before committing to a full run. Not suitable for training.
-
----
-
-### `make curate-download`
-
-Runs the download stage only — fetches Wikipedia, CodeSearchNet, and Common Crawl raw data.
-
-```bash
-make curate-download SIZE=125m
-```
-
-**Produces:** `data/raw/wikipedia/`, `data/raw/code/`, `data/raw/common_crawl/`
-**Resume behaviour:** Wikipedia and code skip shards already on disk. Common Crawl resumes from `data/raw/common_crawl/cc_progress.json` — delete that file to force a full re-download.
-
----
-
-### `make curate-filter`
-
-Runs quality filtering on all raw shards. Applies heuristic filters (FineWeb/Gopher-style) to remove low-quality documents.
-
-```bash
-make curate-filter SIZE=125m
-```
-
-**Requires:** `data/raw/` populated by `make curate-download`.
-**Produces:** `data/filtered/wikipedia/`, `data/filtered/code/`, `data/filtered/common_crawl/`
-**Resume behaviour:** Skips shards already present in the filtered output directory.
-
----
-
-### `make curate-dedup`
-
-Runs deduplication on all filtered shards. Two stages: exact SHA-256 dedup (cross-source), then fuzzy MinHash LSH dedup via datatrove (disk-based, bounded RAM).
-
-```bash
-make curate-dedup SIZE=125m WORKERS=16
-```
-
-**Requires:** `data/filtered/` populated by `make curate-filter`.
-**Produces:** `data/filtered/wikipedia_deduped/`, `data/filtered/code_deduped/`, `data/filtered/common_crawl_deduped/`
-**Resume behaviour:** Skips sources where the deduped output directory already exists.
-
----
-
-### `make curate-blend`
-
-Blends deduped sources to the target token ratio (70% CC / 20% Wikipedia / 10% code) and writes the final `train.jsonl`. Uses streaming to keep peak RAM at O(1).
-
-```bash
-make curate-blend SIZE=125m
-```
-
-**Requires:** All `*_deduped/` directories populated by `make curate-dedup`.
-**Produces:** `data/curated/train.jsonl`, `data/curated/blend_stats.json`
-**Resume behaviour:** Skips if `train.jsonl` already exists — delete it to re-blend.
-
----
-
-### `make curate-upload`
-
-Uploads `data/curated/` to S3 under a versioned path: `{target}/{date}/curated/`. Each run gets its own dated folder so multiple runs never overwrite each other.
-
-```bash
-make curate-upload SIZE=125m
-```
-
-**Requires:** `data/curated/train.jsonl` produced by `make curate-blend`.
-**Produces:** `s3://your-bucket/slm/data/125m/YYYY-MM-DD/curated/`
-**Note:** `make curate` already includes this step — only use `curate-upload` when running stages individually.
-
----
-
-## Stage 2 — Validation
-
-Applies a second round of quality filtering and perplexity filtering to the blended dataset using KenLM.
-
----
-
-### `make validate`
-
-Runs the validation pipeline on `data/curated/train.jsonl`. Filters on terminal punctuation, repeated lines, and perplexity (auto-threshold at 90th percentile).
-
-```bash
-make validate
-```
-
-**Requires:** `data/curated/train.jsonl`, KenLM model at `data/models/en.arpa.bin`.
-**Produces:** `data/validated/train.jsonl`, `data/validated/validation_stats.json`
-
----
-
-### `make validate-upload`
-
-Uploads `data/validated/` to S3 under a versioned path: `{target}/{date}/validated/`. Implemented in `validation/scripts/upload_validated.py`, which mirrors the curated upload but uses the `validated` S3 path segment so the two artifacts are stored independently.
-
-```bash
-make validate-upload SIZE=125m
-```
-
-**Requires:** `data/validated/train.jsonl` produced by `make validate`.
-**Produces:** `s3://your-bucket/slm/data/125m/YYYY-MM-DD/validated/train.jsonl`
-**Note:** Re-uploading on the same day overwrites that day's run. Runs on different days are preserved independently.
-
----
-
-### `make validate-datatrove`
-
-Alternative validation using datatrove's pipeline instead of the manual implementation. Produces equivalent output with different internals.
-
-```bash
-make validate-datatrove
-```
-
----
-
-## Stage 3 — Tokenizer
-
-Trains a BPE tokenizer on the curated dataset.
-
----
-
-### `make tokenizer`
-
-Trains a BPE tokenizer with a 32k vocabulary and 16 special tokens (`<|user|>`, `<|assistant|>`, `<|code|>`, `<|endofturn|>`, etc.) on `data/curated/train.jsonl`.
-
-```bash
-make tokenizer
-```
-
-**Requires:** `data/curated/train.jsonl`
-**Produces:** `data/tokenizer/` (vocab, merges, config)
-
----
-
-### `make tokenizer-test`
-
-Runs roundtrip, fertility, and chat template tests on the trained tokenizer.
-
-```bash
-make tokenizer-test
-```
-
-**Requires:** `data/tokenizer/` produced by `make tokenizer`.
-
----
-
-## Stage 4 — Pretraining
-
-Tokenizes the dataset to binary format and runs pretraining from scratch.
-
----
-
-### `make tokenize`
-
-Tokenizes `data/validated/train.jsonl` to a memory-mapped uint16 binary file using 8 workers. Verifies the output after writing.
-
-```bash
-make tokenize
-```
-
-**Requires:** `data/validated/train.jsonl`, `data/tokenizer/`
-**Produces:** `data/tokenized/train.bin`
-
----
-
-### `make pretrain`
-
-Runs pretraining from scratch using `accelerate launch`. Config is derived from `SIZE` by default.
-
-```bash
-make pretrain SIZE=125m GPUS=4
-make pretrain SIZE=350m GPUS=6
-make pretrain SIZE=1b   GPUS=8
-
-# Override config explicitly
-make pretrain CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
-```
-
-**Requires:** `data/tokenized/train.bin`, `data/tokenizer/`, accelerate configured.
-**Produces:** `results/slm-$(SIZE)/` checkpoints, W&B run.
-
----
-
-### `make pretrain-resume`
-
-Resumes pretraining from the last checkpoint.
-
-```bash
-make pretrain-resume SIZE=125m GPUS=4
-```
-
-**Requires:** Existing checkpoint in `results/slm-$(SIZE)/`.
-
----
-
-## Stage 5 — Supervised Fine-Tuning
-
-Fine-tunes the pretrained model on chat and code datasets using `trl`'s `SFTTrainer`.
-
----
-
-### `make prepare-sft`
-
-Downloads and prepares both chat and code SFT datasets.
-
-```bash
-make prepare-sft
-```
-
-**Produces:** `data/sft/chat/`, `data/sft/code/`
-
----
-
-### `make sft`
-
-Runs chat supervised fine-tuning on the pretrained checkpoint.
-
-```bash
-make sft SIZE=125m GPUS=4
-make sft CONFIG=finetune/configs/sft_chat_125m.yaml GPUS=4
-```
-
-**Requires:** `results/slm-$(SIZE)/final`, `data/sft/chat/`
-**Produces:** `results/slm-$(SIZE)-sft/` checkpoints.
-
----
-
-### `make sft-resume`
-
-Resumes chat SFT from the last checkpoint.
-
-```bash
-make sft-resume SIZE=125m GPUS=4
-```
-
----
-
-### `make sft-code`
-
-Runs code supervised fine-tuning on the chat SFT checkpoint. Uses a lower learning rate than chat SFT to reduce catastrophic forgetting.
-
-```bash
-make sft-code SIZE=125m GPUS=4
-```
-
-**Requires:** `results/slm-$(SIZE)-sft/final`, `data/sft/code/`
-**Produces:** `results/slm-$(SIZE)-sft-code/` checkpoints.
-
----
-
-### `make sft-code-resume`
-
-Resumes code SFT from the last checkpoint.
-
-```bash
-make sft-code-resume SIZE=125m GPUS=4
-```
-
----
-
-## Stage 6 — Preference Alignment
-
-Aligns the fine-tuned model using Direct Preference Optimisation (DPO).
-
----
-
-### `make prepare-dpo`
-
-Downloads and prepares the DPO preference dataset blend.
-
-```bash
-make prepare-dpo
-```
-
-**Produces:** `data/dpo/`
-
----
-
-### `make dpo`
-
-Runs DPO alignment on the SFT checkpoint using `trl`'s `DPOTrainer`. No separate reward model required.
-
-```bash
-make dpo SIZE=125m GPUS=2
-make dpo CONFIG=alignment/configs/dpo_125m.yaml GPUS=2
-```
-
-**Requires:** `results/slm-$(SIZE)-sft-code/final`, `data/dpo/`
-**Produces:** `results/slm-$(SIZE)-dpo/` checkpoints.
-
----
-
-### `make dpo-resume`
-
-Resumes DPO from the last checkpoint.
-
-```bash
-make dpo-resume SIZE=125m GPUS=2
-```
-
----
-
-## Stage 7 — Evaluation
-
----
-
-### `make eval`
-
-Evaluates the final DPO checkpoint on standard benchmarks via `lm-evaluation-harness`: HellaSwag, ARC-Easy, ARC-Challenge, MMLU, TruthfulQA, HumanEval.
-
-```bash
-make eval SIZE=125m
-```
-
-**Requires:** `results/slm-$(SIZE)-dpo/final`
-**Produces:** Benchmark results printed to stdout and saved to `results/slm-$(SIZE)-dpo/eval/`.
-
----
-
-## Stage 8 — Export
-
----
-
-### `make export`
-
-Exports the final DPO checkpoint to HuggingFace Hub as `tohio/slm-$(SIZE)`. Generates a model card automatically.
-
-```bash
-make export SIZE=125m
-```
-
-**Requires:** `results/slm-$(SIZE)-dpo/final`, `HF_TOKEN` in `.env`.
-**Produces:** `tohio/slm-$(SIZE)` on HuggingFace Hub.
-
----
-
-## Stage 10 — Serving
-
----
-
-### `make serve`
-
-Launches a vLLM server using the Hub model. Exposes an OpenAI-compatible REST API.
-
-```bash
-make serve SIZE=125m
-```
-
-**Requires:** Model exported to `tohio/slm-$(SIZE)` on HuggingFace Hub, vLLM installed.
-
----
-
-### `make serve-local`
-
-Launches a vLLM server using a local checkpoint instead of the Hub model. Useful for testing before export.
-
-```bash
-make serve-local SIZE=125m
-```
-
-**Requires:** `results/slm-$(SIZE)-dpo/final`
-
----
-
-## S3 Utilities
-
-Low-level S3 operations for manual data management. Prefer the stage-specific upload targets (`curate-upload`, `validate-upload`) for normal pipeline use.
-
----
-
-### `make s3-upload`
-
-Uploads `data/curated/` to S3 at the `curated/` prefix. Unlike `curate-upload`, this is not versioned by date — it overwrites.
-
-```bash
-make s3-upload
-```
-
----
-
-### `make s3-download`
-
-Downloads curated data from S3 at the `curated/` prefix to `data/curated/`.
-
-```bash
-make s3-download
-```
-
----
-
-### `make s3-list`
-
-Lists all objects in the configured S3 bucket under the SLM prefix.
-
-```bash
-make s3-list
-```
-
----
-
-## Clean
-
----
-
-### `make clean`
-
-Removes Python cache files (`__pycache__`, `*.pyc`) and log directories. Safe to run at any time — does not touch data or results.
-
-```bash
-make clean
-```
-
----
-
-### `make clean-data`
-
-Removes all data directories: `data/raw`, `data/filtered`, `data/curated`, `data/validated`, `data/tokenized`, `data/sft`, `data/dpo`, `data/dedup_scratch`.
-
-```bash
-make clean-data
-```
-
-⚠️ **Destructive** — does not remove `data/models/`. Does not affect S3.
-
----
-
-### `make clean-results`
-
-Removes all training results: `results/`.
-
-```bash
-make clean-results
-```
-
-⚠️ **Destructive** — removes all checkpoints. Ensure results are exported or backed up first.
-
----
-
-### `make clean-logs`
-
-Removes the `logs/` directory.
-
-```bash
-make clean-logs
-```
-
----
-
-## Infrastructure
-
-### Data Curation (CPU) — Stages 1–4a
-
-| Target | Instance | RAM | Est. runtime |
-|---|---|---|---|
-| mini (validation) | Any CPU | 4GB+ | ~30–45 min |
-| 125m | `c8g.4xlarge` (16 vCPU) | 32GB | ~12–16 hrs |
-| 350m | `c8g.4xlarge` (16 vCPU) | 32GB | ~40–50 hrs |
-| 1b | `c8g.8xlarge` (32 vCPU) | 64GB | ~96–120 hrs |
-
-Run on AWS spot in `us-east-1` to minimise Common Crawl egress latency. Attach an EBS volume (`gp3`, 500GB) for `DATA_DIR` so data survives spot interruptions.
-
-### Training (GPU) — Stages 4b–6
-
-| Target | Instance | GPUs | VRAM | Est. pretrain runtime |
-|---|---|---|---|---|
-| 125m | `g5.12xlarge` (4× A10G) | 4 | 96GB | ~12–18 hrs |
-| 350m | `p4d.24xlarge` (8× A100 40GB) | 8 | 320GB | ~24–36 hrs |
-| 1b | `p4d.24xlarge` (8× A100 40GB) | 8 | 320GB | ~72–96 hrs |
-
-SFT and DPO runtimes are roughly 20–30% of pretraining time at the same model size. All training loops support `--resume` from the last checkpoint. Run `make accelerate-config` once on the GPU instance before training.
-
----
-
-## Full Pipeline Reference
-
-Correct end-to-end sequence for a fresh run:
-
-```bash
-# ── One-time setup ─────────────────────────────────────────────────────────────
-make download-fasttext-model DATA_DIR=/data/slm/data   # ~1MB, for CC language filtering
-make download-kenlm-model    DATA_DIR=/data/slm/data   # ~4GB, for validation perplexity
-make accelerate-config                                  # GPU instance only, run once
-
-# ── Data ───────────────────────────────────────────────────────────────────────
-make curate SIZE=125m WORKERS=16    # Stage 1: download, curate, upload to S3
-make validate                       # Stage 2: perplexity filter
-make validate-upload SIZE=125m      # Stage 2: push validated data to S3
-
-# ── Tokenizer ──────────────────────────────────────────────────────────────────
-make tokenizer                      # Stage 3: train BPE tokenizer
-make tokenize                       # Stage 4a: tokenize to binary
-
-# ── Training ───────────────────────────────────────────────────────────────────
-make pretrain GPUS=4                # Stage 4b: pretrain from scratch
-make prepare-sft                    # Stage 5a: download SFT datasets
-make sft      GPUS=4                # Stage 5b: chat SFT
-make sft-code GPUS=4                # Stage 5c: code SFT
-make prepare-dpo                    # Stage 6a: download DPO datasets
-make dpo      GPUS=2                # Stage 6b: DPO alignment
-
-# ── Ship ───────────────────────────────────────────────────────────────────────
-make eval                           # Stage 7: benchmark evaluation
-make export                         # Stage 8: push to HuggingFace Hub
-make serve                          # Stage 10: launch vLLM server
-```
+"""
+pretrain/data/tokenize_data.py
+--------------------------
+Tokenize the validated JSONL dataset into a memory-mapped binary file
+for efficient pretraining.
+
+Tokenizes once, saves to disk as a flat array of uint16 token IDs.
+During training, the dataset is loaded with np.memmap — zero-copy,
+constant memory regardless of dataset size, and much faster than
+tokenizing on the fly.
+
+Format:
+    Single flat binary file of uint16 token IDs.
+    Documents are concatenated with EOS token as separator.
+    No padding — sequences are packed end-to-end.
+
+    [doc1_tok1, doc1_tok2, ..., doc1_tokN, EOS,
+     doc2_tok1, doc2_tok2, ..., doc2_tokM, EOS, ...]
+
+    uint16 supports vocab sizes up to 65,535 — sufficient for 32k vocab.
+
+Output:
+    data/tokenized/train.bin    — token IDs as uint16
+    data/tokenized/train.json   — metadata (n_tokens, n_docs, vocab_size)
+
+Usage:
+    python pretrain/data/tokenize_data.py
+    python pretrain/data/tokenize_data.py --input data/validated/train.jsonl
+    python pretrain/data/tokenize_data.py --workers 8
+"""
+
+import argparse
+import json
+import logging
+import multiprocessing as mp
+import os
+import sys
+from pathlib import Path
+
+import numpy as np
+from dotenv import load_dotenv
+from tqdm import tqdm
+
+load_dotenv()
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger(__name__)
+
+DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
+TOKENIZED_DIR = DATA_DIR / "tokenized"
+
+
+def tokenize_document(args: tuple) -> list[int]:
+    """
+    Tokenize a single document. Designed to run in a worker process.
+
+    Args:
+        args: (text, tokenizer_path, eos_id)
+
+    Returns:
+        List of token IDs with EOS appended.
+    """
+    text, tokenizer_path, eos_id = args
+    # Import inside worker to avoid serialization issues
+    from tokenizers import Tokenizer
+    tokenizer = Tokenizer.from_file(tokenizer_path)
+    encoded = tokenizer.encode(text)
+    return encoded.ids + [eos_id]
+
+
+def tokenize_dataset(
+    input_path: Path,
+    output_dir: Path,
+    tokenizer_path: Path,
+    eos_id: int = 3,
+    workers: int = 4,
+    split: str = "train",
+    shard_size: int = 100_000,
+) -> dict:
+    """
+    Tokenize a JSONL dataset to a memory-mapped binary file.
+
+    Uses multiprocessing to parallelize tokenization across documents.
+    Writes in shards to avoid holding all tokens in memory.
+
+    Args:
+        input_path: Path to validated JSONL file.
+        output_dir: Directory to write output files.
+        tokenizer_path: Path to slm_tokenizer.json.
+        eos_id: EOS token ID used as document separator. Default: 3.
+        workers: Number of parallel tokenization workers.
+        split: Dataset split name (used in output filenames).
+        shard_size: Number of documents to tokenize per batch.
+
+    Returns:
+        Metadata dict with n_tokens, n_docs, vocab_size.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    bin_path = output_dir / f"{split}.bin"
+    meta_path = output_dir / f"{split}.json"
+
+    if bin_path.exists() and meta_path.exists():
+        log.info(f"Already tokenized: {bin_path}")
+        with open(meta_path) as f:
+            return json.load(f)
+
+    log.info(f"Tokenizing {input_path} → {bin_path}")
+    log.info(f"Workers: {workers}, Shard size: {shard_size:,}")
+
+    # Count documents for progress bar
+    log.info("Counting documents...")
+    n_docs = sum(1 for _ in open(input_path))
+    log.info(f"Total documents: {n_docs:,}")
+
+    # Write tokens in shards using a memory-mapped array
+    # We don't know total tokens upfront — write to a temp list then save
+    all_tokens = []
+    n_processed = 0
+
+    tokenizer_path_str = str(tokenizer_path)
+
+    with open(input_path) as f:
+        shard = []
+        for line in tqdm(f, total=n_docs, desc="Reading", unit="doc"):
+            record = json.loads(line)
+            text = record.get("text", "").strip()
+            if text:
+                shard.append((text, tokenizer_path_str, eos_id))
+
+            if len(shard) >= shard_size:
+                tokens = _process_shard(shard, workers)
+                all_tokens.extend(tokens)
+                n_processed += len(shard)
+                shard = []
+
+        # Process remaining
+        if shard:
+            tokens = _process_shard(shard, workers)
+            all_tokens.extend(tokens)
+            n_processed += len(shard)
+
+    n_tokens = len(all_tokens)
+    log.info(f"Total tokens: {n_tokens:,} ({n_tokens / 1e9:.2f}B)")
+    log.info(f"Total documents: {n_processed:,}")
+    log.info(f"Avg tokens per document: {n_tokens // max(n_processed, 1):,}")
+
+    # Save as uint16 memory-mapped array
+    log.info(f"Writing binary file: {bin_path}")
+    arr = np.array(all_tokens, dtype=np.uint16)
+    arr.tofile(str(bin_path))
+
+    # Save metadata
+    meta = {
+        "n_tokens": n_tokens,
+        "n_docs": n_processed,
+        "eos_id": eos_id,
+        "dtype": "uint16",
+        "split": split,
+        "input": str(input_path),
+        "tokenizer": str(tokenizer_path),
+    }
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+
+    log.info(f"Metadata saved: {meta_path}")
+    log.info(f"Binary size: {bin_path.stat().st_size / 1e9:.2f} GB")
+
+    return meta
+
+
+def _process_shard(shard: list[tuple], workers: int) -> list[int]:
+    """Tokenize a shard of documents using multiprocessing."""
+    if workers <= 1:
+        from tokenizers import Tokenizer
+        tokenizer = Tokenizer.from_file(shard[0][1])
+        tokens = []
+        for text, _, eos_id in shard:
+            encoded = tokenizer.encode(text)
+            tokens.extend(encoded.ids + [eos_id])
+        return tokens
+
+    with mp.Pool(workers) as pool:
+        results = pool.map(tokenize_document, shard)
+
+    tokens = []
+    for result in results:
+        tokens.extend(result)
+    return tokens
+
+
+def verify_dataset(bin_path: Path, meta_path: Path) -> None:
+    """Quick sanity check on the tokenized dataset."""
+    with open(meta_path) as f:
+        meta = json.load(f)
+
+    arr = np.memmap(str(bin_path), dtype=np.uint16, mode="r")
+
+    log.info("=== Dataset Verification ===")
+    log.info(f"  File:         {bin_path}")
+    log.info(f"  Shape:        {arr.shape}")
+    log.info(f"  N tokens:     {len(arr):,} (expected {meta['n_tokens']:,})")
+    log.info(f"  Min token ID: {arr.min()}")
+    log.info(f"  Max token ID: {arr.max()}")
+    log.info(f"  EOS count:    {(arr == meta['eos_id']).sum():,} (≈ n_docs)")
+    log.info(f"  First 20 IDs: {arr[:20].tolist()}")
+
+    assert len(arr) == meta["n_tokens"], "Token count mismatch"
+    log.info("  ✓ Verification passed")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Tokenize dataset for pretraining")
+    parser.add_argument(
+        "--input",
+        type=Path,
+        default=DATA_DIR / "validated" / "train.jsonl",
+        help="Input JSONL file",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=TOKENIZED_DIR,
+        help="Output directory",
+    )
+    parser.add_argument(
+        "--tokenizer",
+        type=Path,
+        default=DATA_DIR / "tokenizer" / "slm_tokenizer.json",
+        help="Tokenizer JSON file",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=max(1, mp.cpu_count() - 2),
+        help="Number of parallel workers",
+    )
+    parser.add_argument(
+        "--split",
+        type=str,
+        default="train",
+        help="Split name (train/val)",
+    )
+    parser.add_argument(
+        "--verify",
+        action="store_true",
+        help="Verify output after tokenization",
+    )
+    args = parser.parse_args()
+
+    if not args.input.exists():
+        log.error(f"Input not found: {args.input}")
+        log.error("Run: python validation/scripts/validate.py")
+        sys.exit(1)
+
+    if not args.tokenizer.exists():
+        log.error(f"Tokenizer not found: {args.tokenizer}")
+        log.error("Run: python tokenizer/train_tokenizer.py")
+        sys.exit(1)
+
+    log.info(f"Input:     {args.input}")
+    log.info(f"Output:    {args.output}")
+    log.info(f"Tokenizer: {args.tokenizer}")
+    log.info(f"Workers:   {args.workers}")
+
+    meta = tokenize_dataset(
+        input_path=args.input,
+        output_dir=args.output,
+        tokenizer_path=args.tokenizer,
+        workers=args.workers,
+        split=args.split,
+    )
+
+    if args.verify:
+        verify_dataset(
+            bin_path=args.output / f"{args.split}.bin",
+            meta_path=args.output / f"{args.split}.json",
+        )
+
+    log.info("Tokenization complete.")
+    log.info(f"Next step: python pretrain/train.py")
+
+
+if __name__ == "__main__":
+    main()

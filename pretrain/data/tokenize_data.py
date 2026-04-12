@@ -23,10 +23,17 @@ Output:
     data/tokenized/train.bin    — token IDs as uint16
     data/tokenized/train.json   — metadata (n_tokens, n_docs, vocab_size)
 
+Performance notes:
+    - Tokenizer is loaded once per worker process (not per document)
+    - Documents are batched into chunks before dispatch to amortise IPC overhead
+    - Tokens are streamed directly to disk in shard-sized chunks — peak RAM
+      is O(shard_size) not O(corpus_size)
+    - One persistent mp.Pool for the full run — no per-shard pool startup cost
+
 Usage:
     python pretrain/data/tokenize_data.py
     python pretrain/data/tokenize_data.py --input data/validated/train.jsonl
-    python pretrain/data/tokenize_data.py --workers 8
+    python pretrain/data/tokenize_data.py --workers 24
 """
 
 import argparse
@@ -35,6 +42,7 @@ import logging
 import multiprocessing as mp
 import os
 import sys
+from itertools import chain
 from pathlib import Path
 
 import numpy as np
@@ -55,23 +63,45 @@ log = logging.getLogger(__name__)
 DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
 TOKENIZED_DIR = DATA_DIR / "tokenized"
 
+# Global tokenizer instance — loaded once per worker process via initializer,
+# not once per document. Avoids 3.4M tokenizer loads in the original code.
+_worker_tokenizer = None
+_worker_eos_id = None
 
-def tokenize_document(args: tuple) -> list[int]:
+
+def _worker_init(tokenizer_path: str, eos_id: int) -> None:
     """
-    Tokenize a single document. Designed to run in a worker process.
+    Initialize the tokenizer once per worker process.
 
-    Args:
-        args: (text, tokenizer_path, eos_id)
-
-    Returns:
-        List of token IDs with EOS appended.
+    Called by mp.Pool as the initializer — runs once when each worker
+    process starts, not once per task. The tokenizer is stored as a
+    module-level global so all tasks in that worker reuse it.
     """
-    text, tokenizer_path, eos_id = args
-    # Import inside worker to avoid serialization issues
+    global _worker_tokenizer, _worker_eos_id
     from tokenizers import Tokenizer
-    tokenizer = Tokenizer.from_file(tokenizer_path)
-    encoded = tokenizer.encode(text)
-    return encoded.ids + [eos_id]
+    _worker_tokenizer = Tokenizer.from_file(tokenizer_path)
+    _worker_eos_id = eos_id
+
+
+def _tokenize_chunk(texts: list[str]) -> list[int]:
+    """
+    Tokenize a chunk of documents in a single worker task.
+
+    Receives a list of texts, encodes them all using the process-local
+    tokenizer (loaded once via _worker_init), and returns a flat list
+    of token IDs with EOS appended after each document.
+
+    Batching documents into chunks (rather than one doc per task) amortises
+    the multiprocessing IPC overhead across many documents per round-trip.
+    """
+    global _worker_tokenizer, _worker_eos_id
+    tokens = []
+    # encode_batch encodes all texts in one call — faster than a loop
+    encodings = _worker_tokenizer.encode_batch(texts)
+    for enc in encodings:
+        tokens.extend(enc.ids)
+        tokens.append(_worker_eos_id)
+    return tokens
 
 
 def tokenize_dataset(
@@ -82,24 +112,30 @@ def tokenize_dataset(
     workers: int = 4,
     split: str = "train",
     shard_size: int = 100_000,
+    chunk_size: int = 256,
 ) -> dict:
     """
     Tokenize a JSONL dataset to a memory-mapped binary file.
 
-    Uses multiprocessing to parallelize tokenization across documents.
-    Writes in shards to avoid holding all tokens in memory.
+    Uses a persistent multiprocessing pool with one tokenizer per worker
+    process. Documents are batched into chunks before dispatch to amortise
+    IPC overhead. Tokens are streamed to disk in shard-sized batches so
+    peak RAM is O(shard_size), not O(corpus_size).
 
     Args:
-        input_path: Path to validated JSONL file.
-        output_dir: Directory to write output files.
+        input_path:    Path to validated JSONL file.
+        output_dir:    Directory to write output files.
         tokenizer_path: Path to slm_tokenizer.json.
-        eos_id: EOS token ID used as document separator. Default: 3.
-        workers: Number of parallel tokenization workers.
-        split: Dataset split name (used in output filenames).
-        shard_size: Number of documents to tokenize per batch.
+        eos_id:        EOS token ID used as document separator. Default: 3.
+        workers:       Number of parallel tokenization worker processes.
+        split:         Dataset split name (used in output filenames).
+        shard_size:    Documents per shard — controls how often tokens are
+                       flushed to disk. Lower = less RAM, more I/O.
+        chunk_size:    Documents per worker task. Higher = less IPC overhead,
+                       more latency before first result.
 
     Returns:
-        Metadata dict with n_tokens, n_docs, vocab_size.
+        Metadata dict with n_tokens, n_docs, etc.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     bin_path = output_dir / f"{split}.bin"
@@ -111,49 +147,57 @@ def tokenize_dataset(
             return json.load(f)
 
     log.info(f"Tokenizing {input_path} → {bin_path}")
-    log.info(f"Workers: {workers}, Shard size: {shard_size:,}")
+    log.info(f"Workers: {workers}, Shard size: {shard_size:,}, Chunk size: {chunk_size}")
 
     # Count documents for progress bar
     log.info("Counting documents...")
     n_docs = sum(1 for _ in open(input_path))
     log.info(f"Total documents: {n_docs:,}")
 
-    # Write tokens in shards using a memory-mapped array
-    # We don't know total tokens upfront — write to a temp list then save
-    all_tokens = []
+    tokenizer_path_str = str(tokenizer_path)
+    n_tokens = 0
     n_processed = 0
 
-    tokenizer_path_str = str(tokenizer_path)
+    # Open output file for streaming writes — no large in-memory accumulation
+    with open(bin_path, "wb") as bin_file, \
+         open(input_path) as f, \
+         mp.Pool(
+             processes=workers,
+             initializer=_worker_init,
+             initargs=(tokenizer_path_str, eos_id),
+         ) as pool:
 
-    with open(input_path) as f:
-        shard = []
-        for line in tqdm(f, total=n_docs, desc="Reading", unit="doc"):
+        shard_texts: list[str] = []
+        pbar = tqdm(total=n_docs, desc="Tokenizing", unit="doc")
+
+        for line in f:
             record = json.loads(line)
             text = record.get("text", "").strip()
             if text:
-                shard.append((text, tokenizer_path_str, eos_id))
+                shard_texts.append(text)
 
-            if len(shard) >= shard_size:
-                tokens = _process_shard(shard, workers)
-                all_tokens.extend(tokens)
-                n_processed += len(shard)
-                shard = []
+            if len(shard_texts) >= shard_size:
+                tokens = _flush_shard(shard_texts, pool, chunk_size)
+                _write_tokens(tokens, bin_file)
+                n_tokens += len(tokens)
+                n_processed += len(shard_texts)
+                pbar.update(len(shard_texts))
+                shard_texts = []
 
-        # Process remaining
-        if shard:
-            tokens = _process_shard(shard, workers)
-            all_tokens.extend(tokens)
-            n_processed += len(shard)
+        # Flush remainder
+        if shard_texts:
+            tokens = _flush_shard(shard_texts, pool, chunk_size)
+            _write_tokens(tokens, bin_file)
+            n_tokens += len(tokens)
+            n_processed += len(shard_texts)
+            pbar.update(len(shard_texts))
 
-    n_tokens = len(all_tokens)
-    log.info(f"Total tokens: {n_tokens:,} ({n_tokens / 1e9:.2f}B)")
-    log.info(f"Total documents: {n_processed:,}")
-    log.info(f"Avg tokens per document: {n_tokens // max(n_processed, 1):,}")
+        pbar.close()
 
-    # Save as uint16 memory-mapped array
-    log.info(f"Writing binary file: {bin_path}")
-    arr = np.array(all_tokens, dtype=np.uint16)
-    arr.tofile(str(bin_path))
+    log.info(f"Total tokens:     {n_tokens:,} ({n_tokens / 1e9:.2f}B)")
+    log.info(f"Total documents:  {n_processed:,}")
+    log.info(f"Avg tokens/doc:   {n_tokens // max(n_processed, 1):,}")
+    log.info(f"Binary size:      {bin_path.stat().st_size / 1e9:.2f} GB")
 
     # Save metadata
     meta = {
@@ -167,31 +211,31 @@ def tokenize_dataset(
     }
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
-
-    log.info(f"Metadata saved: {meta_path}")
-    log.info(f"Binary size: {bin_path.stat().st_size / 1e9:.2f} GB")
+    log.info(f"Metadata saved:   {meta_path}")
 
     return meta
 
 
-def _process_shard(shard: list[tuple], workers: int) -> list[int]:
-    """Tokenize a shard of documents using multiprocessing."""
-    if workers <= 1:
-        from tokenizers import Tokenizer
-        tokenizer = Tokenizer.from_file(shard[0][1])
-        tokens = []
-        for text, _, eos_id in shard:
-            encoded = tokenizer.encode(text)
-            tokens.extend(encoded.ids + [eos_id])
-        return tokens
+def _flush_shard(texts: list[str], pool: mp.Pool, chunk_size: int) -> list[int]:
+    """
+    Tokenize a shard of documents using the worker pool.
 
-    with mp.Pool(workers) as pool:
-        results = pool.map(tokenize_document, shard)
+    Splits texts into chunks of chunk_size and dispatches to workers
+    via pool.map. Returns a flat list of all token IDs.
+    """
+    chunks = [
+        texts[i : i + chunk_size]
+        for i in range(0, len(texts), chunk_size)
+    ]
+    results = pool.map(_tokenize_chunk, chunks)
+    # chain.from_iterable avoids repeated list concatenation
+    return list(chain.from_iterable(results))
 
-    tokens = []
-    for result in results:
-        tokens.extend(result)
-    return tokens
+
+def _write_tokens(tokens: list[int], bin_file) -> None:
+    """Write a flat list of token IDs to the binary file as uint16."""
+    arr = np.array(tokens, dtype=np.uint16)
+    bin_file.write(arr.tobytes())
 
 
 def verify_dataset(bin_path: Path, meta_path: Path) -> None:
@@ -238,7 +282,19 @@ def main():
         "--workers",
         type=int,
         default=max(1, mp.cpu_count() - 2),
-        help="Number of parallel workers",
+        help="Number of parallel workers. Default: cpu_count - 2",
+    )
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=256,
+        help="Documents per worker task. Higher = less IPC overhead. Default: 256",
+    )
+    parser.add_argument(
+        "--shard-size",
+        type=int,
+        default=100_000,
+        help="Documents per disk flush. Lower = less RAM. Default: 100000",
     )
     parser.add_argument(
         "--split",
@@ -263,10 +319,12 @@ def main():
         log.error("Run: python tokenizer/train_tokenizer.py")
         sys.exit(1)
 
-    log.info(f"Input:     {args.input}")
-    log.info(f"Output:    {args.output}")
-    log.info(f"Tokenizer: {args.tokenizer}")
-    log.info(f"Workers:   {args.workers}")
+    log.info(f"Input:      {args.input}")
+    log.info(f"Output:     {args.output}")
+    log.info(f"Tokenizer:  {args.tokenizer}")
+    log.info(f"Workers:    {args.workers}")
+    log.info(f"Chunk size: {args.chunk_size}")
+    log.info(f"Shard size: {args.shard_size:,}")
 
     meta = tokenize_dataset(
         input_path=args.input,
@@ -274,6 +332,8 @@ def main():
         tokenizer_path=args.tokenizer,
         workers=args.workers,
         split=args.split,
+        chunk_size=args.chunk_size,
+        shard_size=args.shard_size,
     )
 
     if args.verify:
@@ -283,7 +343,7 @@ def main():
         )
 
     log.info("Tokenization complete.")
-    log.info(f"Next step: python pretrain/train.py")
+    log.info("Next step: python pretrain/train.py")
 
 
 if __name__ == "__main__":
