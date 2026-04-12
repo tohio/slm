@@ -91,9 +91,10 @@ slm/
 │   └── test_tokenizer.py         Roundtrip, fertility, chat template tests
 │
 ├── pretrain/                     Stage 4: pretraining
-│   ├── configs/                  gpt_125m.yaml, gpt_350m.yaml, gpt_1b.yaml
+│   ├── configs/                  gpt_mini.yaml, gpt_125m.yaml, gpt_350m.yaml, gpt_1b.yaml
 │   ├── data/
 │   │   ├── tokenize_data.py      JSONL → uint16 memory-mapped binary
+│   │   ├── upload_tokenized.py   Upload/download tokenized binary to/from S3
 │   │   └── dataset.py            PretrainingDataset wrapping .bin file
 │   └── train.py                  Pretraining loop
 │
@@ -136,6 +137,16 @@ slm/
 │   ├── COMMANDS.md               Full make target reference
 │   ├── architecture.svg          Pipeline architecture diagram
 │   └── screenshots/              Pipeline stage screenshots
+│       ├── 01_blend_stats.png    Stage 1 — source mix breakdown
+│       ├── 02_validation_report.png  Stage 2 — validation report
+│       ├── 03_tokenizer_test.png Stage 3 — special tokens and fertility
+│       ├── 04_pretrain_loss.png  Stage 4b — W&B pretraining loss curve
+│       ├── 05_sft_loss.png       Stage 5 — W&B SFT loss curve
+│       ├── 06_dpo_loss.png       Stage 6 — W&B DPO loss curve
+│       ├── 07_eval_results.png   Stage 7 — benchmark results
+│       ├── 08_chat_session.png   Stage 9 — multi-turn chat session
+│       ├── 09_vllm_curl.png      Stage 10 — vLLM API response
+│       └── 10_hf_hub.png         HuggingFace Hub model page
 │
 ├── infra/
 │   ├── setup.sh                  CPU instance bootstrap — curation environment
@@ -250,8 +261,10 @@ make validate-upload SIZE=125m      # Stage 2: push validated data to S3
 # ── Tokenizer ─────────────────────────────────────────────────────────────────
 make tokenizer                      # Stage 3: train BPE tokenizer
 make tokenize                       # Stage 4a: tokenize to binary
+make tokenize-upload SIZE=125m      # Stage 4a: push tokenized binary to S3
 
 # ── Training ──────────────────────────────────────────────────────────────────
+make pretrain-mini GPUS=1            # Stage 4b: validate training loop (~5-10 min)
 make pretrain GPUS=4                # Stage 4b: pretrain slm-125m
 make prepare-sft                    # Stage 5a: download SFT datasets
 make sft      GPUS=4                # Stage 5b: chat SFT
@@ -304,16 +317,16 @@ python inference/chat.py --model tohio/slm-125m
 
 Stages 1–4a (download, filter, dedup, blend, validate, tokenize) run on CPU instances. No GPU required.
 
-| Target | Instance | RAM | Est. runtime |
+| Target | vCPUs | RAM | Est. runtime |
 |---|---|---|---|
-| mini (validation) | Any CPU | 4GB+ | ~30–45 min |
-| 125m | `c8g.4xlarge` (16 vCPU) | 32GB | ~12–16 hrs |
-| 350m | `c8g.4xlarge` (16 vCPU) | 32GB | ~40–50 hrs |
-| 1b | `c8g.8xlarge` (32 vCPU) | 64GB | ~96–120 hrs |
+| mini (validation) | Any | 4GB+ | ~30–45 min |
+| 125m | 16 vCPU | 32GB | ~22–26 hrs (curation ~12–16 hrs + tokenize ~9 hrs) |
+| 350m | 16 vCPU | 32GB | ~55–65 hrs |
+| 1b | 32 vCPU | 64GB | ~110–130 hrs |
 
-Run curation on AWS spot in `us-east-1` to minimise Common Crawl egress latency. Attach an EBS volume (`gp3`, 500GB) for `DATA_DIR` so data survives spot interruptions — the pipeline is fully resumable at every stage.
+Any cloud provider works for curation. Run close to `us-east-1` (AWS) or `us-east1` (GCP) to minimise Common Crawl egress latency. Attach a persistent disk (500GB) for `DATA_DIR` so data survives spot/preemptible interruptions — the pipeline is fully resumable at every stage.
 
-Use `tmux` to keep the pipeline running through SSM session timeouts:
+Use `tmux` to keep the pipeline running through session timeouts:
 ```bash
 tmux new -s curate
 make curate SIZE=125m WORKERS=16
@@ -322,17 +335,20 @@ make curate SIZE=125m WORKERS=16
 
 ### Training (GPU)
 
-Stages 4b–6 (pretrain, SFT, DPO) require a CUDA-capable GPU instance. Recommended specs:
+Stages 4b–6 (pretrain, SFT, DPO) require a CUDA-capable GPU instance. Any cloud provider with H100 or A100 instances works. Providers like [Nebius](https://nebius.com), [Lambda Labs](https://lambdalabs.com), and [CoreWeave](https://coreweave.com) typically offer better GPU pricing than hyperscalers.
 
-| Target | Instance | GPUs | VRAM | Est. pretrain runtime |
-|---|---|---|---|---|
-| 125m | `g5.12xlarge` (4× A10G) | 4 | 96GB | ~12–18 hrs |
-| 350m | `p4d.24xlarge` (8× A100 40GB) | 8 | 320GB | ~24–36 hrs |
-| 1b | `p4d.24xlarge` (8× A100 40GB) | 8 | 320GB | ~72–96 hrs |
+Before committing to a full pretraining run, validate the training loop with `make pretrain-mini` — it uses a tiny 6-layer model and runs to 500 steps in minutes on a single GPU.
 
-SFT and DPO runtimes are roughly 20–30% of pretraining time at the same model size. Use spot instances where possible — all training loops support `--resume` from the last checkpoint.
+| Target | GPUs | VRAM | Est. pretrain runtime |
+|---|---|---|---|
+| mini (validation) | 1× any GPU | 8GB+ | ~5–10 min |
+| 125m | 4× H100 or A100 | 320GB+ | ~12–18 hrs |
+| 350m | 8× H100 or A100 | 640GB+ | ~24–36 hrs |
+| 1b | 8× H100 or A100 | 640GB+ | ~72–96 hrs |
 
-Run `make accelerate-config` once on the GPU instance before training to configure multi-GPU settings.
+SFT and DPO runtimes are roughly 20–30% of pretraining time at the same model size. Use spot/preemptible instances where possible — all training loops support `--resume` from the last checkpoint.
+
+Run `make accelerate-config` once on the GPU instance before training to configure multi-GPU settings. Pull the tokenized binary with `make tokenize-download` to avoid re-tokenizing on expensive GPU hardware.
 
 ---
 
@@ -355,6 +371,30 @@ Run `make accelerate-config` once on the GPU instance before training to configu
 **Why HTTPS for Common Crawl instead of S3?** Direct S3 access to the `commoncrawl` bucket fails on EC2 instances with IAM roles attached — the instance role credentials are rejected by the bucket policy. HTTPS via `data.commoncrawl.org` works reliably regardless of instance credentials.
 
 **Why fasttext for language detection instead of langdetect?** Language detection runs on every document in the Common Crawl pipeline — at 125m scale that is tens of millions of HTML pages. `langdetect` is pure Python and adds ~5–10ms per document, which compounds to 50–100+ hours of wall time on a single instance. fasttext's language identification model (`lid.176.ftz`) is C-backed, covers 176 languages, and runs ~1000x faster with equivalent accuracy. The model file is ~1MB and is downloaded once via `make download-fasttext-model`.
+
+---
+
+## Screenshots
+
+Captured at each pipeline stage as proof of a working end-to-end run.
+
+| Screenshot | Stage | Description |
+|---|---|---|
+| `docs/screenshots/01_blend_stats.png` | Stage 1 | `blend_stats.json` showing 70/20/10 source mix |
+| `docs/screenshots/02_validation_report.png` | Stage 2 | Validation report — total, kept, and rejection breakdown |
+| `docs/screenshots/03_tokenizer_test.png` | Stage 3 | Tokenizer test output — special tokens table and fertility score |
+| `docs/screenshots/04_pretrain_loss.png` | Stage 4b | W&B pretraining loss curve |
+| `docs/screenshots/05_sft_loss.png` | Stage 5 | W&B chat SFT loss curve |
+| `docs/screenshots/06_dpo_loss.png` | Stage 6 | W&B DPO loss curve |
+| `docs/screenshots/07_eval_results.png` | Stage 7 | Benchmark results — HellaSwag, ARC, MMLU, TruthfulQA, HumanEval |
+| `docs/screenshots/08_chat_session.png` | Stage 9 | Interactive multi-turn chat session via `inference/chat.py` |
+| `docs/screenshots/09_vllm_curl.png` | Stage 10 | `curl` request to vLLM server with response |
+| `docs/screenshots/10_hf_hub.png` | Stage 8 | HuggingFace Hub model page for `tohio/slm-125m` |
+
+![Blend stats](docs/screenshots/01_blend_stats.png)
+![Pretraining loss](docs/screenshots/04_pretrain_loss.png)
+![Eval results](docs/screenshots/07_eval_results.png)
+![Chat session](docs/screenshots/08_chat_session.png)
 
 ---
 

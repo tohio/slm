@@ -16,6 +16,7 @@ SIZE    ?= 125m
 GPUS    ?= 1
 WORKERS ?=
 DATA_DIR ?= data
+DATE     ?= $(shell date +%Y-%m-%d)
 
 # Use the venv python by default so make targets work without activating the venv.
 # Override with: make pretrain PYTHON=python3
@@ -39,7 +40,7 @@ endif
 
 .PHONY: all curate curate-mini curate-download curate-filter curate-dedup \
         curate-blend curate-upload validate validate-upload validate-datatrove \
-        tokenizer tokenizer-test tokenize \
+        tokenizer tokenizer-test tokenize tokenize-upload tokenize-download \
         pretrain pretrain-mini pretrain-resume prepare-sft sft sft-resume sft-code sft-code-resume \
         prepare-dpo dpo dpo-resume eval export serve serve-local \
         setup setup-data-dir install install-uv install-conda install-kenlm \
@@ -105,6 +106,14 @@ tokenizer-test:
 tokenize:
 	@echo "==> Stage 4a: Tokenize dataset"
 	$(PYTHON) pretrain/data/tokenize_data.py --chunk-size 256 --verify
+
+tokenize-upload:
+	@echo "==> Stage 4a: Upload tokenized binary to S3 (target=$(SIZE))"
+	$(PYTHON) pretrain/data/upload_tokenized.py upload --target $(SIZE)
+
+tokenize-download:
+	@echo "==> Stage 4a: Download tokenized binary from S3 (target=$(SIZE), date=$(DATE))"
+	$(PYTHON) pretrain/data/upload_tokenized.py download --target $(SIZE) --date $(DATE)
 
 pretrain:
 	@echo "==> Stage 4b: Pretraining ($(SIZE), $(GPUS) GPU(s), config=$(PRETRAIN_CONFIG))"
@@ -283,6 +292,8 @@ help:
 	@echo "  validate-upload    Stage 2  — upload validated data to S3"
 	@echo "  tokenizer          Stage 3  — train BPE tokenizer"
 	@echo "  tokenize           Stage 4a — tokenize dataset to binary"
+	@echo "  tokenize-upload    Stage 4a — upload tokenized binary to S3"
+	@echo "  tokenize-download  Stage 4a — download tokenized binary from S3"
 	@echo "  pretrain           Stage 4b — pretrain from scratch"
 	@echo "  pretrain-mini      Stage 4b — mini pretrain run for pipeline validation"
 	@echo "  prepare-sft        Stage 5a — download SFT datasets"

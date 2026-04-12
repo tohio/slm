@@ -76,4 +76,4 @@ htmlcov/
 *.tmp
 *.bak
 *~.todo
-docs/screenshots/*.png
+#docs/screenshots/*.png
