@@ -213,18 +213,17 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
 
+    # _tied_weights_keys must be a dict in transformers v5:
+    #   {target_weight_name: source_weight_name}
+    # This tells get_expanded_tied_weights_keys() which weights are shared
+    # so save_pretrained can correctly handle shared tensors during serialisation.
+    _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
+
     def __init__(self, config: SLMConfig):
         super().__init__(config)
         self.model = SLMModel(config)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.post_init()
-        # Set all_tied_weights_keys as a set after post_init so save_pretrained
-        # correctly identifies shared tensors during serialisation.
-        # post_init → get_expanded_tied_weights_keys populates this, but our
-        # override returns a list which v5's set() conversion handles. We set
-        # it explicitly here as a set to be unambiguous.
-        if config.tie_word_embeddings:
-            self.all_tied_weights_keys = {"lm_head.weight"}
 
     def tie_weights(self, **kwargs) -> None:
         """
@@ -235,19 +234,6 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         """
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
-
-    def get_expanded_tied_weights_keys(self, **kwargs) -> list[str]:
-        """
-        Override to bypass transformers v5's tied weights key resolution.
-
-        The default implementation in v5 calls tied_mapping.keys() expecting
-        a dict — we return the list of tied keys directly instead.
-        all_tied_weights_keys is also set directly in __init__ as a set to
-        ensure save_pretrained works correctly regardless.
-        """
-        if self.config.tie_word_embeddings:
-            return ["lm_head.weight"]
-        return []
 
     def get_input_embeddings(self) -> nn.Embedding:
         return self.model.embed_tokens
