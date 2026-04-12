@@ -210,6 +210,10 @@ eval:
 	@echo "==> Stage 7: Evaluation ($(SIZE))"
 	$(PYTHON) eval/eval.py --model results/slm-$(SIZE)-dpo/final
 
+eval-mini:
+	@echo "==> Stage 7: Mini evaluation (pipeline validation)"
+	$(PYTHON) eval/eval.py --model results/slm-mini-dpo/final --tasks hellaswag --limit 50 --batch-size 4
+
 # ── Stage 8: Export ───────────────────────────────────────────────────────────
 
 export: export-base export-instruct export-chat
@@ -375,6 +379,7 @@ help:
 	@echo "  prepare-dpo        Stage 6a — download DPO datasets"
 	@echo "  dpo                Stage 6b — DPO alignment"
 	@echo "  eval               Stage 7  — benchmark evaluation"
+	@echo "  eval-mini          Stage 7  — quick eval validation (hellaswag, 50 examples)"
 	@echo "  export             Stage 8  — push all variants to HuggingFace Hub"
 	@echo "  export-base        Stage 8  — push base model only"
 	@echo "  export-instruct    Stage 8  — push instruct model only"
