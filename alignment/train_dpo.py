@@ -157,6 +157,14 @@ def main():
     model = SLMForCausalLM.from_pretrained(str(base_model_path))
     log.info(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
+    # Load a separate frozen copy as the reference model.
+    # DPOTrainer with ref_model=None tries to load from checkpoint using
+    # config.architectures[0] which looks up SLMForCausalLM in transformers
+    # (not our local module) and fails. Passing an explicit ref_model avoids this.
+    ref_model = SLMForCausalLM.from_pretrained(str(base_model_path))
+    for p in ref_model.parameters():
+        p.requires_grad = False
+
     # ── Tokenizer ─────────────────────────────────────────────────────────────
     from transformers import PreTrainedTokenizerFast
 
@@ -204,7 +212,7 @@ def main():
 
     trainer = DPOTrainer(
         model=model,
-        ref_model=None,         # DPOTrainer creates a frozen copy automatically
+        ref_model=ref_model,    # explicit frozen reference model — avoids transformers lookup
         args=dpo_args,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
