@@ -153,7 +153,7 @@ def main():
     if not tokenizer_path.exists():
         tokenizer_path = DATA_DIR / "tokenizer"
 
-    tokenizer = PreTrainedTokenizerFast.from_pretrained(str(tokenizer_path))
+    tokenizer = PreTrainedTokenizerFast.from_pretrained(str(tokenizer_path), local_files_only=True)
     tokenizer.pad_token    = "<PAD>"
     tokenizer.pad_token_id = 0
     tokenizer.eos_token    = "<EOS>"

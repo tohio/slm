@@ -253,6 +253,31 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
     def set_decoder(self, decoder: SLMModel) -> None:
         self.model = decoder
 
+    def save_pretrained(self, save_directory, **kwargs) -> None:
+        """
+        Override save_pretrained to handle tied weights correctly.
+
+        When tie_word_embeddings=True, lm_head.weight and model.embed_tokens.weight
+        share the same storage. safetensors does not allow tensor aliasing so
+        transformers removes lm_head.weight from the state dict before saving.
+        When loading, from_pretrained then can't find lm_head.weight and reports
+        it as MISSING — it will be re-tied after load, but only if the model
+        knows about the tying.
+
+        We temporarily untie the weights before saving by making lm_head.weight
+        an independent copy, then restore the tie after. This ensures both keys
+        are saved independently and loading works without any MISSING warnings.
+        """
+        if self.config.tie_word_embeddings:
+            # Temporarily make lm_head.weight an independent tensor
+            self.lm_head.weight = nn.Parameter(self.model.embed_tokens.weight.data.clone())
+
+        super().save_pretrained(save_directory, **kwargs)
+
+        if self.config.tie_word_embeddings:
+            # Restore the tie
+            self.lm_head.weight = self.model.embed_tokens.weight
+
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
