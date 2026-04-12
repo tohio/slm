@@ -152,6 +152,9 @@ slm/
 │   ├── setup.sh                  CPU instance bootstrap — curation environment
 │   └── setup_gpu_instance.sh     GPU instance bootstrap — training environment
 │
+├── accelerate_configs/           Accelerate launch configs for GPU training
+│   ├── single_gpu.yaml           Single GPU — mini validation runs
+│   └── multi_gpu.yaml            Multi-GPU — full pretraining and fine-tuning
 ├── Makefile                      Full pipeline automation
 ├── requirements.txt              Python dependencies
 ├── environment.yml               Conda environment
@@ -191,37 +194,43 @@ make setup-data-dir DATA_DIR=/data/slm/data
 # make setup
 ```
 
-Using pip:
+Using pip (recommended — creates `.venv` automatically):
 ```bash
 git clone https://github.com/tohio/slm.git
 cd slm
-pip install -r requirements.txt
-pip install https://github.com/kpu/kenlm/archive/master.zip
 cp .env.sample .env
 # Add your credentials to .env
+make install          # creates .venv and installs all dependencies
+make install-kenlm    # kenlm not on PyPI — install from source (curation instance only)
 ```
 
 Using uv:
 ```bash
 git clone https://github.com/tohio/slm.git
 cd slm
-uv venv && source .venv/bin/activate
-uv pip install -r requirements.txt
-pip install https://github.com/kpu/kenlm/archive/master.zip
 cp .env.sample .env
 # Add your credentials to .env
+make install-uv
+make install-kenlm
 ```
 
 Using conda:
 ```bash
 git clone https://github.com/tohio/slm.git
 cd slm
-conda create -n slm python=3.12 -y
-conda activate slm
-pip install -r requirements.txt
-pip install https://github.com/kpu/kenlm/archive/master.zip
 cp .env.sample .env
 # Add your credentials to .env
+make install-conda
+make install-kenlm
+```
+
+**GPU training instance only** — fasttext and kenlm not needed:
+```bash
+git clone https://github.com/tohio/slm.git
+cd slm
+cp .env.sample .env
+# Add your credentials to .env
+make install-gpu
 ```
 
 Then fill in credentials in `.env`:
@@ -251,7 +260,8 @@ Crawl at 2 WARC segments. Exercises every stage without the wait.
 # ── One-time setup ────────────────────────────────────────────────────────────
 make download-fasttext-model DATA_DIR=/data/slm/data   # fasttext language ID model (~1MB)
 make download-kenlm-model    DATA_DIR=/data/slm/data   # KenLM perplexity model (~4GB)
-make accelerate-config                                  # GPU instance only
+make accelerate-config-single                           # single GPU — mini validation
+make accelerate-config-multi GPUS=8                     # multi-GPU — full training
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 make curate SIZE=125m WORKERS=16    # Stage 1: download, curate, upload to S3
@@ -331,7 +341,7 @@ Any cloud provider works for curation. Run close to `us-east-1` (AWS) or `us-eas
 Use `tmux` to keep the pipeline running through session timeouts:
 ```bash
 tmux new -s curate
-make curate SIZE=125m WORKERS=16
+make curate SIZE=125m WORKERS=16    # .venv/bin/python used automatically
 # Ctrl+B, D to detach — tmux attach -t curate to reattach
 ```
 

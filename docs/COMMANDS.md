@@ -50,11 +50,13 @@ make setup-data-dir DATA_DIR=/data/slm/data
 
 ### `make install`
 
-Installs Python dependencies from `requirements.txt` using pip.
+Creates a `.venv` virtualenv and installs Python dependencies from `requirements.txt`. Does not require a pre-activated virtualenv — safe to run on a fresh instance.
 
 ```bash
 make install
 ```
+
+All subsequent `make` targets use `.venv/bin/python` automatically via the `PYTHON` variable — no need to activate the venv manually.
 
 ---
 
@@ -75,6 +77,19 @@ Creates a conda environment named `slm` and installs dependencies.
 ```bash
 make install-conda
 ```
+
+---
+
+### `make install-gpu`
+
+Installs Python dependencies for a GPU training instance. Identical to `make install` but clearly scoped — fasttext, kenlm, and validation dependencies are not needed on the GPU instance and are not installed separately.
+
+```bash
+make install-gpu
+```
+
+**Use on:** GPU training instances (pretrain, SFT, DPO, eval, export).
+**Use `make install` on:** CPU curation instances (full dependency set including fasttext and kenlm).
 
 ---
 
@@ -120,11 +135,36 @@ make download-kenlm-model DATA_DIR=/data/slm/data
 
 ### `make accelerate-config`
 
-Launches the interactive `accelerate config` wizard. Run once on a GPU instance before any distributed training target (`pretrain`, `sft`, `sft-code`, `dpo`).
+Launches the interactive `accelerate config` wizard. Use this when you need a custom configuration not covered by the presets below.
 
 ```bash
 make accelerate-config
 ```
+
+---
+
+### `make accelerate-config-single`
+
+Copies `accelerate_configs/single_gpu.yaml` into place as the active accelerate config. Use for mini validation runs on a single GPU before committing to a full multi-GPU run.
+
+```bash
+make accelerate-config-single
+```
+
+**Configures:** 1 process, bf16, no distributed training.
+
+---
+
+### `make accelerate-config-multi`
+
+Copies `accelerate_configs/multi_gpu.yaml` into place with `num_processes` set to `GPUS`. Use before full pretraining, SFT, and DPO runs on multi-GPU instances.
+
+```bash
+make accelerate-config-multi GPUS=8    # 8× H200
+make accelerate-config-multi GPUS=4    # 4× A100
+```
+
+**Configures:** MULTI_GPU distributed training, bf16, all GPUs.
 
 ---
 
@@ -715,6 +755,59 @@ Before committing to a full pretraining run, validate the training loop with `ma
 | 1b | 8× H100 or A100 | 640GB+ | ~72–96 hrs |
 
 SFT and DPO runtimes are roughly 20–30% of pretraining time at the same model size. All training loops support `--resume` from the last checkpoint. Providers like [Nebius](https://nebius.com), [Lambda Labs](https://lambdalabs.com), and [CoreWeave](https://coreweave.com) typically offer better GPU pricing than hyperscalers. Run `make accelerate-config` once on the GPU instance before training.
+
+---
+
+## GPU Instance Setup
+
+When spinning up a fresh GPU instance for training, only a subset of the full setup is needed — curation, validation, and tokenization have already run on the CPU instance.
+
+```bash
+# 1. Clone and enter repo
+git clone https://github.com/tohio/slm.git
+cd slm
+
+# 2. Install make if needed
+sudo apt install -y make
+
+# 3. Fill in credentials
+cp .env.sample .env
+vi .env    # WANDB_API_KEY, HF_TOKEN, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, S3_BUCKET
+
+# 4. Install dependencies (creates .venv automatically)
+make install-gpu
+
+# 5. Configure accelerate
+make accelerate-config-single    # for mini validation (single GPU)
+make accelerate-config-multi GPUS=8    # for full training (multi-GPU)
+
+# 6. Pull tokenized binary from S3
+make tokenize-download SIZE=125m DATE=2026-04-12
+
+# 7. Validate the full training pipeline end to end
+make pretrain-mini GPUS=1
+make sft-mini      GPUS=1
+make sft-code-mini GPUS=1
+make dpo-mini      GPUS=1
+
+# 8. Run the full training pipeline
+make pretrain  SIZE=125m GPUS=8
+make prepare-sft
+make sft       SIZE=125m GPUS=8
+make sft-code  SIZE=125m GPUS=8
+make prepare-dpo
+make dpo       SIZE=125m GPUS=8
+make eval      SIZE=125m
+make export    SIZE=125m
+```
+
+**Not needed on the GPU instance:**
+- `make download-fasttext-model` — only used during Common Crawl curation
+- `make download-kenlm-model` — only used during validation
+- `make install-kenlm` — only used during validation
+- `make curate` — runs on the CPU curation instance
+- `make validate` — runs on the CPU curation instance
+- `make tokenize` — runs on the CPU curation instance (result downloaded via `make tokenize-download`)
 
 ---
 

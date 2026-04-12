@@ -44,8 +44,8 @@ endif
         pretrain pretrain-mini pretrain-resume prepare-sft sft sft-mini sft-resume sft-code sft-code-mini sft-code-resume \
         prepare-dpo dpo dpo-resume eval export serve serve-local \
         export export-base export-instruct export-chat \
-        setup setup-data-dir install install-uv install-conda install-kenlm \
-        download-kenlm-model download-fasttext-model accelerate-config \
+        setup setup-data-dir install install-gpu install-uv install-conda install-kenlm \
+        download-kenlm-model download-fasttext-model accelerate-config accelerate-config-single accelerate-config-multi \
         s3-upload s3-download s3-list \
         clean clean-data clean-results clean-logs help
 
@@ -243,10 +243,12 @@ setup-data-dir:
 	bash infra/setup.sh --data-dir $(DATA_DIR)
 
 install:
-	pip install -r requirements.txt
+	python3 -m venv .venv
+	.venv/bin/pip install --upgrade pip
+	.venv/bin/pip install -r requirements.txt
 
 install-uv:
-	uv venv && source .venv/bin/activate && uv pip install -r requirements.txt
+	uv venv && uv pip install -r requirements.txt
 
 install-conda:
 	conda create -n slm python=3.12 -y && \
@@ -254,7 +256,13 @@ install-conda:
 	pip install -r requirements.txt
 
 install-kenlm:
-	pip install https://github.com/kpu/kenlm/archive/master.zip
+	.venv/bin/pip install https://github.com/kpu/kenlm/archive/master.zip
+
+install-gpu:
+	@echo "==> Installing dependencies for GPU training instance..."
+	python3 -m venv .venv
+	.venv/bin/pip install --upgrade pip
+	.venv/bin/pip install -r requirements.txt
 
 download-kenlm-model:
 	@echo "==> Downloading KenLM English model (~4GB)..."
