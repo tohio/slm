@@ -17,7 +17,6 @@ References:
     RoPE: Su et al. (2021) — https://arxiv.org/abs/2104.09864
 """
 
-import math
 from typing import Optional
 
 import torch
@@ -33,15 +32,13 @@ class RotaryEmbedding(nn.Module):
     """
     Rotary Position Embedding (RoPE).
 
-    Precomputes cos/sin rotation matrices for positions up to
-    max_position_embeddings. At forward time, slices to the actual
-    sequence length.
-
-    Args:
-        config (SLMConfig): Model configuration.
-
-    The inverse frequencies follow the original RoPE formula:
-        theta_i = 1 / (base ^ (2i / head_dim))  for i in [0, head_dim/2)
+    Key design decisions:
+    - inv_freq is computed from config and never saved to / loaded from
+      checkpoints (persistent=False). _load_from_state_dict drops it.
+    - cos/sin cache is NOT stored as a buffer at all. It is recomputed
+      lazily on each forward call in float32, then cast to the query
+      dtype at point of use. This avoids NaN from bfloat16 precision
+      limits and survives model.bfloat16() / model.half() casts.
     """
 
     def __init__(self, config: SLMConfig):
@@ -50,26 +47,51 @@ class RotaryEmbedding(nn.Module):
         self.max_position_embeddings = config.max_position_embeddings
         self.base = config.rope_theta
 
+        # Stored only for device tracking — recomputed from config on load
         inv_freq = 1.0 / (
-            self.base
-            ** (torch.arange(0, self.head_dim, 2, dtype=torch.float32) / self.head_dim)
+            self.base ** (
+                torch.arange(0, self.head_dim, 2, dtype=torch.float32) / self.head_dim
+            )
         )
         self.register_buffer("inv_freq", inv_freq, persistent=False)
-        self._build_cache(self.max_position_embeddings)
 
-    def _build_cache(self, seq_len: int) -> None:
-        # Always keep RoPE cache in float32 — bfloat16 doesn't have enough
-        # precision for the cosine values and produces NaN after model.bfloat16()
-        positions = torch.arange(seq_len, dtype=torch.float32, device=self.inv_freq.device)
-        freqs = torch.outer(positions, self.inv_freq.float())
+        # Cache stored as plain Python attributes (not buffers) so they are
+        # never affected by model dtype casts (.bfloat16(), .half(), etc.)
+        self._cos_cache: Optional[torch.Tensor] = None
+        self._sin_cache: Optional[torch.Tensor] = None
+        self._cache_len: int = 0
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        # Drop saved RoPE buffers — always recompute from config.
+        for key in ["inv_freq", "cos_cached", "sin_cached"]:
+            state_dict.pop(prefix + key, None)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
+    def _build_cache(self, seq_len: int, device: torch.device) -> None:
+        """Recompute float32 cos/sin cache up to seq_len on device."""
+        inv_freq = 1.0 / (
+            self.base ** (
+                torch.arange(0, self.head_dim, 2, dtype=torch.float32, device=device)
+                / self.head_dim
+            )
+        )
+        positions = torch.arange(seq_len, dtype=torch.float32, device=device)
+        freqs = torch.outer(positions, inv_freq)
         emb = torch.cat([freqs, freqs], dim=-1)
-        self.register_buffer("cos_cached", emb.cos().float(), persistent=False)
-        self.register_buffer("sin_cached", emb.sin().float(), persistent=False)
+        # Store as plain attributes — immune to dtype casts
+        self._cos_cache = emb.cos()  # float32
+        self._sin_cache = emb.sin()  # float32
+        self._cache_len = seq_len
 
-    def forward(self, seq_len: int) -> tuple[torch.Tensor, torch.Tensor]:
-        if seq_len > self.max_position_embeddings:
-            self._build_cache(seq_len)
-        return self.cos_cached[:seq_len], self.sin_cached[:seq_len]
+    def forward(self, seq_len: int, device: Optional[torch.device] = None) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Returns float32 cos and sin matrices for positions [0, seq_len).
+        Always float32 regardless of model dtype — cast at point of use.
+        """
+        dev = device or self.inv_freq.device
+        if self._cos_cache is None or seq_len > self._cache_len or self._cos_cache.device != dev:
+            self._build_cache(max(seq_len, self.max_position_embeddings), dev)
+        return self._cos_cache[:seq_len], self._sin_cache[:seq_len]
 
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -84,9 +106,10 @@ def apply_rotary_emb(
     cos: torch.Tensor,
     sin: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    # Cast cos/sin to query dtype at point of use — RoPE cache is kept in
-    # float32 to avoid NaN from bfloat16 precision limits, but the rotation
-    # must be done in the same dtype as q/k for correct gradient flow.
+    """
+    Apply RoPE rotation. cos/sin arrive as float32 and are cast to
+    the query dtype here so the rotation matches the computation dtype.
+    """
     cos = cos.to(dtype=q.dtype).unsqueeze(0).unsqueeze(0)
     sin = sin.to(dtype=q.dtype).unsqueeze(0).unsqueeze(0)
     q_rot = (q * cos) + (rotate_half(q) * sin)
@@ -100,20 +123,8 @@ class GroupedQueryAttention(nn.Module):
     """
     Grouped Query Attention (GQA) with RoPE.
 
-    Query heads are grouped — each group of (num_heads / num_kv_heads)
-    query heads shares a single key/value head. This reduces KV cache
-    size at inference by a factor of (num_heads / num_kv_heads).
-
     At num_kv_heads == num_heads: standard Multi-Head Attention (MHA)
     At num_kv_heads == 1: Multi-Query Attention (MQA)
-
-    No projection biases — consistent with the no-bias architecture.
-    Uses scaled dot-product attention (F.scaled_dot_product_attention)
-    which dispatches to FlashAttention when available.
-
-    Args:
-        config (SLMConfig): Model configuration.
-        layer_idx (int): Layer index, used for KV cache management.
     """
 
     def __init__(self, config: SLMConfig, layer_idx: int):
@@ -142,16 +153,12 @@ class GroupedQueryAttention(nn.Module):
         kv_len: int,
     ) -> Optional[torch.Tensor]:
         """
-        Normalise attention_mask to a 4D float additive mask compatible with
-        F.scaled_dot_product_attention, handling all formats the Trainer may pass:
+        Normalise attention_mask to 4D float additive format for SDPA.
 
-            None:
-                No mask — caller uses is_causal=True for causal masking.
-            2D (batch, kv_len):
-                Padding mask from HuggingFace Trainer (1=keep, 0=pad).
-                Combined with a causal mask and expanded to 4D.
-            4D (batch, 1, q_len, kv_len):
-                Full additive mask — convert dtype if needed.
+        Handles:
+            None  — no mask, caller uses is_causal=True
+            2D (batch, kv_len) — padding mask (1=keep, 0=pad), combined with causal
+            4D (batch, 1, q_len, kv_len) — full additive mask, dtype normalised
         """
         if attention_mask is None:
             return None
@@ -159,19 +166,12 @@ class GroupedQueryAttention(nn.Module):
         bsz, q_len = q.shape[0], q.shape[2]
 
         if attention_mask.dim() == 2:
-            # 2D padding mask → combine with causal mask → 4D additive mask
-            # causal: (q_len, kv_len), True where position is allowed
             causal = torch.ones(q_len, kv_len, dtype=torch.bool, device=q.device).tril()
-            # padding: (batch, kv_len) → (batch, 1, 1, kv_len)
             pad = attention_mask[:, None, None, :].bool()
-            # combined: causal AND not padding
-            combined = causal.unsqueeze(0) & pad  # (batch, 1, q_len, kv_len)
-            # additive: 0.0 = keep, -inf = mask out
+            combined = causal.unsqueeze(0) & pad
             mask = torch.zeros(bsz, 1, q_len, kv_len, dtype=q.dtype, device=q.device)
-            mask = mask.masked_fill(~combined, float("-inf"))
-            return mask
+            return mask.masked_fill(~combined, float("-inf"))
 
-        # 4D mask — ensure correct dtype
         if attention_mask.dtype == torch.bool:
             mask = torch.zeros_like(attention_mask, dtype=q.dtype)
             return mask.masked_fill(~attention_mask, float("-inf"))
@@ -188,17 +188,6 @@ class GroupedQueryAttention(nn.Module):
         past_key_value: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
         use_cache: bool = False,
     ) -> tuple[torch.Tensor, Optional[tuple[torch.Tensor, torch.Tensor]]]:
-        """
-        Args:
-            hidden_states: (batch, seq_len, hidden_size)
-            attention_mask: Optional mask — see _prepare_mask for handled formats.
-            past_key_value: Optional cached (key, value) from previous steps.
-            use_cache: Whether to return updated KV cache.
-
-        Returns:
-            output: (batch, seq_len, hidden_size)
-            past_key_value: Updated KV cache if use_cache else None.
-        """
         bsz, q_len, _ = hidden_states.shape
 
         q = self.q_proj(hidden_states)
@@ -209,41 +198,34 @@ class GroupedQueryAttention(nn.Module):
         k = k.view(bsz, q_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
         v = v.view(bsz, q_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
 
-        # Apply RoPE
+        # RoPE — pass device so cache is built on the right device
         kv_seq_len = k.shape[2]
         if past_key_value is not None:
             kv_seq_len += past_key_value[0].shape[2]
-        cos, sin = self.rotary_emb(kv_seq_len)
+        cos, sin = self.rotary_emb(kv_seq_len, device=q.device)
         offset = kv_seq_len - q_len
         q, k = apply_rotary_emb(q, k, cos[offset:offset + q_len], sin[offset:offset + q_len])
 
-        # Append to KV cache
+        # KV cache
         if past_key_value is not None:
             k = torch.cat([past_key_value[0], k], dim=2)
             v = torch.cat([past_key_value[1], v], dim=2)
         past_key_value = (k, v) if use_cache else None
 
-        # Expand KV heads for GQA
+        # GQA: expand KV heads
         if self.num_kv_heads != self.num_heads:
             k = k.repeat_interleave(self.num_query_groups, dim=1)
             v = v.repeat_interleave(self.num_query_groups, dim=1)
 
-        # During training use is_causal=True and ignore the attention_mask.
-        # The Trainer passes a 2D padding mask but for decoder-only causal LM
-        # the causal mask is sufficient — padding tokens in the loss are already
-        # handled by the label masking in SFTTrainer. Using the padding mask
-        # combined with causal masking produces all-inf rows for short sequences
-        # which causes NaN loss.
-        # During inference (past_key_value is not None) we use the explicit mask.
-        use_causal = self.training or attention_mask is None
-        attn_mask = None if use_causal else self._prepare_mask(attention_mask, q, k.shape[2])
+        # Attention mask
+        attn_mask = self._prepare_mask(attention_mask, q, k.shape[2])
 
         dropout_p = self.attention_dropout if self.training else 0.0
         attn_output = F.scaled_dot_product_attention(
             q, k, v,
             attn_mask=attn_mask,
             dropout_p=dropout_p,
-            is_causal=use_causal,
+            is_causal=attn_mask is None,
         )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
