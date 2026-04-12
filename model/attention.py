@@ -58,11 +58,13 @@ class RotaryEmbedding(nn.Module):
         self._build_cache(self.max_position_embeddings)
 
     def _build_cache(self, seq_len: int) -> None:
-        positions = torch.arange(seq_len, dtype=torch.float32)
-        freqs = torch.outer(positions, self.inv_freq)
+        # Always keep RoPE cache in float32 — bfloat16 doesn't have enough
+        # precision for the cosine values and produces NaN after model.bfloat16()
+        positions = torch.arange(seq_len, dtype=torch.float32, device=self.inv_freq.device)
+        freqs = torch.outer(positions, self.inv_freq.float())
         emb = torch.cat([freqs, freqs], dim=-1)
-        self.register_buffer("cos_cached", emb.cos(), persistent=False)
-        self.register_buffer("sin_cached", emb.sin(), persistent=False)
+        self.register_buffer("cos_cached", emb.cos().float(), persistent=False)
+        self.register_buffer("sin_cached", emb.sin().float(), persistent=False)
 
     def forward(self, seq_len: int) -> tuple[torch.Tensor, torch.Tensor]:
         if seq_len > self.max_position_embeddings:
@@ -82,8 +84,11 @@ def apply_rotary_emb(
     cos: torch.Tensor,
     sin: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    cos = cos.unsqueeze(0).unsqueeze(0)
-    sin = sin.unsqueeze(0).unsqueeze(0)
+    # Cast cos/sin to query dtype at point of use — RoPE cache is kept in
+    # float32 to avoid NaN from bfloat16 precision limits, but the rotation
+    # must be done in the same dtype as q/k for correct gradient flow.
+    cos = cos.to(dtype=q.dtype).unsqueeze(0).unsqueeze(0)
+    sin = sin.to(dtype=q.dtype).unsqueeze(0).unsqueeze(0)
     q_rot = (q * cos) + (rotate_half(q) * sin)
     k_rot = (k * cos) + (rotate_half(k) * sin)
     return q_rot, k_rot
