@@ -174,7 +174,8 @@ class GroupedQueryAttention(nn.Module):
         """
         Args:
             hidden_states: (batch, seq_len, hidden_size)
-            attention_mask: Optional causal mask (batch, 1, seq_len, seq_len)
+            attention_mask: Optional causal mask (batch, 1, seq_len, seq_len).
+                            May arrive as bool, float, or int — normalised below.
             past_key_value: Optional cached (key, value) from previous steps
             use_cache: Whether to return updated KV cache
 
@@ -201,11 +202,11 @@ class GroupedQueryAttention(nn.Module):
         cos, sin = self.rotary_emb(kv_seq_len)
         # Slice cos/sin for current positions only (handles KV cache offset)
         offset = kv_seq_len - q_len
-        q_cos = cos[offset:offset + q_len]
-        q_sin = sin[offset:offset + q_len]
-        k_cos = cos[:kv_seq_len] if past_key_value is None else cos[offset:offset + q_len]
-        k_sin = sin[:kv_seq_len] if past_key_value is None else sin[offset:offset + q_len]
-        q, k = apply_rotary_emb(q, k, q_cos, q_sin) if past_key_value is None else apply_rotary_emb(q, k, cos[offset:offset+q_len], sin[offset:offset+q_len])
+        q, k = apply_rotary_emb(
+            q, k,
+            cos[offset:offset + q_len],
+            sin[offset:offset + q_len],
+        )
 
         # Append to KV cache
         if past_key_value is not None:
@@ -218,6 +219,20 @@ class GroupedQueryAttention(nn.Module):
         if self.num_kv_heads != self.num_heads:
             k = k.repeat_interleave(self.num_query_groups, dim=1)
             v = v.repeat_interleave(self.num_query_groups, dim=1)
+
+        # Normalise attention mask dtype for F.scaled_dot_product_attention.
+        # The SFTTrainer passes an int64 mask; SDPA requires bool or a float
+        # mask matching the query dtype. Convert once here so the rest of the
+        # code doesn't need to worry about what dtype arrives.
+        if attention_mask is not None:
+            if attention_mask.dtype == torch.bool:
+                # bool mask: True = keep, False = mask out
+                # SDPA additive convention: 0 = keep, -inf = mask out
+                attention_mask = torch.zeros_like(attention_mask, dtype=q.dtype).masked_fill(
+                    ~attention_mask, float("-inf")
+                )
+            elif attention_mask.dtype != q.dtype:
+                attention_mask = attention_mask.to(dtype=q.dtype)
 
         # Scaled dot-product attention
         # Dispatches to FlashAttention 2 when available (torch >= 2.0)
