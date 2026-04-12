@@ -69,8 +69,15 @@ def load_dataset_from_jsonl(path: Path):
     return Dataset.from_list(records)
 
 
-def build_training_args(cfg: dict, output_dir: Path):
-    from transformers import TrainingArguments
+def build_sft_args(cfg: dict, output_dir: Path):
+    """
+    Build SFTConfig directly — avoids the fragile TrainingArguments.to_dict()
+    round-trip which can include keys SFTConfig doesn't accept.
+
+    SFTConfig extends TrainingArguments and adds SFT-specific fields:
+    dataset_text_field, max_seq_length, packing.
+    """
+    from trl import SFTConfig
 
     train_cfg = cfg["training"]
     optim_cfg = cfg["optimizer"]
@@ -80,7 +87,7 @@ def build_training_args(cfg: dict, output_dir: Path):
     use_bf16  = has_cuda and precision == "bf16"
     use_fp16  = has_cuda and precision == "fp16"
 
-    return TrainingArguments(
+    return SFTConfig(
         output_dir=str(output_dir),
         num_train_epochs=train_cfg.get("epochs", 3),
         max_steps=train_cfg.get("max_steps", -1),
@@ -94,10 +101,8 @@ def build_training_args(cfg: dict, output_dir: Path):
         adam_beta2=optim_cfg.get("beta2", 0.98),
         max_grad_norm=train_cfg.get("gradient_clip_val", 1.0),
         lr_scheduler_type=train_cfg.get("lr_scheduler", "cosine"),
-        # Precision — only enable on GPU
         bf16=use_bf16,
         fp16=use_fp16,
-        # Evaluation — eval_strategy replaces evaluation_strategy in transformers v5
         eval_strategy="steps",
         eval_steps=train_cfg.get("eval_steps", 200),
         save_strategy="steps",
@@ -112,6 +117,10 @@ def build_training_args(cfg: dict, output_dir: Path):
         remove_unused_columns=False,
         seed=train_cfg.get("seed", 42),
         gradient_checkpointing=train_cfg.get("gradient_checkpointing", False),
+        # SFT-specific fields
+        dataset_text_field="text",
+        max_seq_length=cfg["model"].get("max_seq_length", 2048),
+        packing=cfg["data"].get("packing", False),
     )
 
 
@@ -125,7 +134,7 @@ def main():
     cfg = load_config(args.config)
     model_name      = cfg["name"]
     output_dir      = RESULTS_DIR / model_name
-    # Expand environment variables in config paths (e.g. $DATA_DIR, $RESULTS_DIR)
+    # Expand $DATA_DIR/$RESULTS_DIR env vars in config paths
     base_model_path = args.base_model or Path(
         os.path.expandvars(cfg["model"]["base_model_path"])
     )
@@ -165,6 +174,7 @@ def main():
 
     # ── Dataset ───────────────────────────────────────────────────────────────
     data_cfg   = cfg["data"]
+    # Expand $DATA_DIR env var in dataset paths
     train_path = Path(os.path.expandvars(data_cfg["train_path"]))
     val_path   = Path(os.path.expandvars(data_cfg["val_path"]))
 
@@ -180,36 +190,19 @@ def main():
     log.info(f"Train: {len(train_dataset):,} examples")
     log.info(f"Val:   {len(val_dataset):,} examples")
 
-    # ── Training args ─────────────────────────────────────────────────────────
-    training_args = build_training_args(cfg, output_dir)
-
-    # ── W&B ───────────────────────────────────────────────────────────────────
-    if "wandb" in training_args.report_to:
-        import wandb
-        wandb.init(
-            project=cfg.get("wandb_project", "slm"),
-            name=model_name,
-            config={
-                "base_model": str(base_model_path),
-                "n_train": len(train_dataset),
-                "n_val": len(val_dataset),
-                **cfg,
-            },
-        )
+    # ── SFT args ──────────────────────────────────────────────────────────────
+    # Build SFTConfig directly — avoids fragile TrainingArguments.to_dict() round-trip
+    sft_args = build_sft_args(cfg, output_dir)
 
     # ── SFTTrainer ────────────────────────────────────────────────────────────
-    from trl import SFTTrainer, SFTConfig
+    from trl import SFTTrainer
 
-    # processing_class replaces tokenizer in trl >= 0.9
     trainer = SFTTrainer(
         model=model,
-        args=training_args,
+        args=sft_args,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         processing_class=tokenizer,
-        dataset_text_field="text",
-        max_seq_length=cfg["model"].get("max_seq_length", 2048),
-        packing=data_cfg.get("packing", False),
     )
 
     # ── Train ─────────────────────────────────────────────────────────────────
