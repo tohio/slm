@@ -144,9 +144,9 @@ slm/
 │       ├── 05_sft_loss.png       Stage 5 — W&B SFT loss curve
 │       ├── 06_dpo_loss.png       Stage 6 — W&B DPO loss curve
 │       ├── 07_eval_results.png   Stage 7 — benchmark results
-│       ├── 08_chat_session.png   Stage 9 — multi-turn chat session
-│       ├── 09_vllm_curl.png      Stage 10 — vLLM API response
-│       └── 10_hf_hub.png         HuggingFace Hub model page
+│       ├── 08_hf_hub.png         Stage 8 — HuggingFace Hub model page
+│       ├── 09_chat_session.png   Stage 9 — multi-turn chat session
+│       └── 10_vllm_curl.png      Stage 10 — vLLM API response
 │
 ├── infra/
 │   ├── setup.sh                  CPU instance bootstrap — curation environment
@@ -373,13 +373,13 @@ Captured at each pipeline stage as proof of a working end-to-end run.
 | `docs/screenshots/01_blend_stats.png` | Stage 1 | `blend_stats.json` showing 70/20/10 source mix |
 | `docs/screenshots/02_validation_report.png` | Stage 2 | Validation report — total, kept, and rejection breakdown |
 | `docs/screenshots/03_tokenizer_test.png` | Stage 3 | Tokenizer test output — special tokens table and fertility score |
-| `docs/screenshots/04_pretrain_loss.png` | Stage 4b | W&B pretraining loss curve |
+| `docs/screenshots/04_pretrain_loss.png` | Stage 4 | W&B pretraining loss curve |
 | `docs/screenshots/05_sft_loss.png` | Stage 5 | W&B chat SFT loss curve |
 | `docs/screenshots/06_dpo_loss.png` | Stage 6 | W&B DPO loss curve |
 | `docs/screenshots/07_eval_results.png` | Stage 7 | Benchmark results — HellaSwag, ARC, MMLU, TruthfulQA, HumanEval |
-| `docs/screenshots/08_chat_session.png` | Stage 9 | Interactive multi-turn chat session via `inference/chat.py` |
-| `docs/screenshots/09_vllm_curl.png` | Stage 10 | `curl` request to vLLM server with response |
-| `docs/screenshots/10_hf_hub.png` | Stage 8 | HuggingFace Hub model page for `tohio/slm-125m` |
+| `docs/screenshots/08_hf_hub.png` | Stage 8 | HuggingFace Hub model page for `tohio/slm-125m` |
+| `docs/screenshots/09_chat_session.png` | Stage 9 | Interactive multi-turn chat session via `inference/chat.py` |
+| `docs/screenshots/10_vllm_curl.png` | Stage 10 | `curl` request to vLLM server with response |
 
 ### Stage 1 — Data Curation
 
@@ -387,7 +387,7 @@ Source mix breakdown from `blend_stats.json` — confirming the 70/20/10 Wikiped
 
 ![Blend stats](docs/screenshots/01_blend_stats.png)
 
-### Stage 4b — Pretraining
+### Stage 4 — Pretraining
 
 W&B loss curve showing steady convergence over the full pretraining run.
 
@@ -403,7 +403,7 @@ Benchmark results across HellaSwag, ARC, MMLU, TruthfulQA, and HumanEval.
 
 Multi-turn chat session via `inference/chat.py` using the aligned chat model.
 
-![Chat session](docs/screenshots/08_chat_session.png)
+![Chat session](docs/screenshots/09_chat_session.png)
 
 ---
 
