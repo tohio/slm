@@ -123,7 +123,6 @@ def build_dpo_args(cfg: dict, output_dir: Path, beta: float):
         # DPO-specific fields
         beta=beta,
         max_length=cfg["model"].get("max_seq_length", 2048),
-        max_prompt_length=cfg["dpo"].get("max_prompt_length", 512),
     )
 
 
