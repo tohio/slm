@@ -187,6 +187,15 @@ def format_results(results: dict, tasks: list[str], model_name: str) -> str:
     return "\n".join(lines)
 
 
+class _SafeEncoder(json.JSONEncoder):
+    """JSON encoder that converts non-serializable objects to strings."""
+    def default(self, obj):
+        try:
+            return super().default(obj)
+        except TypeError:
+            return str(obj)
+
+
 def save_results(results: dict, model_path: Path, tasks: list[str]) -> Path:
     """Save evaluation results to JSON."""
     model_name = model_path.parent.name if model_path.name == "final" else model_path.name
@@ -203,7 +212,7 @@ def save_results(results: dict, model_path: Path, tasks: list[str]) -> Path:
             "timestamp":  timestamp,
             "results":    results.get("results", {}),
             "config":     results.get("config", {}),
-        }, f, indent=2)
+        }, f, indent=2, cls=_SafeEncoder)
 
     log.info(f"Results saved to {out_path}")
     return out_path
