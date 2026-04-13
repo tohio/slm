@@ -23,9 +23,10 @@ DATE     ?= $(shell date +%Y-%m-%d)
 DATA_DIR ?= $(shell grep -v '^\#' .env 2>/dev/null | grep '^DATA_DIR=' | head -1 | cut -d= -f2 | tr -d ' ')
 DATA_DIR ?= data
 
-# Use the venv python by default so make targets work without activating the venv.
+# Use the venv python and accelerate so make targets work without activating the venv.
 # Override with: make pretrain PYTHON=python3
-PYTHON ?= .venv/bin/python
+PYTHON     ?= .venv/bin/python
+_ACCELERATE = .venv/bin/accelerate
 
 # Config defaults — overridable with CONFIG=path/to/config.yaml
 PRETRAIN_CONFIG ?= pretrain/configs/gpt_$(SIZE).yaml
@@ -34,7 +35,7 @@ SFT_CODE_CONFIG ?= finetune/configs/sft_code_$(SIZE).yaml
 DPO_CONFIG      ?= alignment/configs/dpo_$(SIZE).yaml
 
 # accelerate launch with GPU count
-ACCELERATE = accelerate launch --num_processes $(GPUS)
+ACCELERATE = $(_ACCELERATE) launch --num_processes $(GPUS)
 
 # Optional workers flag for dedup
 ifdef WORKERS
@@ -264,7 +265,7 @@ setup-data-dir:
 
 setup-gpu:
 	@echo "==> Running GPU instance setup (DATA_DIR=$(DATA_DIR))..."
-	bash infra/setup_gpu_instance.sh --data-dir $(DATA_DIR)
+	bash infra/setup_gpu_instance.sh --data-dir $(DATA_DIR) --size $(SIZE) $(if $(DATE),--date $(DATE),)
 
 install:
 	python3 -m venv .venv

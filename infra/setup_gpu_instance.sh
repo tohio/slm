@@ -32,14 +32,20 @@ DATA_DIR="${DATA_DIR:-$REPO_DIR/data}"
 RESULTS_DIR="${RESULTS_DIR:-$REPO_DIR/results}"
 SKIP_DATA=false
 SKIP_PYTHON=false
+TOKENIZE_DATE=""    # empty = auto-detect latest from S3
+SIZE="125m"
 
 # ── Arg parsing ───────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --skip-data)    SKIP_DATA=true;    shift ;;
-        --skip-python)  SKIP_PYTHON=true;  shift ;;
-        --data-dir)     DATA_DIR="$2";     shift 2 ;;
-        --data-dir=*)   DATA_DIR="${1#*=}"; shift ;;
+        --skip-data)    SKIP_DATA=true;       shift ;;
+        --skip-python)  SKIP_PYTHON=true;     shift ;;
+        --data-dir)     DATA_DIR="$2";        shift 2 ;;
+        --data-dir=*)   DATA_DIR="${1#*=}";   shift ;;
+        --date)         TOKENIZE_DATE="$2";   shift 2 ;;
+        --date=*)       TOKENIZE_DATE="${1#*=}"; shift ;;
+        --size)         SIZE="$2";            shift 2 ;;
+        --size=*)       SIZE="${1#*=}";       shift ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
