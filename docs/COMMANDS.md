@@ -56,7 +56,7 @@ Creates a `.venv` virtualenv and installs Python dependencies from `requirements
 make install
 ```
 
-All subsequent `make` targets use `.venv/bin/python` automatically via the `PYTHON` variable — no need to activate the venv manually.
+All subsequent `make` targets use `.venv/bin/python` and `.venv/bin/accelerate` automatically — no need to activate the venv manually. This applies to all training, eval, and export targets.
 
 ---
 
