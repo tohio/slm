@@ -23,15 +23,20 @@ training:
   # 1 GPU:  4 × 8 × 1 = 32 seqs × 2048 tokens = ~65k tokens/step → 150k steps = ~9.8B tokens
   # 4 GPU:  4 × 2 × 4 = 32 seqs × 2048 tokens = ~65k tokens/step → 37.5k steps = ~9.8B tokens  (grad_accum=2, max_steps=37500)
   # 8 GPU:  4 × 1 × 8 = 32 seqs × 2048 tokens = ~65k tokens/step → 18.75k steps = ~9.8B tokens (grad_accum=1, max_steps=18750)
-  max_steps: 150000
-  warmup_steps: 2000
+  #max_steps: 150000
+  max_steps: 18750
+  #warmup_steps: 2000
+  warmup_steps: 250
   micro_batch_size: 4
-  gradient_accumulation_steps: 8   # 1 GPU default — see scaling note above
+  #gradient_accumulation_steps: 8   # 1 GPU default — see scaling note above
+  gradient_accumulation_steps: 1
   precision: bf16
   gradient_clip_val: 1.0
   gradient_checkpointing: false
-  eval_steps: 1000
-  save_steps: 1000
+  #eval_steps: 1000
+  eval_steps: 250
+  #save_steps: 1000
+  save_steps: 250
   save_total_limit: 3
   log_steps: 10
   num_workers: 4
