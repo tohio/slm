@@ -792,12 +792,7 @@ SFT and DPO runtimes are roughly 20–30% of pretraining time at the same model 
 
 `make setup-gpu` is the single command needed to configure a GPU instance. It is safe to re-run after a preemptible VM restart — idempotent throughout.
 
-It handles:
-- Directory creation with correct ownership (no manual sudo needed)
-- `.env` patching — sets `DATA_DIR`, `HF_HOME`, `HF_DATASETS_CACHE` to match the mount point
-- `~/.bashrc` update — exports persist across sessions and restarts
-- Python venv creation and dependency installation
-- Accelerate configured for single GPU by default
+It handles: directory creation, `.env` patching, `~/.bashrc` update, Python venv, AWS CLI, accelerate config, tokenizer download, and tokenized binary download.
 
 ```bash
 # 1. Clone and enter repo
@@ -807,46 +802,43 @@ cd slm
 # 2. Install make if needed
 sudo apt install -y make
 
-# 3. Copy credentials — fill in before running setup
+# 3. Fill in credentials
 cp .env.sample .env
 vi .env    # WANDB_API_KEY, HF_TOKEN, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, S3_BUCKET
 
 # 4. Run GPU setup — handles everything else automatically
-make setup-gpu DATA_DIR=/data/slm/data    # match your persistent disk mount point
+#    Omit DATE to auto-detect the latest tokenized binary from S3
+make setup-gpu DATA_DIR=/data/slm/data SIZE=125m DATE=2026-04-12
 source ~/.bashrc
 
-# 5. Pull tokenized binary from S3
-make tokenize-download SIZE=125m DATE=2026-04-12
-
-# 6. Validate full pipeline end to end (single GPU, ~10 min total)
+# 5. Validate the full pipeline end to end (single GPU, ~15 min total)
 make pretrain-mini  GPUS=1
+make prepare-sft
 make sft-mini       GPUS=1
 make sft-code-mini  GPUS=1
-make dpo-mini       GPUS=1
-
-# 7. Switch to multi-GPU for full training
-make accelerate-config-multi GPUS=8
-
-# 8. Run full training pipeline
-make pretrain   SIZE=125m GPUS=8
-make prepare-sft
-make sft        SIZE=125m GPUS=8
-make sft-code   SIZE=125m GPUS=8
 make prepare-dpo
-make dpo        SIZE=125m GPUS=8
-make eval       SIZE=125m
-make export     SIZE=125m
+make dpo-mini       GPUS=1
+make eval-mini
+
+# 6. Switch to multi-GPU and run the full training pipeline
+make accelerate-config-multi GPUS=8
+make pretrain    SIZE=125m GPUS=8
+make prepare-sft
+make sft         SIZE=125m GPUS=8
+make sft-code    SIZE=125m GPUS=8
+make prepare-dpo
+make dpo         SIZE=125m GPUS=8
+make eval        SIZE=125m
+make export      SIZE=125m
 ```
 
 ### After a preemptible restart
 
-The persistent disk survives but the VM is fresh. Just re-run setup:
-
 ```bash
 cd ~/slm
-make setup-gpu DATA_DIR=/data/slm/data    # same mount point as before
+make setup-gpu DATA_DIR=/data/slm/data SIZE=125m
 source ~/.bashrc
-make pretrain-resume SIZE=125m GPUS=8     # resume from last checkpoint
+make pretrain-resume SIZE=125m GPUS=8
 ```
 
 **Not needed on the GPU instance:**
@@ -855,7 +847,7 @@ make pretrain-resume SIZE=125m GPUS=8     # resume from last checkpoint
 - `make install-kenlm` — only used during validation
 - `make curate` — runs on the CPU curation instance
 - `make validate` — runs on the CPU curation instance
-- `make tokenize` — runs on the CPU curation instance (result downloaded via `make tokenize-download`)
+- `make tokenize` — runs on the CPU curation instance (result downloaded via `make setup-gpu`)
 
 ---
 

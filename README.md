@@ -260,7 +260,13 @@ Crawl at 2 WARC segments. Exercises every stage without the wait.
 # ── One-time setup ────────────────────────────────────────────────────────────
 make download-fasttext-model DATA_DIR=/data/slm/data   # fasttext language ID model (~1MB)
 make download-kenlm-model    DATA_DIR=/data/slm/data   # KenLM perplexity model (~4GB)
-make setup-gpu DATA_DIR=/data/slm/data              # GPU instance setup (run once, or after restart)
+make setup-gpu DATA_DIR=/data/slm/data SIZE=125m DATE=2026-04-12  # GPU instance setup
+make pretrain-mini GPUS=1                           # validate training loop
+make prepare-sft                                    # download SFT datasets
+make sft-mini GPUS=1                                # validate SFT
+make sft-code-mini GPUS=1                           # validate code SFT
+make prepare-dpo                                    # download DPO datasets
+make dpo-mini GPUS=1                                # validate DPO
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 make curate SIZE=125m WORKERS=16    # Stage 1: download, curate, upload to S3
