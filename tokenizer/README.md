@@ -32,6 +32,12 @@ Trains a domain-specific BPE tokenizer on the validated dataset using HuggingFac
 **Train**
 
 ```bash
+make tokenizer
+
+# Upload to S3 for use on GPU instance
+make tokenizer-upload
+
+# Or directly
 python tokenizer/train_tokenizer.py
 python tokenizer/train_tokenizer.py --vocab-size 32000
 python tokenizer/train_tokenizer.py --input data/validated/train.jsonl
@@ -40,7 +46,16 @@ python tokenizer/train_tokenizer.py --input data/validated/train.jsonl
 **Test**
 
 ```bash
+make tokenizer-test
+
+# Or directly
 python tokenizer/test_tokenizer.py
+```
+
+**Download on GPU instance**
+
+```bash
+make tokenizer-download
 ```
 
 **Load in Python**
@@ -60,9 +75,9 @@ text = tokenizer.decode(encoded.ids)
 **Load as HuggingFace tokenizer**
 
 ```python
-from transformers import AutoTokenizer
+from transformers import PreTrainedTokenizerFast
 
-tokenizer = AutoTokenizer.from_pretrained("data/tokenizer")
+tokenizer = PreTrainedTokenizerFast.from_pretrained("data/tokenizer")
 inputs = tokenizer("Hello world", return_tensors="pt")
 ```
 

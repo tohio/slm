@@ -11,33 +11,28 @@ AutoModelForCausalLM so the model can be loaded anywhere with:
 
 Three variants are exported per model size:
 
-    Variant     Checkpoint                        Hub repo
-    --------    ---------                         --------
-    base        results/slm-{size}/final          tohio/slm-{size}
+    Variant     Checkpoint                         Hub repo
+    --------    ---------                          --------
+    base        results/slm-{size}/final           tohio/slm-{size}
     instruct    results/slm-{size}-chat-code/final tohio/slm-{size}-instruct
-    chat        results/slm-{size}-dpo/final       tohio/slm-{size}-chat
+    chat        results/slm-{size}-dpo/final        tohio/slm-{size}-chat
 
 Pushes:
     - Model weights (model.safetensors)
     - Config (config.json)
     - Tokenizer files
-    - Model card (README.md)
+    - Model card (README.md) — populated with actual parameter count,
+      eval benchmark results, training details, and limitations
 
 Usage:
     python export/export.py --size 125m --variant base
     python export/export.py --size 125m --variant instruct
     python export/export.py --size 125m --variant chat
-
-    # Dry run — validate without pushing
     python export/export.py --size 125m --variant chat --dry-run
-
-    # Export all three variants
-    for variant in base instruct chat; do
-        python export/export.py --size 125m --variant $variant
-    done
 """
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -61,76 +56,190 @@ HF_TOKEN    = os.environ.get("HF_TOKEN", "")
 RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", "results"))
 
 # ── Variant definitions ────────────────────────────────────────────────────────
-#
-# Maps (size, variant) → (checkpoint_dir, hub_suffix, description)
-#
-#   base      — pretrained only, no fine-tuning
-#   instruct  — chat SFT + code SFT (instruction following)
-#   chat      — instruct + DPO alignment (preferred for conversation)
 
 VARIANTS = {
     "base": {
         "checkpoint": lambda size: RESULTS_DIR / f"slm-{size}" / "final",
-        "hub_suffix": "",                  # tohio/slm-125m
-        "description": "base pretrained model",
+        "hub_suffix":   "",           # tohio/slm-125m
+        "description":  "base pretrained model",
         "pipeline_tag": "text-generation",
     },
     "instruct": {
         "checkpoint": lambda size: RESULTS_DIR / f"slm-{size}-chat-code" / "final",
-        "hub_suffix": "-instruct",         # tohio/slm-125m-instruct
-        "description": "instruction-tuned via chat SFT + code SFT",
+        "hub_suffix":   "-instruct",  # tohio/slm-125m-instruct
+        "description":  "instruction-tuned via chat SFT + code SFT",
         "pipeline_tag": "text-generation",
     },
     "chat": {
         "checkpoint": lambda size: RESULTS_DIR / f"slm-{size}-dpo" / "final",
-        "hub_suffix": "-chat",             # tohio/slm-125m-chat
-        "description": "chat-aligned via SFT + DPO preference learning",
+        "hub_suffix":   "-chat",      # tohio/slm-125m-chat
+        "description":  "chat-aligned via SFT + DPO preference learning",
         "pipeline_tag": "conversational",
     },
 }
 
+# ── Benchmark metadata ─────────────────────────────────────────────────────────
+
+BENCHMARK_META = {
+    "hellaswag":     {"name": "HellaSwag",     "metric": "acc_norm", "few_shot": 10},
+    "arc_easy":      {"name": "ARC-Easy",      "metric": "acc_norm", "few_shot": 25},
+    "arc_challenge": {"name": "ARC-Challenge", "metric": "acc_norm", "few_shot": 25},
+    "mmlu":          {"name": "MMLU",          "metric": "acc",      "few_shot": 5},
+    "truthfulqa":    {"name": "TruthfulQA",    "metric": "acc",      "few_shot": 0},
+    "humaneval":     {"name": "HumanEval",     "metric": "pass@1",   "few_shot": 0},
+}
+
+
+# ── Eval results ───────────────────────────────────────────────────────────────
+
+def load_eval_results(size: str) -> dict:
+    """
+    Load the most recent eval results for the given model size.
+
+    Eval results are written by make eval to:
+        results/eval/slm-{size}-dpo/eval_<timestamp>.json
+
+    Returns a flat dict of {task_key: score} or empty dict if not found.
+    """
+    eval_dir = RESULTS_DIR / "eval" / f"slm-{size}-dpo"
+    if not eval_dir.exists():
+        return {}
+
+    result_files = sorted(eval_dir.glob("eval_*.json"))
+    if not result_files:
+        return {}
+
+    latest = result_files[-1]
+    try:
+        with open(latest) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+    raw_results = data.get("results", {})
+    scores = {}
+    for task_key, meta in BENCHMARK_META.items():
+        task_name = {
+            "hellaswag":     "hellaswag",
+            "arc_easy":      "arc_easy",
+            "arc_challenge": "arc_challenge",
+            "mmlu":          "mmlu",
+            "truthfulqa":    "truthfulqa_mc2",
+            "humaneval":     "humaneval",
+        }[task_key]
+        if task_name in raw_results:
+            metric = meta["metric"]
+            score = raw_results[task_name].get(metric) or raw_results[task_name].get(f"{metric},none")
+            if isinstance(score, (int, float)):
+                scores[task_key] = score
+
+    return scores
+
+
+def _format_eval_table(scores: dict) -> str:
+    """Format eval scores as a markdown table."""
+    if not scores:
+        return "_Benchmark results will be added after evaluation._"
+
+    lines = [
+        "| Benchmark | Few-shot | Metric | Score |",
+        "|---|---|---|---|",
+    ]
+    for task_key, score in scores.items():
+        meta = BENCHMARK_META[task_key]
+        lines.append(
+            f"| {meta['name']} | {meta['few_shot']}-shot | {meta['metric']} | {score:.4f} |"
+        )
+    return "\n".join(lines)
+
 
 # ── Model card ────────────────────────────────────────────────────────────────
 
-def generate_model_card(size: str, variant: str, hub_name: str) -> str:
-    """Generate a model card README for the HuggingFace Hub."""
-    size_upper = size.upper()
-    variant_cfg = VARIANTS[variant]
-    description = variant_cfg["description"]
-    pipeline_tag = variant_cfg["pipeline_tag"]
-    token_target = _token_target(size)
+def generate_model_card(
+    size: str,
+    variant: str,
+    hub_name: str,
+    n_params: int,
+    eval_scores: dict,
+) -> str:
+    """
+    Generate a fully populated model card for the HuggingFace Hub.
+
+    Args:
+        size:        Model size string (125m, 350m, 1b).
+        variant:     Model variant (base, instruct, chat).
+        hub_name:    HuggingFace repo name (e.g. slm-125m-chat).
+        n_params:    Actual parameter count from the loaded model.
+        eval_scores: Benchmark scores from the most recent eval run.
+                     Only populated for the chat variant (post-DPO).
+    """
+    size_upper    = size.upper()
+    variant_cfg   = VARIANTS[variant]
+    description   = variant_cfg["description"]
+    pipeline_tag  = variant_cfg["pipeline_tag"]
+    token_target  = _token_target(size)
+    param_str     = f"{n_params / 1e6:.1f}M ({n_params:,} parameters)"
+
+    # HuggingFace Hub frontmatter — base_model must be a valid Hub ID or omitted
+    if variant == "base":
+        base_model_yaml = "base_model: null"
+    else:
+        base_model_yaml = f"base_model: {HF_USERNAME}/slm-{size}"
 
     variant_section = {
         "base": f"""\
 This is the **base** variant — pretrained on {token_target} tokens with no fine-tuning.
-Use `{HF_USERNAME}/slm-{size}-instruct` for instruction following or
-`{HF_USERNAME}/slm-{size}-chat` for aligned conversation.
+It is suitable for research and as a starting point for further fine-tuning.
+Use [`{HF_USERNAME}/slm-{size}-instruct`](https://huggingface.co/{HF_USERNAME}/slm-{size}-instruct) for instruction following or
+[`{HF_USERNAME}/slm-{size}-chat`](https://huggingface.co/{HF_USERNAME}/slm-{size}-chat) for aligned conversation.
 """,
         "instruct": f"""\
-This is the **instruct** variant — the base model fine-tuned on chat and code instruction datasets.
-Use `{HF_USERNAME}/slm-{size}-chat` for the DPO-aligned version preferred for conversation.
-Use `{HF_USERNAME}/slm-{size}` for the raw base model.
+This is the **instruct** variant — the base model supervised fine-tuned on chat and code instruction datasets.
+It follows instructions reliably and can generate code across multiple languages.
+Use [`{HF_USERNAME}/slm-{size}-chat`](https://huggingface.co/{HF_USERNAME}/slm-{size}-chat) for the DPO-aligned version preferred for open-ended conversation.
+Use [`{HF_USERNAME}/slm-{size}`](https://huggingface.co/{HF_USERNAME}/slm-{size}) for the raw base model.
 """,
         "chat": f"""\
-This is the **chat** variant — the instruct model further aligned via DPO preference learning.
-This is the recommended variant for conversational use.
-Use `{HF_USERNAME}/slm-{size}-instruct` for the SFT-only version.
-Use `{HF_USERNAME}/slm-{size}` for the raw base model.
+This is the **chat** variant — the instruct model further aligned via Direct Preference Optimization (DPO).
+This is the recommended variant for conversational and assistant use cases.
+Use [`{HF_USERNAME}/slm-{size}-instruct`](https://huggingface.co/{HF_USERNAME}/slm-{size}-instruct) for the SFT-only version.
+Use [`{HF_USERNAME}/slm-{size}`](https://huggingface.co/{HF_USERNAME}/slm-{size}) for the raw base model.
 """,
     }[variant]
 
     training_section = {
-        "base": f"- **Pretraining:** {token_target} tokens on Wikipedia EN + CodeSearchNet + Common Crawl (70/20/10)",
+        "base": f"""\
+| Stage | Dataset | Size |
+|---|---|---|
+| Pretraining | Wikipedia EN + [CodeSearchNet](https://huggingface.co/datasets/code_search_net) + [Common Crawl](https://commoncrawl.org) (70/20/10) | {token_target} tokens |
+""",
         "instruct": f"""\
-- **Pretraining:** {token_target} tokens on Wikipedia EN + CodeSearchNet + Common Crawl (70/20/10)
-- **Chat SFT:** OpenHermes-2.5
-- **Code SFT:** Magicoder-OSS-Instruct""",
+| Stage | Dataset | Size |
+|---|---|---|
+| Pretraining | Wikipedia EN + [CodeSearchNet](https://huggingface.co/datasets/code_search_net) + [Common Crawl](https://commoncrawl.org) (70/20/10) | {token_target} tokens |
+| Chat SFT | [OpenHermes-2.5](https://huggingface.co/datasets/teknium/OpenHermes-2.5) | ~1M examples |
+| Code SFT | [Magicoder-OSS-Instruct-75K](https://huggingface.co/datasets/ise-uiuc/Magicoder-OSS-Instruct-75K) | ~75K examples |
+""",
         "chat": f"""\
-- **Pretraining:** {token_target} tokens on Wikipedia EN + CodeSearchNet + Common Crawl (70/20/10)
-- **Chat SFT:** OpenHermes-2.5
-- **Code SFT:** Magicoder-OSS-Instruct
-- **DPO alignment:** Anthropic/hh-rlhf + Intel/orca_dpo_pairs + argilla/dpo-mix-7k""",
+| Stage | Dataset | Size |
+|---|---|---|
+| Pretraining | Wikipedia EN + [CodeSearchNet](https://huggingface.co/datasets/code_search_net) + [Common Crawl](https://commoncrawl.org) (70/20/10) | {token_target} tokens |
+| Chat SFT | [OpenHermes-2.5](https://huggingface.co/datasets/teknium/OpenHermes-2.5) | ~1M examples |
+| Code SFT | [Magicoder-OSS-Instruct-75K](https://huggingface.co/datasets/ise-uiuc/Magicoder-OSS-Instruct-75K) | ~75K examples |
+| DPO alignment | [Anthropic/hh-rlhf](https://huggingface.co/datasets/Anthropic/hh-rlhf) + [Intel/orca_dpo_pairs](https://huggingface.co/datasets/Intel/orca_dpo_pairs) + [argilla/dpo-mix-7k](https://huggingface.co/datasets/argilla/dpo-mix-7k) | ~80K pairs |
+""",
     }[variant]
+
+    # Eval section — only shown for chat variant (post-alignment eval)
+    eval_section = ""
+    if variant == "chat":
+        eval_section = f"""
+## Evaluation
+
+Evaluated using [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness).
+
+{_format_eval_table(eval_scores)}
+"""
 
     return f"""---
 license: mit
@@ -145,13 +254,13 @@ tags:
   - gqa
   - swiglu
   - {variant}
-base_model: {"trained from scratch" if variant == "base" else f"{HF_USERNAME}/slm-{size}"}
+{base_model_yaml}
 ---
 
 # {hub_name}
 
-A {size_upper} decoder-only language model ({description}). Part of the SLM model family
-built entirely from scratch — from raw web data through to a production-serving aligned model.
+A {size_upper} decoder-only language model ({description}). Part of the SLM model family —
+built entirely from scratch, from raw web data through to a production-ready aligned model.
 
 {variant_section}
 
@@ -167,16 +276,21 @@ built entirely from scratch — from raw web data through to a production-servin
 
 | Component | Choice | Rationale |
 |---|---|---|
-| Positional encoding | RoPE | Better length generalisation |
-| Normalization | RMSNorm | Faster than LayerNorm |
-| Activation | SwiGLU | Better gradient flow |
-| Attention | GQA | Reduced KV memory at inference |
-| Vocab size | 32,000 | Custom BPE tokenizer |
-| Parameters | {_param_count(size)} | |
+| Positional encoding | RoPE | Better length generalisation, relative position awareness |
+| Normalization | RMSNorm | Faster than LayerNorm, modern standard |
+| Activation | SwiGLU | Better gradient flow, used by LLaMA and Mistral |
+| Attention | GQA | Reduces KV cache memory at inference |
+| Bias | None | Simpler, modern standard |
+| Embeddings | Tied | Reduces parameters, effective at small scale |
+| Vocab size | 32,000 | Custom BPE tokenizer trained on the pretraining corpus |
+| Parameters | {param_str} | |
 
 ## Training
 
 {training_section}
+
+**Hardware:** NVIDIA H200 (pretraining on 8× H200, fine-tuning on 1× H200)
+{eval_section}
 
 ## Usage
 
@@ -196,19 +310,23 @@ output = model.generate(inputs, max_new_tokens=200, temperature=0.7, do_sample=T
 print(tokenizer.decode(output[0], skip_special_tokens=True))
 ```
 
+## Limitations
+
+- **Scale:** At {size_upper} parameters this model is significantly smaller than frontier models. It will underperform on complex reasoning, long-context tasks, and domains not well-represented in the pretraining data.
+- **Hallucination:** Like all language models, this model can generate plausible-sounding but factually incorrect content. Outputs should not be used as a source of truth without independent verification.
+- **Safety:** DPO alignment provides basic harmlessness training but does not guarantee safe outputs in all contexts. This model has not undergone red-teaming or adversarial safety evaluation.
+- **Languages:** Training data is predominantly English. Performance on other languages will be significantly degraded.
+- **Code:** Code generation capability is limited to the languages represented in the Magicoder training set (primarily Python and JavaScript).
+
 ## Related
 
-- [slm](https://github.com/tohio/slm) — full training pipeline
-- [ai-infra](https://github.com/tohio/ai-infra) — production Kubernetes serving
+- [slm](https://github.com/tohio/slm) — full training pipeline (data curation through serving)
+- [ai-infra](https://github.com/tohio/ai-infra) — production Kubernetes serving via vLLM
 """
 
 
 def _token_target(size: str) -> str:
     return {"125m": "3B", "350m": "10B", "1b": "25B"}.get(size, "N/A")
-
-
-def _param_count(size: str) -> str:
-    return {"125m": "125M", "350m": "350M", "1b": "1B"}.get(size, "N/A")
 
 
 # ── Export ────────────────────────────────────────────────────────────────────
@@ -235,43 +353,52 @@ def export(
     from model import SLMConfig, SLMForCausalLM
 
     variant_cfg = VARIANTS[variant]
-    checkpoint = model_path or variant_cfg["checkpoint"](size)
-    hub_suffix = variant_cfg["hub_suffix"]
-    hub_name = f"slm-{size}{hub_suffix}"
-    repo_id = f"{HF_USERNAME}/{hub_name}"
+    checkpoint  = model_path or variant_cfg["checkpoint"](size)
+    hub_suffix  = variant_cfg["hub_suffix"]
+    hub_name    = f"slm-{size}{hub_suffix}"
+    repo_id     = f"{HF_USERNAME}/{hub_name}"
 
     log.info(f"=== SLM Export ===")
-    log.info(f"Size:     {size}")
-    log.info(f"Variant:  {variant}")
+    log.info(f"Size:       {size}")
+    log.info(f"Variant:    {variant}")
     log.info(f"Checkpoint: {checkpoint}")
-    log.info(f"Hub:      {repo_id}")
-    log.info(f"Dry run:  {dry_run}")
+    log.info(f"Hub:        {repo_id}")
+    log.info(f"Dry run:    {dry_run}")
 
     if not checkpoint.exists():
         log.error(f"Checkpoint not found: {checkpoint}")
         log.error(f"Run the full training pipeline first: make pretrain sft sft-code dpo SIZE={size}")
         sys.exit(1)
 
-    # Register custom model with AutoConfig
+    # Register custom model
     AutoConfig.register("slm", SLMConfig)
     AutoModelForCausalLM.register(SLMConfig, SLMForCausalLM)
 
-    # Load model
+    # Load model — actual parameter count used in model card
     log.info("Loading model...")
-    config = SLMConfig.from_pretrained(str(checkpoint))
-    model = SLMForCausalLM.from_pretrained(str(checkpoint))
+    config  = SLMConfig.from_pretrained(str(checkpoint))
+    model   = SLMForCausalLM.from_pretrained(str(checkpoint))
     n_params = sum(p.numel() for p in model.parameters())
     log.info(f"Parameters: {n_params:,} ({n_params / 1e6:.1f}M)")
 
     # Load tokenizer
     tokenizer_path = checkpoint / "tokenizer"
     if not tokenizer_path.exists():
-        tokenizer_path = Path("data/tokenizer")
+        tokenizer_path = Path(os.environ.get("DATA_DIR", "data")) / "tokenizer"
     tokenizer = PreTrainedTokenizerFast.from_pretrained(str(tokenizer_path))
-    tokenizer.pad_token  = "<PAD>"
-    tokenizer.eos_token  = "<EOS>"
-    tokenizer.bos_token  = "<BOS>"
-    tokenizer.chat_template = _chat_template()
+    tokenizer.pad_token      = "<PAD>"
+    tokenizer.eos_token      = "<EOS>"
+    tokenizer.bos_token      = "<BOS>"
+    tokenizer.chat_template  = _chat_template()
+
+    # Load eval results (populated for chat variant after make eval)
+    eval_scores = load_eval_results(size) if variant == "chat" else {}
+    if variant == "chat":
+        if eval_scores:
+            log.info(f"Eval results loaded: {list(eval_scores.keys())}")
+        else:
+            log.warning("No eval results found — benchmark table will be empty in model card")
+            log.warning(f"Run: make eval SIZE={size} before exporting")
 
     if dry_run:
         log.info("Dry run — skipping Hub push")
@@ -286,10 +413,11 @@ def export(
     login(token=HF_TOKEN)
 
     # Generate and write model card
-    model_card = generate_model_card(size, variant, hub_name)
-    card_path = checkpoint / "README.md"
+    model_card = generate_model_card(size, variant, hub_name, n_params, eval_scores)
+    card_path  = checkpoint / "README.md"
     with open(card_path, "w") as f:
         f.write(model_card)
+    log.info(f"Model card written ({len(model_card):,} chars)")
 
     # Push to Hub
     log.info(f"Pushing to {repo_id}...")
@@ -315,16 +443,11 @@ def _validate_model(model, tokenizer, config) -> None:
     log.info("Validating model...")
     model.eval()
 
-    prompt = "<|system|>You are a helpful assistant.<|endofturn|><|user|>Hello!<|endofturn|><|assistant|>"
+    prompt   = "<|system|>You are a helpful assistant.<|endofturn|><|user|>Hello!<|endofturn|><|assistant|>"
     input_ids = tokenizer(prompt, return_tensors="pt").input_ids
 
     with torch.no_grad():
-        output = model.generate(
-            input_ids,
-            max_new_tokens=20,
-            pad_token_id=0,
-            eos_token_id=3,
-        )
+        output = model.generate(input_ids, max_new_tokens=20, pad_token_id=0, eos_token_id=3)
 
     decoded = tokenizer.decode(output[0], skip_special_tokens=True)
     log.info(f"Validation output: {decoded[:100]}")
@@ -359,43 +482,15 @@ Examples:
   python export/export.py --size 125m --variant instruct
   python export/export.py --size 125m --variant chat
   python export/export.py --size 125m --variant chat --dry-run
-
-  # Export all three variants
-  for variant in base instruct chat; do
-      python export/export.py --size 125m --variant $variant
-  done
         """,
     )
-    parser.add_argument(
-        "--size",
-        type=str,
-        required=True,
-        choices=["125m", "350m", "1b"],
-        help="Model size",
-    )
-    parser.add_argument(
-        "--variant",
-        type=str,
-        required=True,
-        choices=list(VARIANTS.keys()),
-        help="Model variant: base (pretrain only), instruct (SFT), chat (SFT + DPO)",
-    )
-    parser.add_argument(
-        "--model",
-        type=Path,
-        default=None,
-        help="Override checkpoint path (defaults to variant mapping)",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Validate without pushing to Hub",
-    )
-    parser.add_argument(
-        "--private",
-        action="store_true",
-        help="Create private Hub repository",
-    )
+    parser.add_argument("--size",    type=str,  required=True, choices=["125m", "350m", "1b"])
+    parser.add_argument("--variant", type=str,  required=True, choices=list(VARIANTS.keys()),
+                        help="base (pretrain only) | instruct (SFT) | chat (SFT + DPO)")
+    parser.add_argument("--model",   type=Path, default=None,
+                        help="Override checkpoint path (defaults to variant mapping)")
+    parser.add_argument("--dry-run", action="store_true", help="Validate without pushing to Hub")
+    parser.add_argument("--private", action="store_true", help="Create private Hub repository")
     args = parser.parse_args()
 
     export(
