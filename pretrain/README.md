@@ -23,38 +23,44 @@ pretrain/train.py           →   results/slm-125m/final/   (HF checkpoint)
 **Prerequisites**
 
 ```bash
-pip install -r requirements.txt
-# Validated dataset must exist
-ls data/validated/train.jsonl
+# Validated dataset must exist at DATA_DIR
+ls $DATA_DIR/validated/train.jsonl
+
 # Tokenizer must be trained
-ls data/tokenizer/slm_tokenizer.json
+ls $DATA_DIR/tokenizer/tokenizer.json
 ```
 
 **Step 1 — Tokenize**
 
 ```bash
-# Default: data/validated/train.jsonl → data/tokenized/train.bin
 make tokenize
 
-# Or directly
-python pretrain/data/tokenize.py --workers 8 --verify
+# Upload to S3 for use on GPU instance
+make tokenize-upload SIZE=125m
 ```
 
-**Step 2 — Pretrain**
+**Step 2 — Download on GPU instance**
 
 ```bash
-# Single GPU — 125M
-make pretrain
+make tokenizer-download
+make tokenize-download SIZE=125m DATE=YYYY-MM-DD
+```
 
-# Single GPU — 350M or 1B
-make pretrain SIZE=350m
-make pretrain SIZE=1b
+**Step 3 — Pretrain**
 
-# Multi-GPU via accelerate
-accelerate launch pretrain/train.py --config pretrain/configs/gpt_125m.yaml
+```bash
+# Mini validation run — confirm the training loop works before committing
+make pretrain-mini GPUS=1
 
-# Resume from checkpoint
-python pretrain/train.py --config pretrain/configs/gpt_125m.yaml --resume
+# Single GPU
+make pretrain SIZE=125m GPUS=1
+
+# Multi-GPU
+make accelerate-config-multi GPUS=4
+make pretrain SIZE=125m GPUS=4
+
+# Resume from last checkpoint
+make pretrain-resume SIZE=125m GPUS=4
 ```
 
 ---
@@ -63,6 +69,7 @@ python pretrain/train.py --config pretrain/configs/gpt_125m.yaml --resume
 
 | Config | Model | Layers | Hidden | Steps | Global batch | Target tokens |
 |---|---|---|---|---|---|---|
+| `gpt_mini.yaml` | `slm-mini` | 6 | 384 | 500 | 4 | validation only |
 | `gpt_125m.yaml` | `slm-125m` | 12 | 768 | 150k | 32 | ~3B |
 | `gpt_350m.yaml` | `slm-350m` | 24 | 1024 | 500k | 64 | ~10B |
 | `gpt_1b.yaml` | `slm-1b` | 32 | 2048 | 1.5M | 128 | ~25B |
@@ -76,11 +83,13 @@ Global batch size = `micro_batch_size × gradient_accumulation_steps × num_gpus
 ```
 pretrain/
 ├── configs/
+│   ├── gpt_mini.yaml        training config for mini validation run
 │   ├── gpt_125m.yaml        training config for 125M
 │   ├── gpt_350m.yaml        training config for 350M
 │   └── gpt_1b.yaml          training config for 1B
 ├── data/
-│   ├── tokenize.py          JSONL → memory-mapped uint16 binary
+│   ├── tokenize_data.py     JSONL → memory-mapped uint16 binary
+│   ├── upload_tokenized.py  S3 upload/download for tokenized binary
 │   └── dataset.py           PyTorch Dataset wrapping the .bin file
 └── train.py                 HF Trainer pretraining entry point
 ```
@@ -129,7 +138,6 @@ Training metrics are logged to Weights & Biases automatically. Key metrics to wa
 | `eval/loss` | Should track training loss. Widening gap = overfitting. |
 | `train/learning_rate` | Cosine decay — should ramp up then decay smoothly. |
 | `train/grad_norm` | Should stay below `gradient_clip_val=1.0`. Persistent high norms = instability. |
-| `train/tokens_per_second` | GPU throughput — should be stable after warmup. |
 
 Expected validation perplexity at convergence: **20–40** for `slm-125m` at 3B tokens.
 
@@ -137,19 +145,25 @@ Expected validation perplexity at convergence: **20–40** for `slm-125m` at 3B 
 
 ## Multi-GPU Training
 
-Uses HuggingFace `accelerate` — no code changes needed, just launch differently:
+Multi-GPU training is configured via `accelerate_configs/` and launched through `make`. No code changes are needed — accelerate handles distributed training transparently.
 
 ```bash
-# Configure accelerate (run once)
-accelerate config
+# Configure accelerate for single GPU (mini validation)
+make accelerate-config-single
 
-# Launch on all available GPUs
-accelerate launch pretrain/train.py --config pretrain/configs/gpt_125m.yaml
+# Configure accelerate for multi-GPU (full training)
+make accelerate-config-multi GPUS=4
 
-# Launch on specific GPUs
-CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch --num_processes 4 \
-    pretrain/train.py --config pretrain/configs/gpt_350m.yaml
+# Launch training
+make pretrain SIZE=125m GPUS=4
+make pretrain SIZE=350m GPUS=8
+make pretrain SIZE=1b   GPUS=8
+
+# Override config directly
+make pretrain CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
 ```
+
+Accelerate configs live in `accelerate_configs/single_gpu.yaml` and `accelerate_configs/multi_gpu.yaml`. Both are committed to the repo — no interactive wizard needed on each new instance.
 
 ---
 
@@ -157,10 +171,10 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch --num_processes 4 \
 
 | Model | GPU | Precision | Batch | Est. tokens/sec | Est. time (3B tokens) |
 |---|---|---|---|---|---|
-| `slm-125m` | 1× H100 80GB | bf16 | 32 | ~250k | ~3.5 hrs |
-| `slm-125m` | 1× A100 40GB | bf16 | 32 | ~120k | ~7 hrs |
-| `slm-350m` | 4× H100 80GB | bf16 | 64 | ~400k | ~7 hrs (10B) |
-| `slm-1b` | 4× H100 80GB | bf16 | 128 | ~200k | ~35 hrs (25B) |
+| `slm-125m` | 1× H200 | bf16 | 32 | ~350k | ~2.5 hrs |
+| `slm-125m` | 8× H200 | bf16 | 256 | ~2.4M | ~20 min |
+| `slm-350m` | 8× H200 | bf16 | 128 | ~800k | ~3.5 hrs (10B) |
+| `slm-1b` | 8× H200 | bf16 | 128 | ~300k | ~23 hrs (25B) |
 
 ---
 
@@ -172,6 +186,6 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch --num_processes 4 \
 
 **Why cosine LR schedule?** Cosine annealing smoothly decays the learning rate to a small minimum, giving the model time to converge without abrupt changes. Used by GPT-3, LLaMA, and most modern pretraining runs.
 
-**Why global batch 32/64/128?** Larger batches provide more stable gradient estimates and allow higher learning rates, improving convergence. Gradient accumulation steps simulate larger batches on single GPUs.
+**Why global batch 32/64/128?** Larger batches provide more stable gradient estimates and allow higher learning rates, improving convergence. Gradient accumulation steps simulate larger batches on single GPUs without requiring more GPU memory.
 
-**Why gradient checkpointing for 1B only?** At 125M and 350M, activations fit comfortably in H100 memory. At 1B with sequence length 4096, activation memory becomes the bottleneck. Gradient checkpointing trades ~30% compute for ~60% memory reduction.
+**Why gradient checkpointing for 1B only?** At 125M and 350M, activations fit comfortably in H200 memory. At 1B with sequence length 4096, activation memory becomes the bottleneck. Gradient checkpointing trades ~30% compute for ~60% memory reduction.
