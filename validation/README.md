@@ -12,27 +12,36 @@ The curator (`curator/filters/quality.py`) already applies heuristic filters —
 |---|---|
 | Terminal punctuation (C4) | Incomplete sentences, truncated content, navigation text |
 | Repeated n-grams (Gopher) | Boilerplate, templated content, repeated paragraphs |
-| Language detection (fastText) | Non-English content that passed langdetect |
+| Language detection (fastText) | Non-English content that passed earlier filters |
 | Perplexity (KenLM) | Gibberish, SEO spam, malformed text |
 
 ---
 
 ## Getting Started
 
-**Install dependencies**
+**Prerequisites**
 
 ```bash
-pip install datatrove kenlm
-```
+# Install dependencies (included in requirements.txt)
+make install
 
-**Download KenLM model**
+# Install KenLM Python bindings (not on PyPI — built from source)
+make install-kenlm
 
-```bash
-mkdir -p data/models
-wget https://dl.fbaipublicfiles.com/cc_net/lm/en.arpa.bin -O data/models/en.arpa.bin
+# Download KenLM English language model (~4GB)
+make download-kenlm-model
 ```
 
 **Run validation**
+
+```bash
+make validate
+
+# Upload validated data to S3
+make validate-upload SIZE=125m
+```
+
+**Or directly**
 
 ```bash
 # Default — manual pipeline with auto perplexity threshold
@@ -86,3 +95,5 @@ Perplexity distribution (typical web crawl):
 **Why 90th percentile threshold?** Fixed thresholds don't generalize across data sources. Web crawl and Wikipedia have very different perplexity distributions. The 90th percentile adapts to whatever data you feed it.
 
 **Why skip perplexity for code?** Code has high perplexity relative to English prose by definition — it contains identifiers, syntax, and structure that don't follow natural language patterns. Applying a prose-trained perplexity filter to code would incorrectly remove valid code.
+
+**Why KenLM over a neural LM?** KenLM is a count-based n-gram model — scoring a document takes microseconds vs seconds for a neural model. At 125M scale (millions of documents) a neural perplexity filter would take weeks. KenLM's Wikipedia-trained model is fast, robust, and has been validated by the cc_net and FineWeb pipelines.
