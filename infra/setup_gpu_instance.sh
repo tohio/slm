@@ -11,9 +11,10 @@
 #   bash infra/setup_gpu_instance.sh
 #   bash infra/setup_gpu_instance.sh --data-dir /mnt/persistent
 #   bash infra/setup_gpu_instance.sh --data-dir /mnt/persistent --skip-data
+#   bash infra/setup_gpu_instance.sh --data-dir /mnt/persistent --size 125m --date 2026-04-12
 #
 # Or via make:
-#   make setup-gpu DATA_DIR=/mnt/persistent
+#   make setup-gpu DATA_DIR=/mnt/persistent SIZE=125m DATE=2026-04-12
 # ─────────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -38,14 +39,14 @@ SIZE="125m"
 # ── Arg parsing ───────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --skip-data)    SKIP_DATA=true;       shift ;;
-        --skip-python)  SKIP_PYTHON=true;     shift ;;
-        --data-dir)     DATA_DIR="$2";        shift 2 ;;
-        --data-dir=*)   DATA_DIR="${1#*=}";   shift ;;
-        --date)         TOKENIZE_DATE="$2";   shift 2 ;;
+        --skip-data)    SKIP_DATA=true;          shift ;;
+        --skip-python)  SKIP_PYTHON=true;        shift ;;
+        --data-dir)     DATA_DIR="$2";           shift 2 ;;
+        --data-dir=*)   DATA_DIR="${1#*=}";      shift ;;
+        --date)         TOKENIZE_DATE="$2";      shift 2 ;;
         --date=*)       TOKENIZE_DATE="${1#*=}"; shift ;;
-        --size)         SIZE="$2";            shift 2 ;;
-        --size=*)       SIZE="${1#*=}";       shift ;;
+        --size)         SIZE="$2";               shift 2 ;;
+        --size=*)       SIZE="${1#*=}";          shift ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
@@ -124,8 +125,6 @@ else
 fi
 
 # ── Configure .env ────────────────────────────────────────────────────────────
-# Patch DATA_DIR, HF_HOME, HF_DATASETS_CACHE in .env — same approach as
-# setup.sh so all three path variables are always consistent with DATA_DIR.
 log "Configuring .env..."
 
 if [[ ! -f "$ENV_FILE" ]]; then
@@ -148,8 +147,6 @@ _set_env "HF_HOME"            "$HF_CACHE_DIR"
 _set_env "HF_DATASETS_CACHE"  "$HF_CACHE_DIR"
 
 # ── Configure ~/.bashrc ───────────────────────────────────────────────────────
-# Write path exports to ~/.bashrc so they persist across sessions and
-# survive preemptible VM restarts (the disk persists, bashrc is re-sourced).
 log "Configuring ~/.bashrc..."
 
 BASHRC_MARKER="# SLM GPU environment"
@@ -162,7 +159,6 @@ export RESULTS_DIR=${RESULTS_DIR}
 "
 
 if grep -q "$BASHRC_MARKER" ~/.bashrc; then
-    # Already present — update in place by removing old block and re-adding
     sed -i "/${BASHRC_MARKER}/,/^$/d" ~/.bashrc
     log "  Updated existing SLM block in ~/.bashrc"
 fi
@@ -183,25 +179,47 @@ cp "$REPO_DIR/accelerate_configs/single_gpu.yaml" \
    ~/.cache/huggingface/accelerate/default_config.yaml
 log "  ✓ accelerate configured for single GPU"
 
-# ── Pull data from S3 ─────────────────────────────────────────────────────────
+# ── Pull tokenized binary from S3 (versioned) ────────────────────────────────
 if [[ "$SKIP_DATA" == "true" ]]; then
     log "[SKIP] S3 data pull (--skip-data)"
 elif [[ -z "${S3_BUCKET:-}" ]]; then
     log "WARNING: S3_BUCKET not set in .env — skipping data pull"
-    log "  Run manually: make tokenize-download SIZE=125m DATE=YYYY-MM-DD"
+    log "  Run manually: make tokenize-download SIZE=$SIZE DATE=YYYY-MM-DD"
 else
-    S3_BASE="s3://${S3_BUCKET}/${S3_PREFIX:-slm/data}"
-    log "Pulling tokenized binary from $S3_BASE..."
-    log "  (Use make tokenize-download SIZE=125m DATE=YYYY-MM-DD for versioned download)"
+    cd "$REPO_DIR"
+    S3_PREFIX="${S3_PREFIX:-slm/data}"
 
-    aws s3 sync "${S3_BASE}/tokenized/" "$DATA_DIR/tokenized/" \
-        --no-progress \
-        --exclude "*" \
-        --include "*.bin" \
-        --include "*.json"
+    if [[ -n "$TOKENIZE_DATE" ]]; then
+        # Explicit date provided — use it directly
+        log "Pulling tokenized binary from S3 (size=$SIZE, date=$TOKENIZE_DATE)..."
+        .venv/bin/python pretrain/data/upload_tokenized.py download \
+            --target "$SIZE" --date "$TOKENIZE_DATE"
+    else
+        # No date — auto-detect the latest versioned prefix for this size
+        log "No date specified — auto-detecting latest tokenized version for size=$SIZE..."
+        LATEST=$(aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/${SIZE}/" \
+            2>/dev/null | awk '{print $2}' | tr -d '/' | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' | sort | tail -1 || true)
 
-    BIN_SIZE=$(du -sh "$DATA_DIR/tokenized" 2>/dev/null | cut -f1 || echo "unknown")
-    log "  ✓ Tokenized binary pulled ($BIN_SIZE)"
+        if [[ -z "$LATEST" ]]; then
+            log "WARNING: No versioned tokenized data found at s3://${S3_BUCKET}/${S3_PREFIX}/${SIZE}/"
+            log "  Run manually: make tokenize-download SIZE=$SIZE DATE=YYYY-MM-DD"
+        else
+            log "  Latest version detected: $LATEST"
+            log "Pulling tokenized binary from S3 (size=$SIZE, date=$LATEST)..."
+            .venv/bin/python pretrain/data/upload_tokenized.py download \
+                --target "$SIZE" --date "$LATEST"
+        fi
+    fi
+
+    # Verify the download landed correctly
+    TRAIN_BIN="$DATA_DIR/tokenized/train.bin"
+    if [[ -f "$TRAIN_BIN" ]]; then
+        BIN_SIZE=$(du -sh "$TRAIN_BIN" | cut -f1)
+        log "  ✓ train.bin: $BIN_SIZE"
+    else
+        log "  WARNING: train.bin not found at $TRAIN_BIN after download"
+        log "  Run manually: make tokenize-download SIZE=$SIZE DATE=YYYY-MM-DD"
+    fi
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
@@ -212,7 +230,7 @@ log "Next steps:"
 log "  source ~/.bashrc"
 log "  make pretrain-mini GPUS=1                  # validate training loop"
 log "  make accelerate-config-multi GPUS=8        # configure for full run"
-log "  make pretrain SIZE=125m GPUS=8             # full pretraining"
+log "  make pretrain SIZE=$SIZE GPUS=8            # full pretraining"
 log ""
 log "GPU monitoring:"
 log "  watch -n 2 nvidia-smi"

@@ -1,6 +1,5 @@
 name: slm-350m
 wandb_project: slm
-
 model:
   vocab_size: 32000
   hidden_size: 1024
@@ -12,15 +11,22 @@ model:
   rms_norm_eps: 1.0e-5
   initializer_range: 0.02
   tie_word_embeddings: true
-
 data:
   val_fraction: 0.005
-
 training:
-  max_steps: 500000         # ~10B tokens at global_batch=64, seq=2048
+  # ── Batch size ──────────────────────────────────────────────────────────────
+  # Global batch = micro_batch_size × gradient_accumulation_steps × num_gpus
+  # These values assume 1 GPU. Adjust before running multi-GPU training:
+  #   divide gradient_accumulation_steps by num_gpus to hold global batch constant
+  #   divide max_steps by num_gpus to hold token budget constant
+  #
+  # 1 GPU:  4 × 16 × 1 = 64 seqs × 2048 tokens = ~131k tokens/step → 500k steps = ~65B tokens
+  # 4 GPU:  4 × 4  × 4 = 64 seqs × 2048 tokens = ~131k tokens/step → 125k steps = ~65B tokens  (grad_accum=4,  max_steps=125000)
+  # 8 GPU:  4 × 2  × 8 = 64 seqs × 2048 tokens = ~131k tokens/step → 62.5k steps = ~65B tokens (grad_accum=2,  max_steps=62500)
+  max_steps: 500000
   warmup_steps: 2000
   micro_batch_size: 4
-  gradient_accumulation_steps: 16  # effective global batch = 4 * 16 = 64
+  gradient_accumulation_steps: 16  # 1 GPU default — see scaling note above
   precision: bf16
   gradient_clip_val: 1.0
   gradient_checkpointing: false
@@ -33,7 +39,6 @@ training:
   lr_scheduler: cosine
   report_to:
     - wandb
-
 optimizer:
   lr: 2.0e-4
   weight_decay: 0.1

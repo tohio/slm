@@ -1,6 +1,5 @@
 name: slm-mini
 wandb_project: slm-mini
-
 model:
   vocab_size: 32000
   hidden_size: 384
@@ -12,15 +11,20 @@ model:
   rms_norm_eps: 1.0e-5
   initializer_range: 0.02
   tie_word_embeddings: true
-
 data:
   val_fraction: 0.005
-
 training:
-  max_steps: 500            # ~8M tokens at global_batch=8, seq=1024 — enough to see loss decrease
+  # ── Batch size ──────────────────────────────────────────────────────────────
+  # Global batch = micro_batch_size × gradient_accumulation_steps × num_gpus
+  # These configs are written for 1 GPU (make pretrain-mini GPUS=1).
+  # If running on N GPUs, divide gradient_accumulation_steps by N to keep the
+  # same global batch size, and divide max_steps by N to keep the same token budget.
+  #
+  # 1 GPU:  2 × 4 × 1 = 8 seqs × 1024 tokens = ~8k tokens/step
+  max_steps: 500            # ~4M tokens — enough to confirm loss decreases
   warmup_steps: 50
   micro_batch_size: 2
-  gradient_accumulation_steps: 4   # effective global batch = 2 * 4 = 8
+  gradient_accumulation_steps: 4
   precision: bf16
   gradient_clip_val: 1.0
   gradient_checkpointing: false
@@ -33,7 +37,6 @@ training:
   lr_scheduler: cosine
   report_to:
     - wandb
-
 optimizer:
   lr: 3.0e-4
   weight_decay: 0.1

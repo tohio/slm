@@ -242,58 +242,52 @@ WANDB_API_KEY=...
 HF_TOKEN=...
 ```
 
-**Validate the pipeline with a mini run (~30 min)**
-
-Before committing to a full run, validate the pipeline end to end:
-
-```bash
-make download-fasttext-model        # one-time: download fasttext language ID model (~1MB)
-make curate-mini
-```
-
-This caps Wikipedia at 5k docs, CodeSearchNet at 10k samples, and Common
-Crawl at 2 WARC segments. Exercises every stage without the wait.
+---
 
 **Run the full pipeline**
 
 ```bash
-# ── One-time setup ────────────────────────────────────────────────────────────
-make download-fasttext-model DATA_DIR=/data/slm/data   # fasttext language ID model (~1MB)
-make download-kenlm-model    DATA_DIR=/data/slm/data   # KenLM perplexity model (~4GB)
-make setup-gpu DATA_DIR=/data/slm/data SIZE=125m DATE=2026-04-12  # GPU instance setup
-make pretrain-mini GPUS=1                           # validate training loop
-make prepare-sft                                    # download SFT datasets
-make sft-mini GPUS=1                                # validate SFT
-make sft-code-mini GPUS=1                           # validate code SFT
-make prepare-dpo                                    # download DPO datasets
-make dpo-mini GPUS=1                                # validate DPO
-
-# ── Data ──────────────────────────────────────────────────────────────────────
-make curate SIZE=125m WORKERS=16    # Stage 1: download, curate, upload to S3
+# ── Step 1: Curation instance (CPU) ──────────────────────────────────────────
+# Run on a CPU instance. No GPU required.
+make download-fasttext-model DATA_DIR=/data/slm/data   # language ID model (~1MB)
+make download-kenlm-model    DATA_DIR=/data/slm/data   # perplexity model (~4GB)
+make curate SIZE=125m WORKERS=16    # Stage 1: download, filter, dedup, blend, upload
 make validate                       # Stage 2: perplexity filter
 make validate-upload SIZE=125m      # Stage 2: push validated data to S3
-
-# ── Tokenizer ─────────────────────────────────────────────────────────────────
 make tokenizer                      # Stage 3: train BPE tokenizer
 make tokenizer-upload               # Stage 3: push tokenizer to S3
 make tokenize                       # Stage 4a: tokenize to binary
 make tokenize-upload SIZE=125m      # Stage 4a: push tokenized binary to S3
 
-# ── Training ──────────────────────────────────────────────────────────────────
-make pretrain-mini GPUS=1            # Stage 4b: validate training loop (~5-10 min)
-make pretrain GPUS=4                # Stage 4b: pretrain slm-125m
-make prepare-sft                    # Stage 5a: download SFT datasets
-make sft      GPUS=4                # Stage 5b: chat SFT
-make sft-code GPUS=4                # Stage 5c: code SFT
-make prepare-dpo                    # Stage 6a: download DPO datasets
-make dpo      GPUS=2                # Stage 6b: DPO alignment
+# ── Step 2: GPU instance setup (run once per instance) ───────────────────────
+make setup-gpu DATA_DIR=/data/slm/data SIZE=125m DATE=YYYY-MM-DD
+source ~/.bashrc
+make tokenize-download SIZE=125m DATE=YYYY-MM-DD   # pull tokenized binary from S3
 
-# ── Ship ──────────────────────────────────────────────────────────────────────
-make eval                           # Stage 7: evaluate on benchmarks
-make export-base SIZE=125m          # Stage 8: push base model
-make export-instruct SIZE=125m      # Stage 8: push instruct model
-make export-chat SIZE=125m          # Stage 8: push chat model
-make serve                          # Stage 10: launch vLLM server
+# ── Step 3: Validate mini pipeline (run once before committing to full training)
+# Exercises every stage end-to-end on a single GPU. Takes ~15–20 min.
+make accelerate-config-single
+make pretrain-mini GPUS=1          # Stage 4b: validate training loop
+make prepare-sft                   # Stage 5a: download SFT datasets
+make sft-mini      GPUS=1          # Stage 5b: validate chat SFT
+make sft-code-mini GPUS=1          # Stage 5c: validate code SFT
+make prepare-dpo                   # Stage 6a: download DPO datasets
+make dpo-mini      GPUS=1          # Stage 6b: validate DPO
+make eval-mini                     # Stage 7:  validate eval
+
+# ── Step 4: Full training ─────────────────────────────────────────────────────
+# Before running, update pretrain/configs/gpt_125m.yaml for your GPU count.
+# See pretrain/README.md — Multi-GPU Config Scaling for exact values.
+make accelerate-config-multi GPUS=8
+make pretrain SIZE=125m GPUS=8     # Stage 4b: pretrain (~70 min on 8× H200)
+make sft      SIZE=125m GPUS=8     # Stage 5b: chat SFT
+make sft-code SIZE=125m GPUS=8     # Stage 5c: code SFT
+make dpo      SIZE=125m GPUS=8     # Stage 6b: DPO alignment
+make eval     SIZE=125m            # Stage 7:  benchmark evaluation
+make export-base     SIZE=125m     # Stage 8:  push base model to Hub
+make export-instruct SIZE=125m     # Stage 8:  push instruct model to Hub
+make export-chat     SIZE=125m     # Stage 8:  push chat model to Hub
+make serve                         # Stage 10: launch vLLM server
 ```
 
 For full documentation of every `make` target see [docs/COMMANDS.md](docs/COMMANDS.md).
@@ -310,9 +304,18 @@ make curate-upload   SIZE=125m
 
 **Multi-GPU training**
 
+> **Important:** Training configs in `pretrain/configs/` are written for **1 GPU**. Before running multi-GPU training, scale the config to preserve the global batch size and token budget:
+>
+> ```
+> gradient_accumulation_steps = original_grad_accum / num_gpus
+> max_steps                   = original_max_steps  / num_gpus
+> ```
+>
+> Each config file includes a scaling table with the exact values for 1, 4, and 8 GPUs. See `pretrain/README.md` for the full reference.
+
 ```bash
 make pretrain SIZE=125m GPUS=4
-make pretrain SIZE=350m GPUS=6
+make pretrain SIZE=350m GPUS=8
 make pretrain SIZE=1b   GPUS=8
 
 # Override config directly
@@ -360,13 +363,14 @@ Before committing to a full pretraining run, validate the training loop with `ma
 | Target | GPUs | VRAM | Est. pretrain runtime |
 |---|---|---|---|
 | mini (validation) | 1× any GPU | 8GB+ | ~5–10 min |
-| 125m | 4× H100 or A100 | 320GB+ | ~12–18 hrs |
-| 350m | 8× H100 or A100 | 640GB+ | ~24–36 hrs |
-| 1b | 8× H100 or A100 | 640GB+ | ~72–96 hrs |
+| 125m | 8× H200 | 1,128 GB | ~70 min (9.8B tokens) |
+| 125m | 4× H100 or A100 | 320GB+ | ~3–4 hrs (9.8B tokens) |
+| 350m | 8× H100 or A100 | 640GB+ | ~23 hrs (65B tokens) |
+| 1b | 8× H100 or A100 | 640GB+ | ~7 days (786B tokens) |
 
 SFT and DPO runtimes are roughly 20–30% of pretraining time at the same model size. Use spot/preemptible instances where possible — all training loops support `--resume` from the last checkpoint.
 
-Run `make accelerate-config` once on the GPU instance before training to configure multi-GPU settings. Pull the tokenized binary with `make tokenize-download` to avoid re-tokenizing on expensive GPU hardware.
+Run `make accelerate-config-multi GPUS=N` once on the GPU instance before training to configure multi-GPU settings. Pull the tokenized binary with `make tokenize-download` to avoid re-tokenizing on expensive GPU hardware.
 
 ---
 

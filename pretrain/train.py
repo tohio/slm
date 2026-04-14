@@ -109,6 +109,10 @@ def build_training_args(cfg: dict, output_dir: Path, resume: bool):
 
         # Gradient checkpointing
         gradient_checkpointing=train_cfg.get("gradient_checkpointing", False),
+
+        # DDP — disable unused parameter scan, it adds overhead every step
+        # and is never needed for this architecture (no flow control / optional layers)
+        ddp_find_unused_parameters=False,
     )
 
 

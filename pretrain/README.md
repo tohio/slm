@@ -65,14 +65,33 @@ make pretrain-resume SIZE=125m GPUS=4
 
 ---
 
+## Multi-GPU Config Scaling
+
+> **Important:** The configs in `pretrain/configs/` are written assuming **1 GPU**. Before running multi-GPU training, update `gradient_accumulation_steps` and `max_steps` to keep the global batch size and token budget constant.
+
+The invariant to preserve:
+```
+global_batch_tokens = micro_batch_size × gradient_accumulation_steps × num_gpus × seq_len
+```
+
+| GPUs | gradient_accumulation_steps | max_steps | Global batch (125m) |
+|---|---|---|---|
+| 1 | 8 | 150,000 | 32 seqs |
+| 4 | 2 | 37,500 | 32 seqs |
+| 8 | 1 | 18,750 | 32 seqs |
+
+Each config file includes a scaling comment with the exact values for 1, 4, and 8 GPUs. Copy the appropriate values before launching.
+
+---
+
 ## Configs
 
-| Config | Model | Layers | Hidden | Steps | Global batch | Target tokens |
+| Config | Model | Layers | Hidden | Steps (1 GPU) | Global batch | Target tokens |
 |---|---|---|---|---|---|---|
-| `gpt_mini.yaml` | `slm-mini` | 6 | 384 | 500 | 4 | validation only |
-| `gpt_125m.yaml` | `slm-125m` | 12 | 768 | 150k | 32 | ~3B |
-| `gpt_350m.yaml` | `slm-350m` | 24 | 1024 | 500k | 64 | ~10B |
-| `gpt_1b.yaml` | `slm-1b` | 32 | 2048 | 1.5M | 128 | ~25B |
+| `gpt_mini.yaml` | `slm-mini` | 6 | 384 | 500 | 8 | validation only |
+| `gpt_125m.yaml` | `slm-125m` | 12 | 768 | 150k | 32 | ~9.8B |
+| `gpt_350m.yaml` | `slm-350m` | 24 | 1024 | 500k | 64 | ~65B |
+| `gpt_1b.yaml` | `slm-1b` | 32 | 2048 | 1.5M | 128 | ~786B |
 
 Global batch size = `micro_batch_size × gradient_accumulation_steps × num_gpus`.
 
@@ -139,7 +158,7 @@ Training metrics are logged to Weights & Biases automatically. Key metrics to wa
 | `train/learning_rate` | Cosine decay — should ramp up then decay smoothly. |
 | `train/grad_norm` | Should stay below `gradient_clip_val=1.0`. Persistent high norms = instability. |
 
-Expected validation perplexity at convergence: **20–40** for `slm-125m` at 3B tokens.
+Expected validation perplexity at convergence: **20–40** for `slm-125m` at 9.8B tokens.
 
 ---
 
@@ -169,12 +188,12 @@ Accelerate configs live in `accelerate_configs/single_gpu.yaml` and `accelerate_
 
 ## Hardware Estimates
 
-| Model | GPU | Precision | Batch | Est. tokens/sec | Est. time (3B tokens) |
+| Model | GPU | Precision | Global batch | Est. tokens/sec | Est. time |
 |---|---|---|---|---|---|
-| `slm-125m` | 1× H200 | bf16 | 32 | ~350k | ~2.5 hrs |
-| `slm-125m` | 8× H200 | bf16 | 256 | ~2.4M | ~20 min |
-| `slm-350m` | 8× H200 | bf16 | 128 | ~800k | ~3.5 hrs (10B) |
-| `slm-1b` | 8× H200 | bf16 | 128 | ~300k | ~23 hrs (25B) |
+| `slm-125m` | 1× H200 | bf16 | 32 | ~350k | ~8 hrs (9.8B tokens) |
+| `slm-125m` | 8× H200 | bf16 | 32 | ~2.4M | ~70 min (9.8B tokens) |
+| `slm-350m` | 8× H200 | bf16 | 64 | ~800k | ~23 hrs (65B tokens) |
+| `slm-1b` | 8× H200 | bf16 | 128 | ~300k | ~7 days (786B tokens) |
 
 ---
 
@@ -182,7 +201,7 @@ Accelerate configs live in `accelerate_configs/single_gpu.yaml` and `accelerate_
 
 **Why memory-mapped binary?** Tokenizing on the fly during training adds significant CPU overhead and reduces GPU utilization. Pre-tokenizing once and loading with `np.memmap` gives near-instant data loading with constant memory usage regardless of dataset size.
 
-**Why uint16?** Our 32k vocab fits in uint16 (max 65,535), halving the storage and memory bandwidth compared to int32. The `train.bin` for 3B tokens is ~6GB in uint16 vs ~12GB in int32.
+**Why uint16?** Our 32k vocab fits in uint16 (max 65,535), halving the storage and memory bandwidth compared to int32. The `train.bin` for 9.8B tokens is ~19GB in uint16 vs ~38GB in int32.
 
 **Why cosine LR schedule?** Cosine annealing smoothly decays the learning rate to a small minimum, giving the model time to converge without abrupt changes. Used by GPT-3, LLaMA, and most modern pretraining runs.
 
