@@ -74,7 +74,7 @@ VARIANTS = {
         "checkpoint": lambda size: RESULTS_DIR / f"slm-{size}-dpo" / "final",
         "hub_suffix":   "-chat",      # tohio/slm-125m-chat
         "description":  "chat-aligned via SFT + DPO preference learning",
-        "pipeline_tag": "conversational",
+        "pipeline_tag": "text-generation",
     },
 }
 
