@@ -147,6 +147,7 @@ def run_evaluation(
         device=device,
         limit=limit,
         log_samples=False,
+        confirm_run_unsafe_code=True,
     )
 
     return results
