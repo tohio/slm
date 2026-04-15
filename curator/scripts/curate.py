@@ -102,10 +102,15 @@ log = logging.getLogger(__name__)
 # Token targets per model size — source mix stays constant at 70/20/10.
 # mini target is for pipeline validation only — not for training.
 #
-# CC segment counts are calibrated from empirical observation:
-#   10 segments → ~6M tokens after filtering and dedup (~600k tokens/segment)
-#   Target CC tokens = total_tokens * 0.70
-#   Segments needed  = target_cc_tokens / 600k
+# Targets are set to give comfortable headroom above Chinchilla compute-optimal:
+#   125m — optimal ~2.5B, target 5B  (~2× optimal)
+#   350m — optimal ~7B,   target 20B (~3× optimal)
+#   1b   — optimal ~20B,  target 50B (~2.5× optimal)
+#
+# CC segment calibration (empirical, from 125m run):
+#   ~6M tokens per segment after filtering and dedup
+#   Target CC tokens = total_tokens × 0.70 (SOURCE_MIX)
+#   Segments needed  = target_cc_tokens / 6M
 #
 # For diversity, 350m and 1b spread segments across multiple crawls.
 # Each CC crawl has ~90k WARC segments — well above our segment counts.
@@ -117,18 +122,18 @@ TARGET_CONFIGS = {
         "cc_crawls":     ["CC-MAIN-2024-10"],
     },
     "125m": {
-        "total_tokens":  3_000_000_000,   # 3B tokens
-        "cc_segments":   350,             # 350 segments × ~6M tokens = ~2.1B CC tokens
+        "total_tokens":  5_000_000_000,   # 5B tokens (~2× Chinchilla optimal for 125m)
+        "cc_segments":   584,             # 5B × 0.70 / 6M ≈ 584 segments
         "cc_crawls":     ["CC-MAIN-2024-10"],
     },
     "350m": {
-        "total_tokens":  10_000_000_000,  # 10B tokens
-        "cc_segments":   600,             # 600 segments × 2 crawls × ~6M = ~7.2B CC tokens
+        "total_tokens":  20_000_000_000,  # 20B tokens (~3× Chinchilla optimal for 350m)
+        "cc_segments":   1_167,           # 20B × 0.70 / 6M ≈ 1167 segments, split across 2 crawls
         "cc_crawls":     ["CC-MAIN-2024-10", "CC-MAIN-2023-50"],
     },
     "1b": {
-        "total_tokens":  25_000_000_000,  # 25B tokens
-        "cc_segments":   1_000,           # 1000 segments × 3 crawls × ~6M = ~18B CC tokens
+        "total_tokens":  50_000_000_000,  # 50B tokens (~2.5× Chinchilla optimal for 1b)
+        "cc_segments":   1_945,           # 50B × 0.70 / 6M ≈ 1945 segments, split across 3 crawls
         "cc_crawls":     ["CC-MAIN-2024-10", "CC-MAIN-2023-50", "CC-MAIN-2023-40"],
     },
 }
