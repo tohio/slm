@@ -144,8 +144,12 @@ def generate_response(
             eos_token_id=[EOS_TOKEN_ID, ENDOFTURN_TOKEN_ID],  # stop on <EOS> or <|endofturn|>
         )
 
-    new_tokens = outputs[0][in_len:]
-    return tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+    new_tokens = outputs[0][in_len:].tolist()
+    # Truncate at <|endofturn|> (7) or <EOS> (3) — stop token may be included in output
+    for stop_id in [ENDOFTURN_TOKEN_ID, EOS_TOKEN_ID]:
+        if stop_id in new_tokens:
+            new_tokens = new_tokens[:new_tokens.index(stop_id)]
+    return tokenizer.decode(new_tokens, skip_special_tokens=False).strip()
 
 
 def print_help():
