@@ -219,6 +219,10 @@ def save_results(results: dict, model_path: Path, tasks: list[str]) -> Path:
 
 
 def main():
+    # HumanEval executes model-generated code — required by the code_eval metric.
+    # Set before any lm-eval imports to avoid the ValueError at task load time.
+    os.environ["HF_ALLOW_CODE_EVAL"] = "1"
+
     parser = argparse.ArgumentParser(description="SLM Benchmark Evaluation")
     parser.add_argument("--model",      type=Path, required=True, help="Path to model checkpoint")
     parser.add_argument("--tasks",      type=str,  default="all",
