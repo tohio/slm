@@ -220,6 +220,19 @@ else
         log "  WARNING: train.bin not found at $TRAIN_BIN after download"
         log "  Run manually: make tokenize-download SIZE=$SIZE DATE=YYYY-MM-DD"
     fi
+
+    # ── Pull tokenizer from S3 ────────────────────────────────────────────────
+    log "Pulling tokenizer from S3..."
+    .venv/bin/python curator/scripts/upload_s3.py download \
+        --src tokenizer --dst "$DATA_DIR/tokenizer"
+
+    TOKENIZER_FILE="$DATA_DIR/tokenizer/tokenizer.json"
+    if [[ -f "$TOKENIZER_FILE" ]]; then
+        log "  ✓ Tokenizer pulled"
+    else
+        log "  WARNING: tokenizer.json not found after download"
+        log "  Run manually: make tokenizer-download"
+    fi
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
@@ -230,8 +243,8 @@ log "Next steps:"
 log "  source ~/.bashrc"
 log "  vi .env                                    # verify credentials: S3_BUCKET, AWS keys, WANDB_API_KEY, HF_TOKEN"
 log "  make pretrain-mini GPUS=1                  # validate training loop"
-log "  make accelerate-config-multi GPUS=1        # configure for full run"
-log "  make pretrain SIZE=$SIZE GPUS=1            # full pretraining"
+log "  make accelerate-config-multi GPUS=8        # configure for full run"
+log "  make pretrain SIZE=$SIZE GPUS=8            # full pretraining"
 log ""
 log "GPU monitoring:"
 log "  watch -n 2 nvidia-smi"

@@ -69,6 +69,35 @@ def load_dataset_from_jsonl(path: Path):
     return Dataset.from_list(records)
 
 
+def load_tokenizer(tokenizer_path: Path):
+    """
+    Load the custom BPE tokenizer trained with the `tokenizers` library.
+
+    PreTrainedTokenizerFast.from_pretrained() fails when tokenizer_config.json
+    references a custom tokenizer_class (TokenizersBackend) that transformers
+    doesn't know about. Loading directly from tokenizer.json via the tokenizers
+    library and wrapping in PreTrainedTokenizerFast bypasses this lookup.
+    """
+    from tokenizers import Tokenizer as HFTokenizer
+    from transformers import PreTrainedTokenizerFast
+
+    tokenizer_file = tokenizer_path / "tokenizer.json"
+    if not tokenizer_file.exists():
+        raise FileNotFoundError(f"tokenizer.json not found at {tokenizer_path}")
+
+    _tok = HFTokenizer.from_file(str(tokenizer_file))
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=_tok)
+
+    tokenizer.pad_token    = "<PAD>"
+    tokenizer.pad_token_id = 0
+    tokenizer.eos_token    = "<EOS>"
+    tokenizer.eos_token_id = 3
+    tokenizer.bos_token    = "<BOS>"
+    tokenizer.bos_token_id = 2
+
+    return tokenizer
+
+
 def build_sft_args(cfg: dict, output_dir: Path):
     """
     Build SFTConfig directly — avoids the fragile TrainingArguments.to_dict()
@@ -158,19 +187,15 @@ def main():
     log.info(f"Parameters: {n_params:,} ({n_params / 1e6:.1f}M)")
 
     # ── Tokenizer ─────────────────────────────────────────────────────────────
-    from transformers import PreTrainedTokenizerFast
-
+    # Load directly from tokenizers library — from_pretrained() fails because
+    # tokenizer_config.json references TokenizersBackend, an unknown class.
     tokenizer_path = base_model_path / "tokenizer"
     if not tokenizer_path.exists():
         tokenizer_path = DATA_DIR / "tokenizer"
 
-    tokenizer = PreTrainedTokenizerFast.from_pretrained(str(tokenizer_path))
-    tokenizer.pad_token    = "<PAD>"
-    tokenizer.pad_token_id = 0
-    tokenizer.eos_token    = "<EOS>"
-    tokenizer.eos_token_id = 3
-    tokenizer.bos_token    = "<BOS>"
-    tokenizer.bos_token_id = 2
+    log.info(f"Loading tokenizer from {tokenizer_path}...")
+    tokenizer = load_tokenizer(tokenizer_path)
+    log.info(f"Vocab size: {tokenizer.vocab_size:,}")
 
     # ── Dataset ───────────────────────────────────────────────────────────────
     data_cfg   = cfg["data"]
