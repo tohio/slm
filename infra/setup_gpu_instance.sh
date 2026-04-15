@@ -156,6 +156,7 @@ export DATA_DIR=${DATA_DIR}
 export HF_HOME=${HF_CACHE_DIR}
 export HF_DATASETS_CACHE=${HF_CACHE_DIR}
 export RESULTS_DIR=${RESULTS_DIR}
+source ${REPO_DIR}/.venv/bin/activate
 "
 
 if grep -q "$BASHRC_MARKER" ~/.bashrc; then
