@@ -474,10 +474,10 @@ def _validate_model(model, tokenizer, config) -> None:
     model.eval()
 
     prompt    = "<|system|>You are a helpful assistant.<|endofturn|><|user|>Hello!<|endofturn|><|assistant|>"
-    input_ids = tokenizer(prompt, return_tensors="pt").input_ids
+    input_ids = tokenizer(prompt, return_tensors="pt", add_special_tokens=False).input_ids
 
     with torch.no_grad():
-        output = model.generate(input_ids, max_new_tokens=20, pad_token_id=0, eos_token_id=3)
+        output = model.generate(input_ids, max_new_tokens=20, pad_token_id=0, eos_token_id=[3, 7])
 
     decoded = tokenizer.decode(output[0], skip_special_tokens=True)
     log.info(f"Validation output: {decoded[:100]}")
