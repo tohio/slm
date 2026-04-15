@@ -78,7 +78,7 @@ BENCHMARKS = {
     },
     "humaneval": {
         "task": "humaneval",
-        "metric": "pass@1",
+        "metric": "pass@1,create_test",
         "num_fewshot": 0,
         "description": "Code generation",
     },
