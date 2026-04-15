@@ -232,14 +232,22 @@ def main():
     trainer.save_model(str(output_dir / "final"))
     model_config.save_pretrained(str(output_dir / "final"))
 
-    # Copy tokenizer alongside model
+    # Copy tokenizer alongside model — only if tokenizer dir has actual content.
+    # Guards against silently propagating an empty tokenizer dir downstream
+    # (e.g. if setup-gpu ran before tokenizer was downloaded from S3).
     import shutil
     tokenizer_dir = args.data_dir / "tokenizer"
-    if tokenizer_dir.exists():
+    if tokenizer_dir.exists() and any(tokenizer_dir.iterdir()):
         shutil.copytree(
             tokenizer_dir,
             output_dir / "final" / "tokenizer",
             dirs_exist_ok=True,
+        )
+        log.info("Tokenizer copied alongside model")
+    else:
+        log.warning(
+            f"Tokenizer empty or missing at {tokenizer_dir} — skipping copy. "
+            f"Run: make tokenizer-download"
         )
 
     log.info(f"Model saved to {output_dir / 'final'}")

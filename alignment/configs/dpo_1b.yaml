@@ -10,8 +10,8 @@ dpo:
   max_prompt_length: 1024
 
 data:
-  train_path: data/dpo/train.jsonl
-  val_path: data/dpo/val.jsonl
+  train_path: $DATA_DIR//dpo/train.jsonl
+  val_path: $DATA_DIR//dpo/val.jsonl
 
 training:
   epochs: 1

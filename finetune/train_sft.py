@@ -189,8 +189,14 @@ def main():
     # ── Tokenizer ─────────────────────────────────────────────────────────────
     # Load directly from tokenizers library — from_pretrained() fails because
     # tokenizer_config.json references TokenizersBackend, an unknown class.
+    # Fall back to DATA_DIR/tokenizer if tokenizer.json is missing from the
+    # model directory (e.g. if pretrain ran before tokenizer was downloaded).
     tokenizer_path = base_model_path / "tokenizer"
-    if not tokenizer_path.exists():
+    if not (tokenizer_path / "tokenizer.json").exists():
+        log.warning(
+            f"tokenizer.json not found at {tokenizer_path} — "
+            f"falling back to {DATA_DIR / 'tokenizer'}"
+        )
         tokenizer_path = DATA_DIR / "tokenizer"
 
     log.info(f"Loading tokenizer from {tokenizer_path}...")
@@ -223,7 +229,6 @@ def main():
     log.info(f"Val:   {len(val_dataset):,} examples")
 
     # ── SFT args ──────────────────────────────────────────────────────────────
-    # Build SFTConfig directly — avoids fragile TrainingArguments.to_dict() round-trip
     sft_args = build_sft_args(cfg, output_dir)
 
     # ── SFTTrainer ────────────────────────────────────────────────────────────
@@ -247,8 +252,11 @@ def main():
     trainer.save_model(str(final_dir))
 
     import shutil
-    if tokenizer_path.exists():
+    if tokenizer_path.exists() and any(tokenizer_path.iterdir()):
         shutil.copytree(tokenizer_path, final_dir / "tokenizer", dirs_exist_ok=True)
+        log.info("Tokenizer copied alongside model")
+    else:
+        log.warning(f"Tokenizer empty or missing at {tokenizer_path} — skipping copy")
 
     log.info(f"Model saved to {final_dir}")
     log.info("SFT complete.")
