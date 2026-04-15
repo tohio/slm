@@ -50,15 +50,24 @@ def format_prompt(messages: list[dict]) -> str:
 
 
 def load_model_and_tokenizer(model_path: str):
-    """Load model and tokenizer."""
-    import torch
-    from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedTokenizerFast
+    """Load model and tokenizer.
 
-    local_path = Path(model_path)
-    if local_path.exists():
-        from model import SLMConfig, SLMForCausalLM
-        AutoConfig.register("slm", SLMConfig)
-        AutoModelForCausalLM.register(SLMConfig, SLMForCausalLM)
+    Always registers SLMConfig and SLMForCausalLM with AutoConfig and
+    AutoModelForCausalLM — required whether loading from a local path or
+    the HuggingFace Hub, since the custom model_type 'slm' is not known
+    to transformers out of the box.
+
+    Tokenizer is loaded directly from tokenizer.json via the tokenizers
+    library to bypass the TokenizersBackend class reference in
+    tokenizer_config.json which transformers cannot resolve.
+    """
+    import torch
+    from transformers import AutoConfig, AutoModelForCausalLM
+    from model import SLMConfig, SLMForCausalLM
+
+    # Register unconditionally — required for both local and Hub loading
+    AutoConfig.register("slm", SLMConfig)
+    AutoModelForCausalLM.register(SLMConfig, SLMForCausalLM)
 
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
@@ -67,12 +76,43 @@ def load_model_and_tokenizer(model_path: str):
     )
     model.eval()
 
-    tokenizer_path = local_path / "tokenizer" if (local_path / "tokenizer").exists() else model_path
-    tokenizer = PreTrainedTokenizerFast.from_pretrained(str(tokenizer_path))
-    tokenizer.pad_token_id = 0
-    tokenizer.eos_token_id = 3
+    # Load tokenizer directly from tokenizers library —
+    # PreTrainedTokenizerFast.from_pretrained() fails on TokenizersBackend class
+    tokenizer = _load_tokenizer(model_path)
 
     return model, tokenizer
+
+
+def _load_tokenizer(model_path: str):
+    """Load tokenizer from local path or Hub, bypassing TokenizersBackend."""
+    from tokenizers import Tokenizer as HFTokenizer
+    from transformers import PreTrainedTokenizerFast
+    import os
+
+    local_path = Path(model_path)
+
+    # Determine where tokenizer.json lives
+    if local_path.exists():
+        # Local checkpoint — check model dir / tokenizer subdir first
+        candidates = [
+            local_path / "tokenizer" / "tokenizer.json",
+            local_path / "tokenizer.json",
+        ]
+        tokenizer_file = next((p for p in candidates if p.exists()), None)
+        if tokenizer_file is None:
+            raise FileNotFoundError(f"tokenizer.json not found in {local_path}")
+        _tok = HFTokenizer.from_file(str(tokenizer_file))
+    else:
+        # Hub ID — download tokenizer.json via huggingface_hub
+        from huggingface_hub import hf_hub_download
+        tokenizer_file = hf_hub_download(repo_id=model_path, filename="tokenizer.json")
+        _tok = HFTokenizer.from_file(tokenizer_file)
+
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=_tok)
+    tokenizer.pad_token_id = 0
+    tokenizer.eos_token_id = 3
+    tokenizer.bos_token_id = 2
+    return tokenizer
 
 
 def generate_response(
