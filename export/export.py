@@ -129,7 +129,12 @@ def load_eval_results(size: str) -> dict:
         }[task_key]
         if task_name in raw_results:
             metric = meta["metric"]
-            score = raw_results[task_name].get(metric) or raw_results[task_name].get(f"{metric},none")
+            # Try exact key, then with ,none suffix, then ,create_test suffix
+            score = (
+                raw_results[task_name].get(metric)
+                or raw_results[task_name].get(f"{metric},none")
+                or raw_results[task_name].get(f"{metric},create_test")
+            )
             if isinstance(score, (int, float)):
                 scores[task_key] = score
 
@@ -329,6 +334,35 @@ def _token_target(size: str) -> str:
     return {"125m": "3B", "350m": "10B", "1b": "25B"}.get(size, "N/A")
 
 
+# ── Tokenizer loader ──────────────────────────────────────────────────────────
+
+def load_tokenizer(tokenizer_path: Path):
+    """
+    Load the custom BPE tokenizer trained with the `tokenizers` library.
+
+    PreTrainedTokenizerFast.from_pretrained() fails when tokenizer_config.json
+    references TokenizersBackend, an unknown class in transformers.
+    Load directly from tokenizer.json and wrap in PreTrainedTokenizerFast.
+    """
+    from tokenizers import Tokenizer as HFTokenizer
+    from transformers import PreTrainedTokenizerFast
+
+    tokenizer_file = tokenizer_path / "tokenizer.json"
+    if not tokenizer_file.exists():
+        raise FileNotFoundError(f"tokenizer.json not found at {tokenizer_path}")
+
+    _tok = HFTokenizer.from_file(str(tokenizer_file))
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=_tok)
+    tokenizer.pad_token     = "<PAD>"
+    tokenizer.pad_token_id  = 0
+    tokenizer.eos_token     = "<EOS>"
+    tokenizer.eos_token_id  = 3
+    tokenizer.bos_token     = "<BOS>"
+    tokenizer.bos_token_id  = 2
+    tokenizer.chat_template = _chat_template()
+    return tokenizer
+
+
 # ── Export ────────────────────────────────────────────────────────────────────
 
 def export(
@@ -348,7 +382,7 @@ def export(
         dry_run:    If True, validate without pushing to Hub.
         private:    If True, create a private repository.
     """
-    from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedTokenizerFast
+    from transformers import AutoConfig, AutoModelForCausalLM
     from huggingface_hub import HfApi, login
     from model import SLMConfig, SLMForCausalLM
 
@@ -376,20 +410,16 @@ def export(
 
     # Load model — actual parameter count used in model card
     log.info("Loading model...")
-    config  = SLMConfig.from_pretrained(str(checkpoint))
-    model   = SLMForCausalLM.from_pretrained(str(checkpoint))
+    config   = SLMConfig.from_pretrained(str(checkpoint))
+    model    = SLMForCausalLM.from_pretrained(str(checkpoint))
     n_params = sum(p.numel() for p in model.parameters())
     log.info(f"Parameters: {n_params:,} ({n_params / 1e6:.1f}M)")
 
-    # Load tokenizer
+    # Load tokenizer — use tokenizers library directly to bypass TokenizersBackend
     tokenizer_path = checkpoint / "tokenizer"
-    if not tokenizer_path.exists():
+    if not (tokenizer_path / "tokenizer.json").exists():
         tokenizer_path = Path(os.environ.get("DATA_DIR", "data")) / "tokenizer"
-    tokenizer = PreTrainedTokenizerFast.from_pretrained(str(tokenizer_path))
-    tokenizer.pad_token      = "<PAD>"
-    tokenizer.eos_token      = "<EOS>"
-    tokenizer.bos_token      = "<BOS>"
-    tokenizer.chat_template  = _chat_template()
+    tokenizer = load_tokenizer(tokenizer_path)
 
     # Load eval results (populated for chat variant after make eval)
     eval_scores = load_eval_results(size) if variant == "chat" else {}
@@ -419,9 +449,9 @@ def export(
         f.write(model_card)
     log.info(f"Model card written ({len(model_card):,} chars)")
 
-    # Push to Hub
+    # Push to Hub — safe_serialization removed from push_to_hub in transformers v5
     log.info(f"Pushing to {repo_id}...")
-    model.push_to_hub(repo_id, token=HF_TOKEN, private=private, safe_serialization=True)
+    model.push_to_hub(repo_id, token=HF_TOKEN, private=private)
     tokenizer.push_to_hub(repo_id, token=HF_TOKEN, private=private)
     config.push_to_hub(repo_id, token=HF_TOKEN, private=private)
 
@@ -443,7 +473,7 @@ def _validate_model(model, tokenizer, config) -> None:
     log.info("Validating model...")
     model.eval()
 
-    prompt   = "<|system|>You are a helpful assistant.<|endofturn|><|user|>Hello!<|endofturn|><|assistant|>"
+    prompt    = "<|system|>You are a helpful assistant.<|endofturn|><|user|>Hello!<|endofturn|><|assistant|>"
     input_ids = tokenizer(prompt, return_tensors="pt").input_ids
 
     with torch.no_grad():
