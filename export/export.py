@@ -187,7 +187,7 @@ def generate_model_card(
 
     # HuggingFace Hub frontmatter — base_model must be a valid Hub ID or omitted
     if variant == "base":
-        base_model_yaml = "base_model: null"
+        base_model_yaml = ""  # omit for base variant — HF requires string or absent
     else:
         base_model_yaml = f"base_model: {HF_USERNAME}/slm-{size}"
 
