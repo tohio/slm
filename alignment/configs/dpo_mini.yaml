@@ -13,6 +13,7 @@ data:
   val_path: $DATA_DIR/dpo/val.jsonl
 
 training:
+  epochs: 1 
   max_steps: 50               # enough to validate the training loop
   warmup_steps: 5
   micro_batch_size: 1

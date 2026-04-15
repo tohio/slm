@@ -12,6 +12,7 @@ data:
 
 training:
   epochs: 3
+  max_steps: 5000
   warmup_steps: 100
   micro_batch_size: 4
   gradient_accumulation_steps: 4

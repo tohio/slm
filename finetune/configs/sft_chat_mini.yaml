@@ -12,6 +12,7 @@ data:
   max_samples: 500       # truncate for mini validation — removes full dataset tokenization wait
 
 training:
+  epochs: 3
   max_steps: 50               # enough to validate the training loop
   warmup_steps: 5
   micro_batch_size: 2

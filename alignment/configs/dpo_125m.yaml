@@ -14,7 +14,8 @@ data:
   val_path: $DATA_DIR/dpo/val.jsonl
 
 training:
-  epochs: 1                         # DPO typically needs only 1 epoch
+  epochs: 1 
+  max_steps: 1000                        # DPO typically needs only 1 epoch
   warmup_steps: 100
   micro_batch_size: 2
   gradient_accumulation_steps: 8    # effective global batch = 16
