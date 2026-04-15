@@ -137,6 +137,7 @@ def generate(
         padding=True,
         truncation=True,
         max_length=2048,
+        add_special_tokens=False,
     ).to(model.device)
 
     with torch.no_grad():
