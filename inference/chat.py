@@ -24,6 +24,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 DEFAULT_SYSTEM = "You are a helpful, harmless, and honest assistant."
 
+# Token IDs for stop tokens — must match tokenizer special tokens
+EOS_TOKEN_ID      = 3   # <EOS>
+ENDOFTURN_TOKEN_ID = 7  # <|endofturn|> — used by model to end assistant turns
+PAD_TOKEN_ID      = 0   # <PAD>
+
 COMMANDS = {
     "/reset":   "Clear conversation history",
     "/system":  "Set a new system prompt (/system <prompt>)",
@@ -49,17 +54,48 @@ def format_prompt(messages: list[dict]) -> str:
     return "".join(parts)
 
 
+def _load_tokenizer(model_path: str):
+    """
+    Load tokenizer from local path or Hub, bypassing TokenizersBackend.
+
+    PreTrainedTokenizerFast.from_pretrained() fails when tokenizer_config.json
+    references TokenizersBackend, an unknown class in transformers.
+    Load directly from tokenizer.json via the tokenizers library instead.
+    """
+    from tokenizers import Tokenizer as HFTokenizer
+    from transformers import PreTrainedTokenizerFast
+
+    local_path = Path(model_path)
+
+    if local_path.exists():
+        candidates = [
+            local_path / "tokenizer" / "tokenizer.json",
+            local_path / "tokenizer.json",
+        ]
+        tokenizer_file = next((p for p in candidates if p.exists()), None)
+        if tokenizer_file is None:
+            raise FileNotFoundError(f"tokenizer.json not found in {local_path}")
+        _tok = HFTokenizer.from_file(str(tokenizer_file))
+    else:
+        from huggingface_hub import hf_hub_download
+        tokenizer_file = hf_hub_download(repo_id=model_path, filename="tokenizer.json")
+        _tok = HFTokenizer.from_file(tokenizer_file)
+
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=_tok)
+    tokenizer.pad_token_id  = PAD_TOKEN_ID
+    tokenizer.eos_token_id  = ENDOFTURN_TOKEN_ID  # <|endofturn|> ends assistant turns
+    tokenizer.bos_token_id  = 2
+    return tokenizer
+
+
 def load_model_and_tokenizer(model_path: str):
-    """Load model and tokenizer.
+    """
+    Load model and tokenizer.
 
     Always registers SLMConfig and SLMForCausalLM with AutoConfig and
     AutoModelForCausalLM — required whether loading from a local path or
     the HuggingFace Hub, since the custom model_type 'slm' is not known
     to transformers out of the box.
-
-    Tokenizer is loaded directly from tokenizer.json via the tokenizers
-    library to bypass the TokenizersBackend class reference in
-    tokenizer_config.json which transformers cannot resolve.
     """
     import torch
     from transformers import AutoConfig, AutoModelForCausalLM
@@ -76,43 +112,8 @@ def load_model_and_tokenizer(model_path: str):
     )
     model.eval()
 
-    # Load tokenizer directly from tokenizers library —
-    # PreTrainedTokenizerFast.from_pretrained() fails on TokenizersBackend class
     tokenizer = _load_tokenizer(model_path)
-
     return model, tokenizer
-
-
-def _load_tokenizer(model_path: str):
-    """Load tokenizer from local path or Hub, bypassing TokenizersBackend."""
-    from tokenizers import Tokenizer as HFTokenizer
-    from transformers import PreTrainedTokenizerFast
-    import os
-
-    local_path = Path(model_path)
-
-    # Determine where tokenizer.json lives
-    if local_path.exists():
-        # Local checkpoint — check model dir / tokenizer subdir first
-        candidates = [
-            local_path / "tokenizer" / "tokenizer.json",
-            local_path / "tokenizer.json",
-        ]
-        tokenizer_file = next((p for p in candidates if p.exists()), None)
-        if tokenizer_file is None:
-            raise FileNotFoundError(f"tokenizer.json not found in {local_path}")
-        _tok = HFTokenizer.from_file(str(tokenizer_file))
-    else:
-        # Hub ID — download tokenizer.json via huggingface_hub
-        from huggingface_hub import hf_hub_download
-        tokenizer_file = hf_hub_download(repo_id=model_path, filename="tokenizer.json")
-        _tok = HFTokenizer.from_file(tokenizer_file)
-
-    tokenizer = PreTrainedTokenizerFast(tokenizer_object=_tok)
-    tokenizer.pad_token_id = 0
-    tokenizer.eos_token_id = 3
-    tokenizer.bos_token_id = 2
-    return tokenizer
 
 
 def generate_response(
@@ -139,8 +140,8 @@ def generate_response(
             top_p=top_p,
             do_sample=True,
             repetition_penalty=repetition_penalty,
-            pad_token_id=0,
-            eos_token_id=3,
+            pad_token_id=PAD_TOKEN_ID,
+            eos_token_id=[EOS_TOKEN_ID, ENDOFTURN_TOKEN_ID],  # stop on <EOS> or <|endofturn|>
         )
 
     new_tokens = outputs[0][in_len:]

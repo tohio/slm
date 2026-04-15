@@ -35,17 +35,55 @@ log = logging.getLogger(__name__)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+# Token IDs — must match tokenizer special tokens
+EOS_TOKEN_ID       = 3   # <EOS>
+ENDOFTURN_TOKEN_ID = 7   # <|endofturn|> — model uses this to end turns
+PAD_TOKEN_ID       = 0   # <PAD>
+
+
+def _load_tokenizer(model_path: str):
+    """
+    Load tokenizer from local path or Hub, bypassing TokenizersBackend.
+
+    PreTrainedTokenizerFast.from_pretrained() fails when tokenizer_config.json
+    references TokenizersBackend, an unknown class in transformers.
+    Load directly from tokenizer.json via the tokenizers library instead.
+    """
+    from tokenizers import Tokenizer as HFTokenizer
+    from transformers import PreTrainedTokenizerFast
+
+    local_path = Path(model_path)
+
+    if local_path.exists():
+        candidates = [
+            local_path / "tokenizer" / "tokenizer.json",
+            local_path / "tokenizer.json",
+        ]
+        tokenizer_file = next((p for p in candidates if p.exists()), None)
+        if tokenizer_file is None:
+            raise FileNotFoundError(f"tokenizer.json not found in {local_path}")
+        _tok = HFTokenizer.from_file(str(tokenizer_file))
+    else:
+        from huggingface_hub import hf_hub_download
+        tokenizer_file = hf_hub_download(repo_id=model_path, filename="tokenizer.json")
+        _tok = HFTokenizer.from_file(tokenizer_file)
+
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=_tok)
+    tokenizer.pad_token_id = PAD_TOKEN_ID
+    tokenizer.eos_token_id = ENDOFTURN_TOKEN_ID
+    tokenizer.bos_token_id = 2
+    return tokenizer
+
 
 def load_model_and_tokenizer(model_path: str):
     """Load model and tokenizer from local path or Hub."""
     import torch
-    from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedTokenizerFast
+    from transformers import AutoConfig, AutoModelForCausalLM
+    from model import SLMConfig, SLMForCausalLM
 
-    local_path = Path(model_path)
-    if local_path.exists():
-        from model import SLMConfig, SLMForCausalLM
-        AutoConfig.register("slm", SLMConfig)
-        AutoModelForCausalLM.register(SLMConfig, SLMForCausalLM)
+    # Register unconditionally — required for both local and Hub loading
+    AutoConfig.register("slm", SLMConfig)
+    AutoModelForCausalLM.register(SLMConfig, SLMForCausalLM)
 
     log.info(f"Loading model from {model_path}...")
     model = AutoModelForCausalLM.from_pretrained(
@@ -55,12 +93,7 @@ def load_model_and_tokenizer(model_path: str):
     )
     model.eval()
 
-    tokenizer_path = local_path / "tokenizer" if (local_path / "tokenizer").exists() else model_path
-    tokenizer = PreTrainedTokenizerFast.from_pretrained(str(tokenizer_path))
-    tokenizer.pad_token    = "<PAD>"
-    tokenizer.pad_token_id = 0
-    tokenizer.eos_token    = "<EOS>"
-    tokenizer.eos_token_id = 3
+    tokenizer = _load_tokenizer(model_path)
 
     n_params = sum(p.numel() for p in model.parameters())
     log.info(f"Model loaded — {n_params / 1e6:.1f}M parameters")
@@ -115,8 +148,8 @@ def generate(
             top_k=top_k if do_sample else 0,
             do_sample=do_sample,
             repetition_penalty=repetition_penalty,
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
+            pad_token_id=PAD_TOKEN_ID,
+            eos_token_id=[EOS_TOKEN_ID, ENDOFTURN_TOKEN_ID],  # stop on <EOS> or <|endofturn|>
         )
 
     input_lengths = inputs["input_ids"].shape[1]

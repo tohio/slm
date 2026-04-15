@@ -57,6 +57,11 @@ log = logging.getLogger(__name__)
 DATA_DIR    = Path(os.environ.get("DATA_DIR", "data"))
 RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", "results"))
 
+# Token IDs — must match tokenizer special tokens
+EOS_TOKEN_ID       = 3   # <EOS>
+ENDOFTURN_TOKEN_ID = 7   # <|endofturn|> — model uses this to end turns
+PAD_TOKEN_ID       = 0   # <PAD>
+
 
 def load_config(config_path: Path) -> dict:
     with open(config_path) as f:
@@ -70,6 +75,34 @@ def load_dataset_from_jsonl(path: Path):
         for line in f:
             records.append(json.loads(line))
     return Dataset.from_list(records)
+
+
+def load_tokenizer(tokenizer_path: Path):
+    """
+    Load the custom BPE tokenizer trained with the `tokenizers` library.
+
+    PreTrainedTokenizerFast.from_pretrained() fails when tokenizer_config.json
+    references TokenizersBackend, an unknown class in transformers.
+    Load directly from tokenizer.json and wrap in PreTrainedTokenizerFast.
+    """
+    from tokenizers import Tokenizer as HFTokenizer
+    from transformers import PreTrainedTokenizerFast
+
+    tokenizer_file = tokenizer_path / "tokenizer.json"
+    if not tokenizer_file.exists():
+        raise FileNotFoundError(f"tokenizer.json not found at {tokenizer_path}")
+
+    _tok = HFTokenizer.from_file(str(tokenizer_file))
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=_tok)
+
+    tokenizer.pad_token    = "<PAD>"
+    tokenizer.pad_token_id = PAD_TOKEN_ID
+    tokenizer.eos_token    = "<|endofturn|>"
+    tokenizer.eos_token_id = ENDOFTURN_TOKEN_ID
+    tokenizer.bos_token    = "<BOS>"
+    tokenizer.bos_token_id = 2
+
+    return tokenizer
 
 
 def build_dpo_args(cfg: dict, output_dir: Path, beta: float):
@@ -166,23 +199,20 @@ def main():
         p.requires_grad = False
 
     # ── Tokenizer ─────────────────────────────────────────────────────────────
-    from transformers import PreTrainedTokenizerFast
-
+    # Load directly from tokenizers library — from_pretrained() fails because
+    # tokenizer_config.json references TokenizersBackend, an unknown class.
+    # Fall back to DATA_DIR/tokenizer if tokenizer.json is missing from model dir.
     tokenizer_path = base_model_path / "tokenizer"
-    if not tokenizer_path.exists():
+    if not (tokenizer_path / "tokenizer.json").exists():
+        log.warning(f"tokenizer.json not found at {tokenizer_path} — falling back to {DATA_DIR / 'tokenizer'}")
         tokenizer_path = DATA_DIR / "tokenizer"
 
-    tokenizer = PreTrainedTokenizerFast.from_pretrained(str(tokenizer_path))
-    tokenizer.pad_token    = "<PAD>"
-    tokenizer.pad_token_id = 0
-    tokenizer.eos_token    = "<EOS>"
-    tokenizer.eos_token_id = 3
-    tokenizer.bos_token    = "<BOS>"
-    tokenizer.bos_token_id = 2
+    log.info(f"Loading tokenizer from {tokenizer_path}...")
+    tokenizer = load_tokenizer(tokenizer_path)
+    log.info(f"Vocab size: {tokenizer.vocab_size:,}")
 
     # Set chat template so DPOTrainer can use apply_chat_template for
-    # conversational format data (list of message dicts). This ensures
-    # consistent tokenization at prompt/response boundaries.
+    # conversational format data (list of message dicts).
     if not tokenizer.chat_template:
         tokenizer.chat_template = (
             "{% for message in messages %}"
@@ -217,7 +247,6 @@ def main():
     log.info(f"Train: {len(train_dataset):,} pairs | Val: {len(val_dataset):,} pairs")
 
     # ── DPO args ──────────────────────────────────────────────────────────────
-    # Build DPOConfig directly — avoids fragile TrainingArguments.to_dict() round-trip
     dpo_args = build_dpo_args(cfg, output_dir, beta)
 
     # ── DPOTrainer ────────────────────────────────────────────────────────────
@@ -225,7 +254,7 @@ def main():
 
     trainer = DPOTrainer(
         model=model,
-        ref_model=ref_model,    # explicit frozen reference model — avoids transformers lookup
+        ref_model=ref_model,
         args=dpo_args,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
@@ -241,8 +270,11 @@ def main():
     trainer.save_model(str(final_dir))
 
     import shutil
-    if tokenizer_path.exists():
+    if tokenizer_path.exists() and any(tokenizer_path.iterdir()):
         shutil.copytree(tokenizer_path, final_dir / "tokenizer", dirs_exist_ok=True)
+        log.info("Tokenizer copied alongside model")
+    else:
+        log.warning(f"Tokenizer empty or missing at {tokenizer_path} — skipping copy")
 
     log.info(f"Model saved to {final_dir}")
     log.info("DPO complete. Next: make eval")
