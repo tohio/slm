@@ -20,6 +20,7 @@ Usage:
 import argparse
 import logging
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -38,13 +39,61 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
+DATA_DIR    = Path(os.environ.get("DATA_DIR", "data"))
 RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", "results"))
 
 
 def load_config(config_path: Path) -> dict:
     with open(config_path) as f:
         return yaml.safe_load(f)
+
+
+def validate_tokenizer(tokenizer_dir: Path) -> None:
+    """
+    Verify the tokenizer directory is complete before training starts.
+
+    Fails hard rather than silently continuing — a missing or incomplete
+    tokenizer at this point means the saved checkpoint will be unusable
+    by train_sft.py, which requires tokenizer_config.json to load the
+    chat_template via PreTrainedTokenizerFast.from_pretrained().
+
+    Checks:
+        - tokenizer_dir exists and is non-empty
+        - tokenizer_config.json is present (contains baked-in chat_template)
+        - slm_tokenizer.json is present (raw BPE tokenizer for tokenize_data.py)
+
+    Args:
+        tokenizer_dir: Path to the tokenizer directory.
+
+    Raises:
+        RuntimeError: If any required file is missing.
+    """
+    if not tokenizer_dir.exists() or not any(tokenizer_dir.iterdir()):
+        raise RuntimeError(
+            f"Tokenizer directory missing or empty: {tokenizer_dir}\n"
+            f"Run: make tokenizer-download\n"
+            f"Or retrain: make tokenizer && make tokenizer-upload"
+        )
+
+    required_files = {
+        "tokenizer_config.json": (
+            "Contains the baked-in chat_template required by train_sft.py. "
+            "Retrain the tokenizer: make tokenizer"
+        ),
+        "slm_tokenizer.json": (
+            "Raw BPE tokenizer required by tokenize_data.py. "
+            "Retrain the tokenizer: make tokenizer"
+        ),
+    }
+
+    for filename, hint in required_files.items():
+        if not (tokenizer_dir / filename).exists():
+            raise RuntimeError(
+                f"Missing tokenizer file: {tokenizer_dir / filename}\n"
+                f"{hint}"
+            )
+
+    log.info(f"Tokenizer validated at {tokenizer_dir}")
 
 
 def build_training_args(cfg: dict, output_dir: Path, resume: bool):
@@ -57,8 +106,8 @@ def build_training_args(cfg: dict, output_dir: Path, resume: bool):
     # (e.g. make pretrain-mini on a CPU curation instance)
     has_cuda = torch.cuda.is_available()
     precision = train_cfg.get("precision", "bf16")
-    use_bf16 = has_cuda and precision == "bf16"
-    use_fp16 = has_cuda and precision == "fp16"
+    use_bf16  = has_cuda and precision == "bf16"
+    use_fp16  = has_cuda and precision == "fp16"
 
     return TrainingArguments(
         output_dir=str(output_dir),
@@ -103,7 +152,7 @@ def build_training_args(cfg: dict, output_dir: Path, resume: bool):
 
         # Misc
         dataloader_num_workers=train_cfg.get("num_workers", 4),
-        dataloader_pin_memory=has_cuda,  # pin_memory only useful with CUDA
+        dataloader_pin_memory=has_cuda,
         remove_unused_columns=False,
         seed=train_cfg.get("seed", 42),
 
@@ -143,7 +192,7 @@ def main():
     )
     args = parser.parse_args()
 
-    cfg = load_config(args.config)
+    cfg        = load_config(args.config)
     model_name = cfg["name"]
     output_dir = args.results_dir / model_name
 
@@ -152,6 +201,12 @@ def main():
     log.info(f"Model:      {model_name}")
     log.info(f"Output:     {output_dir}")
     log.info(f"Device:     {'cuda' if torch.cuda.is_available() else 'cpu'}")
+
+    # ── Validate tokenizer before starting ────────────────────────────────────
+    # Fail early — a missing tokenizer discovered after hours of training
+    # produces an unusable checkpoint that can't be loaded by train_sft.py.
+    tokenizer_dir = args.data_dir / "tokenizer"
+    validate_tokenizer(tokenizer_dir)
 
     # ── Model ─────────────────────────────────────────────────────────────────
     from model import SLMConfig, SLMForCausalLM
@@ -172,7 +227,7 @@ def main():
     )
 
     log.info(f"Initializing model from scratch...")
-    model = SLMForCausalLM(model_config)
+    model    = SLMForCausalLM(model_config)
     n_params = sum(p.numel() for p in model.parameters())
     log.info(f"Parameters: {n_params:,} ({n_params / 1e6:.1f}M)")
 
@@ -180,7 +235,7 @@ def main():
     from pretrain.data.dataset import PretrainingDatasetWithValidation
 
     bin_path = args.data_dir / "tokenized" / "train.bin"
-    seq_len = model_cfg_dict["max_position_embeddings"]
+    seq_len  = model_cfg_dict["max_position_embeddings"]
 
     log.info(f"Loading dataset from {bin_path}")
     splits = PretrainingDatasetWithValidation(
@@ -205,11 +260,11 @@ def main():
             project=cfg.get("wandb_project", "slm"),
             name=model_name,
             config={
-                "model": model_cfg_dict,
-                "training": cfg["training"],
-                "optimizer": cfg["optimizer"],
-                "n_params": n_params,
-                "n_train_tokens": budget["total_training_tokens"],
+                "model":           model_cfg_dict,
+                "training":        cfg["training"],
+                "optimizer":       cfg["optimizer"],
+                "n_params":        n_params,
+                "n_train_tokens":  budget["total_training_tokens"],
             },
         )
 
@@ -229,30 +284,19 @@ def main():
 
     # ── Save ──────────────────────────────────────────────────────────────────
     log.info("Saving final model...")
-    trainer.save_model(str(output_dir / "final"))
-    model_config.save_pretrained(str(output_dir / "final"))
+    final_dir = output_dir / "final"
+    trainer.save_model(str(final_dir))
+    model_config.save_pretrained(str(final_dir))
 
-    # Copy tokenizer alongside model — only if tokenizer dir has actual content.
-    # Guards against silently propagating an empty tokenizer dir downstream
-    # (e.g. if setup-gpu ran before tokenizer was downloaded from S3).
-    import shutil
-    tokenizer_dir = args.data_dir / "tokenizer"
-    if tokenizer_dir.exists() and any(tokenizer_dir.iterdir()):
-        shutil.copytree(
-            tokenizer_dir,
-            output_dir / "final" / "tokenizer",
-            dirs_exist_ok=True,
-        )
-        log.info("Tokenizer copied alongside model")
-    else:
-        log.warning(
-            f"Tokenizer empty or missing at {tokenizer_dir} — skipping copy. "
-            f"Run: make tokenizer-download"
-        )
+    # Copy tokenizer alongside model.
+    # tokenizer_dir was already validated above — if we reach this point it is
+    # complete and contains tokenizer_config.json. No need to re-check here.
+    shutil.copytree(tokenizer_dir, final_dir / "tokenizer", dirs_exist_ok=True)
+    log.info(f"Tokenizer copied to {final_dir / 'tokenizer'}")
 
-    log.info(f"Model saved to {output_dir / 'final'}")
+    log.info(f"Model saved to {final_dir}")
     log.info("Pretraining complete.")
-    log.info(f"Next step: make sft")
+    log.info("Next step: make sft")
 
 
 if __name__ == "__main__":

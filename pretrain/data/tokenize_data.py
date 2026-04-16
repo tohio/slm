@@ -23,6 +23,13 @@ Output:
     data/tokenized/train.bin    — token IDs as uint16
     data/tokenized/train.json   — metadata (n_tokens, n_docs, vocab_size)
 
+Tokenizer:
+    Uses the raw tokenizers.Tokenizer from slm_tokenizer.json directly —
+    not PreTrainedTokenizerFast. This is intentional: bulk tokenization
+    only needs text → token IDs conversion. The raw tokenizer is faster
+    and has no dependency on tokenizer_config.json or the chat_template,
+    which are only needed at training and inference time.
+
 Performance notes:
     - Tokenizer is loaded once per worker process (not per document)
     - Documents are batched into chunks before dispatch to amortise IPC overhead
@@ -60,13 +67,13 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
+DATA_DIR      = Path(os.environ.get("DATA_DIR", "data"))
 TOKENIZED_DIR = DATA_DIR / "tokenized"
 
 # Global tokenizer instance — loaded once per worker process via initializer,
 # not once per document. Avoids 3.4M tokenizer loads in the original code.
 _worker_tokenizer = None
-_worker_eos_id = None
+_worker_eos_id    = None
 
 
 def _worker_init(tokenizer_path: str, eos_id: int) -> None:
@@ -76,11 +83,14 @@ def _worker_init(tokenizer_path: str, eos_id: int) -> None:
     Called by mp.Pool as the initializer — runs once when each worker
     process starts, not once per task. The tokenizer is stored as a
     module-level global so all tasks in that worker reuse it.
+
+    Uses the raw tokenizers.Tokenizer (not PreTrainedTokenizerFast) —
+    the chat_template and tokenizer_config.json are not needed here.
     """
     global _worker_tokenizer, _worker_eos_id
     from tokenizers import Tokenizer
     _worker_tokenizer = Tokenizer.from_file(tokenizer_path)
-    _worker_eos_id = eos_id
+    _worker_eos_id    = eos_id
 
 
 def _tokenize_chunk(texts: list[str]) -> list[int]:
@@ -123,22 +133,22 @@ def tokenize_dataset(
     peak RAM is O(shard_size), not O(corpus_size).
 
     Args:
-        input_path:    Path to validated JSONL file.
-        output_dir:    Directory to write output files.
+        input_path:     Path to validated JSONL file.
+        output_dir:     Directory to write output files.
         tokenizer_path: Path to slm_tokenizer.json.
-        eos_id:        EOS token ID used as document separator. Default: 3.
-        workers:       Number of parallel tokenization worker processes.
-        split:         Dataset split name (used in output filenames).
-        shard_size:    Documents per shard — controls how often tokens are
-                       flushed to disk. Lower = less RAM, more I/O.
-        chunk_size:    Documents per worker task. Higher = less IPC overhead,
-                       more latency before first result.
+        eos_id:         EOS token ID used as document separator. Default: 3.
+        workers:        Number of parallel tokenization worker processes.
+        split:          Dataset split name (used in output filenames).
+        shard_size:     Documents per shard — controls how often tokens are
+                        flushed to disk. Lower = less RAM, more I/O.
+        chunk_size:     Documents per worker task. Higher = less IPC overhead,
+                        more latency before first result.
 
     Returns:
         Metadata dict with n_tokens, n_docs, etc.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
-    bin_path = output_dir / f"{split}.bin"
+    bin_path  = output_dir / f"{split}.bin"
     meta_path = output_dir / f"{split}.json"
 
     if bin_path.exists() and meta_path.exists():
@@ -155,7 +165,7 @@ def tokenize_dataset(
     log.info(f"Total documents: {n_docs:,}")
 
     tokenizer_path_str = str(tokenizer_path)
-    n_tokens = 0
+    n_tokens    = 0
     n_processed = 0
 
     # Open output file for streaming writes — no large in-memory accumulation
@@ -172,15 +182,15 @@ def tokenize_dataset(
 
         for line in f:
             record = json.loads(line)
-            text = record.get("text", "").strip()
+            text   = record.get("text", "").strip()
             if text:
                 shard_texts.append(text)
 
             if len(shard_texts) >= shard_size:
                 tokens = _flush_shard(shard_texts, pool, chunk_size)
                 _write_tokens(tokens, bin_file)
-                n_tokens += len(tokens)
-                n_processed += len(shard_texts)
+                n_tokens     += len(tokens)
+                n_processed  += len(shard_texts)
                 pbar.update(len(shard_texts))
                 shard_texts = []
 
@@ -188,7 +198,7 @@ def tokenize_dataset(
         if shard_texts:
             tokens = _flush_shard(shard_texts, pool, chunk_size)
             _write_tokens(tokens, bin_file)
-            n_tokens += len(tokens)
+            n_tokens    += len(tokens)
             n_processed += len(shard_texts)
             pbar.update(len(shard_texts))
 
@@ -201,12 +211,12 @@ def tokenize_dataset(
 
     # Save metadata
     meta = {
-        "n_tokens": n_tokens,
-        "n_docs": n_processed,
-        "eos_id": eos_id,
-        "dtype": "uint16",
-        "split": split,
-        "input": str(input_path),
+        "n_tokens":  n_tokens,
+        "n_docs":    n_processed,
+        "eos_id":    eos_id,
+        "dtype":     "uint16",
+        "split":     split,
+        "input":     str(input_path),
         "tokenizer": str(tokenizer_path),
     }
     with open(meta_path, "w") as f:
@@ -276,7 +286,7 @@ def main():
         "--tokenizer",
         type=Path,
         default=DATA_DIR / "tokenizer" / "slm_tokenizer.json",
-        help="Tokenizer JSON file",
+        help="Path to slm_tokenizer.json (raw BPE tokenizer)",
     )
     parser.add_argument(
         "--workers",
@@ -309,14 +319,16 @@ def main():
     )
     args = parser.parse_args()
 
+    # Pre-flight checks — fail with clear messages before spawning the pool
     if not args.input.exists():
         log.error(f"Input not found: {args.input}")
-        log.error("Run: python validation/scripts/validate.py")
+        log.error("Run: make validate")
         sys.exit(1)
 
     if not args.tokenizer.exists():
         log.error(f"Tokenizer not found: {args.tokenizer}")
-        log.error("Run: python tokenizer/train_tokenizer.py")
+        log.error("Run: make tokenizer && make tokenizer-upload")
+        log.error("Or:  make tokenizer-download")
         sys.exit(1)
 
     log.info(f"Input:      {args.input}")
@@ -343,7 +355,7 @@ def main():
         )
 
     log.info("Tokenization complete.")
-    log.info("Next step: python pretrain/train.py")
+    log.info("Next step: make tokenize-upload")
 
 
 if __name__ == "__main__":

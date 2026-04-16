@@ -1,5 +1,6 @@
 name: slm-350m
 wandb_project: slm
+
 model:
   vocab_size: 32000
   hidden_size: 1024
@@ -11,8 +12,10 @@ model:
   rms_norm_eps: 1.0e-5
   initializer_range: 0.02
   tie_word_embeddings: true
+
 data:
   val_fraction: 0.005
+
 training:
   # ── Batch size ──────────────────────────────────────────────────────────────
   # Global batch = micro_batch_size × gradient_accumulation_steps × num_gpus
@@ -20,10 +23,15 @@ training:
   #   divide gradient_accumulation_steps by num_gpus to hold global batch constant
   #   divide max_steps by num_gpus to hold token budget constant
   #
-  # 1 GPU:  4 × 16 × 1 = 64 seqs × 2048 tokens = ~131k tokens/step → 500k steps = ~65B tokens
-  # 4 GPU:  4 × 4  × 4 = 64 seqs × 2048 tokens = ~131k tokens/step → 125k steps = ~65B tokens  (grad_accum=4,  max_steps=125000)
-  # 8 GPU:  4 × 2  × 8 = 64 seqs × 2048 tokens = ~131k tokens/step → 62.5k steps = ~65B tokens (grad_accum=2,  max_steps=62500)
-  max_steps: 500000
+  # Dataset: 15B tokens
+  # Tokens/step (1 GPU): 4 × 16 × 1 × 2048 = ~131k tokens/step
+  # 1 epoch  → ~115,000 steps
+  # 2 epochs → ~230,000 steps  ← recommended
+  #
+  # 1 GPU:  grad_accum=16, max_steps=230000
+  # 4 GPU:  grad_accum=4,  max_steps=57500
+  # 8 GPU:  grad_accum=2,  max_steps=28750
+  max_steps: 230000
   warmup_steps: 2000
   micro_batch_size: 4
   gradient_accumulation_steps: 16  # 1 GPU default — see scaling note above
@@ -39,6 +47,7 @@ training:
   lr_scheduler: cosine
   report_to:
     - wandb
+
 optimizer:
   lr: 2.0e-4
   weight_decay: 0.1

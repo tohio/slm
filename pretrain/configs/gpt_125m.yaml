@@ -1,5 +1,6 @@
 name: slm-125m
 wandb_project: slm
+
 model:
   vocab_size: 32000
   hidden_size: 768
@@ -11,8 +12,10 @@ model:
   rms_norm_eps: 1.0e-5
   initializer_range: 0.02
   tie_word_embeddings: true
+
 data:
   val_fraction: 0.005
+
 training:
   # ── Batch size ──────────────────────────────────────────────────────────────
   # Global batch = micro_batch_size × gradient_accumulation_steps × num_gpus
@@ -20,17 +23,18 @@ training:
   #   divide gradient_accumulation_steps by num_gpus to hold global batch constant
   #   divide max_steps by num_gpus to hold token budget constant
   #
-  # Dataset: 2.3B tokens — 65k tokens/step → 35k steps = 1 epoch
+  # Dataset: 5B tokens
+  # Tokens/step (1 GPU): 4 × 8 × 1 × 2048 = ~65k tokens/step
+  # 1 epoch  → ~76,000 steps
+  # 2 epochs → ~152,000 steps  ← recommended
   #
-  # 1 GPU:  4 × 8 × 1 = 32 seqs × 2048 tokens = ~65k tokens/step
-  #   1 epoch  → 35,000 steps
-  #   2 epochs → 70,000 steps  ← recommended
-  # 4 GPU:  grad_accum=2, max_steps=17500  (2 epochs)
-  # 8 GPU:  grad_accum=1, max_steps=8750   (2 epochs)
-  max_steps: 70000
+  # 1 GPU:  grad_accum=8,  max_steps=152000
+  # 4 GPU:  grad_accum=2,  max_steps=38000
+  # 8 GPU:  grad_accum=1,  max_steps=19000
+  max_steps: 152000
   warmup_steps: 1000
   micro_batch_size: 4
-  gradient_accumulation_steps: 8
+  gradient_accumulation_steps: 8   # 1 GPU default — see scaling note above
   precision: bf16
   gradient_clip_val: 1.0
   gradient_checkpointing: false
@@ -43,6 +47,7 @@ training:
   lr_scheduler: cosine
   report_to:
     - wandb
+
 optimizer:
   lr: 3.0e-4
   weight_decay: 0.1
