@@ -250,7 +250,15 @@ make install-gpu      # skips kenlm and other curation-only dependencies
 # ── Step 1: Curation instance (CPU) ──────────────────────────────────────────
 make download-fasttext-model DATA_DIR=/data/slm/data   # language ID model (~1MB)
 make download-kenlm-model    DATA_DIR=/data/slm/data   # perplexity model (~4GB)
-make curate SIZE=125m WORKERS=24    # Stage 1: download, filter, dedup, blend, upload
+
+# ── Step 2: Validate curation pipeline ───────────────────────────────────────
+# Exercises every curation stage end-to-end on tiny data (~30–45 min).
+# Fix any issues here before committing to the full run.
+make curate-mini
+make test
+
+# ── Step 3: Full curation ─────────────────────────────────────────────────────
+make curate SIZE=125m WORKERS=62    # Stage 1: download, filter, dedup, blend, upload
 make validate                       # Stage 2: perplexity filter
 make validate-upload SIZE=125m      # Stage 2: push validated data to S3
 make tokenizer                      # Stage 3: train BPE tokenizer
@@ -258,12 +266,13 @@ make tokenizer-upload               # Stage 3: push tokenizer to S3
 make tokenize                       # Stage 4a: tokenize to binary
 make tokenize-upload SIZE=125m      # Stage 4a: push tokenized binary to S3
 
-# ── Step 2: GPU instance setup ───────────────────────────────────────────────
+# ── Step 4: GPU instance setup ───────────────────────────────────────────────
 make setup-gpu DATA_DIR=/data/slm/data SIZE=125m DATE=YYYY-MM-DD
 source ~/.bashrc
 
-# ── Step 3: Validate mini pipeline ───────────────────────────────────────────
-# Exercises every stage end-to-end on a single GPU. Takes ~15–20 min.
+# ── Step 5: Validate training pipeline ───────────────────────────────────────
+# Exercises every training stage end-to-end on a single GPU (~15–20 min).
+# Fix any issues here before committing to the full run.
 make accelerate-config-single
 make pretrain-mini  GPUS=1
 make prepare-sft
@@ -273,12 +282,12 @@ make prepare-dpo
 make dpo-mini       GPUS=1
 make eval-mini
 
-# ── Step 4: Full training ─────────────────────────────────────────────────────
+# ── Step 6: Full training ─────────────────────────────────────────────────────
 # Before running, update gradient_accumulation_steps and max_steps in
 # pretrain/configs/gpt_125m.yaml, alignment/configs/dpo_125m.yaml,
 # finetune/configs/sft_chat_125m.yaml, finetune/configs/sft_code_125m.yaml for your GPU count.
-# See pretrain/README.md — Multi-GPU Config Scaling for exact values.
-make accelerate-config-single        # Use make accelerate-config-multi GPUS=x for multi gpu
+# See docs/COMMANDS.md — Multi-GPU Config Scaling for exact values.
+make accelerate-config-single        # Use make accelerate-config-multi GPUS=x for multi-GPU
 make pretrain  SIZE=125m GPUS=1      # Stage 4b: pretrain from scratch
 make export-base     SIZE=125m       # Stage 8:  push base model to Hub
 make sft       SIZE=125m GPUS=1      # Stage 5b: chat SFT

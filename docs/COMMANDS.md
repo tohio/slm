@@ -917,7 +917,11 @@ make install                                            # install all dependenci
 make download-fasttext-model DATA_DIR=/data/slm/data   # ~1MB, for CC language filtering
 make download-kenlm-model    DATA_DIR=/data/slm/data   # ~4GB, for validation perplexity
 
-# ── Data ───────────────────────────────────────────────────────────────────────
+# ── Validate curation pipeline ─────────────────────────────────────────────────
+make curate-mini                    # validate pipeline end-to-end on tiny data (~30–45 min)
+make test                           # verify outputs are correct
+
+# ── Full curation ──────────────────────────────────────────────────────────────
 make curate SIZE=1b                 # Stage 1: download, filter, dedup, blend, upload
 make validate                       # Stage 2: perplexity filter
 make validate-upload SIZE=1b        # Stage 2: push validated data to S3
@@ -928,10 +932,21 @@ make tokenizer-upload               # Stage 3: push tokenizer to S3
 make tokenize                       # Stage 4a: tokenize to binary
 make tokenize-upload SIZE=1b        # Stage 4a: push tokenized binary to S3
 
-# ── Training (GPU instance) ────────────────────────────────────────────────────
+# ── GPU instance setup ─────────────────────────────────────────────────────────
 make setup-gpu DATA_DIR=/data/slm/data SIZE=1b DATE=2026-04-15
+
+# ── Validate training pipeline ─────────────────────────────────────────────────
+make accelerate-config-single
+make pretrain-mini  GPUS=1          # validate training loop (~5–10 min)
+make prepare-sft
+make sft-mini       GPUS=1
+make sft-code-mini  GPUS=1
+make prepare-dpo
+make dpo-mini       GPUS=1
+make eval-mini
+
+# ── Full training ──────────────────────────────────────────────────────────────
 make accelerate-config-multi GPUS=8
-make pretrain-mini GPUS=1           # Stage 4b: validate training loop (~5-10 min)
 make pretrain    SIZE=1b GPUS=8     # Stage 4b: pretrain from scratch
 make prepare-sft                    # Stage 5a: download SFT datasets
 make sft         SIZE=1b GPUS=8     # Stage 5b: chat SFT
