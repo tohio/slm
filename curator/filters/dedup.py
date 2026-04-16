@@ -27,6 +27,13 @@ Hash compaction:
         - Collision probability at 50M docs: ~1 in 3.7 × 10^10
         - Memory at 50M docs: ~400MB vs ~3.2GB for hex strings
 
+Resume behaviour:
+    exact_dedup_source skips shards whose output file already exists.
+    On resume, already-processed shards are re-scanned into seen_hashes
+    (read-only pass) so cross-shard duplicate detection remains correct.
+    Without this, a document in shard_001 that also appears in shard_005
+    would not be caught if shard_001 was processed in a prior run.
+
 References:
     datatrove minhash: https://github.com/huggingface/datatrove
     FineWeb pipeline:  https://huggingface.co/spaces/HuggingFaceFW/blogpost-fineweb-v1
@@ -137,6 +144,31 @@ def exact_dedup_jsonl(
     return {"total": total, "kept": kept, "exact_duplicates": exact_dupes}
 
 
+def _scan_hashes_into(input_path: Path, seen_hashes: set[bytes]) -> int:
+    """
+    Read a completed output shard and populate seen_hashes from it.
+
+    Used on resume to reconstruct the seen_hashes index from shards that
+    were processed in a prior run, ensuring cross-shard duplicate detection
+    remains correct when restarting a partially-completed dedup stage.
+
+    Args:
+        input_path:  Completed output JSONL shard to scan.
+        seen_hashes: Set to populate in place.
+
+    Returns:
+        Number of hashes added.
+    """
+    added = 0
+    with open(input_path, buffering=8 * 1024 * 1024) as fin:
+        for line in fin:
+            record = orjson.loads(line)
+            h = exact_hash(record.get("text", ""))
+            seen_hashes.add(h)
+            added += 1
+    return added
+
+
 # ── Datatrove minhash pipeline ─────────────────────────────────────────────────
 
 def run_minhash_dedup(
@@ -159,7 +191,7 @@ def run_minhash_dedup(
                      (signatures, buckets, clusters). Safe to delete after.
         workers:     Number of parallel workers. Defaults to cpu_count - 2.
         tasks:       Number of tasks for parallelism. Defaults to number of
-                     input shards. Should be >= workers for good utilisation.
+                     input shards. Must be >= 1 and ideally >= workers.
     """
     input_dir = Path(input_dir)
     output_dir = Path(output_dir)
@@ -176,7 +208,12 @@ def run_minhash_dedup(
     if not shards:
         log.warning(f"No JSONL shards found in {input_dir} — skipping minhash dedup")
         return
-    n_tasks = tasks or max(len(shards), n_workers)
+
+    # FIX 3: n_tasks must be >= 1 and based only on shard count, not worker
+    # count. The old max(len(shards), n_workers) could set n_tasks > len(shards),
+    # creating empty tasks and wasting scheduler overhead. Tasks should match
+    # the data: one task per shard is the natural parallelism unit.
+    n_tasks = tasks or max(len(shards), 1)
 
     log.info(
         f"MinHash dedup: {len(shards)} shards, {n_tasks} tasks, {n_workers} workers\n"
@@ -267,8 +304,11 @@ class Deduplicator:
     disk-based — RAM usage is O(shard_size), not O(corpus_size).
 
     Stage 1 — Exact dedup: SHA-256 8-byte prefix of normalized text.
-              Zero false positives at corpus scale. Cross-shard via shared
-              seen_hashes set. Memory: ~8 bytes/doc vs ~64 bytes for hex.
+              Zero false positives. Cross-shard via shared seen_hashes set.
+              Resume-safe: already-processed output shards are re-scanned
+              into seen_hashes before processing new shards, so cross-shard
+              duplicate detection is preserved across restarts.
+              Memory: ~8 bytes/doc vs ~64 bytes for hex.
                   125m (~10M docs):  ~80MB
                   350m (~30M docs):  ~240MB
                   1b   (~80M docs):  ~640MB
@@ -296,7 +336,14 @@ class Deduplicator:
         self._stats: dict[str, dict] = {}
 
     def exact_dedup_source(self, src_dir: Path, dst_dir: Path) -> dict:
-        """Exact-dedup all JSONL shards in src_dir, writing to dst_dir."""
+        """
+        Exact-dedup all JSONL shards in src_dir, writing to dst_dir.
+
+        Resume behaviour: shards whose output already exists are skipped
+        for writing, but their output is scanned into seen_hashes first.
+        This ensures cross-shard duplicate detection is correct even when
+        restarting a partially-completed run.
+        """
         dst_dir.mkdir(parents=True, exist_ok=True)
         shards = sorted(src_dir.glob("*.jsonl"))
 
@@ -310,7 +357,12 @@ class Deduplicator:
         for shard in tqdm(shards, desc=f"Exact dedup {src_dir.name}", unit="shard"):
             out = dst_dir / shard.name
             if out.exists():
-                log.debug(f"  Skipping {shard.name} — already done")
+                # FIX 2: Re-scan completed output into seen_hashes so
+                # cross-shard dedup is correct on resume. Without this,
+                # docs from already-processed shards aren't in seen_hashes,
+                # allowing duplicates to slip through in subsequent shards.
+                added = _scan_hashes_into(out, self.seen_hashes)
+                log.debug(f"  Resume: scanned {added:,} hashes from {out.name}")
                 continue
             stats = exact_dedup_jsonl(shard, out, self.seen_hashes)
             for k in agg:

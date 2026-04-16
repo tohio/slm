@@ -69,7 +69,6 @@ Usage:
 """
 
 import argparse
-import functools
 import json
 import logging
 import os
@@ -90,7 +89,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from curator.filters.dedup import Deduplicator
 from curator.filters.quality import QualityFilter, QualityConfig
 from curator.sources.common_crawl import CommonCrawlSource
-from curator.sources.code_search_net import CodeSearchNetSource, LANGUAGES
+from curator.sources.code_search_net import CodeSearchNetSource
 from curator.sources.wikipedia import WikipediaSource
 from curator.scripts.upload_s3 import upload_directory, download_prefix, get_bucket_and_prefix
 
@@ -187,13 +186,20 @@ def flatten_datatrove_record(record: dict) -> dict:
         {"text": "...", "id": "...", "metadata": {"source": ..., "url": ..., ...}}
 
     We flatten this back to:
-        {"text": "...", "source": ..., "url": ..., ...}
+        {"text": "...", "id": "...", "source": ..., "url": ..., ...}
+
+    Metadata keys are merged in after top-level keys so that top-level fields
+    (text, id) are never silently overwritten by metadata contents.
 
     Plain JSONL records (not processed by datatrove) are returned unchanged.
     """
     if "metadata" in record and isinstance(record["metadata"], dict):
-        flat = {"text": record.get("text", "")}
-        flat.update(record["metadata"])
+        # Start with all top-level fields except metadata itself,
+        # then merge metadata on top — metadata must not overwrite text/id.
+        flat = {k: v for k, v in record.items() if k != "metadata"}
+        for k, v in record["metadata"].items():
+            if k not in flat:  # never overwrite text, id, or other top-level fields
+                flat[k] = v
         flat.pop("file_path", None)
         return flat
     return record
@@ -238,9 +244,31 @@ def stage_download(target: str, mini: bool = False) -> None:
 
 # ── Stage 2: Filter ────────────────────────────────────────────────────────────
 
+# FIX 1: Module-level worker state for QualityFilter.
+# Each subprocess initializes exactly one QualityFilter (and thus loads the
+# fasttext model once). Without this, a new QualityFilter is constructed per
+# shard, reloading the fasttext model on every call — O(shards) loads instead
+# of O(workers) loads.
+_worker_qf: QualityFilter | None = None
+
+
+def _init_filter_worker() -> None:
+    """
+    Pool initializer: construct QualityFilter once per subprocess.
+
+    Called once when each worker process starts. The fasttext model is
+    loaded here and cached in _worker_qf for the lifetime of the worker.
+    """
+    global _worker_qf
+    _worker_qf = QualityFilter()
+
+
 def _filter_shard(args: tuple[Path, Path]) -> str:
     """
     Filter a single JSONL shard. Designed to run in a subprocess.
+
+    Uses the module-level _worker_qf initialized by _init_filter_worker,
+    so the fasttext model is loaded once per worker, not once per shard.
 
     Args:
         args: (shard_path, dst_dir) tuple.
@@ -253,7 +281,7 @@ def _filter_shard(args: tuple[Path, Path]) -> str:
     if out_path.exists():
         return f"skip:{shard.name}"
 
-    qf = QualityFilter()
+    qf = _worker_qf or QualityFilter()  # fallback if initializer wasn't used
     with open(shard, buffering=8 * 1024 * 1024) as fin, \
          open(out_path, "w", buffering=8 * 1024 * 1024) as fout:
         for line in fin:
@@ -303,9 +331,14 @@ def stage_filter(workers: int | None = None) -> None:
     log.info(f"Filtering {len(all_work)} total shards with {n_workers} workers...")
     skipped = processed = 0
 
-    with ProcessPoolExecutor(max_workers=n_workers) as executor:
-        # chunksize=4 batches work assignments to reduce IPC overhead
-        for report in executor.map(_filter_shard, all_work, chunksize=4):
+    with ProcessPoolExecutor(
+        max_workers=n_workers,
+        initializer=_init_filter_worker,   # FIX 1: load fasttext once per worker
+    ) as executor:
+        # chunksize=16 batches work assignments to reduce IPC overhead.
+        # Increased from 4 — at 64 vCPUs with thousands of shards, larger
+        # batches meaningfully reduce scheduler overhead.
+        for report in executor.map(_filter_shard, all_work, chunksize=16):
             if report.startswith("skip:"):
                 skipped += 1
             else:
@@ -522,41 +555,83 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
             log.warning(f"  {source}: no deduped shards found — skipping")
             continue
         staging = CURATED_DIR / f"blend_{source}.jsonl"
+        # Resume: if staging file already exists, skip re-writing it.
+        if staging.exists():
+            log.info(f"  {source}: staging file already exists — skipping")
+            continue
         work.append((source, str(src_dir), str(staging), target_chars[source]))
 
-    staging_paths: dict[str, Path] = {}
+    staging_paths: dict[str, Path] = {
+        source: CURATED_DIR / f"blend_{source}.jsonl"
+        for source in source_dirs
+        if (CURATED_DIR / f"blend_{source}.jsonl").exists()
+    }
     source_stats: dict[str, dict] = {}
 
-    log.info(f"Pass 1/3: streaming {len(work)} sources to staging files ({n_blend_workers} workers)...")
-    with ProcessPoolExecutor(max_workers=n_blend_workers) as executor:
-        futures = {executor.submit(_write_staging, w): w[0] for w in work}
-        for future in as_completed(futures):
-            source, docs, chars = future.result()
-            staging_paths[source] = CURATED_DIR / f"blend_{source}.jsonl"
-            source_stats[source] = {"docs": docs, "chars": chars}
-            log.info(
-                f"  {source}: {docs:,} docs, "
-                f"{chars / 1e9:.3f}B chars, "
-                f"~{chars // 4 / 1e6:.1f}M tokens"
-            )
+    # FIX: For staging files that already exist (resume path), populate
+    # source_stats by counting their contents so blend_stats.json is complete
+    # and total_chars is accurate regardless of whether this is a fresh run
+    # or a resume.
+    for source, staging in staging_paths.items():
+        docs = chars = 0
+        with open(staging, buffering=8 * 1024 * 1024) as fin:
+            for line in fin:
+                docs += 1
+                try:
+                    record = orjson.loads(line)
+                    chars += len(record.get("text", ""))
+                except Exception:
+                    pass
+        source_stats[source] = {"docs": docs, "chars": chars}
+        log.info(
+            f"  {source} (existing staging): {docs:,} docs, "
+            f"{chars / 1e9:.3f}B chars, ~{chars // 4 / 1e6:.1f}M tokens"
+        )
+
+    if work:
+        log.info(
+            f"Pass 1/3: streaming {len(work)} sources to staging files "
+            f"({n_blend_workers} workers)..."
+        )
+        with ProcessPoolExecutor(max_workers=n_blend_workers) as executor:
+            futures = {executor.submit(_write_staging, w): w[0] for w in work}
+            for future in as_completed(futures):
+                source, docs, chars = future.result()
+                staging_paths[source] = CURATED_DIR / f"blend_{source}.jsonl"
+                # Update stats with freshly written values (overrides the
+                # pre-scan above which would have seen an empty/missing file).
+                source_stats[source] = {"docs": docs, "chars": chars}
+                log.info(
+                    f"  {source}: {docs:,} docs, "
+                    f"{chars / 1e9:.3f}B chars, "
+                    f"~{chars // 4 / 1e6:.1f}M tokens"
+                )
+    else:
+        log.info("Pass 1/3: all staging files already exist — skipping")
 
     # ── Pass 2: merge staging files ───────────────────────────────────────────
     merged_path = CURATED_DIR / "blend_merged.jsonl"
-    total_docs = 0
 
+    # FIX 4: count docs correctly — reset counter per source, count lines
+    # by reading the staging file rather than counting newlines in raw blocks
+    # (which double-counts across block boundaries).
+    total_docs = 0
     log.info("Pass 2/3: merging staging files...")
     with open(merged_path, "wb") as fout:
         for source, staging in staging_paths.items():
+            source_docs = 0
             with open(staging, "rb") as fin:
                 while True:
                     block = fin.read(8 * 1024 * 1024)
                     if not block:
                         break
+                    source_docs += block.count(b"\n")
                     fout.write(block)
-                    total_docs += block.count(b"\n")
+            total_docs += source_docs
             staging.unlink()
+            log.info(f"  {source}: {source_docs:,} docs merged")
 
-    log.info(f"  Merged ~{total_docs:,} documents")
+    log.info(f"  Total merged: {total_docs:,} documents")
 
     # ── Pass 3: chunked shuffle ────────────────────────────────────────────────
     log.info("Pass 3/3: shuffling (chunked)...")

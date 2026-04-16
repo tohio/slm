@@ -46,6 +46,7 @@ Reference:
 import logging
 import os
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -154,6 +155,8 @@ class QualityConfig:
     min_alpha_ratio: float = 0.75            # tightened from 0.70
 
     # Repeated lines — fraction of lines that are duplicates
+    # A line is a duplicate if it appears more than once in the document.
+    # Counted as (total occurrences beyond the first) / total lines.
     max_repeated_line_ratio: float = 0.2     # tightened from 0.3
 
     # Stop word check — minimum number of EN stop words in first 100 words.
@@ -376,13 +379,14 @@ class QualityFilter:
         lines = [l.strip() for l in text.split("\n") if l.strip()]
         if len(lines) < 4:
             return True, None
-        seen: set[str] = set()
-        duplicates = 0
-        for line in lines:
-            if line in seen:
-                duplicates += 1
-            seen.add(line)
-        ratio = duplicates / len(lines)
+
+        # FIX: Use Counter to correctly count all duplicate occurrences.
+        # The old set-based approach only counted whether a line had been
+        # seen before, so a line appearing 5 times counted as 1 duplicate
+        # instead of 4. Counter gives exact occurrence counts.
+        counts = Counter(lines)
+        duplicate_occurrences = sum(c - 1 for c in counts.values() if c > 1)
+        ratio = duplicate_occurrences / len(lines)
         if ratio > self.config.max_repeated_line_ratio:
             return False, "high_repeated_lines"
         return True, None
@@ -421,8 +425,10 @@ class QualityFilter:
             score = float(scores[0])
             if lang != "en" or score < self.config.min_language_score:
                 return False, "non_english"
-        except Exception:
-            pass  # on any prediction error, pass the document through
+        except Exception as e:
+            # Log at DEBUG so persistent failures are visible without
+            # flooding logs on occasional prediction errors.
+            log.debug(f"fasttext prediction error (passing document through): {e}")
 
         return True, None
 
