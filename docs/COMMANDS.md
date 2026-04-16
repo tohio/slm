@@ -26,7 +26,7 @@ These targets are run once per instance before the pipeline starts.
 
 ### `make setup`
 
-Bootstraps a fresh Ubuntu instance for curation. Installs system dependencies, configures the environment, and sets up the default data directory at `repo/data`.
+Bootstraps a fresh Ubuntu 24.04 instance for curation. Installs system dependencies, configures the environment, and sets up the default data directory at `repo/data`.
 
 ```bash
 make setup
@@ -178,6 +178,52 @@ make accelerate-config-multi GPUS=4
 
 ---
 
+## Tests
+
+---
+
+### `make test`
+
+Runs the full test suite.
+
+```bash
+make test
+```
+
+No GPU or external model downloads required — fasttext and KenLM are mocked in `tests/conftest.py`.
+
+---
+
+### `make test-fast`
+
+Runs all tests except the curator integration test (`test_curate.py`), which runs the full filter → dedup → blend pipeline and is the slowest test by a large margin. Use this for fast feedback during development.
+
+```bash
+make test-fast
+```
+
+---
+
+### `make test-curator`
+
+Runs curator tests only — quality filter unit tests, dedup resume correctness, and the blend integration test.
+
+```bash
+make test-curator
+```
+
+---
+
+### `make test-model`
+
+Runs model tests only — forward pass shapes, causal mask, GQA, RoPE, SwiGLU, RMSNorm, and parameter counts.
+
+```bash
+make test-model
+```
+
+---
+
 ## Stage 1 — Data Curation
 
 Downloads raw data from three sources (Wikipedia, CodeSearchNet Python, Common Crawl), applies quality filters, deduplicates, blends to target token ratios, and uploads to S3.
@@ -208,7 +254,7 @@ Runs the full curation pipeline end-to-end: download → filter → dedup → bl
 ```bash
 make curate SIZE=125m
 make curate SIZE=1b
-make curate SIZE=125m WORKERS=32   # override worker count
+make curate SIZE=125m WORKERS=62   # override worker count
 ```
 
 **Requires:** fasttext model downloaded, AWS credentials in `.env`, S3 bucket configured.
@@ -248,7 +294,7 @@ Runs quality filtering on all raw shards in parallel using all available CPU cor
 
 ```bash
 make curate-filter SIZE=125m
-make curate-filter SIZE=125m WORKERS=32   # override worker count
+make curate-filter SIZE=125m WORKERS=62   # override worker count
 ```
 
 **Requires:** `data/raw/` populated by `make curate-download`, fasttext model at `data/models/lid.176.ftz`.
@@ -279,7 +325,7 @@ Runs deduplication on all filtered shards. Two stages: exact SHA-256 dedup (cros
 
 ```bash
 make curate-dedup SIZE=125m
-make curate-dedup SIZE=125m WORKERS=32
+make curate-dedup SIZE=125m WORKERS=62
 ```
 
 **Requires:** `data/filtered/` populated by `make curate-filter`.
@@ -294,7 +340,7 @@ Blends deduped sources to the target token ratio (55% CC / 25% Wikipedia / 20% c
 
 ```bash
 make curate-blend SIZE=125m
-make curate-blend SIZE=125m WORKERS=32
+make curate-blend SIZE=125m WORKERS=62
 ```
 
 **Requires:** All `*_deduped/` directories populated by `make curate-dedup`.
@@ -402,9 +448,6 @@ Tokenizes `data/validated/train.jsonl` to a memory-mapped uint16 binary file. Wo
 
 ```bash
 make tokenize
-
-# Override worker count if needed
-python pretrain/data/tokenize_data.py --workers 8 --chunk-size 256 --verify
 ```
 
 **Requires:** `data/validated/train.jsonl`, `data/tokenizer/`
@@ -789,9 +832,9 @@ make clean-logs
 | Target | vCPUs | RAM | Est. runtime |
 |---|---|---|---|
 | mini (validation) | Any | 4GB+ | ~30–45 min |
-| 125m | 16 vCPU | 32GB | ~8–12 hrs |
-| 350m | 32 vCPU | 64GB | ~20–28 hrs |
-| 1b | 64 vCPU | 256GB | ~30–40 hrs |
+| 125m | 32 vCPU | 64GB | ~4–6 hrs |
+| 350m | 64 vCPU | 128GB | ~10–14 hrs |
+| 1b | 64 vCPU | 256GB | ~20–28 hrs |
 
 Run close to `us-east-1` (AWS) or `us-east1` (GCP) to minimise Common Crawl egress latency. Attach a persistent disk (500GB+) for `DATA_DIR` so data survives spot/preemptible interruptions. [Nebius](https://nebius.com) AMD Epyc Genoa instances (64 vCPU, 256GiB RAM) offer strong price/performance for curation.
 
@@ -812,8 +855,8 @@ Run close to `us-east-1` (AWS) or `us-east1` (GCP) to minimise Common Crawl egre
 
 ```bash
 # 1. Clone and enter repo
-git clone https://github.com/tohio/slm.git
-cd slm
+git clone https://github.com/tohio/slm.git /data/slm
+cd /data/slm
 
 # 2. Install make if needed
 sudo apt install -y make
@@ -850,7 +893,7 @@ make export      SIZE=125m
 ### After a preemptible restart
 
 ```bash
-cd ~/slm
+cd /data/slm
 make setup-gpu DATA_DIR=/data/slm/data SIZE=125m
 source ~/.bashrc
 make pretrain-resume SIZE=125m GPUS=8

@@ -53,6 +53,7 @@ endif
         setup setup-data-dir setup-gpu install install-gpu install-uv install-conda install-kenlm install-orjson \
         download-kenlm-model download-fasttext-model accelerate-config accelerate-config-single accelerate-config-multi \
         s3-upload s3-download s3-list \
+        test test-curator test-model test-fast \
         clean clean-data clean-results clean-logs help
 
 # ── Full pipeline ──────────────────────────────────────────────────────────────
@@ -326,6 +327,24 @@ accelerate-config-multi:
 	cat accelerate_configs/multi_gpu.yaml | sed 's/num_processes: 8/num_processes: $(GPUS)/' > ~/.cache/huggingface/accelerate/default_config.yaml
 	@echo "  Multi-GPU config active ($(GPUS) processes)"
 
+# ── Tests ─────────────────────────────────────────────────────────────────────
+
+test:
+	@echo "==> Running tests..."
+	.venv/bin/pytest tests/ -v --tb=short
+
+test-curator:
+	@echo "==> Running curator tests..."
+	.venv/bin/pytest tests/curator/ -v --tb=short
+
+test-model:
+	@echo "==> Running model tests..."
+	.venv/bin/pytest tests/model/ -v --tb=short
+
+test-fast:
+	@echo "==> Running fast tests (skipping integration)..."
+	.venv/bin/pytest tests/ -v --tb=short -x --ignore=tests/curator/test_curate.py
+
 # ── Clean ─────────────────────────────────────────────────────────────────────
 
 clean-data:
@@ -364,6 +383,12 @@ help:
 	@echo "  install-conda            Install dependencies (conda)"
 	@echo "  install-kenlm            Install KenLM Python bindings from source"
 	@echo "  install-orjson           Install orjson and fasttext-wheel"
+	@echo ""
+	@echo "Tests:"
+	@echo "  test                     Run all tests"
+	@echo "  test-fast                Run all tests except integration (fast feedback)"
+	@echo "  test-curator             Run curator tests only"
+	@echo "  test-model               Run model tests only"
 	@echo ""
 	@echo "Pipeline:"
 	@echo "  curate             Stage 1  — download, curate, and upload to S3"
@@ -420,7 +445,7 @@ help:
 	@echo "  clean-logs         Remove logs directory"
 	@echo ""
 	@echo "Examples:"
-	@echo "  make curate SIZE=125m WORKERS=16"
+	@echo "  make curate SIZE=125m WORKERS=62"
 	@echo "  make pretrain SIZE=125m GPUS=4"
 	@echo "  make pretrain CONFIG=pretrain/configs/gpt_1b.yaml GPUS=8"
 	@echo "  make sft SIZE=125m GPUS=4"

@@ -61,70 +61,91 @@ The model is a dense decoder-only transformer with a modern architecture:
 
 ```
 slm/
-├── model/                        Custom decoder-only transformer architecture
-│   ├── config.py                 SLMConfig — hyperparameters for 125M/350M/1B
-│   ├── attention.py              Grouped Query Attention + RoPE
-│   ├── mlp.py                    SwiGLU feed-forward network
-│   ├── norm.py                   RMSNorm
-│   ├── block.py                  Pre-norm transformer block
-│   └── model.py                  SLMModel + SLMForCausalLM
+├── model/
+│   ├── config.py
+│   ├── attention.py
+│   ├── mlp.py
+│   ├── norm.py
+│   ├── block.py
+│   └── model.py
 │
-├── curator/                      Stage 1: data curation
+├── curator/
 │   ├── sources/
-│   │   ├── wikipedia.py          Wikipedia EN via HuggingFace datasets
-│   │   ├── code_search_net.py    CodeSearchNet Python via HuggingFace datasets
-│   │   └── common_crawl.py       Common Crawl WARCs via HTTPS + trafilatura
+│   │   ├── wikipedia.py
+│   │   ├── code_search_net.py
+│   │   └── common_crawl.py
 │   ├── filters/
-│   │   ├── quality.py            Heuristic quality filters + fasttext language detection
-│   │   └── dedup.py              Exact + datatrove disk-based MinHash deduplication
+│   │   ├── quality.py
+│   │   └── dedup.py
 │   └── scripts/
-│       ├── curate.py             Main pipeline entry point
-│       └── upload_s3.py          S3 upload/download utilities
+│       ├── curate.py
+│       └── upload_s3.py
 │
-├── validation/                   Stage 2: data validation
+├── validation/
 │   └── scripts/
-│       ├── validate.py           Quality filter + perplexity filtering (KenLM)
-│       └── upload_validated.py   Upload validated data to S3 (versioned by target + date)
+│       ├── validate.py
+│       └── upload_validated.py
 │
-├── tokenizer/                    Stage 3: tokenizer training
-│   ├── train_tokenizer.py        BPE tokenizer — 32k vocab, 16 special tokens
-│   └── test_tokenizer.py         Roundtrip, fertility, chat template tests
+├── tokenizer/
+│   ├── train_tokenizer.py
+│   └── test_tokenizer.py
 │
-├── pretrain/                     Stage 4: pretraining
-│   ├── configs/                  gpt_mini.yaml, gpt_125m.yaml, gpt_350m.yaml, gpt_1b.yaml
+├── pretrain/
+│   ├── configs/
 │   ├── data/
-│   │   ├── tokenize_data.py      JSONL → uint16 memory-mapped binary
-│   │   ├── upload_tokenized.py   Upload/download tokenized binary to/from S3
-│   │   └── dataset.py            PretrainingDataset wrapping .bin file
-│   └── train.py                  Pretraining loop
+│   │   ├── tokenize_data.py
+│   │   ├── upload_tokenized.py
+│   │   └── dataset.py
+│   └── train.py
 │
-├── finetune/                     Stage 5: supervised fine-tuning
-│   ├── configs/                  sft_chat/code × 125m/350m/1b (6 configs)
-│   ├── data/prepare_sft.py       Chat + code dataset preparation
-│   └── train_sft.py              SFT training loop
+├── finetune/
+│   ├── configs/
+│   ├── data/prepare_sft.py
+│   └── train_sft.py
 │
-├── alignment/                    Stage 6: preference alignment
-│   ├── configs/                  dpo_125m.yaml, dpo_350m.yaml, dpo_1b.yaml
-│   ├── data/prepare_dpo.py       Preference dataset blending
-│   └── train_dpo.py              DPO training loop
+├── alignment/
+│   ├── configs/
+│   ├── data/prepare_dpo.py
+│   └── train_dpo.py
 │
-├── eval/                         Stage 7: benchmark evaluation
-│   └── eval.py                   HellaSwag, ARC, MMLU, TruthfulQA, HumanEval
+├── eval/
+│   └── eval.py
 │
-├── export/                       Stage 8: model export
-│   └── export.py                 Hub push + model card generation
+├── export/
+│   └── export.py
 │
-├── inference/                    Stage 9: local inference
-│   ├── chat.py                   Interactive multi-turn chat CLI
-│   └── generate.py               Batch text generation
+├── inference/
+│   ├── chat.py
+│   └── generate.py
 │
-├── serve/                        Stage 10: production serving
+├── serve/
 │   ├── manifests/
-│   │   ├── deployment.yaml       vLLM deployment (1 GPU, pinned image version)
-│   │   ├── service.yaml          ClusterIP service on port 8000
-│   │   ├── hpa.yaml              HPA — scales 1–4 replicas on vLLM request queue depth
-│   │   └── pvc.yaml              PersistentVolumeClaim for HuggingFace model cache
-│   └── serve.sh                  Local server launch script
+│   │   ├── deployment.yaml
+│   │   ├── service.yaml
+│   │   ├── hpa.yaml
+│   │   └── pvc.yaml
+│   └── serve.sh
+│
+├── tests/                                  Unit and integration tests
+│   ├── conftest.py                         Shared fixtures — synthetic JSONL shards, tmp dirs
+│   ├── curator/
+│   │   ├── test_quality.py                 QualityFilter — per-filter unit tests + rejection reasons
+│   │   ├── test_dedup.py                   Exact dedup, MinHash dedup, resume correctness
+│   │   └── test_curate.py                  Stage integration — filter → dedup → blend end-to-end
+│   ├── model/
+│   │   ├── test_attention.py               GQA output shape, RoPE correctness
+│   │   ├── test_mlp.py                     SwiGLU output shape + dtype
+│   │   ├── test_norm.py                    RMSNorm invariants
+│   │   └── test_model.py                   Forward pass shapes, causal mask, parameter counts
+│   ├── tokenizer/
+│   │   └── test_tokenizer.py               Roundtrip, fertility, special token IDs, chat template
+│   ├── pretrain/
+│   │   ├── test_dataset.py                 PretrainingDataset indexing, chunk boundaries
+│   │   └── test_tokenize_data.py           JSONL → binary roundtrip, verify flag
+│   ├── validation/
+│   │   └── test_validate.py                Perplexity filter thresholds, KenLM mock
+│   └── inference/
+│       └── test_generate.py                Greedy decode output shape, EOS handling
 │
 ├── notebooks/                    Exploratory analysis — one per pipeline stage
 │   ├── 01_model_exploration.ipynb
@@ -138,31 +159,23 @@ slm/
 │   └── 09_inference_exploration.ipynb
 │
 ├── docs/
-│   ├── COMMANDS.md               Full make target reference
-│   ├── architecture.svg          Pipeline architecture diagram
-│   └── screenshots/              Pipeline stage screenshots
-│       ├── 01_blend_stats.png    Stage 1 — source mix breakdown
-│       ├── 02_validation_report.png  Stage 2 — validation report
-│       ├── 03_tokenizer_test.png Stage 3 — special tokens and fertility
-│       ├── 04_pretrain_loss.png  Stage 4b — W&B pretraining loss curve
-│       ├── 05_sft_loss.png       Stage 5 — W&B SFT loss curve
-│       ├── 06_dpo_loss.png       Stage 6 — W&B DPO loss curve
-│       ├── 07_eval_results.png   Stage 7 — benchmark results
-│       ├── 08_hf_hub.png         Stage 8 — HuggingFace Hub model page
-│       ├── 09_chat_session.png   Stage 9 — multi-turn chat session
-│       └── 10_vllm_curl.png      Stage 10 — vLLM API response
+│   ├── COMMANDS.md
+│   ├── DISK_SETUP.md
+│   ├── architecture.svg
+│   └── screenshots/
 │
 ├── infra/
-│   ├── setup.sh                  CPU instance bootstrap — curation environment
-│   └── setup_gpu_instance.sh     GPU instance bootstrap — safe to re-run after preemptible restart
+│   ├── setup.sh
+│   └── setup_gpu_instance.sh
 │
-├── accelerate_configs/           Accelerate launch configs for GPU training
-│   ├── single_gpu.yaml           Single GPU — mini validation runs
-│   └── multi_gpu.yaml            Multi-GPU — full pretraining and fine-tuning
-├── Makefile                      Full pipeline automation
-├── requirements.txt              Python dependencies
-├── environment.yml               Conda environment
-└── .env.sample                   Environment variable template
+├── accelerate_configs/
+│   ├── single_gpu.yaml
+│   └── multi_gpu.yaml
+│
+├── Makefile
+├── requirements.txt
+├── environment.yml
+└── .env.sample
 ```
 
 ---
@@ -171,14 +184,26 @@ slm/
 
 **Prerequisites**
 - Python 3.12+
+- Ubuntu 24.04 (recommended — `setup.sh` targets noble)
 - CUDA-capable GPU (for pretraining stages)
 - AWS account (S3 for data storage)
 - Weights & Biases account
 
+**Disk setup (separate data volume)**
+
+If you are attaching a secondary disk for your data directory (recommended for
+curation — you need 500GB+), mount it before cloning:
+
+→ [docs/DISK_SETUP.md](docs/DISK_SETUP.md)
+
+If you are using the boot disk only, skip this step.
+
 **Installation**
 
-On a fresh Ubuntu 22.04 cloud instance (recommended):
+On a fresh Ubuntu 24.04 cloud instance (recommended):
 ```bash
+# Clone into /data/slm — requires /data to exist and be writable.
+# If using a separate disk, complete docs/DISK_SETUP.md first.
 git clone https://github.com/tohio/slm.git /data/slm
 cd /data/slm
 
@@ -190,7 +215,7 @@ sudo apt install -y make
 # Custom data dir — recommended when using a separate disk volume
 make setup-data-dir DATA_DIR=/data/slm/data
 
-# Default data dir (repo/data)
+# Default data dir (repo/data) — boot disk only
 # make setup
 ```
 
@@ -250,22 +275,49 @@ make eval-mini
 
 # ── Step 4: Full training ─────────────────────────────────────────────────────
 # Before running, update gradient_accumulation_steps and max_steps in
-# pretrain/configs/gpt_125m.yaml, aligment/configs/dpo_125m.yal, 
+# pretrain/configs/gpt_125m.yaml, alignment/configs/dpo_125m.yaml,
 # finetune/configs/sft_chat_125m.yaml, finetune/configs/sft_code_125m.yaml for your GPU count.
 # See pretrain/README.md — Multi-GPU Config Scaling for exact values.
-make accelerate-config-single.        # Use make accelerate-config-multi GPUS=x for multi gpu
-make pretrain  SIZE=125m GPUS=1       # Stage 4b: pretrain from scratch
-make export-base     SIZE=125m        # Stage 8:  push base model to Hub
-make sft       SIZE=125m GPUS=1       # Stage 5b: chat SFT
-make sft-code  SIZE=125m GPUS=1       # Stage 5c: code SFT
-make export-instruct SIZE=125m        # Stage 8:  push instruct model to Hub
-make dpo       SIZE=125m GPUS=1       # Stage 6b: DPO alignment
-make eval      SIZE=125m              # Stage 7:  benchmark evaluation
-make export-chat     SIZE=125m        # Stage 8:  push chat model to Hub
-make serve                            # Stage 10: launch vLLM server
+make accelerate-config-single        # Use make accelerate-config-multi GPUS=x for multi gpu
+make pretrain  SIZE=125m GPUS=1      # Stage 4b: pretrain from scratch
+make export-base     SIZE=125m       # Stage 8:  push base model to Hub
+make sft       SIZE=125m GPUS=1      # Stage 5b: chat SFT
+make sft-code  SIZE=125m GPUS=1      # Stage 5c: code SFT
+make export-instruct SIZE=125m       # Stage 8:  push instruct model to Hub
+make dpo       SIZE=125m GPUS=1      # Stage 6b: DPO alignment
+make eval      SIZE=125m             # Stage 7:  benchmark evaluation
+make export-chat     SIZE=125m       # Stage 8:  push chat model to Hub
+make serve                           # Stage 10: launch vLLM server
 ```
 
 For full documentation of every `make` target see [docs/COMMANDS.md](docs/COMMANDS.md).
+
+---
+
+## Tests
+
+```bash
+# All tests
+make test
+
+# Specific module
+pytest tests/curator/
+pytest tests/model/
+
+# With output
+pytest -s tests/curator/test_quality.py
+```
+
+| Module | Covers |
+|---|---|
+| `tests/curator/` | Quality filter per-filter unit tests, exact dedup, MinHash dedup, resume correctness, filter → dedup → blend integration |
+| `tests/model/` | Forward pass shapes, causal mask, GQA output, RoPE, SwiGLU, RMSNorm invariants, parameter counts |
+| `tests/tokenizer/` | Roundtrip encoding, fertility, special token IDs, chat template |
+| `tests/pretrain/` | Dataset indexing, chunk boundaries, JSONL → binary roundtrip |
+| `tests/validation/` | Perplexity filter thresholds, KenLM mock |
+| `tests/inference/` | Greedy decode output shape, EOS handling |
+
+No GPU or external model downloads required — fasttext and KenLM are mocked in `tests/conftest.py`.
 
 ---
 
@@ -333,16 +385,16 @@ Runs on CPU instances. No GPU required.
 | Target | vCPUs | RAM | Est. runtime |
 |---|---|---|---|
 | mini (validation) | Any | 4GB+ | ~30–45 min |
-| 125m | 16 vCPU | 32GB | ~8–12 hrs |
-| 350m | 32 vCPU | 64GB | ~20–28 hrs |
-| 1b | 64 vCPU | 256GB | ~30–40 hrs |
+| 125m | 32 vCPU | 64GB | ~4–6 hrs |
+| 350m | 64 vCPU | 128GB | ~10–14 hrs |
+| 1b | 64 vCPU | 256GB | ~20–28 hrs |
 
 Run close to `us-east-1` (AWS) or `us-east1` (GCP) to minimise Common Crawl egress latency. Attach a persistent disk (500GB+) for `DATA_DIR` — the pipeline is fully resumable at every stage.
 
 Use `tmux` to keep the pipeline running through session timeouts:
 ```bash
 tmux new -s curate
-make curate SIZE=125m WORKERS=16
+make curate SIZE=125m WORKERS=48
 # Ctrl+B, D to detach — tmux attach -t curate to reattach
 ```
 
