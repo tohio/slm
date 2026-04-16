@@ -200,11 +200,13 @@ echo "==> Validating environment..."
 ERRORS=0
 
 # Check Python packages
+# fasttext is installed via fasttext-wheel — import as 'fasttext'
+# langdetect is no longer used — replaced by fasttext for language detection
 python -c "
 import sys
 packages = [
     'torch', 'transformers', 'datasets', 'tokenizers',
-    'accelerate', 'trl', 'trafilatura', 'langdetect',
+    'accelerate', 'trl', 'trafilatura', 'fasttext',
     'warcio', 'datatrove', 'orjson', 'spacy',
     'boto3', 'dotenv', 'tqdm', 'requests', 'kenlm',
 ]
@@ -236,7 +238,15 @@ for dir in "${DATA_DIR}/raw" "${DATA_DIR}/filtered" "${DATA_DIR}/curated" \
     fi
 done
 
-# Check KenLM model — warn only, not a hard error (downloaded separately)
+# Check fasttext model — warn only (downloaded separately)
+if [ -f "${DATA_DIR}/models/lid.176.ftz" ]; then
+    echo "  OK: fasttext language model found"
+else
+    echo "  WARNING: fasttext model not found — run: make download-fasttext-model DATA_DIR=${DATA_DIR}"
+    echo "           Required before running: make curate-filter"
+fi
+
+# Check KenLM model — warn only (downloaded separately)
 if [ -f "${DATA_DIR}/models/en.arpa.bin" ]; then
     echo "  OK: KenLM model found"
 else
@@ -274,18 +284,20 @@ if [ "$ERRORS" -eq 0 ]; then
         echo "  1. Fill in missing credentials in ${ENV_FILE}"
         echo "  2. source ~/.bashrc  (or open a new shell)"
         echo "  3. source ${VENV_DIR}/bin/activate"
-        echo "  4. make download-kenlm-model DATA_DIR=${DATA_DIR}"
-        echo "  5. Start curation (pick one):"
+        echo "  4. make download-fasttext-model DATA_DIR=${DATA_DIR}"
+        echo "  5. make download-kenlm-model    DATA_DIR=${DATA_DIR}"
+        echo "  6. Start curation (pick one):"
     else
         echo "  1. source ~/.bashrc  (or open a new shell)"
         echo "  2. source ${VENV_DIR}/bin/activate"
-        echo "  3. make download-kenlm-model DATA_DIR=${DATA_DIR}"
-        echo "  4. Start curation (pick one):"
+        echo "  3. make download-fasttext-model DATA_DIR=${DATA_DIR}"
+        echo "  4. make download-kenlm-model    DATA_DIR=${DATA_DIR}"
+        echo "  5. Start curation (pick one):"
     fi
-    echo "       make curate-mini                        # validate pipeline (~30 min)"
-    echo "       make curate SIZE=125m WORKERS=16        # full 125M run (~6-8 hrs)"
-    echo "       make curate SIZE=350m WORKERS=16        # full 350M run (~18-24 hrs)"
-    echo "       make curate SIZE=1b   WORKERS=32        # full 1B run (~48-72 hrs)"
+    echo "       make curate-mini                       # validate pipeline (~30 min)"
+    echo "       make curate SIZE=125m                  # full 125M run, 5B tokens  (~4-6 hrs)"
+    echo "       make curate SIZE=350m                  # full 350M run, 15B tokens (~10-14 hrs)"
+    echo "       make curate SIZE=1b                    # full 1B run,   30B tokens (~20-28 hrs)"
     echo ""
 else
     echo "========================================"

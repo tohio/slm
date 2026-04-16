@@ -227,12 +227,28 @@ else
     .venv/bin/python curator/scripts/upload_s3.py download \
         --src tokenizer --dst "$DATA_DIR/tokenizer"
 
+    # Verify both tokenizer files are present.
+    # tokenizer.json  — the BPE vocabulary and merge rules.
+    # tokenizer_config.json — HuggingFace metadata including the baked-in
+    #   chat_template. Without this file, apply_chat_template() falls back
+    #   to a generic template and SFT/DPO training will use the wrong format.
     TOKENIZER_FILE="$DATA_DIR/tokenizer/tokenizer.json"
+    TOKENIZER_CONFIG="$DATA_DIR/tokenizer/tokenizer_config.json"
+
     if [[ -f "$TOKENIZER_FILE" ]]; then
-        log "  ✓ Tokenizer pulled"
+        log "  ✓ tokenizer.json present"
     else
         log "  WARNING: tokenizer.json not found after download"
         log "  Run manually: make tokenizer-download"
+    fi
+
+    if [[ -f "$TOKENIZER_CONFIG" ]]; then
+        log "  ✓ tokenizer_config.json present (chat_template included)"
+    else
+        log "  WARNING: tokenizer_config.json not found after download"
+        log "  This file contains the chat_template — without it apply_chat_template()"
+        log "  will use a generic format that does not match the model's training."
+        log "  Retrain the tokenizer: make tokenizer && make tokenizer-upload"
     fi
 fi
 
