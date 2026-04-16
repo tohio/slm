@@ -18,6 +18,12 @@ Usage:
 
     # From Hub
     python inference/generate.py --model tohio/slm-125m
+
+    # Chat format — wrap prompts in the chat template
+    python inference/generate.py \
+        --model results/slm-125m-dpo/final \
+        --chat \
+        --input prompts.txt
 """
 
 import argparse
@@ -35,50 +41,24 @@ log = logging.getLogger(__name__)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-# Token IDs — must match tokenizer special tokens
+# Token IDs for stop tokens — read from tokenizer config at load time,
+# but also defined here as fallback constants for eos_token_id.
 EOS_TOKEN_ID       = 3   # <EOS>
 ENDOFTURN_TOKEN_ID = 7   # <|endofturn|> — model uses this to end turns
 PAD_TOKEN_ID       = 0   # <PAD>
 
 
-def _load_tokenizer(model_path: str):
-    """
-    Load tokenizer from local path or Hub, bypassing TokenizersBackend.
-
-    PreTrainedTokenizerFast.from_pretrained() fails when tokenizer_config.json
-    references TokenizersBackend, an unknown class in transformers.
-    Load directly from tokenizer.json via the tokenizers library instead.
-    """
-    from tokenizers import Tokenizer as HFTokenizer
-    from transformers import PreTrainedTokenizerFast
-
-    local_path = Path(model_path)
-
-    if local_path.exists():
-        candidates = [
-            local_path / "tokenizer" / "tokenizer.json",
-            local_path / "tokenizer.json",
-        ]
-        tokenizer_file = next((p for p in candidates if p.exists()), None)
-        if tokenizer_file is None:
-            raise FileNotFoundError(f"tokenizer.json not found in {local_path}")
-        _tok = HFTokenizer.from_file(str(tokenizer_file))
-    else:
-        from huggingface_hub import hf_hub_download
-        tokenizer_file = hf_hub_download(repo_id=model_path, filename="tokenizer.json")
-        _tok = HFTokenizer.from_file(tokenizer_file)
-
-    tokenizer = PreTrainedTokenizerFast(tokenizer_object=_tok)
-    tokenizer.pad_token_id = PAD_TOKEN_ID
-    tokenizer.eos_token_id = ENDOFTURN_TOKEN_ID
-    tokenizer.bos_token_id = 2
-    return tokenizer
-
-
 def load_model_and_tokenizer(model_path: str):
-    """Load model and tokenizer from local path or Hub."""
+    """
+    Load model and tokenizer from local path or Hub.
+
+    Loads the tokenizer via PreTrainedTokenizerFast.from_pretrained() so
+    special tokens and chat_template are read from the saved
+    tokenizer_config.json rather than hardcoded constants. Do not
+    reconstruct from tokenizer.json directly — that bypasses the config.
+    """
     import torch
-    from transformers import AutoConfig, AutoModelForCausalLM
+    from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedTokenizerFast
     from model import SLMConfig, SLMForCausalLM
 
     # Register unconditionally — required for both local and Hub loading
@@ -93,7 +73,18 @@ def load_model_and_tokenizer(model_path: str):
     )
     model.eval()
 
-    tokenizer = _load_tokenizer(model_path)
+    # Resolve tokenizer path — check for a tokenizer/ subdirectory first
+    # (local checkpoints), then fall back to the model directory itself
+    # (Hub checkpoints and exported models).
+    local_path = Path(model_path)
+    if local_path.exists():
+        tokenizer_path = local_path / "tokenizer"
+        if not (tokenizer_path / "tokenizer_config.json").exists():
+            tokenizer_path = local_path
+    else:
+        tokenizer_path = model_path  # Hub ID
+
+    tokenizer = PreTrainedTokenizerFast.from_pretrained(str(tokenizer_path))
 
     n_params = sum(p.numel() for p in model.parameters())
     log.info(f"Model loaded — {n_params / 1e6:.1f}M parameters")
@@ -111,6 +102,7 @@ def generate(
     top_k: int = 50,
     do_sample: bool = True,
     repetition_penalty: float = 1.1,
+    chat: bool = False,
 ) -> list[str]:
     """
     Generate completions for a list of prompts.
@@ -125,20 +117,49 @@ def generate(
         top_k: Top-k sampling.
         do_sample: Whether to sample. False = greedy.
         repetition_penalty: Penalize repeated tokens.
+        chat: If True, wrap each prompt in the chat template as a user
+              message before generating. Uses apply_chat_template() so
+              the format matches what the model was trained on.
 
     Returns:
         List of generated completion strings (prompt stripped).
     """
     import torch
 
-    inputs = tokenizer(
-        prompts,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=2048,
-        add_special_tokens=False,
-    ).to(model.device)
+    if chat:
+        # Wrap each prompt as a user message and apply the chat template.
+        # This produces the same format used during SFT training.
+        input_ids_list = [
+            tokenizer.apply_chat_template(
+                [{"role": "user", "content": p}],
+                tokenize=True,
+                add_generation_prompt=True,
+                truncation=True,
+                max_length=2048,
+            )
+            for p in prompts
+        ]
+        # Pad to same length for batch processing
+        max_len = max(len(ids) for ids in input_ids_list)
+        padded = [
+            [PAD_TOKEN_ID] * (max_len - len(ids)) + ids
+            for ids in input_ids_list
+        ]
+        import torch
+        input_ids = torch.tensor(padded, dtype=torch.long).to(model.device)
+        attention_mask = (input_ids != PAD_TOKEN_ID).long()
+        inputs = {"input_ids": input_ids, "attention_mask": attention_mask}
+    else:
+        inputs = tokenizer(
+            prompts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=2048,
+            add_special_tokens=False,
+        ).to(model.device)
+
+    input_length = inputs["input_ids"].shape[1]
 
     with torch.no_grad():
         outputs = model.generate(
@@ -150,13 +171,12 @@ def generate(
             do_sample=do_sample,
             repetition_penalty=repetition_penalty,
             pad_token_id=PAD_TOKEN_ID,
-            eos_token_id=[EOS_TOKEN_ID, ENDOFTURN_TOKEN_ID],  # stop on <EOS> or <|endofturn|>
+            eos_token_id=[EOS_TOKEN_ID, ENDOFTURN_TOKEN_ID],
         )
 
-    input_lengths = inputs["input_ids"].shape[1]
     completions = []
     for output in outputs:
-        new_tokens = output[input_lengths:]
+        new_tokens = output[input_length:]
         completion = tokenizer.decode(new_tokens, skip_special_tokens=True)
         completions.append(completion.strip())
 
@@ -165,15 +185,20 @@ def generate(
 
 def main():
     parser = argparse.ArgumentParser(description="SLM text generation")
-    parser.add_argument("--model",          type=str,  required=True, help="Model path or Hub ID")
-    parser.add_argument("--input",          type=Path, default=None,  help="Input prompts file (one per line)")
-    parser.add_argument("--output",         type=Path, default=None,  help="Output JSONL file")
-    parser.add_argument("--max-new-tokens", type=int,  default=256)
+    parser.add_argument("--model",          type=str,   required=True, help="Model path or Hub ID")
+    parser.add_argument("--input",          type=Path,  default=None,  help="Input prompts file (one per line)")
+    parser.add_argument("--output",         type=Path,  default=None,  help="Output JSONL file")
+    parser.add_argument("--max-new-tokens", type=int,   default=256)
     parser.add_argument("--temperature",    type=float, default=0.8)
     parser.add_argument("--top-p",          type=float, default=0.95)
-    parser.add_argument("--top-k",          type=int,  default=50)
+    parser.add_argument("--top-k",          type=int,   default=50)
     parser.add_argument("--greedy",         action="store_true", help="Use greedy decoding")
-    parser.add_argument("--batch-size",     type=int,  default=4)
+    parser.add_argument("--batch-size",     type=int,   default=4)
+    parser.add_argument(
+        "--chat",
+        action="store_true",
+        help="Wrap prompts in the chat template as user messages (use for chat/instruct models)",
+    )
     args = parser.parse_args()
 
     model, tokenizer = load_model_and_tokenizer(args.model)
@@ -187,7 +212,7 @@ def main():
         log.error("No prompts provided")
         sys.exit(1)
 
-    log.info(f"Generating {len(prompts)} completions...")
+    log.info(f"Generating {len(prompts)} completions (chat={args.chat}, greedy={args.greedy})...")
 
     out_file = open(args.output, "w") if args.output else None
 
@@ -200,6 +225,7 @@ def main():
             top_p=args.top_p,
             top_k=args.top_k,
             do_sample=not args.greedy,
+            chat=args.chat,
         )
 
         for prompt, completion in zip(batch, completions):

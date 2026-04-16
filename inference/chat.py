@@ -4,7 +4,9 @@ inference/chat.py
 Interactive chat CLI for SLM.
 
 Maintains conversation history across turns and formats messages
-using the SLM chat template. Supports streaming output.
+using the SLM chat template via tokenizer.apply_chat_template().
+This is the same code path used by SFTTrainer and DPOTrainer during
+training — inference must use it too for the model to respond correctly.
 
 Usage:
     python inference/chat.py --model results/slm-125m-dpo/final
@@ -24,10 +26,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 DEFAULT_SYSTEM = "You are a helpful, harmless, and honest assistant."
 
-# Token IDs for stop tokens — must match tokenizer special tokens
-EOS_TOKEN_ID      = 3   # <EOS>
-ENDOFTURN_TOKEN_ID = 7  # <|endofturn|> — used by model to end assistant turns
-PAD_TOKEN_ID      = 0   # <PAD>
+# Token IDs for stop tokens — read from tokenizer config, but also defined
+# here as fallback constants for the eos_token_id list passed to generate().
+EOS_TOKEN_ID       = 3   # <EOS>
+ENDOFTURN_TOKEN_ID = 7   # <|endofturn|> — model uses this to end assistant turns
+PAD_TOKEN_ID       = 0   # <PAD>
 
 COMMANDS = {
     "/reset":   "Clear conversation history",
@@ -38,59 +41,14 @@ COMMANDS = {
 }
 
 
-def format_prompt(messages: list[dict]) -> str:
-    """Format conversation history into SLM chat template."""
-    parts = []
-    for msg in messages:
-        role    = msg["role"]
-        content = msg["content"]
-        if role == "system":
-            parts.append(f"<|system|>{content}<|endofturn|>")
-        elif role == "user":
-            parts.append(f"<|user|>{content}<|endofturn|>")
-        elif role == "assistant":
-            parts.append(f"<|assistant|>{content}<|endofturn|>")
-    parts.append("<|assistant|>")
-    return "".join(parts)
-
-
-def _load_tokenizer(model_path: str):
-    """
-    Load tokenizer from local path or Hub, bypassing TokenizersBackend.
-
-    PreTrainedTokenizerFast.from_pretrained() fails when tokenizer_config.json
-    references TokenizersBackend, an unknown class in transformers.
-    Load directly from tokenizer.json via the tokenizers library instead.
-    """
-    from tokenizers import Tokenizer as HFTokenizer
-    from transformers import PreTrainedTokenizerFast
-
-    local_path = Path(model_path)
-
-    if local_path.exists():
-        candidates = [
-            local_path / "tokenizer" / "tokenizer.json",
-            local_path / "tokenizer.json",
-        ]
-        tokenizer_file = next((p for p in candidates if p.exists()), None)
-        if tokenizer_file is None:
-            raise FileNotFoundError(f"tokenizer.json not found in {local_path}")
-        _tok = HFTokenizer.from_file(str(tokenizer_file))
-    else:
-        from huggingface_hub import hf_hub_download
-        tokenizer_file = hf_hub_download(repo_id=model_path, filename="tokenizer.json")
-        _tok = HFTokenizer.from_file(tokenizer_file)
-
-    tokenizer = PreTrainedTokenizerFast(tokenizer_object=_tok)
-    tokenizer.pad_token_id  = PAD_TOKEN_ID
-    tokenizer.eos_token_id  = ENDOFTURN_TOKEN_ID  # <|endofturn|> ends assistant turns
-    tokenizer.bos_token_id  = 2
-    return tokenizer
-
-
 def load_model_and_tokenizer(model_path: str):
     """
-    Load model and tokenizer.
+    Load model and tokenizer from local path or Hub.
+
+    Loads the tokenizer via PreTrainedTokenizerFast.from_pretrained() so
+    the baked-in chat_template from train_tokenizer.py is available for
+    apply_chat_template(). Do not reconstruct from tokenizer.json directly
+    as that bypasses tokenizer_config.json and loses the chat template.
 
     Always registers SLMConfig and SLMForCausalLM with AutoConfig and
     AutoModelForCausalLM — required whether loading from a local path or
@@ -98,7 +56,7 @@ def load_model_and_tokenizer(model_path: str):
     to transformers out of the box.
     """
     import torch
-    from transformers import AutoConfig, AutoModelForCausalLM
+    from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedTokenizerFast
     from model import SLMConfig, SLMForCausalLM
 
     # Register unconditionally — required for both local and Hub loading
@@ -112,7 +70,25 @@ def load_model_and_tokenizer(model_path: str):
     )
     model.eval()
 
-    tokenizer = _load_tokenizer(model_path)
+    # Resolve tokenizer path — check for a tokenizer/ subdirectory first
+    # (local checkpoints saved by train_sft.py), then fall back to the
+    # model directory itself (Hub checkpoints and exported models).
+    local_path = Path(model_path)
+    if local_path.exists():
+        tokenizer_path = local_path / "tokenizer"
+        if not (tokenizer_path / "tokenizer_config.json").exists():
+            tokenizer_path = local_path
+    else:
+        tokenizer_path = model_path  # Hub ID — from_pretrained handles it
+
+    tokenizer = PreTrainedTokenizerFast.from_pretrained(str(tokenizer_path))
+
+    if not getattr(tokenizer, "chat_template", None):
+        raise ValueError(
+            f"Tokenizer at {tokenizer_path} has no chat_template. "
+            f"Retrain the tokenizer: python tokenizer/train_tokenizer.py"
+        )
+
     return model, tokenizer
 
 
@@ -125,31 +101,44 @@ def generate_response(
     top_p: float = 0.9,
     repetition_penalty: float = 1.1,
 ) -> str:
-    """Generate a single assistant response."""
+    """
+    Generate a single assistant response.
+
+    Uses tokenizer.apply_chat_template() to format the conversation —
+    the same code path used during SFT and DPO training.
+    """
     import torch
 
-    prompt  = format_prompt(messages)
-    inputs  = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048, add_special_tokens=False).to(model.device)
-    in_len  = inputs["input_ids"].shape[1]
+    input_ids = tokenizer.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        return_tensors="pt",
+        truncation=True,
+        max_length=2048,
+    ).to(model.device)
+
+    in_len = input_ids.shape[1]
 
     with torch.no_grad():
         outputs = model.generate(
-            **inputs,
+            input_ids,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_p=top_p,
             do_sample=True,
             repetition_penalty=repetition_penalty,
             pad_token_id=PAD_TOKEN_ID,
-            eos_token_id=[EOS_TOKEN_ID, ENDOFTURN_TOKEN_ID],  # stop on <EOS> or <|endofturn|>
+            eos_token_id=[EOS_TOKEN_ID, ENDOFTURN_TOKEN_ID],
         )
 
     new_tokens = outputs[0][in_len:].tolist()
-    # Truncate at <|endofturn|> (7) or <EOS> (3) — stop token may be included in output
+    # Strip trailing stop tokens if included in output
     for stop_id in [ENDOFTURN_TOKEN_ID, EOS_TOKEN_ID]:
         if stop_id in new_tokens:
             new_tokens = new_tokens[:new_tokens.index(stop_id)]
-    return tokenizer.decode(new_tokens, skip_special_tokens=False).strip()
+
+    return tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
 
 
 def print_help():
@@ -236,9 +225,9 @@ def chat_loop(model, tokenizer, system_prompt: str, args):
 
 def main():
     parser = argparse.ArgumentParser(description="SLM interactive chat")
-    parser.add_argument("--model",          type=str,  required=True, help="Model path or Hub ID")
-    parser.add_argument("--system",         type=str,  default=DEFAULT_SYSTEM, help="System prompt")
-    parser.add_argument("--max-new-tokens", type=int,  default=512)
+    parser.add_argument("--model",          type=str,   required=True, help="Model path or Hub ID")
+    parser.add_argument("--system",         type=str,   default=DEFAULT_SYSTEM, help="System prompt")
+    parser.add_argument("--max-new-tokens", type=int,   default=512)
     parser.add_argument("--temperature",    type=float, default=0.7)
     parser.add_argument("--top-p",          type=float, default=0.9)
     args = parser.parse_args()
