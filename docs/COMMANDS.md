@@ -12,8 +12,8 @@ All targets accept these variables as overrides:
 |---|---|---|
 | `SIZE` | `125m` | Model size target — controls data volume and config selection. One of `125m`, `350m`, `1b`. |
 | `GPUS` | `1` | Number of GPUs for `accelerate launch`. Used by `pretrain`, `sft`, `sft-code`, `dpo`. |
-| `WORKERS` | _(cpu_count // 2)_ | Parallel workers for the dedup stage. |
-| `DATA_DIR` | `data` | Root data directory. Override when using a separate EBS volume. |
+| `WORKERS` | _(cpu_count - 2)_ | Parallel workers for filter, dedup, and blend stages. Defaults to `cpu_count - 2` automatically — only set this to override. |
+| `DATA_DIR` | `data` | Root data directory. Override when using a separate disk volume. |
 | `CONFIG` | _(derived from SIZE)_ | Explicit path to a YAML config file. Overrides the SIZE-derived default. |
 
 ---
@@ -32,13 +32,13 @@ Bootstraps a fresh Ubuntu instance for curation. Installs system dependencies, c
 make setup
 ```
 
-**Use instead:** `make setup-data-dir` when using a separate EBS volume (recommended).
+**Use instead:** `make setup-data-dir` when using a separate disk volume (recommended).
 
 ---
 
 ### `make setup-data-dir`
 
-Same as `setup` but configures a custom data directory. Use when data lives on a separate EBS volume so it survives spot interruptions.
+Same as `setup` but configures a custom data directory. Use when data lives on a separate disk volume so it survives spot interruptions.
 
 ```bash
 make setup-data-dir DATA_DIR=/data/slm/data
@@ -50,19 +50,19 @@ make setup-data-dir DATA_DIR=/data/slm/data
 
 ### `make install`
 
-Creates a `.venv` virtualenv and installs Python dependencies from `requirements.txt`. Does not require a pre-activated virtualenv — safe to run on a fresh instance.
+Creates a `.venv` virtualenv and installs Python dependencies from `requirements.txt`, including `orjson` and `fasttext-wheel`. Does not require a pre-activated virtualenv — safe to run on a fresh instance.
 
 ```bash
 make install
 ```
 
-All subsequent `make` targets use `.venv/bin/python` and `.venv/bin/accelerate` automatically — no need to activate the venv manually. This applies to all training, eval, and export targets.
+All subsequent `make` targets use `.venv/bin/python` and `.venv/bin/accelerate` automatically — no need to activate the venv manually.
 
 ---
 
 ### `make install-uv`
 
-Installs Python dependencies using `uv` (faster alternative to pip). Creates a `.venv` virtualenv first.
+Installs Python dependencies using `uv` (faster alternative to pip), including `orjson` and `fasttext-wheel`.
 
 ```bash
 make install-uv
@@ -72,7 +72,7 @@ make install-uv
 
 ### `make install-conda`
 
-Creates a conda environment named `slm` and installs dependencies.
+Creates a conda environment named `slm` and installs dependencies including `orjson` and `fasttext-wheel`.
 
 ```bash
 make install-conda
@@ -82,7 +82,7 @@ make install-conda
 
 ### `make install-gpu`
 
-Installs Python dependencies for a GPU training instance. Identical to `make install` but clearly scoped — fasttext, kenlm, and validation dependencies are not needed on the GPU instance and are not installed separately.
+Installs Python dependencies for a GPU training instance. Includes `orjson` and `fasttext-wheel`. fasttext and kenlm validation dependencies are not needed on the GPU instance and are not installed separately.
 
 ```bash
 make install-gpu
@@ -105,9 +105,19 @@ make install-kenlm
 
 ---
 
+### `make install-orjson`
+
+Installs `orjson` and `fasttext-wheel` into the existing virtualenv. Use this on instances where `make install` was run before these dependencies were added.
+
+```bash
+make install-orjson
+```
+
+---
+
 ### `make download-fasttext-model`
 
-Downloads the fasttext language identification model (`lid.176.ftz`, ~1MB) to `DATA_DIR/models/`. Required by the Common Crawl download stage for English language filtering.
+Downloads the fasttext language identification model (`lid.176.ftz`, ~1MB) to `DATA_DIR/models/`. Required by the quality filter stage for English language detection on Common Crawl documents.
 
 ```bash
 make download-fasttext-model
@@ -115,7 +125,7 @@ make download-fasttext-model DATA_DIR=/data/slm/data
 ```
 
 **Produces:** `data/models/lid.176.ftz`
-**Must run before:** Any `curate` or `curate-download` target.
+**Must run before:** Any `curate` or `curate-filter` target.
 
 ---
 
@@ -160,8 +170,8 @@ make accelerate-config-single
 Copies `accelerate_configs/multi_gpu.yaml` into place with `num_processes` set to `GPUS`. Use before full pretraining, SFT, and DPO runs on multi-GPU instances.
 
 ```bash
-make accelerate-config-multi GPUS=8    # 8× H200
-make accelerate-config-multi GPUS=4    # 4× A100
+make accelerate-config-multi GPUS=8
+make accelerate-config-multi GPUS=4
 ```
 
 **Configures:** MULTI_GPU distributed training, bf16, all GPUs.
@@ -170,17 +180,35 @@ make accelerate-config-multi GPUS=4    # 4× A100
 
 ## Stage 1 — Data Curation
 
-Downloads raw data from three sources (Wikipedia, CodeSearchNet, Common Crawl), applies quality filters, deduplicates, blends to target token ratios, and uploads to S3.
+Downloads raw data from three sources (Wikipedia, CodeSearchNet Python, Common Crawl), applies quality filters, deduplicates, blends to target token ratios, and uploads to S3.
+
+### Source mix
+
+| Source | Mix | Tokens (1b target) | Notes |
+|---|---|---|---|
+| Common Crawl | 55% | 16.5B | Broad web coverage, aggressive filtering |
+| Wikipedia EN | 25% | 7.5B | High quality, factual, structured |
+| CodeSearchNet | 20% | 6B | Python only |
+
+### Token targets
+
+| Model | Total tokens | CC segments |
+|---|---|---|
+| `mini` | 1M | 2 |
+| `125m` | 5B | 459 |
+| `350m` | 15B | 916 (split across 2 crawls) |
+| `1b` | 30B | 1,833 (split across 3 crawls) |
 
 ---
 
 ### `make curate`
 
-Runs the full curation pipeline end-to-end: download → filter → dedup → blend → upload to S3.
+Runs the full curation pipeline end-to-end: download → filter → dedup → blend → upload to S3. Worker count defaults to `cpu_count - 2` automatically.
 
 ```bash
-make curate SIZE=125m WORKERS=16
-make curate SIZE=350m WORKERS=32
+make curate SIZE=125m
+make curate SIZE=1b
+make curate SIZE=125m WORKERS=32   # override worker count
 ```
 
 **Requires:** fasttext model downloaded, AWS credentials in `.env`, S3 bucket configured.
@@ -191,7 +219,7 @@ make curate SIZE=350m WORKERS=32
 
 ### `make curate-mini`
 
-Runs a minimal curation pipeline for pipeline validation. Caps Wikipedia at 5k docs, CodeSearchNet at 10k samples (Python + JS only), and Common Crawl at 2 WARC segments. Total runtime ~30–45 min.
+Runs a minimal curation pipeline for pipeline validation. Caps Wikipedia at 5k docs, CodeSearchNet at 10k Python samples, and Common Crawl at 2 WARC segments. Total runtime ~30–45 min.
 
 ```bash
 make curate-mini
@@ -203,7 +231,7 @@ make curate-mini
 
 ### `make curate-download`
 
-Runs the download stage only — fetches Wikipedia, CodeSearchNet, and Common Crawl raw data.
+Runs the download stage only — fetches Wikipedia, CodeSearchNet (Python), and Common Crawl raw data.
 
 ```bash
 make curate-download SIZE=125m
@@ -216,15 +244,32 @@ make curate-download SIZE=125m
 
 ### `make curate-filter`
 
-Runs quality filtering on all raw shards. Applies heuristic filters (FineWeb/Gopher-style) to remove low-quality documents.
+Runs quality filtering on all raw shards in parallel using all available CPU cores (defaults to `cpu_count - 2`). Applies heuristic filters including language detection via fasttext.
 
 ```bash
 make curate-filter SIZE=125m
+make curate-filter SIZE=125m WORKERS=32   # override worker count
 ```
 
-**Requires:** `data/raw/` populated by `make curate-download`.
+**Requires:** `data/raw/` populated by `make curate-download`, fasttext model at `data/models/lid.176.ftz`.
 **Produces:** `data/filtered/wikipedia/`, `data/filtered/code/`, `data/filtered/common_crawl/`
 **Resume behaviour:** Skips shards already present in the filtered output directory.
+
+**Filters applied:**
+
+| Filter | Threshold | Catches | Skipped for code |
+|---|---|---|---|
+| Min length | 500 chars | Stubs, fragments | |
+| Max length | 50k chars | Spam, boilerplate | |
+| Mean word length | 3–10 chars | Gibberish, SEO spam | ✗ |
+| Symbol ratio | < 8% symbols/words | Symbol-heavy spam | ✗ |
+| Bullet ratio | < 90% bullet lines | Pure list content | |
+| Ellipsis ratio | < 30% ellipsis lines | Truncated content | |
+| Alpha ratio | > 75% alpha chars | Numeric/code spam | ✗ |
+| Repeated lines | < 20% duplicates | Boilerplate | |
+| Boilerplate patterns | < 2 matches | Cookie notices, T&Cs | ✗ |
+| Language (fasttext) | en, score ≥ 0.65 | Non-English content | ✗ |
+| Stop words (fallback) | ≥ 3 EN stop words | Non-English (no model) | ✗ |
 
 ---
 
@@ -233,7 +278,8 @@ make curate-filter SIZE=125m
 Runs deduplication on all filtered shards. Two stages: exact SHA-256 dedup (cross-source), then fuzzy MinHash LSH dedup via datatrove (disk-based, bounded RAM).
 
 ```bash
-make curate-dedup SIZE=125m WORKERS=16
+make curate-dedup SIZE=125m
+make curate-dedup SIZE=125m WORKERS=32
 ```
 
 **Requires:** `data/filtered/` populated by `make curate-filter`.
@@ -244,10 +290,11 @@ make curate-dedup SIZE=125m WORKERS=16
 
 ### `make curate-blend`
 
-Blends deduped sources to the target token ratio (70% CC / 20% Wikipedia / 10% code) and writes the final `train.jsonl`. Uses streaming to keep peak RAM at O(1).
+Blends deduped sources to the target token ratio (55% CC / 25% Wikipedia / 20% code) and writes the final `train.jsonl`. Uses parallel staging and a chunked shuffle — no random disk seeks, optimal I/O throughput on any block storage.
 
 ```bash
 make curate-blend SIZE=125m
+make curate-blend SIZE=125m WORKERS=32
 ```
 
 **Requires:** All `*_deduped/` directories populated by `make curate-dedup`.
@@ -278,7 +325,7 @@ Applies a second round of quality filtering and perplexity filtering to the blen
 
 ### `make validate`
 
-Runs the validation pipeline on `data/curated/train.jsonl`. Filters on terminal punctuation, repeated lines, and perplexity (auto-threshold at 90th percentile).
+Runs the validation pipeline on `data/curated/train.jsonl`. Applies terminal punctuation check (C4), repeated n-gram check (Gopher), language detection (fasttext via datatrove), and perplexity filtering (KenLM, auto-threshold at 90th percentile). Skips perplexity filter for code documents.
 
 ```bash
 make validate
@@ -291,7 +338,7 @@ make validate
 
 ### `make validate-upload`
 
-Uploads `data/validated/` to S3 under a versioned path: `{target}/{date}/validated/`. Implemented in `validation/scripts/upload_validated.py`, which mirrors the curated upload but uses the `validated` S3 path segment so the two artifacts are stored independently.
+Uploads `data/validated/` to S3 under a versioned path: `{target}/{date}/validated/`.
 
 ```bash
 make validate-upload SIZE=125m
@@ -299,13 +346,12 @@ make validate-upload SIZE=125m
 
 **Requires:** `data/validated/train.jsonl` produced by `make validate`.
 **Produces:** `s3://your-bucket/slm/data/125m/YYYY-MM-DD/validated/train.jsonl`
-**Note:** Re-uploading on the same day overwrites that day's run. Runs on different days are preserved independently.
 
 ---
 
 ### `make validate-datatrove`
 
-Alternative validation using datatrove's pipeline instead of the manual implementation. Produces equivalent output with different internals.
+Alternative validation using datatrove's pipeline instead of the manual implementation. More thorough, recommended for final production runs.
 
 ```bash
 make validate-datatrove
@@ -352,7 +398,7 @@ Tokenizes the dataset to binary format and runs pretraining from scratch.
 
 ### `make tokenize`
 
-Tokenizes `data/validated/train.jsonl` to a memory-mapped uint16 binary file. Worker count defaults to `cpu_count - 2` automatically — no configuration needed. Verifies the output after writing.
+Tokenizes `data/validated/train.jsonl` to a memory-mapped uint16 binary file. Worker count defaults to `cpu_count - 2` automatically. Verifies the output after writing.
 
 ```bash
 make tokenize
@@ -386,7 +432,7 @@ make pretrain CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
 
 ### `make tokenize-upload`
 
-Uploads `data/tokenized/` to S3 under a versioned path: `{target}/{date}/tokenized/`. Run on the CPU curation instance after `make tokenize`. At 1b scale the binary exceeds 50GB — uploading once and downloading on the GPU instance is faster and cheaper than re-tokenizing on expensive GPU hardware.
+Uploads `data/tokenized/` to S3 under a versioned path. Run on the CPU curation instance after `make tokenize`. At 1b scale the binary exceeds 50GB — uploading once and downloading on the GPU instance is faster and cheaper than re-tokenizing on expensive GPU hardware.
 
 ```bash
 make tokenize-upload SIZE=125m
@@ -394,13 +440,12 @@ make tokenize-upload SIZE=125m
 
 **Requires:** `data/tokenized/train.bin` produced by `make tokenize`.
 **Produces:** `s3://your-bucket/slm/data/125m/YYYY-MM-DD/tokenized/`
-**Note:** Logs the upload date — copy it for use with `make tokenize-download`.
 
 ---
 
 ### `make tokenize-download`
 
-Downloads the tokenized binary from S3 to `data/tokenized/`. Run on the GPU training instance before `make pretrain`. Pass the date from the upload run.
+Downloads the tokenized binary from S3 to `data/tokenized/`. Run on the GPU training instance before `make pretrain`.
 
 ```bash
 make tokenize-download SIZE=125m DATE=2026-04-12
@@ -413,7 +458,7 @@ make tokenize-download SIZE=125m DATE=2026-04-12
 
 ### `make tokenizer-upload`
 
-Uploads `DATA_DIR/tokenizer/` to S3 at the `tokenizer/` prefix. Run on the CPU curation instance after `make tokenizer`. The tokenizer is needed on the GPU instance for SFT and DPO — without it, `from_pretrained` fails.
+Uploads `DATA_DIR/tokenizer/` to S3. Run on the CPU curation instance after `make tokenizer`.
 
 ```bash
 make tokenizer-upload
@@ -421,7 +466,6 @@ make tokenizer-upload
 
 **Requires:** `data/tokenizer/` produced by `make tokenizer`.
 **Produces:** `s3://your-bucket/slm/data/tokenizer/`
-**Run on:** CPU curation instance after tokenizer training.
 
 ---
 
@@ -435,13 +479,12 @@ make tokenizer-download
 
 **Requires:** A prior `make tokenizer-upload` run.
 **Produces:** `DATA_DIR/tokenizer/`
-**Run on:** GPU training instance before `make sft`.
 
 ---
 
 ### `make pretrain-mini`
 
-Runs a minimal pretraining pass using `pretrain/configs/gpt_mini.yaml` — a 6-layer, 384-hidden model trained for 500 steps. Use this to validate the full training loop (data loading, optimizer, logging, checkpointing) before committing to an expensive full pretraining run.
+Runs a minimal pretraining pass using `pretrain/configs/gpt_mini.yaml` — a 6-layer, 384-hidden model trained for 500 steps. Use this to validate the full training loop before committing to an expensive full pretraining run.
 
 ```bash
 make pretrain-mini GPUS=1
@@ -449,7 +492,7 @@ make pretrain-mini GPUS=1
 
 **Requires:** `data/tokenized/train.bin`, `data/tokenizer/`, accelerate configured.
 **Produces:** `results/slm-mini/` checkpoint.
-**Runtime:** ~5–10 min on a single GPU. Can also run on CPU (slower).
+**Runtime:** ~5–10 min on a single GPU.
 **Note:** The mini model is not useful for inference — it is a pipeline validation tool only.
 
 ---
@@ -467,8 +510,6 @@ make pretrain-resume SIZE=125m GPUS=4
 ---
 
 ## Stage 5 — Supervised Fine-Tuning
-
-Fine-tunes the pretrained model on chat and code datasets using `trl`'s `SFTTrainer`.
 
 ---
 
@@ -533,8 +574,6 @@ make sft-code-resume SIZE=125m GPUS=4
 
 ## Stage 6 — Preference Alignment
 
-Aligns the fine-tuned model using Direct Preference Optimisation (DPO).
-
 ---
 
 ### `make prepare-dpo`
@@ -551,7 +590,7 @@ make prepare-dpo
 
 ### `make dpo`
 
-Runs DPO alignment on the SFT checkpoint using `trl`'s `DPOTrainer`. No separate reward model required.
+Runs DPO alignment on the SFT checkpoint using `trl`'s `DPOTrainer`.
 
 ```bash
 make dpo SIZE=125m GPUS=2
@@ -596,7 +635,7 @@ make eval SIZE=125m
 
 ### `make export`
 
-Exports all three model variants to HuggingFace Hub. Runs `export-base`, `export-instruct`, and `export-chat` in sequence. Generates a model card for each variant automatically.
+Exports all three model variants to HuggingFace Hub.
 
 ```bash
 make export SIZE=125m
@@ -615,21 +654,15 @@ Exports the base pretrained checkpoint to `tohio/slm-{size}`.
 make export-base SIZE=125m
 ```
 
-**Requires:** `results/slm-$(SIZE)/final`, `HF_TOKEN` in `.env`.
-**Produces:** `tohio/slm-$(SIZE)` on HuggingFace Hub.
-
 ---
 
 ### `make export-instruct`
 
-Exports the instruction-tuned checkpoint (chat SFT + code SFT) to `tohio/slm-{size}-instruct`.
+Exports the instruction-tuned checkpoint to `tohio/slm-{size}-instruct`.
 
 ```bash
 make export-instruct SIZE=125m
 ```
-
-**Requires:** `results/slm-$(SIZE)-chat-code/final`, `HF_TOKEN` in `.env`.
-**Produces:** `tohio/slm-$(SIZE)-instruct` on HuggingFace Hub.
 
 ---
 
@@ -640,9 +673,6 @@ Exports the DPO-aligned checkpoint to `tohio/slm-{size}-chat`.
 ```bash
 make export-chat SIZE=125m
 ```
-
-**Requires:** `results/slm-$(SIZE)-dpo/final`, `HF_TOKEN` in `.env`.
-**Produces:** `tohio/slm-$(SIZE)-chat` on HuggingFace Hub.
 
 ---
 
@@ -658,25 +688,19 @@ Launches a vLLM server using the Hub model. Exposes an OpenAI-compatible REST AP
 make serve SIZE=125m
 ```
 
-**Requires:** Model exported to `tohio/slm-$(SIZE)` on HuggingFace Hub, vLLM installed.
-
 ---
 
 ### `make serve-local`
 
-Launches a vLLM server using a local checkpoint instead of the Hub model. Useful for testing before export.
+Launches a vLLM server using a local checkpoint instead of the Hub model.
 
 ```bash
 make serve-local SIZE=125m
 ```
 
-**Requires:** `results/slm-$(SIZE)-dpo/final`
-
 ---
 
 ## S3 Utilities
-
-Low-level S3 operations for manual data management. Prefer the stage-specific upload targets (`curate-upload`, `validate-upload`) for normal pipeline use.
 
 ---
 
@@ -716,7 +740,7 @@ make s3-list
 
 ### `make clean`
 
-Removes Python cache files (`__pycache__`, `*.pyc`) and log directories. Safe to run at any time — does not touch data or results.
+Removes Python cache files and log directories. Safe to run at any time.
 
 ```bash
 make clean
@@ -726,25 +750,25 @@ make clean
 
 ### `make clean-data`
 
-Removes all data directories: `data/raw`, `data/filtered`, `data/curated`, `data/validated`, `data/tokenized`, `data/sft`, `data/dpo`, `data/dedup_scratch`.
+Removes all data directories. Does not remove `data/models/`. Does not affect S3.
 
 ```bash
 make clean-data
 ```
 
-⚠️ **Destructive** — does not remove `data/models/`. Does not affect S3.
+⚠️ **Destructive**
 
 ---
 
 ### `make clean-results`
 
-Removes all training results: `results/`.
+Removes all training results. Ensure results are exported or backed up first.
 
 ```bash
 make clean-results
 ```
 
-⚠️ **Destructive** — removes all checkpoints. Ensure results are exported or backed up first.
+⚠️ **Destructive**
 
 ---
 
@@ -765,15 +789,13 @@ make clean-logs
 | Target | vCPUs | RAM | Est. runtime |
 |---|---|---|---|
 | mini (validation) | Any | 4GB+ | ~30–45 min |
-| 125m | 16 vCPU | 32GB | ~22–26 hrs (curation ~12–16 hrs + tokenize ~9 hrs) |
-| 350m | 16 vCPU | 32GB | ~55–65 hrs |
-| 1b | 32 vCPU | 64GB | ~110–130 hrs |
+| 125m | 16 vCPU | 32GB | ~8–12 hrs |
+| 350m | 32 vCPU | 64GB | ~20–28 hrs |
+| 1b | 64 vCPU | 256GB | ~30–40 hrs |
 
-Any cloud provider works for curation. Run close to `us-east-1` (AWS) or `us-east1` (GCP) to minimise Common Crawl egress latency. Attach a persistent disk (500GB) for `DATA_DIR` so data survives spot/preemptible interruptions.
+Run close to `us-east-1` (AWS) or `us-east1` (GCP) to minimise Common Crawl egress latency. Attach a persistent disk (500GB+) for `DATA_DIR` so data survives spot/preemptible interruptions. [Nebius](https://nebius.com) AMD Epyc Genoa instances (64 vCPU, 256GiB RAM) offer strong price/performance for curation.
 
 ### Training (GPU) — Stages 4b–6
-
-Before committing to a full pretraining run, validate the training loop with `make pretrain-mini` — uses a tiny 6-layer model and completes in minutes on a single GPU.
 
 | Target | GPUs | VRAM | Est. pretrain runtime |
 |---|---|---|---|
@@ -782,17 +804,11 @@ Before committing to a full pretraining run, validate the training loop with `ma
 | 350m | 8× H100 or A100 | 640GB+ | ~24–36 hrs |
 | 1b | 8× H100 or A100 | 640GB+ | ~72–96 hrs |
 
-SFT and DPO runtimes are roughly 20–30% of pretraining time at the same model size. All training loops support `--resume` from the last checkpoint. Providers like [Nebius](https://nebius.com), [Lambda Labs](https://lambdalabs.com), and [CoreWeave](https://coreweave.com) typically offer better GPU pricing than hyperscalers. Run `make accelerate-config` once on the GPU instance before training.
-
 ---
 
 ## GPU Instance Setup
 
 ### Fresh instance or after preemptible restart
-
-`make setup-gpu` is the single command needed to configure a GPU instance. It is safe to re-run after a preemptible VM restart — idempotent throughout.
-
-It handles: directory creation, `.env` patching, `~/.bashrc` update, Python venv, AWS CLI, accelerate config, tokenizer download, and tokenized binary download.
 
 ```bash
 # 1. Clone and enter repo
@@ -806,12 +822,11 @@ sudo apt install -y make
 cp .env.sample .env
 vi .env    # WANDB_API_KEY, HF_TOKEN, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, S3_BUCKET
 
-# 4. Run GPU setup — handles everything else automatically
-#    Omit DATE to auto-detect the latest tokenized binary from S3
+# 4. Run GPU setup
 make setup-gpu DATA_DIR=/data/slm/data SIZE=125m DATE=2026-04-12
 source ~/.bashrc
 
-# 5. Validate the full pipeline end to end (single GPU, ~15 min total)
+# 5. Validate the full pipeline end to end (~15 min total)
 make pretrain-mini  GPUS=1
 make prepare-sft
 make sft-mini       GPUS=1
@@ -820,7 +835,7 @@ make prepare-dpo
 make dpo-mini       GPUS=1
 make eval-mini
 
-# 6. Switch to multi-GPU and run the full training pipeline
+# 6. Full training pipeline
 make accelerate-config-multi GPUS=8
 make pretrain    SIZE=125m GPUS=8
 make prepare-sft
@@ -842,64 +857,47 @@ make pretrain-resume SIZE=125m GPUS=8
 ```
 
 **Not needed on the GPU instance:**
-- `make download-fasttext-model` — only used during Common Crawl curation
+- `make download-fasttext-model` — only used during curation filtering
 - `make download-kenlm-model` — only used during validation
 - `make install-kenlm` — only used during validation
 - `make curate` — runs on the CPU curation instance
 - `make validate` — runs on the CPU curation instance
-- `make tokenize` — runs on the CPU curation instance (result downloaded via `make setup-gpu`)
-
----
-
-### `make setup-gpu`
-
-Runs `infra/setup_gpu_instance.sh` with the specified `DATA_DIR`. Safe to re-run after preemptible restarts.
-
-```bash
-make setup-gpu DATA_DIR=/data/slm/data
-make setup-gpu DATA_DIR=/mnt/persistent
-```
-
-**What it does:**
-- Creates `DATA_DIR` and all subdirectories, fixing ownership if needed
-- Patches `DATA_DIR`, `HF_HOME`, `HF_DATASETS_CACHE` in `.env`
-- Updates `~/.bashrc` with path exports
-- Creates `.venv` and installs dependencies
-- Copies `accelerate_configs/single_gpu.yaml` as the active accelerate config
-- Optionally pulls tokenized binary from S3 if `S3_BUCKET` is set in `.env`
+- `make tokenize` — runs on the CPU curation instance
 
 ---
 
 ## Full Pipeline Reference
 
-Correct end-to-end sequence for a fresh run:
-
 ```bash
 # ── One-time setup ─────────────────────────────────────────────────────────────
+make install                                            # install all dependencies
 make download-fasttext-model DATA_DIR=/data/slm/data   # ~1MB, for CC language filtering
 make download-kenlm-model    DATA_DIR=/data/slm/data   # ~4GB, for validation perplexity
-make accelerate-config                                  # GPU instance only, run once
 
 # ── Data ───────────────────────────────────────────────────────────────────────
-make curate SIZE=125m WORKERS=16    # Stage 1: download, curate, upload to S3
+make curate SIZE=1b                 # Stage 1: download, filter, dedup, blend, upload
 make validate                       # Stage 2: perplexity filter
-make validate-upload SIZE=125m      # Stage 2: push validated data to S3
+make validate-upload SIZE=1b        # Stage 2: push validated data to S3
 
 # ── Tokenizer ──────────────────────────────────────────────────────────────────
 make tokenizer                      # Stage 3: train BPE tokenizer
+make tokenizer-upload               # Stage 3: push tokenizer to S3
 make tokenize                       # Stage 4a: tokenize to binary
+make tokenize-upload SIZE=1b        # Stage 4a: push tokenized binary to S3
 
-# ── Training ───────────────────────────────────────────────────────────────────
-make pretrain-mini GPUS=1            # Stage 4b: validate training loop (~5-10 min)
-make pretrain GPUS=4                # Stage 4b: pretrain from scratch
+# ── Training (GPU instance) ────────────────────────────────────────────────────
+make setup-gpu DATA_DIR=/data/slm/data SIZE=1b DATE=2026-04-15
+make accelerate-config-multi GPUS=8
+make pretrain-mini GPUS=1           # Stage 4b: validate training loop (~5-10 min)
+make pretrain    SIZE=1b GPUS=8     # Stage 4b: pretrain from scratch
 make prepare-sft                    # Stage 5a: download SFT datasets
-make sft      GPUS=4                # Stage 5b: chat SFT
-make sft-code GPUS=4                # Stage 5c: code SFT
+make sft         SIZE=1b GPUS=8     # Stage 5b: chat SFT
+make sft-code    SIZE=1b GPUS=8     # Stage 5c: code SFT
 make prepare-dpo                    # Stage 6a: download DPO datasets
-make dpo      GPUS=2                # Stage 6b: DPO alignment
+make dpo         SIZE=1b GPUS=8     # Stage 6b: DPO alignment
 
 # ── Ship ───────────────────────────────────────────────────────────────────────
-make eval                           # Stage 7: benchmark evaluation
-make export                         # Stage 8: push to HuggingFace Hub
-make serve                          # Stage 10: launch vLLM server
+make eval        SIZE=1b            # Stage 7: benchmark evaluation
+make export      SIZE=1b            # Stage 8: push to HuggingFace Hub
+make serve       SIZE=1b            # Stage 10: launch vLLM server
 ```

@@ -4,7 +4,7 @@
 #   make <target>                                        # defaults: SIZE=125m, GPUS=1
 #   make <target> SIZE=350m                              # different model size
 #   make <target> GPUS=4                                 # multi-GPU
-#   make <target> WORKERS=16                             # parallel workers for dedup
+#   make <target> WORKERS=16                             # parallel workers for filter, dedup, blend
 #   make <target> CONFIG=pretrain/configs/gpt_125m.yaml  # explicit config override
 #
 # Full pipeline:
@@ -37,7 +37,7 @@ DPO_CONFIG      ?= alignment/configs/dpo_$(SIZE).yaml
 # accelerate launch with GPU count
 ACCELERATE = $(_ACCELERATE) launch --num_processes $(GPUS)
 
-# Optional workers flag for dedup
+# Optional workers flag — passed to filter, dedup, and blend stages
 ifdef WORKERS
   WORKERS_FLAG = --workers $(WORKERS)
 else
@@ -50,7 +50,7 @@ endif
         pretrain pretrain-mini pretrain-resume prepare-sft sft sft-mini sft-resume sft-code sft-code-mini sft-code-resume \
         prepare-dpo dpo dpo-resume eval export serve serve-local \
         export export-base export-instruct export-chat \
-        setup setup-data-dir setup-gpu install install-gpu install-uv install-conda install-kenlm \
+        setup setup-data-dir setup-gpu install install-gpu install-uv install-conda install-kenlm install-orjson \
         download-kenlm-model download-fasttext-model accelerate-config accelerate-config-single accelerate-config-multi \
         s3-upload s3-download s3-list \
         clean clean-data clean-results clean-logs help
@@ -74,13 +74,13 @@ curate-download:
 	$(PYTHON) curator/scripts/curate.py --target $(SIZE) --stage download
 
 curate-filter:
-	$(PYTHON) curator/scripts/curate.py --target $(SIZE) --stage filter
+	$(PYTHON) curator/scripts/curate.py --target $(SIZE) --stage filter $(WORKERS_FLAG)
 
 curate-dedup:
 	$(PYTHON) curator/scripts/curate.py --target $(SIZE) --stage dedup $(WORKERS_FLAG)
 
 curate-blend:
-	$(PYTHON) curator/scripts/curate.py --target $(SIZE) --stage blend
+	$(PYTHON) curator/scripts/curate.py --target $(SIZE) --stage blend $(WORKERS_FLAG)
 
 curate-upload:
 	@echo "==> Stage 1: Upload curated data to S3 (target=$(SIZE))"
@@ -122,7 +122,6 @@ tokenize-download:
 	@echo "==> Stage 4a: Download tokenized binary from S3 (target=$(SIZE), date=$(DATE))"
 	$(PYTHON) pretrain/data/upload_tokenized.py download --target $(SIZE) --date $(DATE)
 
-
 tokenizer-upload:
 	@echo "==> Uploading tokenizer to S3..."
 	$(PYTHON) curator/scripts/upload_s3.py upload --src $(DATA_DIR)/tokenizer --dst tokenizer
@@ -133,6 +132,7 @@ tokenizer-download:
 	mkdir -p $(DATA_DIR)/tokenizer
 	$(PYTHON) curator/scripts/upload_s3.py download --src tokenizer --dst $(DATA_DIR)/tokenizer
 	@echo "  Tokenizer downloaded to $(DATA_DIR)/tokenizer/"
+
 pretrain:
 	@echo "==> Stage 4b: Pretraining ($(SIZE), $(GPUS) GPU(s), config=$(PRETRAIN_CONFIG))"
 	$(ACCELERATE) pretrain/train.py \
@@ -271,23 +271,29 @@ install:
 	python3 -m venv .venv
 	.venv/bin/pip install --upgrade pip
 	.venv/bin/pip install -r requirements.txt
+	.venv/bin/pip install orjson fasttext-wheel
 
 install-uv:
-	uv venv && uv pip install -r requirements.txt
+	uv venv && uv pip install -r requirements.txt && uv pip install orjson fasttext-wheel
 
 install-conda:
 	conda create -n slm python=3.12 -y && \
 	conda activate slm && \
-	pip install -r requirements.txt
+	pip install -r requirements.txt && \
+	pip install orjson fasttext-wheel
 
 install-kenlm:
 	.venv/bin/pip install https://github.com/kpu/kenlm/archive/master.zip
+
+install-orjson:
+	.venv/bin/pip install orjson fasttext-wheel
 
 install-gpu:
 	@echo "==> Installing dependencies for GPU training instance..."
 	python3 -m venv .venv
 	.venv/bin/pip install --upgrade pip
 	.venv/bin/pip install -r requirements.txt
+	.venv/bin/pip install orjson fasttext-wheel
 
 download-kenlm-model:
 	@echo "==> Downloading KenLM English model (~4GB)..."
@@ -357,6 +363,7 @@ help:
 	@echo "  install-uv               Install dependencies (uv)"
 	@echo "  install-conda            Install dependencies (conda)"
 	@echo "  install-kenlm            Install KenLM Python bindings from source"
+	@echo "  install-orjson           Install orjson and fasttext-wheel"
 	@echo ""
 	@echo "Pipeline:"
 	@echo "  curate             Stage 1  — download, curate, and upload to S3"

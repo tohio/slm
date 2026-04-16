@@ -19,8 +19,9 @@ replacing the datasketch in-memory LSH. RAM usage is bounded by shard
 size, not corpus size — scales to 125m, 350m, and 1b with the same
 memory footprint.
 
-Blend uses streaming reservoir sampling + offset-based shuffle.
-Peak RAM during blend is O(1) regardless of corpus size.
+Blend uses streaming chunk-based shuffle — peak RAM is O(chunk_size),
+not O(corpus_size). Chunks are written sequentially, shuffled in memory,
+then interleaved for good I/O throughput on any block storage.
 
 S3 upload path structure:
     {S3_PREFIX}/{target}/{date}/curated/
@@ -68,14 +69,17 @@ Usage:
 """
 
 import argparse
+import functools
 import json
 import logging
 import os
 import random
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
+import orjson
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -98,18 +102,29 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
+# ── Worker count ───────────────────────────────────────────────────────────────
+# Reserve 2 cores for the OS and datatrove's own threading.
+# All parallel stages derive their worker count from this function so there
+# is never a hardcoded CPU count anywhere in the pipeline.
+
+def default_workers() -> int:
+    """Return a sensible default worker count for the current machine."""
+    cpu = os.cpu_count() or 4
+    return max(1, cpu - 2)
+
+
 # ── Target configurations ──────────────────────────────────────────────────────
-# Token targets per model size — source mix stays constant at 70/20/10.
+# Token targets per model size — source mix stays constant at 55/25/20.
 # mini target is for pipeline validation only — not for training.
 #
 # Targets are set to give comfortable headroom above Chinchilla compute-optimal:
 #   125m — optimal ~2.5B, target 5B  (~2× optimal)
-#   350m — optimal ~7B,   target 20B (~3× optimal)
-#   1b   — optimal ~20B,  target 50B (~2.5× optimal)
+#   350m — optimal ~7B,   target 15B (~2× optimal)
+#   1b   — optimal ~20B,  target 30B (~1.5× optimal)
 #
 # CC segment calibration (empirical, from 125m run):
 #   ~6M tokens per segment after filtering and dedup
-#   Target CC tokens = total_tokens × 0.70 (SOURCE_MIX)
+#   Target CC tokens = total_tokens × 0.55 (SOURCE_MIX)
 #   Segments needed  = target_cc_tokens / 6M
 #
 # For diversity, 350m and 1b spread segments across multiple crawls.
@@ -123,33 +138,36 @@ TARGET_CONFIGS = {
     },
     "125m": {
         "total_tokens":  5_000_000_000,   # 5B tokens (~2× Chinchilla optimal for 125m)
-        "cc_segments":   584,             # 5B × 0.70 / 6M ≈ 584 segments
+        "cc_segments":   459,             # 5B × 0.55 / 6M ≈ 459 segments
         "cc_crawls":     ["CC-MAIN-2024-10"],
     },
     "350m": {
-        "total_tokens":  20_000_000_000,  # 20B tokens (~3× Chinchilla optimal for 350m)
-        "cc_segments":   1_167,           # 20B × 0.70 / 6M ≈ 1167 segments, split across 2 crawls
+        "total_tokens":  15_000_000_000,  # 15B tokens (~2× Chinchilla optimal for 350m)
+        "cc_segments":   916,             # 15B × 0.55 / 6M ≈ 916 segments, split across 2 crawls
         "cc_crawls":     ["CC-MAIN-2024-10", "CC-MAIN-2023-50"],
     },
     "1b": {
-        "total_tokens":  50_000_000_000,  # 50B tokens (~2.5× Chinchilla optimal for 1b)
-        "cc_segments":   1_945,           # 50B × 0.70 / 6M ≈ 1945 segments, split across 3 crawls
+        "total_tokens":  30_000_000_000,  # 30B tokens (~1.5× Chinchilla optimal for 1b)
+        "cc_segments":   1_833,           # 30B × 0.55 / 6M ≈ 1833 segments, split across 3 crawls
         "cc_crawls":     ["CC-MAIN-2024-10", "CC-MAIN-2023-50", "CC-MAIN-2023-40"],
     },
 }
 
-# Source mix — fraction of total tokens per source
+# Source mix — fraction of total tokens per source.
+# Increased code to 20% (from 10%) for better coding ability.
+# Reduced CC to 55% (from 70%) to offset the code increase while
+# maintaining Wikipedia's high-quality signal at 25%.
 SOURCE_MIX = {
-    "common_crawl": 0.70,
-    "wikipedia":    0.20,
-    "code":         0.10,
+    "common_crawl": 0.55,
+    "wikipedia":    0.25,
+    "code":         0.20,
 }
 
 # Mini run overrides — passed to source constructors when --mini is set
 MINI_OVERRIDES = {
     "wiki_max_docs":    5_000,
     "code_max_docs":    10_000,
-    "code_languages":   ["python", "javascript"],   # 2 of 6 languages
+    "code_languages":   ["python"],
 }
 
 # Data directories — override with DATA_DIR env var
@@ -176,7 +194,6 @@ def flatten_datatrove_record(record: dict) -> dict:
     if "metadata" in record and isinstance(record["metadata"], dict):
         flat = {"text": record.get("text", "")}
         flat.update(record["metadata"])
-        # drop datatrove internals
         flat.pop("file_path", None)
         return flat
     return record
@@ -198,11 +215,11 @@ def stage_download(target: str, mini: bool = False) -> None:
     wiki.download()
     log.info(f"Wikipedia stats: {wiki.stats()}")
 
-    # CodeSearchNet
-    log.info("Downloading CodeSearchNet...")
+    # CodeSearchNet — Python only
+    log.info("Downloading CodeSearchNet (Python)...")
     code = CodeSearchNetSource(
         output_dir=RAW_DIR / "code",
-        languages=MINI_OVERRIDES["code_languages"] if mini else LANGUAGES,
+        languages=MINI_OVERRIDES["code_languages"] if mini else ["python"],
         max_docs=MINI_OVERRIDES["code_max_docs"] if mini else None,
     )
     code.download()
@@ -221,12 +238,52 @@ def stage_download(target: str, mini: bool = False) -> None:
 
 # ── Stage 2: Filter ────────────────────────────────────────────────────────────
 
-def stage_filter() -> None:
-    """Apply quality filters to all raw data."""
-    log.info("=== Stage 2: Quality Filter ===")
+def _filter_shard(args: tuple[Path, Path]) -> str:
+    """
+    Filter a single JSONL shard. Designed to run in a subprocess.
 
-    sources = ["wikipedia", "code", "common_crawl"]
-    for source in sources:
+    Args:
+        args: (shard_path, dst_dir) tuple.
+
+    Returns:
+        Human-readable report string from QualityFilter.
+    """
+    shard, dst_dir = args
+    out_path = dst_dir / shard.name
+    if out_path.exists():
+        return f"skip:{shard.name}"
+
+    qf = QualityFilter()
+    with open(shard, buffering=8 * 1024 * 1024) as fin, \
+         open(out_path, "w", buffering=8 * 1024 * 1024) as fout:
+        for line in fin:
+            record = orjson.loads(line)
+            kept, _ = qf.check(record)
+            if kept:
+                fout.write(orjson.dumps(record).decode() + "\n")
+
+    return qf.report()
+
+
+def stage_filter(workers: int | None = None) -> None:
+    """
+    Apply quality filters to all raw data in parallel.
+
+    All shards across all sources are collected into a single work queue
+    and processed by a process pool. Each shard is independent so there
+    is no coordination overhead — parallelism is embarrassingly parallel.
+
+    Worker count defaults to cpu_count - 2, leaving headroom for the OS
+    and datatrove's threading. Override with --workers.
+    """
+    n_workers = workers or default_workers()
+    log.info(f"=== Stage 2: Quality Filter ({n_workers} workers) ===")
+
+    # Collect all shards across all sources into one flat work list.
+    # Processing all sources together maximises worker utilisation —
+    # workers don't sit idle waiting for one slow source to finish.
+    all_work: list[tuple[Path, Path]] = []
+    for source in ["wikipedia", "code", "common_crawl"]:
         src_dir = RAW_DIR / source
         dst_dir = FILTERED_DIR / source
         dst_dir.mkdir(parents=True, exist_ok=True)
@@ -236,23 +293,29 @@ def stage_filter() -> None:
             log.warning(f"No shards found in {src_dir} — skipping")
             continue
 
-        log.info(f"Filtering {source}: {len(shards)} shards...")
-        qf = QualityFilter()
+        log.info(f"  {source}: {len(shards)} shards queued")
+        all_work.extend((shard, dst_dir) for shard in shards)
 
-        for shard in shards:
-            out_path = dst_dir / shard.name
-            if out_path.exists():
-                log.debug(f"  Skipping {shard.name} — already filtered")
-                continue
+    if not all_work:
+        log.warning("No shards found across any source — skipping filter stage")
+        return
 
-            with open(shard) as fin, open(out_path, "w") as fout:
-                for line in fin:
-                    record = json.loads(line)
-                    kept, reason = qf.check(record)
-                    if kept:
-                        fout.write(json.dumps(record, ensure_ascii=False) + "\n")
+    log.info(f"Filtering {len(all_work)} total shards with {n_workers} workers...")
+    skipped = processed = 0
 
-        log.info(qf.report())
+    with ProcessPoolExecutor(max_workers=n_workers) as executor:
+        # chunksize=4 batches work assignments to reduce IPC overhead
+        for report in executor.map(_filter_shard, all_work, chunksize=4):
+            if report.startswith("skip:"):
+                skipped += 1
+            else:
+                processed += 1
+                log.debug(report)
+
+    log.info(
+        f"Filter complete — "
+        f"processed: {processed}, skipped (already done): {skipped}"
+    )
 
 
 # ── Stage 3: Deduplicate ───────────────────────────────────────────────────────
@@ -265,12 +328,13 @@ def stage_dedup(workers: int | None = None) -> None:
         1. Exact dedup  — SHA-256 streaming pass, shared cross-source index.
         2. Fuzzy dedup  — datatrove 4-stage disk pipeline.
                           Peak RAM is O(shard_size), not O(corpus_size).
+
+    Worker count defaults to cpu_count - 2.
     """
-    log.info("=== Stage 3: Deduplication (datatrove MinHash) ===")
+    n_workers = workers or default_workers()
+    log.info(f"=== Stage 3: Deduplication (datatrove MinHash, {n_workers} workers) ===")
 
-    n_workers = workers or max(1, (os.cpu_count() or 4) // 2)
     working_dir = DATA_DIR / "dedup_scratch"
-
     dedup = Deduplicator(working_dir=working_dir, workers=n_workers)
 
     sources = ["wikipedia", "code", "common_crawl"]
@@ -299,17 +363,125 @@ def stage_dedup(workers: int | None = None) -> None:
 
 # ── Stage 4: Blend ─────────────────────────────────────────────────────────────
 
-def stage_blend(target: str, seed: int = 42) -> None:
+def _write_staging(args: tuple) -> tuple[str, int, int]:
+    """
+    Stream one source to a per-source staging file. Runs in a subprocess.
+
+    Args:
+        args: (source, src_dir, staging_path, source_char_target)
+
+    Returns:
+        (source, docs_written, chars_written)
+    """
+    source, src_dir, staging_path, source_char_target = args
+    shards = sorted(Path(src_dir).glob("*.jsonl"))
+    chars = docs = 0
+
+    with open(staging_path, "w", buffering=8 * 1024 * 1024) as fout:
+        for shard in shards:
+            if chars >= source_char_target:
+                break
+            with open(shard, buffering=8 * 1024 * 1024) as fin:
+                for line in fin:
+                    record = flatten_datatrove_record(orjson.loads(line))
+                    chars += len(record.get("text", ""))
+                    fout.write(orjson.dumps(record).decode() + "\n")
+                    docs += 1
+                    if chars >= source_char_target:
+                        break
+
+    return source, docs, chars
+
+
+def _shuffle_chunked(
+    merged_path: Path,
+    output_path: Path,
+    rng: random.Random,
+    chunk_lines: int = 500_000,
+) -> int:
+    """
+    Shuffle a large JSONL file using a chunked approach.
+
+    Replaces the seek-per-line approach which causes millions of random
+    disk seeks — worst-case I/O pattern for any block storage device.
+
+    Instead:
+        Pass 1 — read sequentially in chunks of chunk_lines, shuffle each
+                 chunk in memory, write to a numbered chunk file.
+        Pass 2 — shuffle the chunk file order, then concatenate sequentially.
+
+    Both passes are sequential reads/writes — optimal for block storage.
+    Peak RAM = chunk_lines × avg_line_size (tunable via chunk_lines param).
+
+    Args:
+        merged_path:  Input JSONL file to shuffle.
+        output_path:  Output shuffled JSONL file.
+        rng:          Seeded random instance for reproducibility.
+        chunk_lines:  Lines per chunk. Default 500k — ~400MB at avg 800 bytes/line.
+
+    Returns:
+        Total number of lines written.
+    """
+    chunk_dir = merged_path.parent / "shuffle_chunks"
+    chunk_dir.mkdir(exist_ok=True)
+    chunk_paths: list[Path] = []
+    total_lines = 0
+
+    # Pass 1: write shuffled chunks sequentially
+    log.info("Shuffle pass 1/2: writing shuffled chunks...")
+    buf: list[str] = []
+    chunk_idx = 0
+
+    with open(merged_path, buffering=8 * 1024 * 1024) as fin:
+        for line in fin:
+            buf.append(line)
+            total_lines += 1
+            if len(buf) >= chunk_lines:
+                rng.shuffle(buf)
+                p = chunk_dir / f"chunk_{chunk_idx:06d}.jsonl"
+                with open(p, "w", buffering=8 * 1024 * 1024) as fout:
+                    fout.writelines(buf)
+                chunk_paths.append(p)
+                buf = []
+                chunk_idx += 1
+
+    # flush remaining
+    if buf:
+        rng.shuffle(buf)
+        p = chunk_dir / f"chunk_{chunk_idx:06d}.jsonl"
+        with open(p, "w", buffering=8 * 1024 * 1024) as fout:
+            fout.writelines(buf)
+        chunk_paths.append(p)
+
+    log.info(f"  Wrote {len(chunk_paths)} chunks ({total_lines:,} lines total)")
+
+    # Pass 2: shuffle chunk order, concatenate sequentially
+    log.info("Shuffle pass 2/2: interleaving chunks in random order...")
+    rng.shuffle(chunk_paths)
+
+    with open(output_path, "wb") as fout:
+        for cp in chunk_paths:
+            with open(cp, "rb") as fin:
+                while True:
+                    block = fin.read(8 * 1024 * 1024)
+                    if not block:
+                        break
+                    fout.write(block)
+            cp.unlink()
+
+    chunk_dir.rmdir()
+    return total_lines
+
+
+def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None:
     """
     Blend sources to the target token ratio and write final train.jsonl.
 
-    Streams each source to hit its target char count, writes per-source
-    staging files, then merges and shuffles using a byte-offset index.
-    Peak RAM is O(1) — no source is loaded into memory in full at any point.
-
-    Handles both plain JSONL (from filter stage) and datatrove's wrapped
-    format {"text": ..., "id": ..., "metadata": {...}}, flattening both
-    to a consistent {"text": ..., "source": ..., ...} output format.
+    Pass 1 — parallel: each source streams to its own staging file
+             (3 workers, one per source — they are I/O independent).
+    Pass 2 — sequential: merge staging files into one.
+    Pass 3 — chunked shuffle: replaces seek-per-line with sequential
+             chunk reads/writes for much better block storage throughput.
 
     Uses character count as a proxy for token count (4 chars ≈ 1 token).
     """
@@ -338,105 +510,73 @@ def stage_blend(target: str, seed: int = 42) -> None:
         for source, fraction in SOURCE_MIX.items()
     }
 
-    # ── Pass 1: stream each source to a per-source staging file ───────────────
-    staging_paths = {}
-    source_stats = {}
+    # ── Pass 1: parallel staging ───────────────────────────────────────────────
+    # Three sources are written in parallel — each is I/O independent.
+    # We use min(3, cpu_count-2) workers since there are only 3 sources.
+    n_blend_workers = min(3, workers or default_workers())
 
+    work = []
     for source, src_dir in source_dirs.items():
         shards = sorted(src_dir.glob("*.jsonl"))
         if not shards:
             log.warning(f"  {source}: no deduped shards found — skipping")
             continue
-
         staging = CURATED_DIR / f"blend_{source}.jsonl"
-        staging_paths[source] = staging
+        work.append((source, str(src_dir), str(staging), target_chars[source]))
 
-        # Use a distinct variable name to avoid shadowing the outer `target`
-        # (the model size string e.g. "125m"). The original code reused `target`
-        # here, which caused blend_stats.json to record the last source's char
-        # target (an int) instead of the model size string.
-        source_char_target = target_chars[source]
-        chars = 0
-        docs = 0
+    staging_paths: dict[str, Path] = {}
+    source_stats: dict[str, dict] = {}
 
-        with open(staging, "w") as fout:
-            for shard in shards:
-                if chars >= source_char_target:
-                    break
-                with open(shard) as fin:
-                    for line in fin:
-                        record = json.loads(line)
+    log.info(f"Pass 1/3: streaming {len(work)} sources to staging files ({n_blend_workers} workers)...")
+    with ProcessPoolExecutor(max_workers=n_blend_workers) as executor:
+        futures = {executor.submit(_write_staging, w): w[0] for w in work}
+        for future in as_completed(futures):
+            source, docs, chars = future.result()
+            staging_paths[source] = CURATED_DIR / f"blend_{source}.jsonl"
+            source_stats[source] = {"docs": docs, "chars": chars}
+            log.info(
+                f"  {source}: {docs:,} docs, "
+                f"{chars / 1e9:.3f}B chars, "
+                f"~{chars // 4 / 1e6:.1f}M tokens"
+            )
 
-                        # Flatten datatrove format if needed
-                        record = flatten_datatrove_record(record)
-
-                        chars += len(record.get("text", ""))
-                        fout.write(json.dumps(record, ensure_ascii=False) + "\n")
-                        docs += 1
-                        if chars >= source_char_target:
-                            break
-
-        log.info(
-            f"  {source}: {docs:,} docs, "
-            f"{chars / 1e9:.3f}B chars, "
-            f"~{chars // 4 / 1e6:.1f}M tokens"
-        )
-        source_stats[source] = {"docs": docs, "chars": chars}
-
-    # ── Pass 2: merge staging files into one (interleaved) ────────────────────
+    # ── Pass 2: merge staging files ───────────────────────────────────────────
     merged_path = CURATED_DIR / "blend_merged.jsonl"
     total_docs = 0
-    total_chars = 0
 
-    with open(merged_path, "w") as fout:
+    log.info("Pass 2/3: merging staging files...")
+    with open(merged_path, "wb") as fout:
         for source, staging in staging_paths.items():
-            with open(staging) as fin:
-                for line in fin:
-                    fout.write(line)
-                    total_docs += 1
+            with open(staging, "rb") as fin:
+                while True:
+                    block = fin.read(8 * 1024 * 1024)
+                    if not block:
+                        break
+                    fout.write(block)
+                    total_docs += block.count(b"\n")
             staging.unlink()
 
-    log.info(f"Merged {total_docs:,} documents")
+    log.info(f"  Merged ~{total_docs:,} documents")
 
-    # ── Pass 3: shuffle via byte-offset index ─────────────────────────────────
-    log.info("Building line offset index for shuffle...")
-    offsets = []
-    with open(merged_path, "rb") as f:
-        while True:
-            offset = f.tell()
-            line = f.readline()
-            if not line:
-                break
-            offsets.append(offset)
-            total_chars += len(line) - 1
-
-    log.info(f"Shuffling {len(offsets):,} line offsets...")
-    rng.shuffle(offsets)
-
-    log.info(f"Writing shuffled output to {output_path}...")
-    with open(merged_path, "rb") as fin, open(output_path, "wb") as fout:
-        for offset in offsets:
-            fin.seek(offset)
-            fout.write(fin.readline())
-
+    # ── Pass 3: chunked shuffle ────────────────────────────────────────────────
+    log.info("Pass 3/3: shuffling (chunked)...")
+    total_lines = _shuffle_chunked(merged_path, output_path, rng)
     merged_path.unlink()
 
+    total_chars = sum(s["chars"] for s in source_stats.values())
     log.info(
         f"Blend complete — "
-        f"{total_docs:,} documents, "
+        f"{total_lines:,} documents, "
         f"~{total_chars // 4 / 1e9:.2f}B tokens"
     )
 
-    # ── Write blend stats ─────────────────────────────────────────────────────
-    # Note: `target` here is the model size string (e.g. "125m"), not a char
-    # count. Previously a variable name collision caused this to be written as
-    # the last source's char target (an int) instead of the model size string.
+    # ── Write blend stats ──────────────────────────────────────────────────────
     stats_path = CURATED_DIR / "blend_stats.json"
     with open(stats_path, "w") as f:
         json.dump({
             "target": target,
             "target_tokens": total_tokens,
-            "total_documents": total_docs,
+            "total_documents": total_lines,
             "estimated_tokens": total_chars // 4,
             "source_mix": {
                 s: {"docs": v["docs"], "chars": v["chars"]}
@@ -468,7 +608,6 @@ def stage_upload(target: str) -> None:
     s3_path = f"s3://{bucket}/{prefix}/{dst_prefix}/"
 
     log.info(f"Uploading to {s3_path}")
-
     upload_directory(
         src=CURATED_DIR,
         dst_prefix=dst_prefix,
@@ -496,12 +635,14 @@ Examples:
   # Full 125M run
   python curator/scripts/curate.py --target 125m
 
-  # Full 350M run with 16 workers
-  python curator/scripts/curate.py --target 350m --workers 16
+  # Full 1B run
+  python curator/scripts/curate.py --target 1b
 
   # Individual stages
   python curator/scripts/curate.py --target 125m --stage download
-  python curator/scripts/curate.py --target 125m --stage dedup --workers 8
+  python curator/scripts/curate.py --target 125m --stage filter
+  python curator/scripts/curate.py --target 125m --stage dedup
+  python curator/scripts/curate.py --target 125m --stage blend
         """,
     )
     parser.add_argument(
@@ -521,7 +662,7 @@ Examples:
         action="store_true",
         help=(
             "Minimal data volumes for pipeline validation. "
-            "Caps Wikipedia at 5k docs, CodeSearchNet at 10k samples (python+js only). "
+            "Caps Wikipedia at 5k docs, CodeSearchNet at 10k samples (python only). "
             "Use with --target mini."
         ),
     )
@@ -530,8 +671,8 @@ Examples:
         type=int,
         default=None,
         help=(
-            "Number of parallel workers for dedup stage. "
-            "Defaults to cpu_count // 2."
+            "Number of parallel workers for filter, dedup, and blend stages. "
+            "Defaults to cpu_count - 2."
         ),
     )
     parser.add_argument(
@@ -548,23 +689,24 @@ Examples:
             f"Consider using --target mini for a consistent minimal run."
         )
 
+    n_workers = args.workers or default_workers()
     log.info(
         f"SLM Curation Pipeline — "
         f"target={args.target}, stage={args.stage}, "
-        f"mini={args.mini}, workers={args.workers or 'auto'}"
+        f"mini={args.mini}, workers={n_workers} (cpu_count={os.cpu_count()})"
     )
 
     if args.stage in ("download", "all"):
         stage_download(args.target, mini=args.mini)
 
     if args.stage in ("filter", "all"):
-        stage_filter()
+        stage_filter(workers=n_workers)
 
     if args.stage in ("dedup", "all"):
-        stage_dedup(workers=args.workers)
+        stage_dedup(workers=n_workers)
 
     if args.stage in ("blend", "all"):
-        stage_blend(args.target, seed=args.seed)
+        stage_blend(args.target, seed=args.seed, workers=n_workers)
 
     if args.stage in ("upload", "all"):
         stage_upload(args.target)
