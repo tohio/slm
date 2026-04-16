@@ -2,338 +2,310 @@
 
 This guide helps you choose the right GPU configuration for each pipeline stage. The goal is **efficient resource use** — picking the smallest hardware that completes the job reasonably, not the largest hardware available.
 
-The SLM pipeline scales linearly with data parallelism (no code changes needed), so you can adjust `GPUS=N` to match your budget and timeline.
+The SLM pipeline uses pure data parallelism throughout — the model is replicated on each GPU and the batch is split across GPUs. No tensor parallelism or model parallelism is needed at any model size. You can adjust `GPUS=N` to match your budget and timeline without any code changes.
+
+---
+
+## Token Budgets
+
+Token targets are set in `curator/scripts/curate.py` and drive everything downstream:
+
+| Model | Curated tokens | Training epochs | Rationale |
+|---|---|---|---|
+| `slm-125m` | 5B | 2 | ~2× Chinchilla optimal |
+| `slm-350m` | 15B | 2 | ~2× Chinchilla optimal |
+| `slm-1b` | 30B | 2 | ~1.5× Chinchilla optimal |
 
 ---
 
 ## Three-Run Training Plan
 
-We recommend validating the pipeline in three progressively larger runs:
+We recommend validating the pipeline in three progressively larger runs before committing to the full 1B training.
 
-### **Run 1: Pipeline Validation (Sanity Check)**
+---
 
-Prove the entire pipeline works end-to-end before committing to long training runs.
+### **Run 1: Pipeline Validation**
+
+Prove the entire pipeline works end-to-end before committing to long runs.
 
 | Aspect | Value |
 |---|---|
 | **Model** | 125M parameters |
-| **Tokens** | 250M (10% of baseline) |
-| **Hardware** | 2x A100 40GB |
-| **Pre-training duration** | 8-10 minutes |
-| **Full pipeline duration** | 30-45 minutes |
-| **Estimated cost** | $3-5 |
+| **Stage** | Mini config — pipeline validation only |
+| **Hardware** | 1× any GPU (8GB+ VRAM) |
+| **Pre-training duration** | ~5–10 min |
+| **Full pipeline duration** | ~15–30 min |
+| **Estimated cost** | <$1 |
 
-**Why 2x A100?**
-- Validates multi-GPU setup from the start
-- Quick feedback loop (under 1 hour)
-- Cheap enough to re-run if there are bugs
-- Demonstrates data parallelism works
-
-**Command:**
 ```bash
-make pretrain CONFIG=pretrain/configs/gpt_125m.yaml GPUS=2
-make sft CONFIG=finetune/configs/sft_chat_125m.yaml GPUS=2
-make sft CONFIG=finetune/configs/sft_code_125m.yaml GPUS=2
-make dpo CONFIG=alignment/configs/dpo_125m.yaml GPUS=2
+make pretrain-mini  GPUS=1
+make prepare-sft
+make sft-mini       GPUS=1
+make sft-code-mini  GPUS=1
+make prepare-dpo
+make dpo-mini       GPUS=1
+make eval-mini
 ```
+
+This uses the mini configs (500 steps each) — enough to confirm loss decreases and the full pipeline runs without errors. Not for producing a usable model.
 
 ---
 
 ### **Run 2: 125M Full Training**
 
-Train a complete 125M baseline model with full pre-training data.
+Train a complete 125M model on the full 5B token dataset.
 
-**Option A: 4x A100 (Cost-conscious)**
+**Option A: 4× A100 40GB (Cost-conscious)**
 
 | Aspect | Value |
 |---|---|
 | **Model** | 125M parameters |
-| **Tokens** | 2.5B (full) |
-| **Hardware** | 4x A100 40GB |
-| **Pre-training duration** | 3-4 hours |
-| **Full pipeline duration** | 4-5 hours |
-| **Estimated cost** | $12-18 |
+| **Tokens** | 5B (2 epochs) |
+| **Hardware** | 4× A100 40GB |
+| **Pre-training duration** | ~2–3 hours |
+| **Full pipeline duration** | ~4–5 hours |
+| **Estimated cost** | ~$15–25 |
 
-**Command:**
 ```bash
-make pretrain CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
-make sft CONFIG=finetune/configs/sft_chat_125m.yaml GPUS=4
-make sft CONFIG=finetune/configs/sft_code_125m.yaml GPUS=4
-make dpo CONFIG=alignment/configs/dpo_125m.yaml GPUS=4
+make accelerate-config-multi GPUS=4
+make pretrain  SIZE=125m GPUS=4
+make sft       SIZE=125m GPUS=4
+make sft-code  SIZE=125m GPUS=4
+make dpo       SIZE=125m GPUS=4
+make eval      SIZE=125m
+make export    SIZE=125m
 ```
 
-**Option B: 2x H100 (Speed-focused)**
+Remember to adjust `gradient_accumulation_steps` in the configs for 4 GPUs — see the scaling comment in `pretrain/configs/gpt_125m.yaml`.
+
+**Option B: 2× H100 80GB (Speed-focused)**
 
 | Aspect | Value |
 |---|---|
 | **Model** | 125M parameters |
-| **Tokens** | 2.5B (full) |
-| **Hardware** | 2x H100 80GB |
-| **Pre-training duration** | 1.5-2 hours |
-| **Full pipeline duration** | 2-3 hours |
-| **Estimated cost** | $15-22 |
+| **Tokens** | 5B (2 epochs) |
+| **Hardware** | 2× H100 80GB |
+| **Pre-training duration** | ~1–1.5 hours |
+| **Full pipeline duration** | ~2–3 hours |
+| **Estimated cost** | ~$15–20 |
 
-**Command:**
 ```bash
-make pretrain CONFIG=pretrain/configs/gpt_125m.yaml GPUS=2
-make sft CONFIG=finetune/configs/sft_chat_125m.yaml GPUS=2
-make sft CONFIG=finetune/configs/sft_code_125m.yaml GPUS=2
-make dpo CONFIG=alignment/configs/dpo_125m.yaml GPUS=2
+make accelerate-config-multi GPUS=2
+make pretrain  SIZE=125m GPUS=2
+make sft       SIZE=125m GPUS=2
+make sft-code  SIZE=125m GPUS=2
+make dpo       SIZE=125m GPUS=2
+make eval      SIZE=125m
+make export    SIZE=125m
 ```
 
 **Which to choose?**
-- **4x A100:** Better for portfolios (shows you understand scaling on standard hardware)
-- **2x H100:** Better for time-constrained projects (half the duration at similar cost)
+- **4× A100:** Better if you want to demonstrate multi-GPU scaling on standard hardware
+- **2× H100:** Better if you want faster iteration at similar cost
 
 ---
 
 ### **Run 3: 350M Full Training**
 
-Scale to a larger model with matching token budget (Chinchilla scaling laws).
+Scale to a larger model on the full 15B token dataset.
 
-**Option A: 6x H100 (Balanced)**
-
-| Aspect | Value |
-|---|---|
-| **Model** | 350M parameters |
-| **Tokens** | 7B (Chinchilla-scaled) |
-| **Hardware** | 6x H100 80GB |
-| **Pre-training duration** | 4-5 hours |
-| **Full pipeline duration** | 5-7 hours |
-| **Estimated cost** | $60-85 |
-
-**Command:**
-```bash
-make pretrain CONFIG=pretrain/configs/gpt_350m.yaml GPUS=6
-make sft CONFIG=finetune/configs/sft_chat_350m.yaml GPUS=6
-make sft CONFIG=finetune/configs/sft_code_350m.yaml GPUS=6
-make dpo CONFIG=alignment/configs/dpo_350m.yaml GPUS=6
-```
-
-**Option B: 8x H100 (Maximum Efficiency)**
+**Option A: 4× H100 80GB (Balanced)**
 
 | Aspect | Value |
 |---|---|
 | **Model** | 350M parameters |
-| **Tokens** | 7B (Chinchilla-scaled) |
-| **Hardware** | 8x H100 80GB |
-| **Pre-training duration** | 3-4 hours |
-| **Full pipeline duration** | 4-5 hours |
-| **Estimated cost** | $75-100 |
+| **Tokens** | 15B (2 epochs) |
+| **Hardware** | 4× H100 80GB |
+| **Pre-training duration** | ~6–8 hours |
+| **Full pipeline duration** | ~8–10 hours |
+| **Estimated cost** | ~$80–120 |
 
-**Command:**
 ```bash
-make pretrain CONFIG=pretrain/configs/gpt_350m.yaml GPUS=8
-make sft CONFIG=finetune/configs/sft_chat_350m.yaml GPUS=8
-make sft CONFIG=finetune/configs/sft_code_350m.yaml GPUS=8
-make dpo CONFIG=alignment/configs/dpo_350m.yaml GPUS=8
+make accelerate-config-multi GPUS=4
+make pretrain  SIZE=350m GPUS=4
+make sft       SIZE=350m GPUS=4
+make sft-code  SIZE=350m GPUS=4
+make dpo       SIZE=350m GPUS=4
+make eval      SIZE=350m
+make export    SIZE=350m
+```
+
+**Option B: 8× H100 80GB (Faster)**
+
+| Aspect | Value |
+|---|---|
+| **Model** | 350M parameters |
+| **Tokens** | 15B (2 epochs) |
+| **Hardware** | 8× H100 80GB |
+| **Pre-training duration** | ~3–4 hours |
+| **Full pipeline duration** | ~4–6 hours |
+| **Estimated cost** | ~$80–110 |
+
+```bash
+make accelerate-config-multi GPUS=8
+make pretrain  SIZE=350m GPUS=8
+make sft       SIZE=350m GPUS=8
+make sft-code  SIZE=350m GPUS=8
+make dpo       SIZE=350m GPUS=8
+make eval      SIZE=350m
+make export    SIZE=350m
 ```
 
 **Which to choose?**
-- **6x H100:** Sweet spot for cost/efficiency
-- **8x H100:** Marginal speedup (10-15%) for ~15% more cost
+- **4× H100:** Good balance — near-linear speedup, lower cost
+- **8× H100:** ~1.8× faster than 4× at ~2× the cost — diminishing returns start here
 
 ---
 
----
+### **Run 4: 1B Full Training**
 
-### **Run 4: 1B Full Training (Production Scale)**
+The flagship model — 30B tokens, full pipeline.
 
-Demonstrate scaling to a production-size model with full Chinchilla token budget.
-
-**Option A: 8x H100 (Recommended)**
+**Option A: 8× H100 80GB (Recommended)**
 
 | Aspect | Value |
 |---|---|
 | **Model** | 1B parameters |
-| **Tokens** | 20B (Chinchilla-scaled) |
-| **Hardware** | 8x H100 80GB with tensor parallelism (TP=2) |
-| **Pre-training duration** | 18-24 hours |
-| **Full pipeline duration** | 20-26 hours |
-| **Estimated cost** | $240-330 |
+| **Tokens** | 30B (2 epochs) |
+| **Hardware** | 8× H100 80GB |
+| **Pre-training duration** | ~20–28 hours |
+| **Full pipeline duration** | ~24–32 hours |
+| **Estimated cost** | ~$250–350 |
 
-**Command:**
 ```bash
-make pretrain CONFIG=pretrain/configs/gpt_1b.yaml GPUS=8
-make sft CONFIG=finetune/configs/sft_chat_1b.yaml GPUS=8
-make sft CONFIG=finetune/configs/sft_code_1b.yaml GPUS=8
-make dpo CONFIG=alignment/configs/dpo_1b.yaml GPUS=8
+make accelerate-config-multi GPUS=8
+make pretrain  SIZE=1b GPUS=8
+make sft       SIZE=1b GPUS=8
+make sft-code  SIZE=1b GPUS=8
+make dpo       SIZE=1b GPUS=8
+make eval      SIZE=1b
+make export    SIZE=1b
 ```
 
-**Option B: 16x H100 (Maximum Speed)**
+**Note on memory:** The 1B model in bfloat16 is ~2GB of weights. With optimizer states, gradients, and activations it fits comfortably on a single 80GB H100. Gradient checkpointing is already enabled in `gpt_1b.yaml` to reduce activation memory at 4096 sequence length. No tensor parallelism or model parallelism is needed.
+
+**Option B: Nebius AMD Epyc Genoa (Alternative)**
+
+If you're running on the Nebius instance (64 vCPU, 256GiB RAM) for a CPU baseline or curation:
 
 | Aspect | Value |
 |---|---|
-| **Model** | 1B parameters |
-| **Tokens** | 20B (Chinchilla-scaled) |
-| **Hardware** | 16x H100 80GB with tensor parallelism (TP=4, DP=4) |
-| **Pre-training duration** | 10-12 hours |
-| **Full pipeline duration** | 12-14 hours |
-| **Estimated cost** | $240-280 |
+| **Use case** | Data curation only — not GPU training |
+| **Cost** | $1.72/hr |
 
-**Command:**
-```bash
-make pretrain CONFIG=pretrain/configs/gpt_1b.yaml GPUS=16
-make sft CONFIG=finetune/configs/sft_chat_1b.yaml GPUS=16
-make sft CONFIG=finetune/configs/sft_code_1b.yaml GPUS=16
-make dpo CONFIG=alignment/configs/dpo_1b.yaml GPUS=16
-```
-
-**Which to choose?**
-- **8x H100:** Good for portfolio (shows understanding of tensor parallelism, reasonable cost)
-- **16x H100:** Only if you need results in <14 hours (similar cost but adds complexity)
-
-**Note on 1B scaling:**
-- Tensor parallelism (TP) is now required — the model no longer fits on a single GPU
-- 8x H100 uses TP=2 (model split across 2 GPUs, 4 data parallel groups)
-- 16x H100 uses TP=4 (model split across 4 GPUs, 4 data parallel groups)
-- Communication overhead increases, but still near-linear scaling
-- This run demonstrates when to move from pure data parallelism to tensor parallelism
+The Nebius instance is for curation (`make curate SIZE=1b`), not pretraining. GPU training always runs on a separate GPU instance.
 
 ---
 
 ## Summary Table
 
-| Run | Goal | Model | Tokens | Hardware | Duration | Cost | Key Lesson |
-|---|---|---|---|---|---|---|---|
-| **1** | Validate | 125M | 250M | 2x A100 | 30-45 min | $3-5 | Pipeline works |
-| **2a** | Full baseline | 125M | 2.5B | 4x A100 | 4-5 hrs | $12-18 | Scaling on standard GPUs |
-| **2b** | Full baseline | 125M | 2.5B | 2x H100 | 2-3 hrs | $15-22 | When to use expensive GPUs |
-| **3a** | Prove scaling | 350M | 7B | 6x H100 | 5-7 hrs | $60-85 | Efficient large runs |
-| **3b** | Prove scaling | 350M | 7B | 8x H100 | 4-5 hrs | $75-100 | Maximum utilization |
-| **4a** | Production scale | 1B | 20B | 8x H100 | 20-26 hrs | $240-330 | Tensor parallelism required |
-| **4b** | Production scale | 1B | 20B | 16x H100 | 12-14 hrs | $240-280 | Multi-node complexity |
+| Run | Goal | Model | Tokens | Hardware | Duration | Cost |
+|---|---|---|---|---|---|---|
+| **1** | Validate pipeline | mini | ~4M | 1× any GPU | 15–30 min | <$1 |
+| **2a** | Full 125M | 125M | 5B | 4× A100 | 4–5 hrs | $15–25 |
+| **2b** | Full 125M | 125M | 5B | 2× H100 | 2–3 hrs | $15–20 |
+| **3a** | Full 350M | 350M | 15B | 4× H100 | 8–10 hrs | $80–120 |
+| **3b** | Full 350M | 350M | 15B | 8× H100 | 4–6 hrs | $80–110 |
+| **4** | Full 1B | 1B | 30B | 8× H100 | 24–32 hrs | $250–350 |
 
-**Total cost for all four runs:** $365-555
-**Total wall-clock time (sequential):** ~40-60 hours
-**Total wall-clock time (parallelized):** Could run runs 2, 3 & 4 simultaneously if resources available, ~26-36 hours
+**Total cost for all four runs (option A path):** ~$345–496
+**Total wall-clock time (sequential):** ~37–48 hours
 
 ---
 
-## Summary Table
+## When to Use Each GPU Type
 
-### **When to use A100s**
-- Budget-constrained projects
-- Learning/portfolio projects (shows you understand efficient scaling)
-- Small models (125M-350M)
-- Long-running but not urgent (3-8 hour timeline acceptable)
+### **Use A100s when:**
+- Budget-constrained
+- Running 125M or 350M models
+- Timeline is flexible (4–10 hours acceptable)
 
-### **When to use H100s**
-- Time-constrained (need results in hours)
-- Production runs
-- Larger models (350M+)
-- Complex training scenarios (long sequences, large batches)
+### **Use H100s when:**
+- Time-constrained
+- Running 1B model (gradient checkpointing at 4096 seq len benefits from H100 memory bandwidth)
+- Running 350M on a tight timeline
 
-### **When NOT to use 8 GPUs for 125M**
-- Wasteful and expensive
-- Diminishing returns: 4x speedup from 1→4 GPUs, only 2x speedup from 4→8
-- Better to run smaller experiments faster on 2x GPUs
+### **Avoid 8 GPUs for 125M:**
+- Diminishing returns — 4→8 GPU gives ~1.8× speedup at 2× cost
+- Better to run more experiments on 2–4 GPUs than one fast run on 8
 
 ---
 
 ## Cost Breakdown by Provider
 
-Prices vary by provider and spot vs. on-demand. Current ballpark (March 2026):
+Prices are approximate spot rates (April 2026):
 
-### **Lambda Labs**
-- A100 40GB: ~$1.10/hr
-- H100 80GB: ~$3.50/hr
+| Provider | A100 40GB | H100 80GB |
+|---|---|---|
+| Lambda Labs | ~$1.10/hr | ~$3.50/hr |
+| RunPod | ~$0.80/hr (spot) | ~$2.40/hr (spot) |
+| Crusoe Energy | ~$0.90/hr | ~$3.00/hr |
+| Nebius | — | ~$2.10/hr (H100) |
 
-### **RunPod**
-- A100 40GB: ~$0.80/hr (spot)
-- H100 80GB: ~$2.40/hr (spot)
-
-### **Crusoe Energy**
-- A100 40GB: ~$0.90/hr
-- H100 80GB: ~$3.00/hr
-
-**Tip:** Use spot instances for all three runs — training is resumable from checkpoints, so occasional interruptions are acceptable.
+Use spot instances for all runs — training is resumable from checkpoints, so occasional interruptions are acceptable.
 
 ---
 
-## Data Parallelism & Tensor Parallelism
+## Data Parallelism
 
-**For 125M and 350M (Pure Data Parallelism):**
-
-The pipeline uses pure data parallelism — model is replicated on each GPU, batch is split:
+The pipeline uses pure data parallelism throughout all model sizes. The model is replicated on each GPU and the batch is split:
 
 ```
 GPUS=1: Full model on 1 GPU, full batch processed serially
-GPUS=2: Model replicated on 2 GPUs, batch split and processed in parallel
-GPUS=4: Model replicated on 4 GPUs, 4x speedup (near-linear)
-GPUS=6+: Speedup ~5-5.5x for 6, ~6-6.5x for 8 (communication overhead grows)
+GPUS=2: Model replicated on 2 GPUs, ~1.9x speedup
+GPUS=4: Model replicated on 4 GPUs, ~3.7x speedup
+GPUS=8: Model replicated on 8 GPUs, ~6.5x speedup
 ```
 
-**Scaling efficiency (data parallel only):**
-- 1→2 GPU: ~1.9x speedup
-- 1→4 GPU: ~3.8x speedup
-- 1→6 GPU: ~5.5x speedup
-- 1→8 GPU: ~7x speedup (not linear, but still good)
+Near-linear scaling up to 4 GPUs. Diminishing returns after that due to communication overhead, but 8× H100 is still ~6.5× faster than 1× H100.
 
-Diminishing returns kick in after 4 GPUs, so 6-8 H100s is the practical ceiling for 350M.
+**Adjusting configs for multi-GPU:**
 
-**For 1B (Tensor + Data Parallelism):**
+Each pretrain config includes a scaling comment. Example for 125M:
 
-The 1B model requires **tensor parallelism** — the model itself is split across multiple GPUs:
-
-```
-GPUS=8 with TP=2, DP=4:
-  - Model split across 2 GPUs (tensor parallel)
-  - Replicated across 4 groups (data parallel)
-  - Each group has full model copy split in half
-
-GPUS=16 with TP=4, DP=4:
-  - Model split across 4 GPUs (tensor parallel)
-  - Replicated across 4 groups (data parallel)
-  - Finer model parallelism, higher communication overhead
+```yaml
+# 1 GPU:  grad_accum=8,  max_steps=152000
+# 4 GPU:  grad_accum=2,  max_steps=38000
+# 8 GPU:  grad_accum=1,  max_steps=19000
 ```
 
-**Scaling efficiency (tensor + data parallel):**
-- 8x H100: ~6.5-7x speedup vs. 1 GPU
-- 16x H100: ~13-14x speedup vs. 1 GPU (nearly linear)
+Update `gradient_accumulation_steps` and `max_steps` before launching to keep the global batch size and token budget constant.
 
-Tensor parallelism communication is more expensive than data parallelism, so efficiency drops slightly. For 1B, 8x H100 is a good balance — 16x is faster but the communication overhead grows.
+SFT and DPO configs similarly include scaling comments — update `gradient_accumulation_steps` before running multi-GPU.
 
 ---
 
 ## Resuming from Checkpoints
 
-All stages checkpoint every 1,000 steps. If a run is interrupted:
+All stages checkpoint periodically. If a run is interrupted:
 
 ```bash
-# Training resumes automatically from the latest checkpoint
-make pretrain CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
+# Resume pretraining from latest checkpoint
+make pretrain-resume SIZE=125m GPUS=4
+
+# Resume SFT
+make sft-resume      SIZE=125m GPUS=4
+
+# Resume DPO
+make dpo-resume      SIZE=125m GPUS=2
 ```
 
-This makes spot instances safe — you can absorb interruptions without losing progress.
-
----
-
-## Quick Reference: Command Template
-
-```bash
-# Run any stage with custom GPU count
-make pretrain CONFIG=pretrain/configs/gpt_MODEL_SIZE.yaml GPUS=N
-make sft CONFIG=finetune/configs/sft_STAGE_MODEL_SIZE.yaml GPUS=N
-make dpo CONFIG=alignment/configs/dpo_MODEL_SIZE.yaml GPUS=N
-
-# Example: 350M with 8 H100s
-make pretrain CONFIG=pretrain/configs/gpt_350m.yaml GPUS=8
-```
+Spot instances are safe for all runs — you lose at most one checkpoint interval of work.
 
 ---
 
 ## Monitoring GPU Utilization
 
-During training, monitor GPU usage to confirm you're fully utilizing the hardware:
-
 ```bash
-# On the training instance (every 2 seconds)
+# Monitor every 2 seconds
 watch -n 2 nvidia-smi
 
-# Expected: GPUs should be 95%+ utilized, memory 80%+ full
+# Or use nvtop for a more detailed view
+nvtop
 ```
 
-If GPU utilization is low (<80%), you may benefit from increasing batch size or sequence length in the config.
+**Expected during training:**
+- GPU utilization: 90–98%
+- GPU memory: 70–90% full
 
-If GPU memory is maxed out and you're getting OOM errors, reduce batch size or use gradient checkpointing (already enabled by default).
+If utilization is below 80%, increase `micro_batch_size` or `gradient_accumulation_steps`. If you're hitting OOM, reduce `micro_batch_size` or enable `gradient_checkpointing: true`.

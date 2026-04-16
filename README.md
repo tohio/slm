@@ -44,8 +44,8 @@ The model is a dense decoder-only transformer with a modern architecture:
 | Stage | Tool |
 |---|---|
 | Data curation | HuggingFace `datasets` + `datatrove` + custom scripts |
-| Data validation | `datatrove` |
-| Tokenizer | HuggingFace `tokenizers` (BPE) |
+| Data validation | `datatrove` + KenLM perplexity filtering |
+| Tokenizer | HuggingFace `tokenizers` (BPE, 32k vocab) |
 | Pretraining | HuggingFace `accelerate` + `transformers` |
 | Experiment tracking | Weights & Biases |
 | SFT | HuggingFace `trl` (`SFTTrainer`) |
@@ -72,10 +72,10 @@ slm/
 ├── curator/                      Stage 1: data curation
 │   ├── sources/
 │   │   ├── wikipedia.py          Wikipedia EN via HuggingFace datasets
-│   │   ├── code_search_net.py    CodeSearchNet via HuggingFace datasets
+│   │   ├── code_search_net.py    CodeSearchNet Python via HuggingFace datasets
 │   │   └── common_crawl.py       Common Crawl WARCs via HTTPS + trafilatura
 │   ├── filters/
-│   │   ├── quality.py            Heuristic quality filters (FineWeb/Gopher-style)
+│   │   ├── quality.py            Heuristic quality filters + fasttext language detection
 │   │   └── dedup.py              Exact + datatrove disk-based MinHash deduplication
 │   └── scripts/
 │       ├── curate.py             Main pipeline entry point
@@ -83,7 +83,7 @@ slm/
 │
 ├── validation/                   Stage 2: data validation
 │   └── scripts/
-│       ├── validate.py           Quality filter + perplexity filtering
+│       ├── validate.py           Quality filter + perplexity filtering (KenLM)
 │       └── upload_validated.py   Upload validated data to S3 (versioned by target + date)
 │
 ├── tokenizer/                    Stage 3: tokenizer training
@@ -167,7 +167,7 @@ slm/
 
 **Prerequisites**
 - Python 3.12+
-- CUDA-capable GPU (H100 or A100 recommended for pretraining)
+- CUDA-capable GPU (for pretraining stages)
 - AWS account (S3 for data storage)
 - Weights & Biases account
 
@@ -178,68 +178,39 @@ On a fresh Ubuntu 22.04 cloud instance (recommended):
 git clone https://github.com/tohio/slm.git /data/slm
 cd /data/slm
 
-# Populate credentials before running setup
 cp .env.sample .env
+vi .env   # fill in S3_BUCKET, AWS credentials, WANDB_API_KEY, HF_TOKEN
 
-# fill in S3_BUCKET, AWS credentials, WANDB_API_KEY, HF_TOKEN
-vi .env
-
-# make is the only manual prerequisite — setup handles everything else
 sudo apt install -y make
 
-# Custom data dir — recommended when using a separate EBS volume
+# Custom data dir — recommended when using a separate disk volume
 make setup-data-dir DATA_DIR=/data/slm/data
 
-# Default data dir (repo/data) — use if no separate EBS volume
+# Default data dir (repo/data)
 # make setup
 ```
 
-Using pip (recommended — creates `.venv` automatically):
+Using pip:
 ```bash
-git clone https://github.com/tohio/slm.git
-cd slm
-cp .env.sample .env
-# Add your credentials to .env
 make install          # creates .venv and installs all dependencies
-make install-kenlm    # kenlm not on PyPI — install from source (curation instance only)
+make install-kenlm    # kenlm not on PyPI — curation instance only
 ```
 
 Using uv:
 ```bash
-git clone https://github.com/tohio/slm.git
-cd slm
-cp .env.sample .env
-# Add your credentials to .env
 make install-uv
 make install-kenlm
 ```
 
 Using conda:
 ```bash
-git clone https://github.com/tohio/slm.git
-cd slm
-cp .env.sample .env
-# Add your credentials to .env
 make install-conda
 make install-kenlm
 ```
 
-**GPU training instance only** — fasttext and kenlm not needed:
+GPU training instance only:
 ```bash
-git clone https://github.com/tohio/slm.git
-cd slm
-cp .env.sample .env
-# Add your credentials to .env
-make install-gpu
-```
-
-Then fill in credentials in `.env`:
-```
-S3_BUCKET=your-bucket
-AWS_ACCESS_KEY_ID=...
-AWS_SECRET_ACCESS_KEY=...
-WANDB_API_KEY=...
-HF_TOKEN=...
+make install-gpu      # skips kenlm and other curation-only dependencies
 ```
 
 ---
@@ -248,10 +219,9 @@ HF_TOKEN=...
 
 ```bash
 # ── Step 1: Curation instance (CPU) ──────────────────────────────────────────
-# Run on a CPU instance. No GPU required.
 make download-fasttext-model DATA_DIR=/data/slm/data   # language ID model (~1MB)
 make download-kenlm-model    DATA_DIR=/data/slm/data   # perplexity model (~4GB)
-make curate SIZE=125m WORKERS=16    # Stage 1: download, filter, dedup, blend, upload
+make curate SIZE=125m WORKERS=24    # Stage 1: download, filter, dedup, blend, upload
 make validate                       # Stage 2: perplexity filter
 make validate-upload SIZE=125m      # Stage 2: push validated data to S3
 make tokenizer                      # Stage 3: train BPE tokenizer
@@ -259,130 +229,147 @@ make tokenizer-upload               # Stage 3: push tokenizer to S3
 make tokenize                       # Stage 4a: tokenize to binary
 make tokenize-upload SIZE=125m      # Stage 4a: push tokenized binary to S3
 
-# ── Step 2: GPU instance setup (run once per instance) ───────────────────────
+# ── Step 2: GPU instance setup ───────────────────────────────────────────────
 make setup-gpu DATA_DIR=/data/slm/data SIZE=125m DATE=YYYY-MM-DD
 source ~/.bashrc
-make tokenize-download SIZE=125m DATE=YYYY-MM-DD   # pull tokenized binary from S3
 
-# ── Step 3: Validate mini pipeline (run once before committing to full training)
+# ── Step 3: Validate mini pipeline ───────────────────────────────────────────
 # Exercises every stage end-to-end on a single GPU. Takes ~15–20 min.
 make accelerate-config-single
-make pretrain-mini GPUS=1          # Stage 4b: validate training loop
-make prepare-sft                   # Stage 5a: download SFT datasets
-make sft-mini      GPUS=1          # Stage 5b: validate chat SFT
-make sft-code-mini GPUS=1          # Stage 5c: validate code SFT
-make prepare-dpo                   # Stage 6a: download DPO datasets
-make dpo-mini      GPUS=1          # Stage 6b: validate DPO
-make eval-mini                     # Stage 7:  validate eval
+make pretrain-mini  GPUS=1
+make prepare-sft
+make sft-mini       GPUS=1
+make sft-code-mini  GPUS=1
+make prepare-dpo
+make dpo-mini       GPUS=1
+make eval-mini
 
 # ── Step 4: Full training ─────────────────────────────────────────────────────
-# Before running, update pretrain/configs/gpt_125m.yaml for your GPU count.
+# Before running, update gradient_accumulation_steps and max_steps in
+# pretrain/configs/gpt_125m.yaml, aligment/configs/dpo_125m.yal and finetune/configs/sft_*_125m.yaml for your GPU count.
 # See pretrain/README.md — Multi-GPU Config Scaling for exact values.
-make accelerate-config-multi GPUS=8
-make pretrain SIZE=125m GPUS=8     # Stage 4b: pretrain (~70 min on 8× H200)
-make sft      SIZE=125m GPUS=8     # Stage 5b: chat SFT
-make sft-code SIZE=125m GPUS=8     # Stage 5c: code SFT
-make dpo      SIZE=125m GPUS=8     # Stage 6b: DPO alignment
-make eval     SIZE=125m            # Stage 7:  benchmark evaluation
-make export-base     SIZE=125m     # Stage 8:  push base model to Hub
-make export-instruct SIZE=125m     # Stage 8:  push instruct model to Hub
-make export-chat     SIZE=125m     # Stage 8:  push chat model to Hub
-make serve                         # Stage 10: launch vLLM server
+make accelerate-config-single.        # Use make accelerate-config-multi GPUS=x for multi gpu
+make pretrain  SIZE=125m GPUS=1       # Stage 4b: pretrain from scratch
+make export-base     SIZE=125m        # Stage 8:  push base model to Hub
+make sft       SIZE=125m GPUS=1       # Stage 5b: chat SFT
+make sft-code  SIZE=125m GPUS=1       # Stage 5c: code SFT
+make export-instruct SIZE=125m        # Stage 8:  push instruct model to Hub
+make dpo       SIZE=125m GPUS=1       # Stage 6b: DPO alignment
+make eval      SIZE=125m              # Stage 7:  benchmark evaluation
+make export-chat     SIZE=125m        # Stage 8:  push chat model to Hub
+make serve                            # Stage 10: launch vLLM server
 ```
 
 For full documentation of every `make` target see [docs/COMMANDS.md](docs/COMMANDS.md).
 
-**Run curation sub-stages individually**
+---
 
-```bash
-make curate-download SIZE=125m
-make curate-filter   SIZE=125m
-make curate-dedup    SIZE=125m WORKERS=16
-make curate-blend    SIZE=125m
-make curate-upload   SIZE=125m
-```
+## Multi-GPU Config Scaling
 
-**Multi-GPU training**
-
-> **Important:** Training configs in `pretrain/configs/` are written for **1 GPU**. Before running multi-GPU training, scale the config to preserve the global batch size and token budget:
+> **Important:** All training configs — pretrain, SFT, and DPO — are written
+> for **1 GPU**. Before running multi-GPU training at any stage, scale the
+> config to preserve the global batch size and token budget:
 >
 > ```
-> gradient_accumulation_steps = original_grad_accum / num_gpus
-> max_steps                   = original_max_steps  / num_gpus
+> gradient_accumulation_steps = original / num_gpus
+> max_steps                   = original / num_gpus   # pretrain only
 > ```
 >
-> Each config file includes a scaling table with the exact values for 1, 4, and 8 GPUs. See `pretrain/README.md` for the full reference.
+> Each config file includes a comment with exact values for 1, 4, and 8 GPUs.
+> This must be done for **every stage** — pretrain, SFT chat, SFT code, and DPO.
+
+| Stage | Config location | Scaling fields |
+|---|---|---|
+| Pretrain | `pretrain/configs/gpt_{size}.yaml` | `gradient_accumulation_steps`, `max_steps` |
+| SFT chat | `finetune/configs/sft_chat_{size}.yaml` | `gradient_accumulation_steps` |
+| SFT code | `finetune/configs/sft_code_{size}.yaml` | `gradient_accumulation_steps` |
+| DPO | `alignment/configs/dpo_{size}.yaml` | `gradient_accumulation_steps` |
+
+Note: SFT and DPO use `epochs` not `max_steps` — only `gradient_accumulation_steps` needs adjusting for those stages.
 
 ```bash
-make pretrain SIZE=125m GPUS=4
-make pretrain SIZE=350m GPUS=8
-make pretrain SIZE=1b   GPUS=8
+make pretrain  SIZE=125m GPUS=8
+make sft       SIZE=125m GPUS=8
+make sft-code  SIZE=125m GPUS=8
+make dpo       SIZE=125m GPUS=8
 
 # Override config directly
 make pretrain CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
-make sft      CONFIG=finetune/configs/sft_chat_125m.yaml GPUS=4
-make dpo      CONFIG=alignment/configs/dpo_125m.yaml GPUS=2
 ```
 
-**Interactive chat**
+---
 
-```bash
-python inference/chat.py --model tohio/slm-125m
-```
+## Data
+
+### Source Mix
+
+| Source | Mix | Tokens (1b) | Notes |
+|---|---|---|---|
+| Common Crawl | 55% | 16.5B | Broad web coverage, aggressively filtered |
+| Wikipedia EN | 25% | 7.5B | High quality, factual, structured |
+| CodeSearchNet | 20% | 6B | Python only |
+
+### Token Targets
+
+| Model | Total tokens | Epochs |
+|---|---|---|
+| `slm-125m` | 5B | 2 |
+| `slm-350m` | 15B | 2 |
+| `slm-1b` | 30B | 2 |
 
 ---
 
 ## Infrastructure
 
-### Data Curation (CPU)
+### Data Curation (CPU) — Stages 1–4a
 
-Stages 1–4a (download, filter, dedup, blend, validate, tokenize) run on CPU instances. No GPU required.
+Runs on CPU instances. No GPU required.
 
 | Target | vCPUs | RAM | Est. runtime |
 |---|---|---|---|
 | mini (validation) | Any | 4GB+ | ~30–45 min |
-| 125m | 16 vCPU | 32GB | ~22–26 hrs (curation ~12–16 hrs + tokenize ~9 hrs) |
-| 350m | 16 vCPU | 32GB | ~55–65 hrs |
-| 1b | 32 vCPU | 64GB | ~110–130 hrs |
+| 125m | 16 vCPU | 32GB | ~8–12 hrs |
+| 350m | 32 vCPU | 64GB | ~20–28 hrs |
+| 1b | 64 vCPU | 256GB | ~30–40 hrs |
 
-Any cloud provider works for curation. Run close to `us-east-1` (AWS) or `us-east1` (GCP) to minimise Common Crawl egress latency. Attach a persistent disk (500GB) for `DATA_DIR` so data survives spot/preemptible interruptions — the pipeline is fully resumable at every stage.
+Run close to `us-east-1` (AWS) or `us-east1` (GCP) to minimise Common Crawl egress latency. Attach a persistent disk (500GB+) for `DATA_DIR` — the pipeline is fully resumable at every stage.
 
 Use `tmux` to keep the pipeline running through session timeouts:
 ```bash
 tmux new -s curate
-make curate SIZE=125m WORKERS=16    # .venv/bin/python used automatically
+make curate SIZE=125m WORKERS=16
 # Ctrl+B, D to detach — tmux attach -t curate to reattach
 ```
 
-### Training (GPU)
+### Training (GPU) — Stages 4b–6
 
-Stages 4b–6 (pretrain, SFT, DPO) require a CUDA-capable GPU instance. Any cloud provider with H100 or A100 instances works. Providers like [Nebius](https://nebius.com), [Lambda Labs](https://lambdalabs.com), and [CoreWeave](https://coreweave.com) typically offer better GPU pricing than hyperscalers.
+Requires a CUDA-capable GPU instance. The pipeline uses **pure data parallelism** throughout all model sizes — no tensor parallelism or model parallelism is needed. The model is replicated on each GPU and the batch is split across GPUs.
 
-Before committing to a full pretraining run, validate the training loop with `make pretrain-mini` — it uses a tiny 6-layer model and runs to 500 steps in minutes on a single GPU.
+> **Before running multi-GPU training at any stage:** Update
+> `gradient_accumulation_steps` in the pretrain, SFT, and DPO configs for
+> your GPU count. For pretrain, also update `max_steps`. Each config includes
+> a scaling comment with exact values for 1, 4, and 8 GPUs.
 
-| Target | GPUs | VRAM | Est. pretrain runtime |
-|---|---|---|---|
-| mini (validation) | 1× any GPU | 8GB+ | ~5–10 min |
-| 125m | 8× H200 | 1,128 GB | ~70 min (9.8B tokens) |
-| 125m | 4× H100 or A100 | 320GB+ | ~3–4 hrs (9.8B tokens) |
-| 350m | 8× H100 or A100 | 640GB+ | ~23 hrs (65B tokens) |
-| 1b | 8× H100 or A100 | 640GB+ | ~7 days (786B tokens) |
+Runtime varies significantly by GPU type and count. Use `make pretrain-mini GPUS=1` first to validate the training loop and measure your actual throughput before committing to a full run.
 
-SFT and DPO runtimes are roughly 20–30% of pretraining time at the same model size. Use spot/preemptible instances where possible — all training loops support `--resume` from the last checkpoint.
+| Target | Min VRAM | Notes |
+|---|---|---|
+| mini (validation) | 8GB+ | Any GPU — confirms training loop works |
+| 125m | 16GB+ per GPU | Fits on any modern data center GPU |
+| 350m | 24GB+ per GPU | A100 40GB or better recommended |
+| 1b | 40GB+ per GPU | A100 80GB / H100 / H200 recommended; gradient checkpointing enabled |
 
-Run `make accelerate-config-multi GPUS=N` once on the GPU instance before training to configure multi-GPU settings. Pull the tokenized binary with `make tokenize-download` to avoid re-tokenizing on expensive GPU hardware.
+SFT and DPO runtimes are roughly 20–30% of pretraining time at the same model size. Use spot/preemptible instances — all training loops support `--resume` from the last checkpoint.
 
 ---
 
 ## Screenshots
 
-Captured at each pipeline stage as proof of a working end-to-end run.
-
 | Screenshot | Stage | Description |
 |---|---|---|
-| `docs/screenshots/01_blend_stats.png` | Stage 1 | `blend_stats.json` showing 70/20/10 source mix |
+| `docs/screenshots/01_blend_stats.png` | Stage 1 | `blend_stats.json` showing 55/25/20 source mix |
 | `docs/screenshots/02_validation_report.png` | Stage 2 | Validation report — total, kept, and rejection breakdown |
-| `docs/screenshots/03_tokenizer_test.png` | Stage 3 | Tokenizer test output — special tokens table and fertility score |
+| `docs/screenshots/03_tokenizer_test.png` | Stage 3 | Tokenizer test output — special tokens and fertility score |
 | `docs/screenshots/04_pretrain_loss.png` | Stage 4 | W&B pretraining loss curve |
 | `docs/screenshots/05_sft_loss.png` | Stage 5 | W&B chat SFT loss curve |
 | `docs/screenshots/06_dpo_loss.png` | Stage 6 | W&B DPO loss curve |
@@ -393,7 +380,7 @@ Captured at each pipeline stage as proof of a working end-to-end run.
 
 ### Stage 1 — Data Curation
 
-Source mix breakdown from `blend_stats.json` — confirming the 70/20/10 Wikipedia / Common Crawl / code split.
+Source mix breakdown from `blend_stats.json` — confirming the 55/25/20 Common Crawl / Wikipedia / code split.
 
 ![Blend stats](docs/screenshots/01_blend_stats.png)
 
@@ -427,7 +414,7 @@ Models are evaluated on standard benchmarks via `lm-evaluation-harness`:
 | ARC-Easy / ARC-Challenge | Science QA |
 | MMLU | Broad knowledge |
 | TruthfulQA | Factual accuracy |
-| HumanEval | Code generation |
+| HumanEval | Python code generation |
 
 ---
 
@@ -435,30 +422,31 @@ Models are evaluated on standard benchmarks via `lm-evaluation-harness`:
 
 **Why from scratch?** Starting from an existing checkpoint is the right production choice. We start from scratch deliberately — it exercises every stage of the pipeline and provides full visibility into how data quality and tokenizer design interact with training dynamics.
 
-**Why a custom tokenizer?** A tokenizer trained on your specific data mix encodes domain patterns more efficiently. Special tokens (`<|user|>`, `<|assistant|>`, `<|code|>`, `<|endofturn|>`) are baked in from the start, giving the model a clean chat template without retrofitting.
+**Why a custom tokenizer?** A tokenizer trained on your specific data mix encodes domain patterns more efficiently. Special tokens (`<|system|>`, `<|user|>`, `<|assistant|>`, `<|code|>`, `<|endofturn|>` and more) are baked in from the start with a Jinja2 chat template, giving the model a clean and consistent format across pretraining, SFT, DPO, and inference.
 
-**Why GQA over MHA?** At inference time, KV cache is the primary memory bottleneck. GQA reduces KV heads from 12 to 4 (125m) — a 3x reduction in KV memory with negligible quality loss. Directly improves throughput in vLLM.
+**Why GQA over MHA?** At inference time, KV cache is the primary memory bottleneck. GQA reduces KV heads from 12 to 4 (125m) — a 3× reduction in KV memory with negligible quality loss. Directly improves throughput in vLLM.
 
 **Why DPO over PPO?** At small model scale, PPO's actor-critic setup requires multiple models simultaneously and is sensitive to reward scaling. DPO achieves comparable alignment with a simpler training loop and no separate reward model.
 
 **Why sequential SFT (chat → code)?** Sequential fine-tuning produces independently evaluable checkpoints at each stage, making regressions immediately visible. The code SFT uses a lower learning rate to reduce catastrophic forgetting of chat capability.
 
-**Why vLLM for serving?** PagedAttention enables continuous batching and efficient KV cache management. The OpenAI-compatible API means any client built against the OpenAI SDK works out of the box — no custom client code.
+**Why Python-only for code?** CodeSearchNet's Go and Rust corpora are thin, and including weak language coverage adds noise without meaningful benefit. Python has the strongest coverage, the highest quality docstrings, and the best downstream evaluation benchmarks (HumanEval). A focused 20% Python corpus outperforms a diluted multi-language mix at this scale.
 
-**Why datatrove for dedup instead of datasketch?** datasketch's `MinHashLSH` is in-memory — at 350m scale it requires ~32GB RAM, at 1b it requires ~85GB and cannot fit on a single instance. datatrove's disk-based pipeline uses a sort-based approach where RAM usage is bounded by shard size, not corpus size. Same approach used by FineWeb at trillion-token scale.
+**Why vLLM for serving?** PagedAttention enables continuous batching and efficient KV cache management. The OpenAI-compatible API means any client built against the OpenAI SDK works out of the box.
+
+**Why datatrove for dedup instead of datasketch?** datasketch's `MinHashLSH` is in-memory — at 350m scale it requires ~32GB RAM. datatrove's disk-based pipeline uses a sort-based approach where RAM usage is bounded by shard size, not corpus size. Same approach used by FineWeb at trillion-token scale.
 
 **Why HTTPS for Common Crawl instead of S3?** Direct S3 access to the `commoncrawl` bucket fails on EC2 instances with IAM roles attached — the instance role credentials are rejected by the bucket policy. HTTPS via `data.commoncrawl.org` works reliably regardless of instance credentials.
 
-**Why fasttext for language detection instead of langdetect?** Language detection runs on every document in the Common Crawl pipeline — at 125m scale that is tens of millions of HTML pages. `langdetect` is pure Python and adds ~5–10ms per document, which compounds to 50–100+ hours of wall time on a single instance. fasttext's language identification model (`lid.176.ftz`) is C-backed, covers 176 languages, and runs ~1000x faster with equivalent accuracy. The model file is ~1MB and is downloaded once via `make download-fasttext-model`.
+**Why fasttext for language detection?** Language detection runs on every Common Crawl document — tens of millions of pages. `langdetect` is pure Python and adds ~5–10ms per document. fasttext's `lid.176.ftz` model is C-backed, covers 176 languages, and runs ~1000× faster with equivalent accuracy.
 
 ---
 
 ## Production Serving
 
-The `serve/manifests/` directory contains Kubernetes manifests deployed via [ai-infra](https://github.com/tohio/ai-infra) using ArgoCD. The vLLM server exposes an OpenAI-compatible REST API and a Prometheus `/metrics` endpoint scraped by the cluster monitoring stack.
+The `serve/manifests/` directory contains Kubernetes manifests deployed via [ai-infra](https://github.com/tohio/ai-infra) using ArgoCD. The vLLM server exposes an OpenAI-compatible REST API:
 
 ```bash
-# Query the model via OpenAI-compatible API
 curl http://slm-service:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
@@ -474,9 +462,9 @@ curl http://slm-service:8000/v1/chat/completions \
 This project is scoped as a complete end-to-end training pipeline and demonstration. In a larger production system:
 
 - **Data scale** — the curation pipeline would run on a distributed compute cluster over petabyte-scale crawl data rather than a single CPU instance.
-- **Training scale** — multi-node training with FSDP or tensor parallelism across 8+ GPUs for the 1B model.
+- **Training scale** — multi-node training with FSDP across 8+ nodes for the 1B model and beyond.
 - **Continual learning** — a data flywheel feeding new curated data back into periodic pretraining runs.
-- **Reward modelling** — a trained reward model enabling PPO or online DPO for more sophisticated alignment.
+- **Reward modelling** — a trained reward model enabling online DPO for more sophisticated alignment.
 - **Observability** — per-request latency, token throughput, and generation quality metrics surfaced in Grafana.
 
 ---
