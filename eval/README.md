@@ -13,7 +13,7 @@ Benchmark evaluation using `lm-evaluation-harness`. Evaluates trained SLM checkp
 | ARC-Challenge | `arc_challenge` | `acc_norm` | 25 | Science QA (hard) |
 | MMLU | `mmlu` | `acc` | 5 | Broad knowledge (57 subjects) |
 | TruthfulQA | `truthfulqa_mc2` | `acc` | 0 | Factual accuracy |
-| HumanEval | `humaneval` | `pass@1` | 0 | Code generation |
+| HumanEval | `humaneval` | `pass@1` | 0 | Python code generation |
 
 ---
 
@@ -35,9 +35,12 @@ python eval/eval.py --model results/slm-125m-dpo/final --tasks hellaswag,arc_eas
 # Limit examples (smoke test)
 python eval/eval.py --model results/slm-125m-dpo/final --tasks quick --limit 100
 
+# Override few-shot count for all tasks
+python eval/eval.py --model results/slm-125m-dpo/final --num-fewshot 0
+
 # Compare base vs aligned
-python eval/eval.py --model results/slm-125m/final --tasks all
-python eval/eval.py --model results/slm-125m-dpo/final --tasks all
+python eval/eval.py --model results/slm-125m/final       --tasks all
+python eval/eval.py --model results/slm-125m-dpo/final   --tasks all
 ```
 
 ---
@@ -49,18 +52,26 @@ Results are saved to `results/eval/<model_name>/eval_<timestamp>.json`:
 ```
 results/eval/
 ├── slm-125m/
-│   └── eval_20240601_120000.json
-├── slm-125m-chat/
-│   └── eval_20240601_130000.json
+│   └── eval_20260415_120000.json
+├── slm-125m-chat-code/
+│   └── eval_20260415_130000.json
 └── slm-125m-dpo/
-    └── eval_20240601_140000.json
+    └── eval_20260415_140000.json
 ```
+
+The `export.py` script reads the most recent result file for the `slm-{size}-dpo` model and embeds the scores in the Hub model card automatically. Run `make eval` before `make export-chat`.
+
+---
+
+## Tokenizer
+
+The evaluator looks for the tokenizer at `<model_path>/tokenizer/` — the subdirectory written by `train.py`, `train_sft.py`, and `train_dpo.py`. If that directory is missing, it falls back to the model root. A clear error is raised if `tokenizer_config.json` cannot be found in either location.
 
 ---
 
 ## Expected Performance
 
-Approximate expected scores at convergence — **these are rough targets, not guarantees**:
+Approximate expected scores at convergence — **rough targets, not guarantees**:
 
 | Benchmark | Random | GPT-2 (117M) | slm-125m target |
 |---|---|---|---|

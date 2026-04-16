@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: slm-hf-cache
+  namespace: inference
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      # 125m: ~500MB, 350m: ~1.5GB, 1b: ~4GB
+      # 20Gi gives comfortable headroom for all three variants plus tokenizer cache
+      storage: 20Gi
+  # Remove storageClassName to use the cluster default storage class.
+  # Set explicitly if your cluster requires a specific class (e.g. gp3, ssd).
+  # storageClassName: gp3

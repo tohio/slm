@@ -119,7 +119,11 @@ slm/
 │   └── generate.py               Batch text generation
 │
 ├── serve/                        Stage 10: production serving
-│   ├── manifests/                Kubernetes deployment, service, HPA
+│   ├── manifests/
+│   │   ├── deployment.yaml       vLLM deployment (1 GPU, pinned image version)
+│   │   ├── service.yaml          ClusterIP service on port 8000
+│   │   ├── hpa.yaml              HPA — scales 1–4 replicas on vLLM request queue depth
+│   │   └── pvc.yaml              PersistentVolumeClaim for HuggingFace model cache
 │   └── serve.sh                  Local server launch script
 │
 ├── notebooks/                    Exploratory analysis — one per pipeline stage
@@ -246,7 +250,8 @@ make eval-mini
 
 # ── Step 4: Full training ─────────────────────────────────────────────────────
 # Before running, update gradient_accumulation_steps and max_steps in
-# pretrain/configs/gpt_125m.yaml, aligment/configs/dpo_125m.yal and finetune/configs/sft_*_125m.yaml for your GPU count.
+# pretrain/configs/gpt_125m.yaml, aligment/configs/dpo_125m.yal, 
+# finetune/configs/sft_chat_125m.yaml, finetune/configs/sft_code_125m.yaml for your GPU count.
 # See pretrain/README.md — Multi-GPU Config Scaling for exact values.
 make accelerate-config-single.        # Use make accelerate-config-multi GPUS=x for multi gpu
 make pretrain  SIZE=125m GPUS=1       # Stage 4b: pretrain from scratch

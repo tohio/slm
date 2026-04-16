@@ -11,9 +11,43 @@ spec:
   minReplicas: 1
   maxReplicas: 4
   metrics:
-    - type: Resource
-      resource:
-        name: cpu
+    # Scale on vLLM's running request queue depth via Prometheus adapter.
+    # CPU utilization is not a useful signal for GPU inference workloads —
+    # vLLM is GPU-bound and CPU stays low even when the GPU is saturated.
+    #
+    # Prerequisite: prometheus-adapter must be installed and configured to
+    # expose vLLM metrics. vLLM serves Prometheus metrics at /metrics.
+    # The metric vllm:num_requests_running is the number of requests
+    # currently being processed — a direct proxy for GPU load.
+    #
+    # If prometheus-adapter is not available, use the CPU fallback below
+    # and accept that autoscaling will be reactive rather than proactive.
+    - type: Pods
+      pods:
+        metric:
+          name: vllm:num_requests_running
         target:
-          type: Utilization
-          averageUtilization: 70
+          type: AverageValue
+          # Scale up when average running requests per pod exceeds 8.
+          # Tune based on observed latency at your target SLA.
+          averageValue: "8"
+
+  # ── CPU fallback ────────────────────────────────────────────────────────────
+  # Uncomment if prometheus-adapter is not available. Note: CPU-based scaling
+  # is a poor proxy for GPU inference load and will react slowly or not at all
+  # under typical GPU-saturated workloads.
+  #
+  # - type: Resource
+  #   resource:
+  #     name: cpu
+  #     target:
+  #       type: Utilization
+  #       averageUtilization: 70
+
+  behavior:
+    scaleUp:
+      # Wait 60s before scaling up — avoids thrashing on burst traffic
+      stabilizationWindowSeconds: 60
+    scaleDown:
+      # Wait 5 minutes before scaling down — avoids premature scale-down
+      stabilizationWindowSeconds: 300

@@ -4,15 +4,21 @@ eval/eval.py
 Benchmark evaluation using lm-evaluation-harness.
 
 Evaluates a trained SLM checkpoint on standard LLM benchmarks:
-    - HellaSwag    — commonsense reasoning
-    - ARC-Easy     — science QA (easy)
+    - HellaSwag     — commonsense reasoning
+    - ARC-Easy      — science QA (easy)
     - ARC-Challenge — science QA (hard)
-    - MMLU         — broad knowledge (57 subjects)
-    - TruthfulQA   — factual accuracy
-    - HumanEval    — code generation (pass@1)
+    - MMLU          — broad knowledge (57 subjects)
+    - TruthfulQA    — factual accuracy
+    - HumanEval     — code generation (pass@1)
 
-Results are written to eval/results/<model_name>/ as JSON
+Results are written to results/eval/<model_name>/ as JSON
 and printed as a formatted table.
+
+Tokenizer:
+    The tokenizer is expected at <model_path>/tokenizer/ — the subdirectory
+    written by train.py, train_sft.py, and train_dpo.py. The path is passed
+    explicitly to HFLM so AutoTokenizer does not need to find it at the
+    model root.
 
 Usage:
     python eval/eval.py --model results/slm-125m-dpo/final
@@ -25,8 +31,8 @@ import json
 import logging
 import os
 import sys
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -47,38 +53,38 @@ EVAL_RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", "results")) / "eval"
 
 BENCHMARKS = {
     "hellaswag": {
-        "task": "hellaswag",
-        "metric": "acc_norm",
+        "task":        "hellaswag",
+        "metric":      "acc_norm",
         "num_fewshot": 10,
         "description": "Commonsense reasoning",
     },
     "arc_easy": {
-        "task": "arc_easy",
-        "metric": "acc_norm",
+        "task":        "arc_easy",
+        "metric":      "acc_norm",
         "num_fewshot": 25,
         "description": "Science QA (easy)",
     },
     "arc_challenge": {
-        "task": "arc_challenge",
-        "metric": "acc_norm",
+        "task":        "arc_challenge",
+        "metric":      "acc_norm",
         "num_fewshot": 25,
         "description": "Science QA (challenge)",
     },
     "mmlu": {
-        "task": "mmlu",
-        "metric": "acc",
+        "task":        "mmlu",
+        "metric":      "acc",
         "num_fewshot": 5,
         "description": "Broad knowledge (57 subjects)",
     },
     "truthfulqa": {
-        "task": "truthfulqa_mc2",
-        "metric": "acc",
+        "task":        "truthfulqa_mc2",
+        "metric":      "acc",
         "num_fewshot": 0,
         "description": "Factual accuracy",
     },
     "humaneval": {
-        "task": "humaneval",
-        "metric": "pass@1,create_test",
+        "task":        "humaneval",
+        "metric":      "pass@1,create_test",
         "num_fewshot": 0,
         "description": "Code generation",
     },
@@ -86,6 +92,38 @@ BENCHMARKS = {
 
 ALL_TASKS   = list(BENCHMARKS.keys())
 QUICK_TASKS = ["hellaswag", "arc_easy", "arc_challenge"]
+
+
+def resolve_tokenizer_path(model_path: Path) -> Path:
+    """
+    Resolve the tokenizer directory for a given model checkpoint.
+
+    Checks for a tokenizer/ subdirectory first — this is where train.py,
+    train_sft.py, and train_dpo.py copy the tokenizer alongside weights.
+    Falls back to the model directory root for Hub-style checkpoints where
+    the tokenizer files live alongside the model weights.
+
+    Args:
+        model_path: Path to the model checkpoint directory.
+
+    Returns:
+        Path to the tokenizer directory.
+
+    Raises:
+        FileNotFoundError: If no tokenizer_config.json can be found.
+    """
+    candidates = [
+        model_path / "tokenizer",
+        model_path,
+    ]
+    for candidate in candidates:
+        if (candidate / "tokenizer_config.json").exists():
+            return candidate
+
+    raise FileNotFoundError(
+        f"tokenizer_config.json not found in {model_path} or {model_path / 'tokenizer'}.\n"
+        f"Ensure the tokenizer was copied during training: make tokenizer-download"
+    )
 
 
 def run_evaluation(
@@ -101,6 +139,13 @@ def run_evaluation(
 
     Registers SLMConfig and SLMForCausalLM with the AutoModel classes
     before creating the HFLM wrapper so lm-eval can load the checkpoint.
+
+    Passes the tokenizer path explicitly to HFLM — the tokenizer lives in
+    a tokenizer/ subdirectory, not at the model root, so AutoTokenizer
+    cannot find it automatically.
+
+    Passes num_fewshot as a per-task dict so each benchmark uses its
+    canonical few-shot count regardless of what other tasks are requested.
     """
     try:
         from lm_eval import evaluator
@@ -112,19 +157,30 @@ def run_evaluation(
     from model import SLMConfig, SLMForCausalLM
 
     # Register custom model so AutoModelForCausalLM (used internally by HFLM)
-    # can load the checkpoint without raising "Unrecognized configuration class".
+    # can load the checkpoint without "Unrecognized configuration class".
     AutoConfig.register("slm", SLMConfig)
     AutoModelForCausalLM.register(SLMConfig, SLMForCausalLM)
 
+    # Resolve tokenizer — lives in tokenizer/ subdirectory of the checkpoint
+    tokenizer_path = resolve_tokenizer_path(model_path)
     log.info(f"Loading model from {model_path}...")
+    log.info(f"Tokenizer from {tokenizer_path}")
+
     lm = HFLM(
         pretrained=str(model_path),
+        tokenizer=str(tokenizer_path),  # explicit path — not auto-detected
         device=device,
         batch_size=batch_size,
     )
 
-    task_names  = []
-    fewshot_map = {}
+    # Build task list and per-task fewshot map.
+    # Passing num_fewshot as a dict ensures each task uses its canonical
+    # few-shot count — passing a single int applies it to all tasks which
+    # is wrong when running a mix of benchmarks with different fewshot counts
+    # (e.g. HellaSwag=10, MMLU=5, TruthfulQA=0).
+    task_names:  list[str]      = []
+    fewshot_map: dict[str, int] = {}
+
     for task_key in tasks:
         if task_key not in BENCHMARKS:
             log.warning(f"Unknown task: {task_key} — skipping")
@@ -137,12 +193,16 @@ def run_evaluation(
             else benchmark["num_fewshot"]
         )
 
+    if not task_names:
+        raise ValueError("No valid tasks specified.")
+
     log.info(f"Evaluating on: {task_names}")
+    log.info(f"Few-shot counts: {fewshot_map}")
 
     results = evaluator.simple_evaluate(
         model=lm,
         tasks=task_names,
-        num_fewshot=list(fewshot_map.values())[0] if len(set(fewshot_map.values())) == 1 else None,
+        num_fewshot=fewshot_map,   # per-task dict — not a single int
         batch_size=batch_size,
         device=device,
         limit=limit,
@@ -221,17 +281,27 @@ def save_results(results: dict, model_path: Path, tasks: list[str]) -> Path:
 
 def main():
     # HumanEval executes model-generated code — required by the code_eval metric.
-    # Set before any lm-eval imports to avoid the ValueError at task load time.
+    # Set before any lm-eval imports to avoid ValueError at task load time.
     os.environ["HF_ALLOW_CODE_EVAL"] = "1"
 
     parser = argparse.ArgumentParser(description="SLM Benchmark Evaluation")
-    parser.add_argument("--model",      type=Path, required=True, help="Path to model checkpoint")
-    parser.add_argument("--tasks",      type=str,  default="all",
-                        help=f"Comma-separated tasks or 'all' or 'quick'. Available: {', '.join(ALL_TASKS)}")
-    parser.add_argument("--batch-size", type=int,  default=8)
-    parser.add_argument("--num-fewshot",type=int,  default=None)
-    parser.add_argument("--device",     type=str,  default="cuda")
-    parser.add_argument("--limit",      type=int,  default=None,
+    parser.add_argument(
+        "--model",
+        type=Path,
+        required=True,
+        help="Path to model checkpoint directory",
+    )
+    parser.add_argument(
+        "--tasks",
+        type=str,
+        default="all",
+        help=f"Comma-separated tasks, 'all', or 'quick'. Available: {', '.join(ALL_TASKS)}",
+    )
+    parser.add_argument("--batch-size",  type=int,  default=8)
+    parser.add_argument("--num-fewshot", type=int,  default=None,
+                        help="Override few-shot count for all tasks")
+    parser.add_argument("--device",      type=str,  default="cuda")
+    parser.add_argument("--limit",       type=int,  default=None,
                         help="Limit examples per task (for quick testing)")
     args = parser.parse_args()
 

@@ -20,7 +20,9 @@ spec:
     spec:
       containers:
         - name: vllm
-          image: vllm/vllm-openai:latest
+          # Pin to a specific version — never use :latest in production.
+          # Check https://github.com/vllm-project/vllm/releases for latest stable.
+          image: vllm/vllm-openai:v0.6.3
           args:
             - --model
             - tohio/slm-125m
@@ -36,6 +38,9 @@ spec:
             - "0.90"
             - --served-model-name
             - slm-125m
+            # --trust-remote-code is required because SLMConfig and SLMForCausalLM
+            # are custom classes not known to the base transformers library.
+            # The model is loaded from our own Hub repo — not arbitrary third-party code.
             - --trust-remote-code
           ports:
             - containerPort: 8000
@@ -74,7 +79,12 @@ spec:
               mountPath: /root/.cache/huggingface
       volumes:
         - name: hf-cache
-          emptyDir: {}
+          # PersistentVolumeClaim — model weights are cached across pod restarts.
+          # Without this, the model re-downloads from the Hub on every restart,
+          # adding significant cold start time especially for 350m and 1b variants.
+          # Create the PVC before applying: kubectl apply -f pvc.yaml
+          persistentVolumeClaim:
+            claimName: slm-hf-cache
       tolerations:
         - key: nvidia.com/gpu
           operator: Exists
