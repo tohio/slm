@@ -3,10 +3,18 @@ finetune/data/prepare_sft.py
 -----------------------------
 Download and format SFT datasets for chat and code fine-tuning.
 
-Formats all data into the SLM chat template:
-    <|system|>{system}<|endofturn|>
-    <|user|>{user}<|endofturn|>
-    <|assistant|>{assistant}<|endofturn|>
+Formats all data into the SLM conversation format:
+    [
+        {"role": "system",    "content": "..."},
+        {"role": "user",      "content": "..."},
+        {"role": "assistant", "content": "..."}
+    ]
+
+The "text" field is intentionally omitted. train_sft.py applies
+tokenizer.apply_chat_template() at training time via a formatting_func
+passed to SFTTrainer — the same code path used during inference.
+Pre-formatting with a manual formatter would bypass the tokenizer's
+baked-in chat template and produce the wrong training format.
 
 Stage 1 — Chat SFT:
     Dataset: teknium/OpenHermes-2.5
@@ -38,6 +46,7 @@ import argparse
 import json
 import logging
 import os
+import random
 import sys
 from pathlib import Path
 
@@ -55,36 +64,11 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
-SFT_DIR = DATA_DIR / "sft"
+SFT_DIR  = DATA_DIR / "sft"
 
-# Default system prompt
+# Default system prompts
 DEFAULT_SYSTEM = "You are a helpful, harmless, and honest assistant."
-CODE_SYSTEM = "You are an expert programming assistant. Write clean, efficient, and well-documented code."
-
-
-# ── Chat template ──────────────────────────────────────────────────────────────
-
-def format_conversation(messages: list[dict]) -> str:
-    """
-    Format a list of messages into the SLM chat template string.
-
-    Args:
-        messages: List of {"role": ..., "content": ...} dicts.
-
-    Returns:
-        Formatted chat string with special tokens.
-    """
-    parts = []
-    for msg in messages:
-        role = msg["role"]
-        content = msg["content"].strip()
-        if role == "system":
-            parts.append(f"<|system|>{content}<|endofturn|>")
-        elif role == "user":
-            parts.append(f"<|user|>{content}<|endofturn|>")
-        elif role == "assistant":
-            parts.append(f"<|assistant|>{content}<|endofturn|>")
-    return "".join(parts)
+CODE_SYSTEM    = "You are an expert programming assistant. Write clean, efficient, and well-documented code."
 
 
 def write_jsonl(records: list[dict], path: Path) -> None:
@@ -109,9 +93,9 @@ def prepare_chat(val_fraction: float = 0.02) -> None:
     """
     from datasets import load_dataset
 
-    out_dir = SFT_DIR / "chat"
+    out_dir    = SFT_DIR / "chat"
     train_path = out_dir / "train.jsonl"
-    val_path = out_dir / "val.jsonl"
+    val_path   = out_dir / "val.jsonl"
 
     if train_path.exists() and val_path.exists():
         log.info(f"Chat SFT data already exists at {out_dir}")
@@ -130,20 +114,19 @@ def prepare_chat(val_fraction: float = 0.02) -> None:
             skipped += 1
             continue
 
-        # Convert from OpenHermes format (role=human/gpt) to SLM format
         messages = []
 
-        # Add system prompt if present — use `or ""` to handle None values
+        # Add system prompt — use `or ""` to handle None values
         system = (example.get("system_prompt") or "").strip()
-        if system:
-            messages.append({"role": "system", "content": system})
-        else:
-            messages.append({"role": "system", "content": DEFAULT_SYSTEM})
+        messages.append({
+            "role": "system",
+            "content": system if system else DEFAULT_SYSTEM,
+        })
 
         valid = True
         for turn in conversations:
             # Use `or ""` to handle None values in role and content fields
-            role = (turn.get("from") or turn.get("role") or "").lower()
+            role    = (turn.get("from") or turn.get("role") or "").lower()
             content = (turn.get("value") or turn.get("content") or "").strip()
 
             if not content:
@@ -166,7 +149,6 @@ def prepare_chat(val_fraction: float = 0.02) -> None:
 
         records.append({
             "conversations": messages,
-            "text": format_conversation(messages),
             "source": "openhermes",
         })
 
@@ -174,10 +156,9 @@ def prepare_chat(val_fraction: float = 0.02) -> None:
 
     # Split
     n_val = max(1000, int(len(records) * val_fraction))
-    import random
     random.seed(42)
     random.shuffle(records)
-    val_records = records[:n_val]
+    val_records   = records[:n_val]
     train_records = records[n_val:]
 
     write_jsonl(train_records, train_path)
@@ -198,9 +179,9 @@ def prepare_code(val_fraction: float = 0.05) -> None:
     """
     from datasets import load_dataset
 
-    out_dir = SFT_DIR / "code"
+    out_dir    = SFT_DIR / "code"
     train_path = out_dir / "train.jsonl"
-    val_path = out_dir / "val.jsonl"
+    val_path   = out_dir / "val.jsonl"
 
     if train_path.exists() and val_path.exists():
         log.info(f"Code SFT data already exists at {out_dir}")
@@ -216,7 +197,7 @@ def prepare_code(val_fraction: float = 0.05) -> None:
     for example in dataset:
         # Use `or ""` to handle None values
         instruction = (example.get("problem") or "").strip()
-        solution = (example.get("solution") or "").strip()
+        solution    = (example.get("solution") or "").strip()
 
         if not instruction or not solution:
             skipped += 1
@@ -232,14 +213,13 @@ def prepare_code(val_fraction: float = 0.05) -> None:
             assistant_content = solution
 
         messages = [
-            {"role": "system", "content": CODE_SYSTEM},
-            {"role": "user", "content": instruction},
+            {"role": "system",    "content": CODE_SYSTEM},
+            {"role": "user",      "content": instruction},
             {"role": "assistant", "content": assistant_content},
         ]
 
         records.append({
             "conversations": messages,
-            "text": format_conversation(messages),
             "source": "magicoder",
         })
 
@@ -247,27 +227,15 @@ def prepare_code(val_fraction: float = 0.05) -> None:
 
     # Split
     n_val = max(500, int(len(records) * val_fraction))
-    import random
     random.seed(42)
     random.shuffle(records)
-    val_records = records[:n_val]
+    val_records   = records[:n_val]
     train_records = records[n_val:]
 
     write_jsonl(train_records, train_path)
     write_jsonl(val_records, val_path)
 
     log.info(f"Code SFT: {len(train_records):,} train, {len(val_records):,} val")
-
-
-def _detect_language(code: str) -> str:
-    """Simple heuristic to detect programming language."""
-    if "def " in code or "import " in code or "print(" in code:
-        return "python"
-    if "function " in code or "const " in code or "let " in code:
-        return "javascript"
-    if "public class " in code or "void " in code:
-        return "java"
-    return "python"
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────

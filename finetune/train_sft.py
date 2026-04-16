@@ -12,8 +12,14 @@ the code SFT uses a lower LR to reduce catastrophic forgetting of
 chat capability learned in stage 1.
 
 Answer-only loss: loss is computed only on assistant response tokens,
-not on system/user prompt tokens. This focuses the gradient signal
-on what the model should generate, not what it reads.
+not on system/user prompt tokens. Implemented via
+DataCollatorForCompletionOnlyLM with response_template="<|assistant|>".
+This focuses the gradient signal on what the model should generate,
+not what it reads.
+
+Chat template: formatting uses tokenizer.apply_chat_template() via a
+formatting_func passed to SFTTrainer — the same code path as inference.
+The "text" field from prepare_sft.py is ignored.
 
 Usage:
     # Chat SFT
@@ -33,6 +39,7 @@ import argparse
 import json
 import logging
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -71,31 +78,53 @@ def load_dataset_from_jsonl(path: Path):
 
 def load_tokenizer(tokenizer_path: Path):
     """
-    Load the custom BPE tokenizer trained with the `tokenizers` library.
+    Load the HuggingFace tokenizer saved by train_tokenizer.py.
 
-    PreTrainedTokenizerFast.from_pretrained() fails when tokenizer_config.json
-    references a custom tokenizer_class (TokenizersBackend) that transformers
-    doesn't know about. Loading directly from tokenizer.json via the tokenizers
-    library and wrapping in PreTrainedTokenizerFast bypasses this lookup.
+    Uses PreTrainedTokenizerFast.from_pretrained() to load the full
+    tokenizer config including the baked-in chat_template. Do not
+    reconstruct from tokenizer.json directly — that bypasses
+    tokenizer_config.json and loses the chat template, causing
+    apply_chat_template() to fall back to a generic format.
     """
-    from tokenizers import Tokenizer as HFTokenizer
     from transformers import PreTrainedTokenizerFast
 
-    tokenizer_file = tokenizer_path / "tokenizer.json"
-    if not tokenizer_file.exists():
-        raise FileNotFoundError(f"tokenizer.json not found at {tokenizer_path}")
+    if not (tokenizer_path / "tokenizer_config.json").exists():
+        raise FileNotFoundError(
+            f"tokenizer_config.json not found at {tokenizer_path}. "
+            f"Retrain the tokenizer: python tokenizer/train_tokenizer.py"
+        )
 
-    _tok = HFTokenizer.from_file(str(tokenizer_file))
-    tokenizer = PreTrainedTokenizerFast(tokenizer_object=_tok)
+    tokenizer = PreTrainedTokenizerFast.from_pretrained(str(tokenizer_path))
 
-    tokenizer.pad_token    = "<PAD>"
-    tokenizer.pad_token_id = 0
-    tokenizer.eos_token    = "<EOS>"
-    tokenizer.eos_token_id = 3
-    tokenizer.bos_token    = "<BOS>"
-    tokenizer.bos_token_id = 2
+    if not getattr(tokenizer, "chat_template", None):
+        raise ValueError(
+            f"Tokenizer at {tokenizer_path} has no chat_template. "
+            f"Retrain the tokenizer: python tokenizer/train_tokenizer.py"
+        )
 
     return tokenizer
+
+
+def make_formatting_func(tokenizer):
+    """
+    Return a formatting function for SFTTrainer that applies the
+    tokenizer's baked-in chat template to each example.
+
+    SFTTrainer calls this function on each example before tokenization.
+    Using apply_chat_template() here ensures training format matches
+    inference format exactly — the same code path used in chat.py and
+    generate.py.
+
+    The "text" field from prepare_sft.py is ignored — formatting always
+    goes through the tokenizer's chat template.
+    """
+    def formatting_func(example):
+        return tokenizer.apply_chat_template(
+            example["conversations"],
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+    return formatting_func
 
 
 def build_sft_args(cfg: dict, output_dir: Path):
@@ -104,7 +133,8 @@ def build_sft_args(cfg: dict, output_dir: Path):
     round-trip which can include keys SFTConfig doesn't accept.
 
     SFTConfig extends TrainingArguments and adds SFT-specific fields:
-    dataset_text_field, max_seq_length, packing.
+    max_seq_length, packing. dataset_text_field is intentionally omitted —
+    formatting is handled by the formatting_func passed to SFTTrainer.
     """
     from trl import SFTConfig
 
@@ -147,7 +177,7 @@ def build_sft_args(cfg: dict, output_dir: Path):
         seed=train_cfg.get("seed", 42),
         gradient_checkpointing=train_cfg.get("gradient_checkpointing", False),
         # SFT-specific fields
-        dataset_text_field="text",
+        # dataset_text_field intentionally omitted — formatting_func handles it
         max_length=cfg["model"].get("max_seq_length", 2048),
         packing=cfg["data"].get("packing", False),
     )
@@ -155,15 +185,14 @@ def build_sft_args(cfg: dict, output_dir: Path):
 
 def main():
     parser = argparse.ArgumentParser(description="SLM Supervised Fine-Tuning")
-    parser.add_argument("--config", type=Path, required=True, help="Path to SFT config YAML")
-    parser.add_argument("--base-model", type=Path, default=None, help="Override base model path")
-    parser.add_argument("--resume", action="store_true", help="Resume from latest checkpoint")
+    parser.add_argument("--config",     type=Path, required=True, help="Path to SFT config YAML")
+    parser.add_argument("--base-model", type=Path, default=None,  help="Override base model path")
+    parser.add_argument("--resume",     action="store_true",       help="Resume from latest checkpoint")
     args = parser.parse_args()
 
-    cfg = load_config(args.config)
+    cfg             = load_config(args.config)
     model_name      = cfg["name"]
     output_dir      = RESULTS_DIR / model_name
-    # Expand $DATA_DIR/$RESULTS_DIR env vars in config paths
     base_model_path = args.base_model or Path(
         os.path.expandvars(cfg["model"]["base_model_path"])
     )
@@ -182,19 +211,18 @@ def main():
     AutoConfig.register("slm", SLMConfig)
 
     log.info(f"Loading base model from {base_model_path}...")
-    model = SLMForCausalLM.from_pretrained(str(base_model_path))
+    model    = SLMForCausalLM.from_pretrained(str(base_model_path))
     n_params = sum(p.numel() for p in model.parameters())
     log.info(f"Parameters: {n_params:,} ({n_params / 1e6:.1f}M)")
 
     # ── Tokenizer ─────────────────────────────────────────────────────────────
-    # Load directly from tokenizers library — from_pretrained() fails because
-    # tokenizer_config.json references TokenizersBackend, an unknown class.
-    # Fall back to DATA_DIR/tokenizer if tokenizer.json is missing from the
-    # model directory (e.g. if pretrain ran before tokenizer was downloaded).
+    # Use from_pretrained() so tokenizer_config.json is loaded — this is what
+    # gives us the baked-in chat_template for apply_chat_template().
+    # Fall back to DATA_DIR/tokenizer if not found in the model directory.
     tokenizer_path = base_model_path / "tokenizer"
-    if not (tokenizer_path / "tokenizer.json").exists():
+    if not (tokenizer_path / "tokenizer_config.json").exists():
         log.warning(
-            f"tokenizer.json not found at {tokenizer_path} — "
+            f"tokenizer_config.json not found at {tokenizer_path} — "
             f"falling back to {DATA_DIR / 'tokenizer'}"
         )
         tokenizer_path = DATA_DIR / "tokenizer"
@@ -205,7 +233,6 @@ def main():
 
     # ── Dataset ───────────────────────────────────────────────────────────────
     data_cfg   = cfg["data"]
-    # Expand $DATA_DIR env var in dataset paths
     train_path = Path(os.path.expandvars(data_cfg["train_path"]))
     val_path   = Path(os.path.expandvars(data_cfg["val_path"]))
 
@@ -228,6 +255,19 @@ def main():
     log.info(f"Train: {len(train_dataset):,} examples")
     log.info(f"Val:   {len(val_dataset):,} examples")
 
+    # ── Answer-only loss masking ───────────────────────────────────────────────
+    # Mask loss on system and user tokens — only compute loss on assistant
+    # response tokens. This focuses gradient signal on generation, not reading.
+    # response_template must match the token(s) that precede every assistant
+    # response in the formatted output from apply_chat_template().
+    from trl import DataCollatorForCompletionOnlyLM
+
+    collator = DataCollatorForCompletionOnlyLM(
+        response_template="<|assistant|>",
+        tokenizer=tokenizer,
+    )
+    log.info("Answer-only loss masking enabled (response_template='<|assistant|>')")
+
     # ── SFT args ──────────────────────────────────────────────────────────────
     sft_args = build_sft_args(cfg, output_dir)
 
@@ -240,6 +280,8 @@ def main():
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         processing_class=tokenizer,
+        formatting_func=make_formatting_func(tokenizer),
+        data_collator=collator,
     )
 
     # ── Train ─────────────────────────────────────────────────────────────────
@@ -251,7 +293,6 @@ def main():
     final_dir = output_dir / "final"
     trainer.save_model(str(final_dir))
 
-    import shutil
     if tokenizer_path.exists() and any(tokenizer_path.iterdir()):
         shutil.copytree(tokenizer_path, final_dir / "tokenizer", dirs_exist_ok=True)
         log.info("Tokenizer copied alongside model")

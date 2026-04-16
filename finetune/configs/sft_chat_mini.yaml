@@ -7,16 +7,16 @@ model:
 
 data:
   train_path: $DATA_DIR/sft/chat/train.jsonl
-  val_path: $DATA_DIR/sft/chat/val.jsonl
+  val_path:   $DATA_DIR/sft/chat/val.jsonl
   packing: false
-  max_samples: 500       # truncate for mini validation — removes full dataset tokenization wait
+  max_samples: 500                   # truncate for mini validation
 
 training:
   epochs: 3
-  max_steps: 50               # enough to validate the training loop
+  max_steps: 50                      # enough to validate the training loop
   warmup_steps: 5
   micro_batch_size: 2
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 2     # not performance-sensitive for validation
   precision: bf16
   gradient_clip_val: 1.0
   gradient_checkpointing: false

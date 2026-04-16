@@ -7,15 +7,19 @@ model:
 
 data:
   train_path: $DATA_DIR/sft/code/train.jsonl
-  val_path: $DATA_DIR/sft/code/val.jsonl
+  val_path:   $DATA_DIR/sft/code/val.jsonl
   packing: false
 
 training:
   epochs: 3
-  max_steps: 6000
   warmup_steps: 50
   micro_batch_size: 2
-  gradient_accumulation_steps: 8
+  # Target effective batch size: 128
+  # gradient_accumulation_steps = 128 / (micro_batch_size x num_gpus)
+  #   1 GPU:  128 / (2 x 1) = 64
+  #   4 GPU:  128 / (2 x 4) = 16
+  #   8 GPU:  128 / (2 x 8) = 8
+  gradient_accumulation_steps: 16   # adjust based on your GPU count
   precision: bf16
   gradient_clip_val: 1.0
   gradient_checkpointing: false
@@ -30,7 +34,7 @@ training:
     - wandb
 
 optimizer:
-  lr: 3.0e-6
+  lr: 3.0e-6                         # lower than chat SFT — preserve chat capability
   weight_decay: 0.01
   beta1: 0.9
   beta2: 0.98

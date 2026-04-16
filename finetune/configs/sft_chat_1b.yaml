@@ -7,20 +7,24 @@ model:
 
 data:
   train_path: $DATA_DIR/sft/chat/train.jsonl
-  val_path: $DATA_DIR/sft/chat/val.jsonl
+  val_path:   $DATA_DIR/sft/chat/val.jsonl
   packing: false
 
 training:
   epochs: 3
-  max_steps: 20000
   warmup_steps: 100
   micro_batch_size: 1
-  gradient_accumulation_steps: 16   # effective global batch = 16
+  # Target effective batch size: 128
+  # gradient_accumulation_steps = 128 / (micro_batch_size x num_gpus)
+  #   1 GPU:  128 / (1 x 1)  = 128
+  #   4 GPU:  128 / (1 x 4)  = 32
+  #   8 GPU:  128 / (1 x 8)  = 16
+  gradient_accumulation_steps: 32   # adjust based on your GPU count
   precision: bf16
   gradient_clip_val: 1.0
-  gradient_checkpointing: true      # required at 1B + 4096 seq len
-  eval_steps: 200
-  save_steps: 200
+  gradient_checkpointing: true       # required at 1B + 4096 seq len
+  eval_steps: 500
+  save_steps: 500
   save_total_limit: 3
   log_steps: 10
   num_workers: 4
@@ -30,7 +34,7 @@ training:
     - wandb
 
 optimizer:
-  lr: 5.0e-6                        # lower for larger model
+  lr: 5.0e-6                         # lower for larger model
   weight_decay: 0.01
   beta1: 0.9
   beta2: 0.98
