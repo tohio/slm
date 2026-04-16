@@ -20,7 +20,7 @@ Three variants are exported per model size:
 Pushes:
     - Model weights (model.safetensors)
     - Config (config.json)
-    - Tokenizer files
+    - Tokenizer files (including chat_template from train_tokenizer.py)
     - Model card (README.md) — populated with actual parameter count,
       eval benchmark results, training details, and limitations
 
@@ -54,6 +54,11 @@ log = logging.getLogger(__name__)
 HF_USERNAME = os.environ.get("HF_USERNAME", "tohio")
 HF_TOKEN    = os.environ.get("HF_TOKEN", "")
 RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", "results"))
+
+# Import CHAT_TEMPLATE from train_tokenizer — single source of truth.
+# Do not duplicate or redefine the template here. The exported tokenizer
+# must use exactly the same template the model was trained with.
+from tokenizer.train_tokenizer import CHAT_TEMPLATE
 
 # ── Variant definitions ────────────────────────────────────────────────────────
 
@@ -129,7 +134,6 @@ def load_eval_results(size: str) -> dict:
         }[task_key]
         if task_name in raw_results:
             metric = meta["metric"]
-            # Try exact key, then with ,none suffix, then ,create_test suffix
             score = (
                 raw_results[task_name].get(metric)
                 or raw_results[task_name].get(f"{metric},none")
@@ -185,9 +189,8 @@ def generate_model_card(
     token_target  = _token_target(size)
     param_str     = f"{n_params / 1e6:.1f}M ({n_params:,} parameters)"
 
-    # HuggingFace Hub frontmatter — base_model must be a valid Hub ID or omitted
     if variant == "base":
-        base_model_yaml = ""  # omit for base variant — HF requires string or absent
+        base_model_yaml = ""
     else:
         base_model_yaml = f"base_model: {HF_USERNAME}/slm-{size}"
 
@@ -200,7 +203,7 @@ Use [`{HF_USERNAME}/slm-{size}-instruct`](https://huggingface.co/{HF_USERNAME}/s
 """,
         "instruct": f"""\
 This is the **instruct** variant — the base model supervised fine-tuned on chat and code instruction datasets.
-It follows instructions reliably and can generate code across multiple languages.
+It follows instructions reliably and can generate Python code.
 Use [`{HF_USERNAME}/slm-{size}-chat`](https://huggingface.co/{HF_USERNAME}/slm-{size}-chat) for the DPO-aligned version preferred for open-ended conversation.
 Use [`{HF_USERNAME}/slm-{size}`](https://huggingface.co/{HF_USERNAME}/slm-{size}) for the raw base model.
 """,
@@ -212,30 +215,30 @@ Use [`{HF_USERNAME}/slm-{size}`](https://huggingface.co/{HF_USERNAME}/slm-{size}
 """,
     }[variant]
 
+    # Source mix updated to 55/25/20 CC/Wikipedia/Python
     training_section = {
         "base": f"""\
 | Stage | Dataset | Size |
 |---|---|---|
-| Pretraining | Wikipedia EN + [CodeSearchNet](https://huggingface.co/datasets/code_search_net) + [Common Crawl](https://commoncrawl.org) (70/20/10) | {token_target} tokens |
+| Pretraining | Wikipedia EN (25%) + [CodeSearchNet Python](https://huggingface.co/datasets/code_search_net) (20%) + [Common Crawl](https://commoncrawl.org) (55%) | {token_target} tokens |
 """,
         "instruct": f"""\
 | Stage | Dataset | Size |
 |---|---|---|
-| Pretraining | Wikipedia EN + [CodeSearchNet](https://huggingface.co/datasets/code_search_net) + [Common Crawl](https://commoncrawl.org) (70/20/10) | {token_target} tokens |
+| Pretraining | Wikipedia EN (25%) + [CodeSearchNet Python](https://huggingface.co/datasets/code_search_net) (20%) + [Common Crawl](https://commoncrawl.org) (55%) | {token_target} tokens |
 | Chat SFT | [OpenHermes-2.5](https://huggingface.co/datasets/teknium/OpenHermes-2.5) | ~1M examples |
 | Code SFT | [Magicoder-OSS-Instruct-75K](https://huggingface.co/datasets/ise-uiuc/Magicoder-OSS-Instruct-75K) | ~75K examples |
 """,
         "chat": f"""\
 | Stage | Dataset | Size |
 |---|---|---|
-| Pretraining | Wikipedia EN + [CodeSearchNet](https://huggingface.co/datasets/code_search_net) + [Common Crawl](https://commoncrawl.org) (70/20/10) | {token_target} tokens |
+| Pretraining | Wikipedia EN (25%) + [CodeSearchNet Python](https://huggingface.co/datasets/code_search_net) (20%) + [Common Crawl](https://commoncrawl.org) (55%) | {token_target} tokens |
 | Chat SFT | [OpenHermes-2.5](https://huggingface.co/datasets/teknium/OpenHermes-2.5) | ~1M examples |
 | Code SFT | [Magicoder-OSS-Instruct-75K](https://huggingface.co/datasets/ise-uiuc/Magicoder-OSS-Instruct-75K) | ~75K examples |
 | DPO alignment | [Anthropic/hh-rlhf](https://huggingface.co/datasets/Anthropic/hh-rlhf) + [Intel/orca_dpo_pairs](https://huggingface.co/datasets/Intel/orca_dpo_pairs) + [argilla/dpo-mix-7k](https://huggingface.co/datasets/argilla/dpo-mix-7k) | ~80K pairs |
 """,
     }[variant]
 
-    # Eval section — only shown for chat variant (post-alignment eval)
     eval_section = ""
     if variant == "chat":
         eval_section = f"""
@@ -310,7 +313,11 @@ messages = [
     {{"role": "user", "content": "Explain what a transformer is."}},
 ]
 
-inputs = tokenizer.apply_chat_template(messages, return_tensors="pt")
+inputs = tokenizer.apply_chat_template(
+    messages,
+    return_tensors="pt",
+    add_generation_prompt=True,
+)
 output = model.generate(inputs, max_new_tokens=200, temperature=0.7, do_sample=True)
 print(tokenizer.decode(output[0], skip_special_tokens=True))
 ```
@@ -321,7 +328,7 @@ print(tokenizer.decode(output[0], skip_special_tokens=True))
 - **Hallucination:** Like all language models, this model can generate plausible-sounding but factually incorrect content. Outputs should not be used as a source of truth without independent verification.
 - **Safety:** DPO alignment provides basic harmlessness training but does not guarantee safe outputs in all contexts. This model has not undergone red-teaming or adversarial safety evaluation.
 - **Languages:** Training data is predominantly English. Performance on other languages will be significantly degraded.
-- **Code:** Code generation capability is limited to the languages represented in the Magicoder training set (primarily Python and JavaScript).
+- **Code:** Code generation is Python-only, reflecting the pretraining and SFT data distribution.
 
 ## Related
 
@@ -331,35 +338,41 @@ print(tokenizer.decode(output[0], skip_special_tokens=True))
 
 
 def _token_target(size: str) -> str:
-    return {"125m": "3B", "350m": "10B", "1b": "25B"}.get(size, "N/A")
+    """Token targets matching TARGET_CONFIGS in curator/scripts/curate.py."""
+    return {"125m": "5B", "350m": "15B", "1b": "30B"}.get(size, "N/A")
 
 
 # ── Tokenizer loader ──────────────────────────────────────────────────────────
 
 def load_tokenizer(tokenizer_path: Path):
     """
-    Load the custom BPE tokenizer trained with the `tokenizers` library.
+    Load the HuggingFace tokenizer saved by train_tokenizer.py.
 
-    PreTrainedTokenizerFast.from_pretrained() fails when tokenizer_config.json
-    references TokenizersBackend, an unknown class in transformers.
-    Load directly from tokenizer.json and wrap in PreTrainedTokenizerFast.
+    Loads directly via PreTrainedTokenizerFast.from_pretrained() which
+    reads the saved tokenizer_config.json — including the baked-in
+    chat_template. Do not reconstruct from tokenizer.json and re-set
+    the template manually, as that would overwrite the saved template
+    with whatever is in this file at export time rather than what was
+    used during training.
     """
-    from tokenizers import Tokenizer as HFTokenizer
     from transformers import PreTrainedTokenizerFast
 
-    tokenizer_file = tokenizer_path / "tokenizer.json"
-    if not tokenizer_file.exists():
-        raise FileNotFoundError(f"tokenizer.json not found at {tokenizer_path}")
+    if not (tokenizer_path / "tokenizer_config.json").exists():
+        raise FileNotFoundError(
+            f"HuggingFace tokenizer not found at {tokenizer_path}. "
+            f"Run: python tokenizer/train_tokenizer.py"
+        )
 
-    _tok = HFTokenizer.from_file(str(tokenizer_file))
-    tokenizer = PreTrainedTokenizerFast(tokenizer_object=_tok)
-    tokenizer.pad_token     = "<PAD>"
-    tokenizer.pad_token_id  = 0
-    tokenizer.eos_token     = "<EOS>"
-    tokenizer.eos_token_id  = 3
-    tokenizer.bos_token     = "<BOS>"
-    tokenizer.bos_token_id  = 2
-    tokenizer.chat_template = _chat_template()
+    tokenizer = PreTrainedTokenizerFast.from_pretrained(str(tokenizer_path))
+
+    # Verify the chat template was loaded correctly — fail loudly if missing
+    # rather than silently exporting a model with a broken chat template.
+    if not getattr(tokenizer, "chat_template", None):
+        raise ValueError(
+            f"Tokenizer at {tokenizer_path} has no chat_template. "
+            f"Retrain the tokenizer: python tokenizer/train_tokenizer.py"
+        )
+
     return tokenizer
 
 
@@ -408,20 +421,22 @@ def export(
     AutoConfig.register("slm", SLMConfig)
     AutoModelForCausalLM.register(SLMConfig, SLMForCausalLM)
 
-    # Load model — actual parameter count used in model card
+    # Load model
     log.info("Loading model...")
     config   = SLMConfig.from_pretrained(str(checkpoint))
     model    = SLMForCausalLM.from_pretrained(str(checkpoint))
     n_params = sum(p.numel() for p in model.parameters())
     log.info(f"Parameters: {n_params:,} ({n_params / 1e6:.1f}M)")
 
-    # Load tokenizer — use tokenizers library directly to bypass TokenizersBackend
+    # Load tokenizer — from_pretrained reads the saved tokenizer_config.json
+    # including the baked-in chat_template from train_tokenizer.py
     tokenizer_path = checkpoint / "tokenizer"
-    if not (tokenizer_path / "tokenizer.json").exists():
+    if not (tokenizer_path / "tokenizer_config.json").exists():
         tokenizer_path = Path(os.environ.get("DATA_DIR", "data")) / "tokenizer"
     tokenizer = load_tokenizer(tokenizer_path)
+    log.info(f"Tokenizer loaded from {tokenizer_path}")
 
-    # Load eval results (populated for chat variant after make eval)
+    # Load eval results
     eval_scores = load_eval_results(size) if variant == "chat" else {}
     if variant == "chat":
         if eval_scores:
@@ -449,7 +464,7 @@ def export(
         f.write(model_card)
     log.info(f"Model card written ({len(model_card):,} chars)")
 
-    # Push to Hub — safe_serialization removed from push_to_hub in transformers v5
+    # Push to Hub
     log.info(f"Pushing to {repo_id}...")
     model.push_to_hub(repo_id, token=HF_TOKEN, private=private)
     tokenizer.push_to_hub(repo_id, token=HF_TOKEN, private=private)
@@ -473,31 +488,27 @@ def _validate_model(model, tokenizer, config) -> None:
     log.info("Validating model...")
     model.eval()
 
-    prompt    = "<|system|>You are a helpful assistant.<|endofturn|><|user|>Hello!<|endofturn|><|assistant|>"
-    input_ids = tokenizer(prompt, return_tensors="pt", add_special_tokens=False).input_ids
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "Hello!"},
+    ]
+    input_ids = tokenizer.apply_chat_template(
+        messages,
+        return_tensors="pt",
+        add_generation_prompt=True,
+    )
 
     with torch.no_grad():
-        output = model.generate(input_ids, max_new_tokens=20, pad_token_id=0, eos_token_id=[3, 7])
+        output = model.generate(
+            input_ids,
+            max_new_tokens=20,
+            pad_token_id=0,
+            eos_token_id=[3, 7],
+        )
 
     decoded = tokenizer.decode(output[0], skip_special_tokens=True)
     log.info(f"Validation output: {decoded[:100]}")
     log.info("✓ Model validation passed")
-
-
-def _chat_template() -> str:
-    """Jinja2 chat template for the SLM chat format."""
-    return (
-        "{% for message in messages %}"
-        "{% if message['role'] == 'system' %}"
-        "<|system|>{{ message['content'] }}<|endofturn|>"
-        "{% elif message['role'] == 'user' %}"
-        "<|user|>{{ message['content'] }}<|endofturn|>"
-        "{% elif message['role'] == 'assistant' %}"
-        "<|assistant|>{{ message['content'] }}<|endofturn|>"
-        "{% endif %}"
-        "{% endfor %}"
-        "{% if add_generation_prompt %}<|assistant|>{% endif %}"
-    )
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────

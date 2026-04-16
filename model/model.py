@@ -25,10 +25,10 @@ Design:
 Compatibility (transformers v5):
     - SLMForCausalLM inherits from GenerationMixin directly — PreTrainedModel
       no longer inherits from GenerationMixin from v4.50 onwards.
-    - Weight tying: tie_weights() does the actual sharing; all_tied_weights_keys
-      is set directly as a set after post_init so save_pretrained correctly
-      handles shared tensors. get_expanded_tied_weights_keys is overridden to
-      return the keys without going through the broken v5 dict resolution.
+    - Weight tying: tie_weights() does the actual sharing; _tied_weights_keys
+      is set as a dict so save_pretrained correctly handles shared tensors.
+      get_expanded_tied_weights_keys is overridden to return the keys without
+      going through the broken v5 dict resolution.
     - past_key_values supports both legacy list[tuple] format and v5
       DynamicCache objects for full compatibility with trl and vLLM.
     - prepare_inputs_for_generation accepts cache_position (added in v5).
@@ -121,11 +121,12 @@ class SLMModel(PreTrainedModel):
             past_key_values = [None] * len(self.layers)
         elif isinstance(past_key_values, Cache):
             # DynamicCache passed by v5 generate() — extract per-layer KV tuples.
-            # get_seq_length() in v5 takes no layer argument.
+            # Check per-layer directly rather than using get_seq_length() which
+            # can return per-layer lengths in v5 rather than a single scalar,
+            # making total_cached > 0 an unreliable sentinel.
             legacy_cache = []
-            total_cached = past_key_values.get_seq_length()
             for i in range(len(self.layers)):
-                if total_cached > 0 and i < len(past_key_values.key_cache):
+                if i < len(past_key_values.key_cache):
                     legacy_cache.append((
                         past_key_values.key_cache[i],
                         past_key_values.value_cache[i],
@@ -215,8 +216,8 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
 
     # _tied_weights_keys must be a dict in transformers v5:
     #   {target_weight_name: source_weight_name}
-    # This tells get_expanded_tied_weights_keys() which weights are shared
-    # so save_pretrained can correctly handle shared tensors during serialisation.
+    # This tells save_pretrained which weights are shared so it can
+    # correctly handle shared tensors during serialisation.
     _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
 
     def __init__(self, config: SLMConfig):
@@ -265,18 +266,16 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         knows about the tying.
 
         We temporarily untie the weights before saving by making lm_head.weight
-        an independent copy, then restore the tie after. This ensures both keys
-        are saved independently and loading works without any MISSING warnings.
+        an independent copy, then restore the tie after. try/finally guarantees
+        the tie is always restored even if save raises an exception.
         """
         if self.config.tie_word_embeddings:
-            # Temporarily make lm_head.weight an independent tensor
             self.lm_head.weight = nn.Parameter(self.model.embed_tokens.weight.data.clone())
-
-        super().save_pretrained(save_directory, **kwargs)
-
-        if self.config.tie_word_embeddings:
-            # Restore the tie
-            self.lm_head.weight = self.model.embed_tokens.weight
+        try:
+            super().save_pretrained(save_directory, **kwargs)
+        finally:
+            if self.config.tie_word_embeddings:
+                self.lm_head.weight = self.model.embed_tokens.weight
 
     def forward(
         self,

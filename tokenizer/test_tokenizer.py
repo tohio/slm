@@ -35,12 +35,29 @@ from tokenizer.train_tokenizer import SPECIAL_TOKENS, BOS_ID, EOS_ID, PAD_ID, UN
 
 
 def load_tokenizer(tokenizer_dir: Path):
-    """Load the trained tokenizer."""
+    """Load the raw tokenizer for low-level tests."""
     from tokenizers import Tokenizer
     path = tokenizer_dir / "slm_tokenizer.json"
     if not path.exists():
         raise FileNotFoundError(f"Tokenizer not found at {path}")
     return Tokenizer.from_file(str(path))
+
+
+def load_hf_tokenizer(tokenizer_dir: Path):
+    """
+    Load the HuggingFace PreTrainedTokenizerFast.
+
+    This is the tokenizer used by all training scripts and inference.
+    Tests that use apply_chat_template must use this tokenizer, not
+    the raw tokenizers.Tokenizer — they are different objects.
+    """
+    from transformers import PreTrainedTokenizerFast
+    if not (tokenizer_dir / "tokenizer_config.json").exists():
+        raise FileNotFoundError(
+            f"HuggingFace tokenizer not found at {tokenizer_dir}. "
+            f"Run: python tokenizer/train_tokenizer.py"
+        )
+    return PreTrainedTokenizerFast.from_pretrained(str(tokenizer_dir))
 
 
 def test_special_tokens(tokenizer) -> bool:
@@ -85,6 +102,34 @@ def test_roundtrip(tokenizer) -> bool:
     return all_passed
 
 
+def test_no_auto_bos_eos(tokenizer) -> bool:
+    """
+    Verify BOS/EOS are NOT injected automatically on encode.
+
+    The tokenizer must not add BOS/EOS automatically — they are added
+    explicitly by the data pipeline. Automatic injection corrupts
+    chat-formatted data by inserting tokens in the wrong positions.
+    """
+    log.info("=== BOS/EOS Auto-injection Check ===")
+    text = "Hello world"
+    encoded = tokenizer.encode(text)
+    first_token = tokenizer.id_to_token(encoded.ids[0])
+    last_token = tokenizer.id_to_token(encoded.ids[-1])
+
+    bos_injected = first_token == "<BOS>"
+    eos_injected = last_token == "<EOS>"
+
+    if bos_injected or eos_injected:
+        print(f"  ✗ Auto-injection detected — BOS: {bos_injected}, EOS: {eos_injected}")
+        print(f"    First token: {first_token}, Last token: {last_token}")
+        print(f"    Fix: remove TemplateProcessing from train_tokenizer.py")
+        return False
+
+    print(f"  ✓ No auto BOS/EOS injection")
+    print(f"    First token: {repr(first_token)}, Last token: {repr(last_token)}")
+    return True
+
+
 def test_fertility(tokenizer, sample_texts: list[str]) -> float:
     """
     Compute tokenizer fertility — tokens per word.
@@ -119,24 +164,22 @@ def test_fertility(tokenizer, sample_texts: list[str]) -> float:
     return fertility
 
 
-def test_chat_template(tokenizer) -> None:
-    """Test chat template formatting with special tokens."""
-    log.info("=== Chat Template ===")
+def test_chat_template(hf_tokenizer) -> bool:
+    """
+    Test chat template formatting via apply_chat_template().
 
-    def format_chat(messages: list[dict]) -> str:
-        """Format a list of messages into a chat string."""
-        parts = []
-        for msg in messages:
-            role = msg["role"]
-            content = msg["content"]
-            if role == "system":
-                parts.append(f"<|system|>{content}<|endofturn|>")
-            elif role == "user":
-                parts.append(f"<|user|>{content}<|endofturn|>")
-            elif role == "assistant":
-                parts.append(f"<|assistant|>{content}<|endofturn|>")
-        parts.append("<|assistant|>")  # prompt model to respond
-        return "".join(parts)
+    Uses the HuggingFace tokenizer's apply_chat_template() — the same
+    code path used by SFTTrainer, DPOTrainer, and inference. Testing a
+    manual formatter instead would give false confidence that the real
+    path works.
+
+    Verifies:
+        - apply_chat_template() does not raise
+        - Output contains the expected special tokens in order
+        - BOS appears exactly once at the start
+        - Generation prompt ends with <|assistant|>
+    """
+    log.info("=== Chat Template (apply_chat_template) ===")
 
     messages = [
         {"role": "system", "content": "You are a helpful assistant."},
@@ -145,20 +188,74 @@ def test_chat_template(tokenizer) -> None:
         {"role": "user", "content": "What about Germany?"},
     ]
 
-    chat_string = format_chat(messages)
-    encoded = tokenizer.encode(chat_string)
+    # Test without generation prompt
+    try:
+        chat_string = hf_tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+    except Exception as e:
+        print(f"  ✗ apply_chat_template() raised: {e}")
+        print(f"    Fix: ensure chat_template is set in train_tokenizer._save_as_hf_tokenizer()")
+        return False
 
-    print(f"  Chat string:\n{chat_string}")
-    print(f"\n  Tokens: {len(encoded.ids)}")
-    print(f"  Token IDs (first 20): {encoded.ids[:20]}")
+    # Test with generation prompt
+    chat_with_prompt = hf_tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
 
-    # Verify special tokens appear correctly
-    special_in_output = [
-        tokenizer.id_to_token(tid)
-        for tid in encoded.ids
-        if tokenizer.id_to_token(tid) in SPECIAL_TOKENS
-    ]
-    print(f"  Special tokens found: {special_in_output}")
+    print(f"  Chat string (with generation prompt):")
+    print(f"  {repr(chat_with_prompt[:200])}{'...' if len(chat_with_prompt) > 200 else ''}")
+
+    all_passed = True
+
+    # BOS appears exactly once at the start
+    bos = hf_tokenizer.bos_token
+    if not chat_with_prompt.startswith(bos):
+        print(f"  ✗ Does not start with BOS token ({bos})")
+        all_passed = False
+    elif chat_with_prompt.count(bos) > 1:
+        print(f"  ✗ BOS appears {chat_with_prompt.count(bos)} times — should appear once")
+        all_passed = False
+    else:
+        print(f"  ✓ BOS appears exactly once at start")
+
+    # Expected special tokens appear in order
+    expected_tokens = ["<|system|>", "<|user|>", "<|assistant|>", "<|endofturn|>"]
+    for token in expected_tokens:
+        if token in chat_with_prompt:
+            print(f"  ✓ {token} present")
+        else:
+            print(f"  ✗ {token} missing")
+            all_passed = False
+
+    # Generation prompt ends with <|assistant|>
+    if chat_with_prompt.endswith("<|assistant|>"):
+        print(f"  ✓ Ends with <|assistant|> (generation prompt correct)")
+    else:
+        print(f"  ✗ Does not end with <|assistant|>")
+        print(f"    Last 50 chars: {repr(chat_with_prompt[-50:])}")
+        all_passed = False
+
+    # Tokenize and check token IDs
+    encoded = hf_tokenizer.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        return_tensors=None,
+    )
+    print(f"\n  Token count: {len(encoded)}")
+    print(f"  First token ID: {encoded[0]} (expected BOS={BOS_ID})")
+    if encoded[0] != BOS_ID:
+        print(f"  ✗ First token is not BOS")
+        all_passed = False
+    else:
+        print(f"  ✓ First token is BOS")
+
+    return all_passed
 
 
 def test_vocab_coverage(tokenizer) -> None:
@@ -194,12 +291,15 @@ def main():
     )
     args = parser.parse_args()
 
+    # Load both tokenizer forms
     tokenizer = load_tokenizer(args.tokenizer)
+    hf_tokenizer = load_hf_tokenizer(args.tokenizer)
     log.info(f"Loaded tokenizer from {args.tokenizer}")
 
     # Run tests
     special_ok = test_special_tokens(tokenizer)
     roundtrip_ok = test_roundtrip(tokenizer)
+    no_auto_bos_eos_ok = test_no_auto_bos_eos(tokenizer)
 
     # Load sample texts for fertility
     sample_texts = []
@@ -215,14 +315,23 @@ def main():
         sample_texts = ["The quick brown fox jumps over the lazy dog."] * 100
 
     fertility = test_fertility(tokenizer, sample_texts)
-    test_chat_template(tokenizer)
+    chat_ok = test_chat_template(hf_tokenizer)
     test_vocab_coverage(tokenizer)
 
     # Summary
     print("\n=== Summary ===")
-    print(f"  Special tokens: {'✓ PASS' if special_ok else '✗ FAIL'}")
-    print(f"  Roundtrip:      {'✓ PASS' if roundtrip_ok else '✗ FAIL'}")
-    print(f"  Fertility:      {fertility:.3f} tokens/word {'✓' if fertility < 1.5 else '✗'}")
+    print(f"  Special tokens:     {'✓ PASS' if special_ok else '✗ FAIL'}")
+    print(f"  Roundtrip:          {'✓ PASS' if roundtrip_ok else '✗ FAIL'}")
+    print(f"  No auto BOS/EOS:    {'✓ PASS' if no_auto_bos_eos_ok else '✗ FAIL'}")
+    print(f"  Fertility:          {fertility:.3f} tokens/word {'✓' if fertility < 1.5 else '✗'}")
+    print(f"  Chat template:      {'✓ PASS' if chat_ok else '✗ FAIL'}")
+
+    all_passed = special_ok and roundtrip_ok and no_auto_bos_eos_ok and chat_ok
+    if not all_passed:
+        print("\n  ✗ Some tests failed — fix before proceeding to pretraining")
+        sys.exit(1)
+    else:
+        print("\n  ✓ All tests passed")
 
 
 if __name__ == "__main__":

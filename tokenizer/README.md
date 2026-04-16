@@ -52,6 +52,8 @@ make tokenizer-test
 python tokenizer/test_tokenizer.py
 ```
 
+The test suite validates special token IDs, encode/decode roundtrip, BOS/EOS auto-injection (must be absent), fertility, and chat template via `apply_chat_template()`. It exits with code 1 if any test fails — the pipeline will not proceed with a broken tokenizer.
+
 **Download on GPU instance**
 
 ```bash
@@ -85,20 +87,62 @@ inputs = tokenizer("Hello world", return_tensors="pt")
 
 ## Chat Template
 
+The Jinja2 chat template is baked into the HuggingFace tokenizer at training time. Use `apply_chat_template()` — do not format chat strings manually. Manual formatters bypass the template and will produce output that does not match what the model was trained on.
+
 ```python
-def format_chat(messages):
-    parts = []
-    for msg in messages:
-        role, content = msg["role"], msg["content"]
-        if role == "system":
-            parts.append(f"<|system|>{content}<|endofturn|>")
-        elif role == "user":
-            parts.append(f"<|user|>{content}<|endofturn|>")
-        elif role == "assistant":
-            parts.append(f"<|assistant|>{content}<|endofturn|>")
-    parts.append("<|assistant|>")
-    return "".join(parts)
+from transformers import PreTrainedTokenizerFast
+
+tokenizer = PreTrainedTokenizerFast.from_pretrained("data/tokenizer")
+
+messages = [
+    {"role": "system", "content": "You are a helpful assistant."},
+    {"role": "user", "content": "What is the capital of France?"},
+]
+
+# Correct — uses the baked-in template
+prompt = tokenizer.apply_chat_template(
+    messages,
+    tokenize=False,
+    add_generation_prompt=True,
+)
+# Output:
+# <BOS><|system|>You are a helpful assistant.<|endofturn|><|user|>What is the capital of France?<|endofturn|><|assistant|>
+
+# Tokenized directly
+input_ids = tokenizer.apply_chat_template(
+    messages,
+    tokenize=True,
+    add_generation_prompt=True,
+    return_tensors="pt",
+)
 ```
+
+### Format
+
+```
+<BOS>
+<|system|>{system content}<|endofturn|>
+<|user|>{user content}<|endofturn|>
+<|assistant|>{assistant content}<EOS><|endofturn|>
+<|user|>{user content}<|endofturn|>
+<|assistant|>   ← generation prompt (add_generation_prompt=True)
+```
+
+**BOS** appears once at the very start of the full sequence.
+**EOS** appears after each assistant response, signalling end of generation.
+Role tokens (`<|system|>`, `<|user|>`, `<|assistant|>`) act as turn delimiters — no BOS/EOS on system or user turns.
+
+---
+
+## BOS/EOS Handling
+
+BOS and EOS are **not** added automatically by the tokenizer. They must be added explicitly by the data pipeline:
+
+- **Pretraining** — the tokenization script prepends BOS and appends EOS to each document.
+- **SFT/DPO** — `apply_chat_template()` handles BOS/EOS placement automatically via the baked-in template.
+- **Inference** — `apply_chat_template(add_generation_prompt=True)` prepends BOS correctly.
+
+Automatic injection via `TemplateProcessing` was intentionally removed. It corrupted chat-formatted data by inserting BOS/EOS at positions the model does not expect.
 
 ---
 
@@ -106,12 +150,12 @@ def format_chat(messages):
 
 ```
 data/tokenizer/
-├── slm_tokenizer.json      full tokenizer (HF tokenizers format)
-├── tokenizer.json          HuggingFace PreTrainedTokenizerFast
-├── tokenizer_config.json   HF tokenizer config
-├── vocab.json              vocabulary (token → ID)
-├── merges.txt              BPE merge rules
-└── special_tokens.json     special token ID mapping
+├── slm_tokenizer.json        full tokenizer (HF tokenizers format)
+├── tokenizer.json            HuggingFace PreTrainedTokenizerFast
+├── tokenizer_config.json     HF tokenizer config — includes chat_template
+├── vocab.json                vocabulary (token → ID)
+├── merges.txt                BPE merge rules
+└── special_tokens.json       special token ID mapping
 ```
 
 ---
@@ -123,6 +167,10 @@ data/tokenizer/
 **Why byte-level BPE?** Byte-level BPE (same as GPT-2) represents every Unicode character as a sequence of bytes. No UNK tokens for out-of-vocabulary characters — every possible input is encodable. Essential for handling multilingual text and special characters in code.
 
 **Why 32k vocab?** At 125M–1B parameters, a 32k vocab gives a good tradeoff — small enough that the embedding table doesn't dominate the parameter budget, large enough for good token efficiency (~1.3 tokens/word on English). Larger models could use 64k–128k.
+
+**Why no automatic BOS/EOS injection?** Automatic injection via `TemplateProcessing` runs on every `encode()` call regardless of context. During pretraining this doubles BOS/EOS tokens if the data pipeline also adds them. During SFT and DPO it inserts tokens at positions the chat template does not expect, corrupting the turn structure the model needs to learn. Explicit placement by the data pipeline is unambiguous and correct in all contexts.
+
+**Why bake in the chat template?** `apply_chat_template()` is the standard HuggingFace interface used by `SFTTrainer`, `DPOTrainer`, and inference scripts. Without a baked-in template it falls back to a generic format that does not match the model's special tokens, causing the model to echo role tokens instead of generating responses. Baking it in at tokenizer training time means every downstream consumer gets the correct format automatically.
 
 **Why train on validated data?** The tokenizer vocabulary reflects the frequency distribution of the training corpus. Training on validated (higher quality) data ensures the vocabulary is optimized for the actual pretraining distribution, not the noisier raw web data.
 

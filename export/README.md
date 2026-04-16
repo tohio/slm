@@ -65,15 +65,29 @@ python export/export.py --size 125m --variant chat --model path/to/checkpoint
 The model card is generated automatically at export time and includes:
 
 - **Architecture table** — component choices and rationale
-- **Training table** — dataset names, Hub links, and sizes per stage
+- **Training table** — dataset names, Hub links, and sizes per stage (55% CC / 25% Wikipedia / 20% Python)
 - **Parameter count** — actual value from the loaded checkpoint
+- **Token targets** — 5B (125m), 15B (350m), 30B (1b)
 - **Benchmark results** — populated from the most recent `make eval` run (chat variant only)
 - **Hardware** — training hardware used
 - **Limitations** — scale, hallucination, safety, language, and code coverage
-- **Usage example** — copy-paste ready code with chat template
+- **Usage example** — copy-paste ready code with `apply_chat_template`
 
 If `make eval` has not been run before `make export-chat`, the benchmark table
 will contain a placeholder. Run `make eval SIZE={size}` first.
+
+---
+
+## Chat Template
+
+The exported tokenizer includes the baked-in Jinja2 chat template from
+`tokenizer/train_tokenizer.py`. `export.py` loads the tokenizer via
+`PreTrainedTokenizerFast.from_pretrained()` — it never reconstructs or
+overwrites the template. The template on the Hub is always identical to
+the one the model was trained with.
+
+Export will raise an error if the tokenizer has no `chat_template`, preventing
+a model with a broken chat format from being pushed to the Hub.
 
 ---
 
@@ -92,7 +106,11 @@ messages = [
     {"role": "user", "content": "What is a transformer?"},
 ]
 
-inputs = tokenizer.apply_chat_template(messages, return_tensors="pt")
+inputs = tokenizer.apply_chat_template(
+    messages,
+    return_tensors="pt",
+    add_generation_prompt=True,
+)
 output = model.generate(inputs, max_new_tokens=200, do_sample=True, temperature=0.7)
 print(tokenizer.decode(output[0], skip_special_tokens=True))
 ```
@@ -103,6 +121,6 @@ print(tokenizer.decode(output[0], skip_special_tokens=True))
 
 | Size | Base | Instruct | Chat |
 |---|---|---|---|
-| 125M | [`tohio/slm-125m`](https://huggingface.co/tohio/slm-125m) | [`tohio/slm-125m-instruct`](https://huggingface.co/tohio/slm-125m-instruct) | [`tohio/slm-125m-chat`](https://huggingface.co/tohio/slm-125m-chat) |
-| 350M | [`tohio/slm-350m`](https://huggingface.co/tohio/slm-350m) | [`tohio/slm-350m-instruct`](https://huggingface.co/tohio/slm-350m-instruct) | [`tohio/slm-350m-chat`](https://huggingface.co/tohio/slm-350m-chat) |
-| 1B | [`tohio/slm-1b`](https://huggingface.co/tohio/slm-1b) | [`tohio/slm-1b-instruct`](https://huggingface.co/tohio/slm-1b-instruct) | [`tohio/slm-1b-chat`](https://huggingface.co/tohio/slm-1b-chat) |
+| 125M | [tohio/slm-125m](https://huggingface.co/tohio/slm-125m) | [tohio/slm-125m-instruct](https://huggingface.co/tohio/slm-125m-instruct) | [tohio/slm-125m-chat](https://huggingface.co/tohio/slm-125m-chat) |
+| 350M | [tohio/slm-350m](https://huggingface.co/tohio/slm-350m) | [tohio/slm-350m-instruct](https://huggingface.co/tohio/slm-350m-instruct) | [tohio/slm-350m-chat](https://huggingface.co/tohio/slm-350m-chat) |
+| 1B | [tohio/slm-1b](https://huggingface.co/tohio/slm-1b) | [tohio/slm-1b-instruct](https://huggingface.co/tohio/slm-1b-instruct) | [tohio/slm-1b-chat](https://huggingface.co/tohio/slm-1b-chat) |

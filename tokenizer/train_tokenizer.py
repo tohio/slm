@@ -22,11 +22,24 @@ Special tokens:
 
 Vocab size: 32,000 (sufficient for English + code at 125M–1B scale)
 
+BOS/EOS handling:
+    BOS and EOS are NOT added automatically by the tokenizer post-processor.
+    They must be added explicitly by the training data pipeline where needed.
+    Automatic injection via TemplateProcessing corrupts chat-formatted data
+    by inserting tokens at positions the model does not expect.
+
+Chat template:
+    The Jinja2 chat template is baked into the HuggingFace tokenizer at
+    save time so tokenizer.apply_chat_template() works correctly in SFT,
+    DPO, and inference — matching the special token structure exactly.
+
 Output:
     data/tokenizer/slm_tokenizer.json   — full tokenizer (HF format)
     data/tokenizer/vocab.json           — vocabulary
     data/tokenizer/merges.txt           — BPE merge rules
     data/tokenizer/special_tokens.json  — special token definitions
+    data/tokenizer/tokenizer.json       — HuggingFace PreTrainedTokenizerFast
+    data/tokenizer/tokenizer_config.json — includes chat_template
 
 Usage:
     python tokenizer/train_tokenizer.py
@@ -102,6 +115,35 @@ ENDOFREASONING_ID = 13
 CONTEXT_ID = 14
 ENDOFCONTEXT_ID = 15
 
+# ── Chat template ──────────────────────────────────────────────────────────────
+# Jinja2 template baked into the HuggingFace tokenizer so that
+# tokenizer.apply_chat_template() produces the correct format in SFT,
+# DPO, and inference.
+#
+# Format:
+#   <|system|>{content}<|endofturn|>
+#   <|user|>{content}<|endofturn|>
+#   <|assistant|>{content}<|endofturn|>
+#   <|assistant|>   ← generation prompt (add_generation_prompt=True)
+#
+# BOS is prepended once at the start of the full sequence.
+# EOS is appended at the end of each assistant turn.
+# No BOS/EOS on system or user turns — the role tokens are the delimiters.
+
+CHAT_TEMPLATE = (
+    "{{ bos_token }}"
+    "{% for message in messages %}"
+        "{% if message['role'] == 'system' %}"
+            "<|system|>{{ message['content'] }}<|endofturn|>"
+        "{% elif message['role'] == 'user' %}"
+            "<|user|>{{ message['content'] }}<|endofturn|>"
+        "{% elif message['role'] == 'assistant' %}"
+            "<|assistant|>{{ message['content'] }}{{ eos_token }}<|endofturn|>"
+        "{% endif %}"
+    "{% endfor %}"
+    "{% if add_generation_prompt %}<|assistant|>{% endif %}"
+)
+
 
 # ── Text iterator ──────────────────────────────────────────────────────────────
 
@@ -147,13 +189,12 @@ def train_tokenizer(
         vocab_size: Target vocabulary size. Default: 32,000.
         min_frequency: Minimum token frequency to include in vocab.
     """
-    from tokenizers import Tokenizer, AddedToken
+    from tokenizers import Tokenizer
     from tokenizers.models import BPE
     from tokenizers.trainers import BpeTrainer
     from tokenizers.pre_tokenizers import ByteLevel
     from tokenizers.decoders import ByteLevel as ByteLevelDecoder
     from tokenizers.normalizers import NFC
-    from tokenizers.processors import TemplateProcessing
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -167,20 +208,15 @@ def train_tokenizer(
     # NFC normalization — handles unicode composed/decomposed forms
     tokenizer.normalizer = NFC()
 
-    # Byte-level pre-tokenizer — handles any unicode without UNK tokens
-    # Same as GPT-2's approach — every byte is representable
+    # Byte-level pre-tokenizer — handles any unicode without UNK tokens.
+    # Same as GPT-2's approach — every byte is representable.
     tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=False)
     tokenizer.decoder = ByteLevelDecoder()
 
-    # Add BOS/EOS automatically via post-processor
-    tokenizer.post_processor = TemplateProcessing(
-        single="<BOS> $A <EOS>",
-        pair="<BOS> $A <EOS> $B:1 <EOS>:1",
-        special_tokens=[
-            ("<BOS>", BOS_ID),
-            ("<EOS>", EOS_ID),
-        ],
-    )
+    # No post-processor — BOS/EOS are NOT added automatically.
+    # They must be added explicitly by the data pipeline where needed.
+    # Automatic injection via TemplateProcessing corrupts chat-formatted
+    # data by inserting tokens at positions the model does not expect.
 
     # Trainer
     trainer = BpeTrainer(
@@ -208,7 +244,7 @@ def train_tokenizer(
                 f"expected={expected_id}, actual={actual_id}"
             )
 
-    # Save
+    # Save raw tokenizer
     tokenizer_path = output_dir / "slm_tokenizer.json"
     tokenizer.save(str(tokenizer_path))
     log.info(f"Tokenizer saved to {tokenizer_path}")
@@ -226,7 +262,7 @@ def train_tokenizer(
         )
     log.info(f"Special tokens saved to {special_tokens_path}")
 
-    # Save as HuggingFace PreTrainedTokenizerFast for transformers compatibility
+    # Save as HuggingFace PreTrainedTokenizerFast with chat template
     _save_as_hf_tokenizer(tokenizer, output_dir)
 
     # Print vocab stats
@@ -239,7 +275,13 @@ def _save_as_hf_tokenizer(tokenizer, output_dir: Path) -> None:
     """
     Save the tokenizer as a HuggingFace PreTrainedTokenizerFast.
 
-    This enables use with AutoTokenizer and the full transformers ecosystem.
+    Bakes in the Jinja2 chat template so tokenizer.apply_chat_template()
+    works correctly in SFT, DPO, and inference without any additional
+    configuration. This is the tokenizer used by all training scripts.
+
+    Args:
+        tokenizer: Trained tokenizers.Tokenizer instance.
+        output_dir: Directory to save the HuggingFace tokenizer.
     """
     try:
         from transformers import PreTrainedTokenizerFast
@@ -252,10 +294,20 @@ def _save_as_hf_tokenizer(tokenizer, output_dir: Path) -> None:
             pad_token="<PAD>",
             additional_special_tokens=SPECIAL_TOKENS[4:],  # chat/code/tool tokens
         )
+
+        # Bake in the chat template so apply_chat_template() works
+        # correctly in SFT, DPO, and inference. Without this,
+        # apply_chat_template() falls back to a generic template that
+        # does not match our special token structure.
+        hf_tokenizer.chat_template = CHAT_TEMPLATE
+
         hf_tokenizer.save_pretrained(str(output_dir))
         log.info(f"HuggingFace tokenizer saved to {output_dir}")
+        log.info(f"Chat template baked in — apply_chat_template() ready")
+
     except Exception as e:
-        log.warning(f"Could not save HF tokenizer: {e}")
+        log.error(f"Could not save HF tokenizer: {e}")
+        raise
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
