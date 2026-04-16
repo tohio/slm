@@ -10,18 +10,22 @@ dpo:
   max_prompt_length: 1024
 
 data:
-  train_path: $DATA_DIR//dpo/train.jsonl
-  val_path: $DATA_DIR//dpo/val.jsonl
+  train_path: $DATA_DIR/dpo/train.jsonl
+  val_path:   $DATA_DIR/dpo/val.jsonl
 
 training:
-  epochs: 1
-  max_steps: 4000
+  epochs: 1                          # DPO needs only 1 epoch — more causes overoptimization
   warmup_steps: 100
   micro_batch_size: 1
-  gradient_accumulation_steps: 16
+  # Target effective batch size: 64
+  # gradient_accumulation_steps = 64 / (micro_batch_size x num_gpus)
+  #   1 GPU:  64 / (1 x 1) = 64
+  #   4 GPU:  64 / (1 x 4) = 16
+  #   8 GPU:  64 / (1 x 8) = 8
+  gradient_accumulation_steps: 16   # adjust based on your GPU count
   precision: bf16
   gradient_clip_val: 1.0
-  gradient_checkpointing: true
+  gradient_checkpointing: true       # required at 1B + 4096 seq len
   eval_steps: 200
   save_steps: 200
   save_total_limit: 3

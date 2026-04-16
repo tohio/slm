@@ -36,6 +36,7 @@ import argparse
 import json
 import logging
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -57,11 +58,6 @@ log = logging.getLogger(__name__)
 DATA_DIR    = Path(os.environ.get("DATA_DIR", "data"))
 RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", "results"))
 
-# Token IDs — must match tokenizer special tokens
-EOS_TOKEN_ID       = 3   # <EOS>
-ENDOFTURN_TOKEN_ID = 7   # <|endofturn|> — model uses this to end turns
-PAD_TOKEN_ID       = 0   # <PAD>
-
 
 def load_config(config_path: Path) -> dict:
     with open(config_path) as f:
@@ -79,28 +75,29 @@ def load_dataset_from_jsonl(path: Path):
 
 def load_tokenizer(tokenizer_path: Path):
     """
-    Load the custom BPE tokenizer trained with the `tokenizers` library.
+    Load the HuggingFace tokenizer saved by train_tokenizer.py.
 
-    PreTrainedTokenizerFast.from_pretrained() fails when tokenizer_config.json
-    references TokenizersBackend, an unknown class in transformers.
-    Load directly from tokenizer.json and wrap in PreTrainedTokenizerFast.
+    Uses PreTrainedTokenizerFast.from_pretrained() to load the full
+    tokenizer config including the baked-in chat_template. Do not
+    reconstruct from tokenizer.json directly — that bypasses
+    tokenizer_config.json and loses the chat template, causing
+    DPOTrainer's apply_chat_template() calls to use the wrong format.
     """
-    from tokenizers import Tokenizer as HFTokenizer
     from transformers import PreTrainedTokenizerFast
 
-    tokenizer_file = tokenizer_path / "tokenizer.json"
-    if not tokenizer_file.exists():
-        raise FileNotFoundError(f"tokenizer.json not found at {tokenizer_path}")
+    if not (tokenizer_path / "tokenizer_config.json").exists():
+        raise FileNotFoundError(
+            f"tokenizer_config.json not found at {tokenizer_path}. "
+            f"Retrain the tokenizer: python tokenizer/train_tokenizer.py"
+        )
 
-    _tok = HFTokenizer.from_file(str(tokenizer_file))
-    tokenizer = PreTrainedTokenizerFast(tokenizer_object=_tok)
+    tokenizer = PreTrainedTokenizerFast.from_pretrained(str(tokenizer_path))
 
-    tokenizer.pad_token    = "<PAD>"
-    tokenizer.pad_token_id = PAD_TOKEN_ID
-    tokenizer.eos_token    = "<|endofturn|>"
-    tokenizer.eos_token_id = ENDOFTURN_TOKEN_ID
-    tokenizer.bos_token    = "<BOS>"
-    tokenizer.bos_token_id = 2
+    if not getattr(tokenizer, "chat_template", None):
+        raise ValueError(
+            f"Tokenizer at {tokenizer_path} has no chat_template. "
+            f"Retrain the tokenizer: python tokenizer/train_tokenizer.py"
+        )
 
     return tokenizer
 
@@ -117,6 +114,7 @@ def build_dpo_args(cfg: dict, output_dir: Path, beta: float):
 
     train_cfg = cfg["training"]
     optim_cfg = cfg["optimizer"]
+    dpo_cfg   = cfg.get("dpo", {})
 
     has_cuda = torch.cuda.is_available()
     precision = train_cfg.get("precision", "bf16")
@@ -156,20 +154,20 @@ def build_dpo_args(cfg: dict, output_dir: Path, beta: float):
         # DPO-specific fields
         beta=beta,
         max_length=cfg["model"].get("max_seq_length", 2048),
+        max_prompt_length=dpo_cfg.get("max_prompt_length", 512),
     )
 
 
 def main():
     parser = argparse.ArgumentParser(description="SLM DPO Alignment")
-    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--config",     type=Path, required=True)
     parser.add_argument("--base-model", type=Path, default=None)
-    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--resume",     action="store_true")
     args = parser.parse_args()
 
-    cfg = load_config(args.config)
+    cfg             = load_config(args.config)
     model_name      = cfg["name"]
     output_dir      = RESULTS_DIR / model_name
-    # Expand $DATA_DIR/$RESULTS_DIR env vars in config paths
     base_model_path = args.base_model or Path(
         os.path.expandvars(cfg["model"]["base_model_path"])
     )
@@ -199,33 +197,23 @@ def main():
         p.requires_grad = False
 
     # ── Tokenizer ─────────────────────────────────────────────────────────────
-    # Load directly from tokenizers library — from_pretrained() fails because
-    # tokenizer_config.json references TokenizersBackend, an unknown class.
-    # Fall back to DATA_DIR/tokenizer if tokenizer.json is missing from model dir.
+    # Use from_pretrained() so tokenizer_config.json is loaded — this gives us
+    # the baked-in chat_template for DPOTrainer's apply_chat_template() calls.
+    # Fall back to DATA_DIR/tokenizer if not found in the model directory.
     tokenizer_path = base_model_path / "tokenizer"
-    if not (tokenizer_path / "tokenizer.json").exists():
-        log.warning(f"tokenizer.json not found at {tokenizer_path} — falling back to {DATA_DIR / 'tokenizer'}")
+    if not (tokenizer_path / "tokenizer_config.json").exists():
+        log.warning(
+            f"tokenizer_config.json not found at {tokenizer_path} — "
+            f"falling back to {DATA_DIR / 'tokenizer'}"
+        )
         tokenizer_path = DATA_DIR / "tokenizer"
 
     log.info(f"Loading tokenizer from {tokenizer_path}...")
     tokenizer = load_tokenizer(tokenizer_path)
     log.info(f"Vocab size: {tokenizer.vocab_size:,}")
 
-    # Set chat template so DPOTrainer can use apply_chat_template for
-    # conversational format data (list of message dicts).
-    if not tokenizer.chat_template:
-        tokenizer.chat_template = (
-            "{% for message in messages %}"
-            "{% if message['role'] == 'system' %}<|system|>{{ message['content'] }}<|endofturn|>"
-            "{% elif message['role'] == 'user' %}<|user|>{{ message['content'] }}<|endofturn|>"
-            "{% elif message['role'] == 'assistant' %}<|assistant|>{{ message['content'] }}<|endofturn|>"
-            "{% endif %}{% endfor %}"
-            "{% if add_generation_prompt %}<|assistant|>{% endif %}"
-        )
-
     # ── Dataset ───────────────────────────────────────────────────────────────
     data_cfg   = cfg["data"]
-    # Expand $DATA_DIR env var in dataset paths
     train_path = Path(os.path.expandvars(data_cfg["train_path"]))
     val_path   = Path(os.path.expandvars(data_cfg["val_path"]))
 
@@ -269,7 +257,6 @@ def main():
     final_dir = output_dir / "final"
     trainer.save_model(str(final_dir))
 
-    import shutil
     if tokenizer_path.exists() and any(tokenizer_path.iterdir()):
         shutil.copytree(tokenizer_path, final_dir / "tokenizer", dirs_exist_ok=True)
         log.info("Tokenizer copied alongside model")

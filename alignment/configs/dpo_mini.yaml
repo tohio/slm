@@ -10,14 +10,14 @@ dpo:
 
 data:
   train_path: $DATA_DIR/dpo/train.jsonl
-  val_path: $DATA_DIR/dpo/val.jsonl
+  val_path:   $DATA_DIR/dpo/val.jsonl
 
 training:
-  epochs: 1 
-  max_steps: 50               # enough to validate the training loop
+  epochs: 1
+  max_steps: 50                      # enough to validate the training loop
   warmup_steps: 5
   micro_batch_size: 1
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 2     # not performance-sensitive for validation
   precision: bf16
   gradient_clip_val: 1.0
   gradient_checkpointing: false

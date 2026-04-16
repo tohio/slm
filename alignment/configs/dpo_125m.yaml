@@ -6,19 +6,23 @@ model:
   max_seq_length: 2048
 
 dpo:
-  beta: 0.1                         # KL penalty — higher = closer to SFT reference
+  beta: 0.1                          # KL penalty — higher = closer to SFT reference
   max_prompt_length: 512
 
 data:
   train_path: $DATA_DIR/dpo/train.jsonl
-  val_path: $DATA_DIR/dpo/val.jsonl
+  val_path:   $DATA_DIR/dpo/val.jsonl
 
 training:
-  epochs: 1 
-  max_steps: 1000                        # DPO typically needs only 1 epoch
+  epochs: 1                          # DPO needs only 1 epoch — more causes overoptimization
   warmup_steps: 100
   micro_batch_size: 2
-  gradient_accumulation_steps: 8    # effective global batch = 16
+  # Target effective batch size: 64
+  # gradient_accumulation_steps = 64 / (micro_batch_size x num_gpus)
+  #   1 GPU:  64 / (2 x 1) = 32
+  #   4 GPU:  64 / (2 x 4) = 8
+  #   8 GPU:  64 / (2 x 8) = 4
+  gradient_accumulation_steps: 8    # adjust based on your GPU count
   precision: bf16
   gradient_clip_val: 1.0
   gradient_checkpointing: false
@@ -33,7 +37,7 @@ training:
     - wandb
 
 optimizer:
-  lr: 5.0e-7                        # very low — DPO is sensitive to LR
+  lr: 5.0e-7                         # very low — DPO is sensitive to LR
   weight_decay: 0.01
   beta1: 0.9
   beta2: 0.98
