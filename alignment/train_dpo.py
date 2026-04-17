@@ -104,17 +104,16 @@ def load_tokenizer(tokenizer_path: Path):
 
 def build_dpo_args(cfg: dict, output_dir: Path, beta: float):
     """
-    Build DPOConfig directly — avoids the fragile TrainingArguments.to_dict()
-    round-trip which can include keys DPOConfig doesn't accept.
+    Build DPOConfig for trl 0.29.
 
-    DPOConfig extends TrainingArguments and adds DPO-specific fields:
-    beta, max_length, max_prompt_length.
+    DPO-specific fields in trl 0.29: beta, max_length.
+    max_prompt_length was removed — trl 0.29 handles prompt truncation
+    via max_length only.
     """
     from trl import DPOConfig
 
     train_cfg = cfg["training"]
     optim_cfg = cfg["optimizer"]
-    dpo_cfg   = cfg.get("dpo", {})
 
     has_cuda = torch.cuda.is_available()
     precision = train_cfg.get("precision", "bf16")
@@ -154,7 +153,6 @@ def build_dpo_args(cfg: dict, output_dir: Path, beta: float):
         # DPO-specific fields
         beta=beta,
         max_length=cfg["model"].get("max_seq_length", 2048),
-        max_prompt_length=dpo_cfg.get("max_prompt_length", 512),
     )
 
 
@@ -197,9 +195,6 @@ def main():
         p.requires_grad = False
 
     # ── Tokenizer ─────────────────────────────────────────────────────────────
-    # Use from_pretrained() so tokenizer_config.json is loaded — this gives us
-    # the baked-in chat_template for DPOTrainer's apply_chat_template() calls.
-    # Fall back to DATA_DIR/tokenizer if not found in the model directory.
     tokenizer_path = base_model_path / "tokenizer"
     if not (tokenizer_path / "tokenizer_config.json").exists():
         log.warning(
