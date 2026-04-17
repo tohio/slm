@@ -184,13 +184,14 @@ def main():
 
     AutoConfig.register("slm", SLMConfig)
     model = SLMForCausalLM.from_pretrained(str(base_model_path))
+    # trl 0.26 DPOTrainer sets warnings_issued on the model object.
+    # PreTrainedModel normally has this but our model's __getattr__ raises
+    # AttributeError for unknown attributes — set it explicitly.
+    model.warnings_issued = {}
     log.info(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
-    # Load a separate frozen copy as the reference model.
-    # DPOTrainer with ref_model=None tries to load from checkpoint using
-    # config.architectures[0] which looks up SLMForCausalLM in transformers
-    # (not our local module) and fails. Passing an explicit ref_model avoids this.
     ref_model = SLMForCausalLM.from_pretrained(str(base_model_path))
+    ref_model.warnings_issued = {}
     for p in ref_model.parameters():
         p.requires_grad = False
 
