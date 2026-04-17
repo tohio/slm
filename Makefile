@@ -53,7 +53,8 @@ endif
         setup setup-data-dir setup-gpu install install-gpu install-uv install-conda install-kenlm install-orjson \
         download-kenlm-model download-fasttext-model accelerate-config accelerate-config-single accelerate-config-multi \
         s3-upload s3-download s3-list \
-        test test-curator test-model test-fast \
+        test-curator test-validate test-tokenizer test-data-pipeline \
+        test-training test-sft-chat test-sft-code test-dpo test-gpu-pipeline test-model \
         clean clean-data clean-results clean-logs help
 
 # ── Full pipeline ──────────────────────────────────────────────────────────────
@@ -328,22 +329,46 @@ accelerate-config-multi:
 	@echo "  Multi-GPU config active ($(GPUS) processes)"
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
-
-test:
-	@echo "==> Running tests..."
-	.venv/bin/pytest tests/ -v --tb=short
+# Data pipeline tests — run on CPU curation instance after each stage.
+# GPU pipeline tests — run on GPU instance after each training stage.
 
 test-curator:
-	@echo "==> Running curator tests..."
-	.venv/bin/pytest tests/curator/ -v --tb=short
+	@echo "==> Validating curate-mini outputs..."
+	.venv/bin/pytest tests/data_pipeline/test_pipeline_curator.py -v --tb=short
+
+test-validate:
+	@echo "==> Validating validate outputs..."
+	.venv/bin/pytest tests/data_pipeline/test_pipeline_validate.py -v --tb=short
+
+test-tokenizer:
+	@echo "==> Validating tokenizer outputs..."
+	.venv/bin/pytest tests/data_pipeline/test_pipeline_tokenizer.py -v --tb=short
+
+test-data-pipeline: test-curator test-validate test-tokenizer
+	@echo "==> Data pipeline tests complete"
+
+test-training:
+	@echo "==> Validating pretrain-mini outputs..."
+	.venv/bin/pytest tests/gpu_pipeline/test_pipeline_training.py -v --tb=short
+
+test-sft-chat:
+	@echo "==> Validating sft-mini outputs..."
+	.venv/bin/pytest tests/gpu_pipeline/test_pipeline_sft.py::TestChatSFTModel tests/gpu_pipeline/test_pipeline_sft.py::TestSFTData -v --tb=short
+
+test-sft-code:
+	@echo "==> Validating sft-code-mini outputs..."
+	.venv/bin/pytest tests/gpu_pipeline/test_pipeline_sft.py::TestCodeSFTModel -v --tb=short
+
+test-dpo:
+	@echo "==> Validating dpo-mini outputs..."
+	.venv/bin/pytest tests/gpu_pipeline/test_pipeline_dpo.py -v --tb=short
+
+test-gpu-pipeline: test-training test-sft-chat test-sft-code test-dpo
+	@echo "==> GPU pipeline tests complete"
 
 test-model:
-	@echo "==> Running model tests..."
+	@echo "==> Running model unit tests..."
 	.venv/bin/pytest tests/model/ -v --tb=short
-
-test-fast:
-	@echo "==> Running fast tests (skipping integration)..."
-	.venv/bin/pytest tests/ -v --tb=short -x --ignore=tests/curator/test_curate.py
 
 # ── Clean ─────────────────────────────────────────────────────────────────────
 
@@ -384,11 +409,21 @@ help:
 	@echo "  install-kenlm            Install KenLM Python bindings from source"
 	@echo "  install-orjson           Install orjson and fasttext-wheel"
 	@echo ""
-	@echo "Tests:"
-	@echo "  test                     Run all tests"
-	@echo "  test-fast                Run all tests except integration (fast feedback)"
-	@echo "  test-curator             Run curator tests only"
-	@echo "  test-model               Run model tests only"
+	@echo "Tests (CPU — data pipeline):"
+	@echo "  test-curator             Validate curate-mini outputs (run after make curate-mini)"
+	@echo "  test-validate            Validate validate outputs (run after make validate)"
+	@echo "  test-tokenizer           Validate tokenizer outputs (run after make tokenizer)"
+	@echo "  test-data-pipeline       Run all data pipeline tests"
+	@echo ""
+	@echo "Tests (GPU — training pipeline):"
+	@echo "  test-training            Validate pretrain-mini outputs (run after make pretrain-mini)"
+	@echo "  test-sft-chat            Validate sft-mini outputs (run after make sft-mini)"
+	@echo "  test-sft-code            Validate sft-code-mini outputs (run after make sft-code-mini)"
+	@echo "  test-dpo                 Validate dpo-mini outputs (run after make dpo-mini)"
+	@echo "  test-gpu-pipeline        Run all GPU pipeline tests"
+	@echo ""
+	@echo "Tests (unit — no pipeline outputs needed):"
+	@echo "  test-model               Model architecture unit tests"
 	@echo ""
 	@echo "Pipeline:"
 	@echo "  curate             Stage 1  — download, curate, and upload to S3"

@@ -180,47 +180,123 @@ make accelerate-config-multi GPUS=4
 
 ## Tests
 
----
-
-### `make test`
-
-Runs the full test suite.
-
-```bash
-make test
-```
-
-No GPU or external model downloads required — fasttext and KenLM are mocked in `tests/conftest.py`.
-
----
-
-### `make test-fast`
-
-Runs all tests except the curator integration test (`test_curate.py`), which runs the full filter → dedup → blend pipeline and is the slowest test by a large margin. Use this for fast feedback during development.
-
-```bash
-make test-fast
-```
+Tests validate real pipeline outputs at each stage. Run each test target immediately after its corresponding make stage. See [tests/README.md](../tests/README.md) for full documentation of what each test checks.
 
 ---
 
 ### `make test-curator`
 
-Runs curator tests only — quality filter unit tests, dedup resume correctness, and the blend integration test.
+Validates `make curate-mini` outputs — raw shards, filtered quality, deduplication correctness, `train.jsonl` source mix, and `blend_stats.json` accuracy.
 
 ```bash
-make test-curator
+make curate-mini && make test-curator
+```
+
+**Requires:** `DATA_DIR` set, `make curate-mini` completed.
+
+---
+
+### `make test-validate`
+
+Validates `make validate` outputs — retention rate, subset correctness, quality of retained docs, and `validation_stats.json` consistency.
+
+```bash
+make validate && make test-validate
+```
+
+**Requires:** `make test-curator` passing, `make validate` completed.
+
+---
+
+### `make test-tokenizer`
+
+Validates `make tokenizer` outputs — all 16 special token IDs correct, encode/decode roundtrip, no auto BOS/EOS, fertility < 1.5, chat template via `apply_chat_template`.
+
+```bash
+make tokenizer && make test-tokenizer
+```
+
+**Requires:** `make validate` completed.
+
+---
+
+### `make test-data-pipeline`
+
+Runs all three data pipeline tests in sequence.
+
+```bash
+make test-data-pipeline
+```
+
+---
+
+### `make test-training`
+
+Validates `make pretrain-mini` outputs — model loads, config matches `gpt_mini.yaml`, loss is finite and below random init threshold, dataset indexing correct.
+
+```bash
+make pretrain-mini GPUS=1 && make test-training
+```
+
+**Requires:** GPU instance, `make pretrain-mini` completed.
+
+---
+
+### `make test-sft-chat`
+
+Validates `make sft-mini` outputs — SFT data format, chat model loads, tokenizer has chat template, forward pass finite, generation runs.
+
+```bash
+make sft-mini GPUS=1 && make test-sft-chat
+```
+
+**Requires:** `make test-training` passing, `make sft-mini` completed.
+
+---
+
+### `make test-sft-code`
+
+Validates `make sft-code-mini` outputs — code model loads, forward pass finite, code special tokens present.
+
+```bash
+make sft-code-mini GPUS=1 && make test-sft-code
+```
+
+**Requires:** `make test-sft-chat` passing, `make sft-code-mini` completed.
+
+---
+
+### `make test-dpo`
+
+Validates `make dpo-mini` outputs — DPO data format (prompt/chosen/rejected), chosen ≠ rejected, model loads, forward pass finite, generation runs.
+
+```bash
+make dpo-mini GPUS=1 && make test-dpo
+```
+
+**Requires:** `make test-sft-code` passing, `make dpo-mini` completed.
+
+---
+
+### `make test-gpu-pipeline`
+
+Runs all four GPU pipeline tests in sequence.
+
+```bash
+make test-gpu-pipeline
 ```
 
 ---
 
 ### `make test-model`
 
-Runs model tests only — forward pass shapes, causal mask, GQA, RoPE, SwiGLU, RMSNorm, and parameter counts.
+Model architecture unit tests — no pipeline outputs needed, runs on CPU anywhere.
 
 ```bash
 make test-model
 ```
+
+**Covers:** RMSNorm, SwiGLU, GQA shapes, causal mask, weight tying, parameter count ~25M, save/load roundtrip.
 
 ---
 
@@ -527,7 +603,7 @@ make tokenizer-download
 
 ### `make pretrain-mini`
 
-Runs a minimal pretraining pass using `pretrain/configs/gpt_mini.yaml` — a 6-layer, 384-hidden model trained for 500 steps. Use this to validate the full training loop before committing to an expensive full pretraining run.
+Runs a minimal pretraining pass using `pretrain/configs/gpt_mini.yaml` — a 6-layer, 384-hidden model (~25M parameters) trained for 5000 steps (~40M tokens). Trains long enough to confirm loss decreases and produce semi-coherent output — use `inference/chat.py` after to verify the model is learning before committing to a full run.
 
 ```bash
 make pretrain-mini GPUS=1
@@ -535,8 +611,8 @@ make pretrain-mini GPUS=1
 
 **Requires:** `data/tokenized/train.bin`, `data/tokenizer/`, accelerate configured.
 **Produces:** `results/slm-mini/` checkpoint.
-**Runtime:** ~5–10 min on a single GPU.
-**Note:** The mini model is not useful for inference — it is a pipeline validation tool only.
+**Runtime:** ~30–45 min on a single GPU.
+**Note:** Semi-coherent output expected — enough to confirm the model is learning before a full run.
 
 ---
 

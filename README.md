@@ -126,26 +126,19 @@ slm/
 │   │   └── pvc.yaml
 │   └── serve.sh
 │
-├── tests/                                  Unit and integration tests
-│   ├── conftest.py                         Shared fixtures — synthetic JSONL shards, tmp dirs
-│   ├── curator/
-│   │   ├── test_quality.py                 QualityFilter — per-filter unit tests + rejection reasons
-│   │   ├── test_dedup.py                   Exact dedup, MinHash dedup, resume correctness
-│   │   └── test_curate.py                  Stage integration — filter → dedup → blend end-to-end
+├── tests/                                  Pipeline validation tests — run after each make stage
+│   ├── conftest.py                         DATA_DIR resolution, fasttext mock, shared helpers
+│   ├── README.md                           Test documentation — what each test validates
+│   ├── data_pipeline/                      CPU instance — run after each curation stage
+│   │   ├── test_pipeline_curator.py        Validates make curate-mini outputs
+│   │   ├── test_pipeline_validate.py       Validates make validate outputs
+│   │   └── test_pipeline_tokenizer.py      Validates make tokenizer outputs
 │   ├── model/
-│   │   ├── test_attention.py               GQA output shape, RoPE correctness
-│   │   ├── test_mlp.py                     SwiGLU output shape + dtype
-│   │   ├── test_norm.py                    RMSNorm invariants
-│   │   └── test_model.py                   Forward pass shapes, causal mask, parameter counts
-│   ├── tokenizer/
-│   │   └── test_tokenizer.py               Roundtrip, fertility, special token IDs, chat template
-│   ├── pretrain/
-│   │   ├── test_dataset.py                 PretrainingDataset indexing, chunk boundaries
-│   │   └── test_tokenize_data.py           JSONL → binary roundtrip, verify flag
-│   ├── validation/
-│   │   └── test_validate.py                Perplexity filter thresholds, KenLM mock
-│   └── inference/
-│       └── test_generate.py                Greedy decode output shape, EOS handling
+│   │   └── test_model.py                   Architecture unit tests — no pipeline outputs needed
+│   └── gpu_pipeline/                       GPU instance — run after each training stage
+│       ├── test_pipeline_training.py       Validates make pretrain-mini outputs
+│       ├── test_pipeline_sft.py            Validates make sft-mini and sft-code-mini outputs
+│       └── test_pipeline_dpo.py            Validates make dpo-mini outputs
 │
 ├── notebooks/                    Exploratory analysis — one per pipeline stage
 │   ├── 01_model_exploration.ipynb
@@ -252,10 +245,14 @@ make download-fasttext-model DATA_DIR=/data/slm/data   # language ID model (~1MB
 make download-kenlm-model    DATA_DIR=/data/slm/data   # perplexity model (~4GB)
 
 # ── Step 2: Validate curation pipeline ───────────────────────────────────────
-# Exercises every curation stage end-to-end on tiny data (~30–45 min).
-# Fix any issues here before committing to the full run.
+# Exercises every curation stage end-to-end on tiny data.
+# All tests run here — catch issues before spending hours on the full run.
 make curate-mini
-make test
+make test-curator
+make validate
+make test-validate
+make tokenizer
+make test-tokenizer
 
 # ── Step 3: Full curation ─────────────────────────────────────────────────────
 make curate SIZE=125m WORKERS=62    # Stage 1: download, filter, dedup, blend, upload
@@ -271,15 +268,19 @@ make setup-gpu DATA_DIR=/data/slm/data SIZE=125m DATE=YYYY-MM-DD
 source ~/.bashrc
 
 # ── Step 5: Validate training pipeline ───────────────────────────────────────
-# Exercises every training stage end-to-end on a single GPU (~15–20 min).
-# Fix any issues here before committing to the full run.
+# Exercises every training stage end-to-end on a single GPU.
+# All tests run here — catch issues before spending hours on the full run.
 make accelerate-config-single
 make pretrain-mini  GPUS=1
+make test-training
 make prepare-sft
 make sft-mini       GPUS=1
+make test-sft-chat
 make sft-code-mini  GPUS=1
+make test-sft-code
 make prepare-dpo
 make dpo-mini       GPUS=1
+make test-dpo
 make eval-mini
 
 # ── Step 6: Full training ─────────────────────────────────────────────────────
@@ -305,28 +306,47 @@ For full documentation of every `make` target see [docs/COMMANDS.md](docs/COMMAN
 
 ## Tests
 
+Tests validate real pipeline outputs at each stage. Each test target is paired with the make stage that produces the outputs it checks. See [tests/README.md](tests/README.md) for full documentation.
+
+**CPU curation instance:**
+
 ```bash
-# All tests
-make test
+make curate-mini   && make test-curator      # validate curation outputs
+make validate      && make test-validate     # validate validation outputs
+make tokenizer     && make test-tokenizer    # validate tokenizer outputs
 
-# Specific module
-pytest tests/curator/
-pytest tests/model/
-
-# With output
-pytest -s tests/curator/test_quality.py
+make test-data-pipeline                      # run all three at once
 ```
 
-| Module | Covers |
-|---|---|
-| `tests/curator/` | Quality filter per-filter unit tests, exact dedup, MinHash dedup, resume correctness, filter → dedup → blend integration |
-| `tests/model/` | Forward pass shapes, causal mask, GQA output, RoPE, SwiGLU, RMSNorm invariants, parameter counts |
-| `tests/tokenizer/` | Roundtrip encoding, fertility, special token IDs, chat template |
-| `tests/pretrain/` | Dataset indexing, chunk boundaries, JSONL → binary roundtrip |
-| `tests/validation/` | Perplexity filter thresholds, KenLM mock |
-| `tests/inference/` | Greedy decode output shape, EOS handling |
+**GPU training instance:**
 
-No GPU or external model downloads required — fasttext and KenLM are mocked in `tests/conftest.py`.
+```bash
+make pretrain-mini  GPUS=1  && make test-training    # validate pretraining
+make sft-mini       GPUS=1  && make test-sft-chat    # validate chat SFT
+make sft-code-mini  GPUS=1  && make test-sft-code    # validate code SFT
+make dpo-mini       GPUS=1  && make test-dpo         # validate DPO
+
+make test-gpu-pipeline                               # run all four at once
+```
+
+**Model unit tests — no pipeline outputs needed, runs anywhere:**
+
+```bash
+make test-model
+```
+
+| Target | Stage | Validates |
+|---|---|---|
+| `test-curator` | `curate-mini` | Raw shards, filter quality, dedup correctness, blend output, stats |
+| `test-validate` | `validate` | Retention rate, subset correctness, quality of retained docs |
+| `test-tokenizer` | `tokenizer` | Special token IDs, roundtrip, fertility, chat template |
+| `test-data-pipeline` | all three above | Runs curator + validate + tokenizer tests |
+| `test-training` | `pretrain-mini` | Model loads, loss finite and below random init, dataset indexing |
+| `test-sft-chat` | `sft-mini` | SFT data format, model loads, chat template preserved, generation runs |
+| `test-sft-code` | `sft-code-mini` | Code model loads, loss finite, code special tokens present |
+| `test-dpo` | `dpo-mini` | DPO data format, chosen ≠ rejected, model loads, generation runs |
+| `test-gpu-pipeline` | all four above | Runs training + sft-chat + sft-code + dpo tests |
+| `test-model` | none | RMSNorm, SwiGLU, GQA, causal mask, weight tying, parameter count |
 
 ---
 
