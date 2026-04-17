@@ -12,10 +12,9 @@ the code SFT uses a lower LR to reduce catastrophic forgetting of
 chat capability learned in stage 1.
 
 Answer-only loss: loss is computed only on assistant response tokens,
-not on system/user prompt tokens. Implemented via
-DataCollatorForCompletionOnlyLM with response_template="<|assistant|>".
-This focuses the gradient signal on what the model should generate,
-not what it reads.
+not on system/user prompt tokens. Handled natively by SFTConfig via
+completion_only_loss=True and response_template="<|assistant|>".
+DataCollatorForCompletionOnlyLM was removed in trl 0.17+.
 
 Chat template: formatting uses tokenizer.apply_chat_template() via a
 formatting_func passed to SFTTrainer — the same code path as inference.
@@ -133,8 +132,11 @@ def build_sft_args(cfg: dict, output_dir: Path):
     round-trip which can include keys SFTConfig doesn't accept.
 
     SFTConfig extends TrainingArguments and adds SFT-specific fields:
-    max_seq_length, packing. dataset_text_field is intentionally omitted —
-    formatting is handled by the formatting_func passed to SFTTrainer.
+    max_seq_length, packing, completion_only_loss, response_template.
+
+    Answer-only loss is handled natively via completion_only_loss=True and
+    response_template="<|assistant|>" — DataCollatorForCompletionOnlyLM
+    was removed in trl 0.17+.
     """
     from trl import SFTConfig
 
@@ -177,9 +179,12 @@ def build_sft_args(cfg: dict, output_dir: Path):
         seed=train_cfg.get("seed", 42),
         gradient_checkpointing=train_cfg.get("gradient_checkpointing", False),
         # SFT-specific fields
-        # dataset_text_field intentionally omitted — formatting_func handles it
         max_length=cfg["model"].get("max_seq_length", 2048),
         packing=cfg["data"].get("packing", False),
+        # Answer-only loss — compute loss on assistant responses only.
+        # Replaces DataCollatorForCompletionOnlyLM which was removed in trl 0.17+.
+        completion_only_loss=True,
+        response_template="<|assistant|>",
     )
 
 
@@ -255,21 +260,9 @@ def main():
     log.info(f"Train: {len(train_dataset):,} examples")
     log.info(f"Val:   {len(val_dataset):,} examples")
 
-    # ── Answer-only loss masking ───────────────────────────────────────────────
-    # Mask loss on system and user tokens — only compute loss on assistant
-    # response tokens. This focuses gradient signal on generation, not reading.
-    # response_template must match the token(s) that precede every assistant
-    # response in the formatted output from apply_chat_template().
-    from trl import DataCollatorForCompletionOnlyLM
-
-    collator = DataCollatorForCompletionOnlyLM(
-        response_template="<|assistant|>",
-        tokenizer=tokenizer,
-    )
-    log.info("Answer-only loss masking enabled (response_template='<|assistant|>')")
-
     # ── SFT args ──────────────────────────────────────────────────────────────
     sft_args = build_sft_args(cfg, output_dir)
+    log.info("Answer-only loss enabled (completion_only_loss=True, response_template='<|assistant|>')")
 
     # ── SFTTrainer ────────────────────────────────────────────────────────────
     from trl import SFTTrainer
@@ -281,7 +274,6 @@ def main():
         eval_dataset=val_dataset,
         processing_class=tokenizer,
         formatting_func=make_formatting_func(tokenizer),
-        data_collator=collator,
     )
 
     # ── Train ─────────────────────────────────────────────────────────────────
