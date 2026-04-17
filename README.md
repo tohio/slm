@@ -166,6 +166,7 @@ slm/
 │   └── multi_gpu.yaml
 │
 ├── Makefile
+├── pytest.ini
 ├── requirements.txt
 ├── environment.yml
 └── .env.sample
