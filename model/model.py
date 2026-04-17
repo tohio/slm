@@ -75,7 +75,7 @@ def _extract_kv_from_dynamic_cache(
     cache_layers = getattr(cache, "layers", None)
     if cache_layers is not None:
         for i in range(n_layers):
-            if i < len(cache_layers) and cache_layers[i].is_initialized():
+            if i < len(cache_layers) and cache_layers[i].is_initialized:
                 result.append((cache_layers[i].keys, cache_layers[i].values))
             else:
                 result.append(None)
