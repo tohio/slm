@@ -248,12 +248,12 @@ make download-kenlm-model    DATA_DIR=/data/slm/data   # perplexity model (~4GB)
 # ── Step 2: Validate curation pipeline ───────────────────────────────────────
 # Exercises every curation stage end-to-end on tiny data.
 # All tests run here — catch issues before spending hours on the full run.
-make curate-mini
-make test-curator
-make validate
-make test-validate
-make tokenizer
-make test-tokenizer
+make curate-mini && make test-curator
+make validate    && make test-validate
+make tokenizer   && make test-tokenizer
+make tokenize
+make tokenize-upload SIZE=mini    # push mini tokenized binary to S3 for GPU instance
+make tokenizer-upload             # push tokenizer to S3 (shared across all sizes)
 
 # ── Step 3: Full curation ─────────────────────────────────────────────────────
 make curate SIZE=125m WORKERS=62    # Stage 1: download, filter, dedup, blend, upload
@@ -265,23 +265,20 @@ make tokenize                       # Stage 4a: tokenize to binary
 make tokenize-upload SIZE=125m      # Stage 4a: push tokenized binary to S3
 
 # ── Step 4: GPU instance setup ───────────────────────────────────────────────
-make setup-gpu DATA_DIR=/data/slm/data SIZE=125m DATE=YYYY-MM-DD
+# For mini validation — pulls mini tokenized binary and tokenizer from S3
+make setup-gpu DATA_DIR=/data/slm/data SIZE=mini DATE=YYYY-MM-DD
 source ~/.bashrc
 
 # ── Step 5: Validate training pipeline ───────────────────────────────────────
 # Exercises every training stage end-to-end on a single GPU.
 # All tests run here — catch issues before spending hours on the full run.
-make accelerate-config-single
-make pretrain-mini  GPUS=1
-make test-training
+make accelerate-config-single       # single GPU for mini validation
+make pretrain-mini  GPUS=1 && make test-training
 make prepare-sft
-make sft-mini       GPUS=1
-make test-sft-chat
-make sft-code-mini  GPUS=1
-make test-sft-code
+make sft-mini       GPUS=1 && make test-sft-chat
+make sft-code-mini  GPUS=1 && make test-sft-code
 make prepare-dpo
-make dpo-mini       GPUS=1
-make test-dpo
+make dpo-mini       GPUS=1 && make test-dpo
 make eval-mini
 
 # ── Step 6: Full training ─────────────────────────────────────────────────────
@@ -289,7 +286,9 @@ make eval-mini
 # pretrain/configs/gpt_125m.yaml, alignment/configs/dpo_125m.yaml,
 # finetune/configs/sft_chat_125m.yaml, finetune/configs/sft_code_125m.yaml for your GPU count.
 # See docs/COMMANDS.md — Multi-GPU Config Scaling for exact values.
-make accelerate-config-single        # Use make accelerate-config-multi GPUS=x for multi-GPU
+# Re-run setup-gpu to pull the 125m tokenized binary before training.
+make setup-gpu DATA_DIR=/data/slm/data SIZE=125m DATE=YYYY-MM-DD
+make accelerate-config-single        # single GPU — change to: make accelerate-config-multi GPUS=x for multi-GPU
 make pretrain  SIZE=125m GPUS=1      # Stage 4b: pretrain from scratch
 make export-base     SIZE=125m       # Stage 8:  push base model to Hub
 make sft       SIZE=125m GPUS=1      # Stage 5b: chat SFT
@@ -424,7 +423,7 @@ Run close to `us-east-1` (AWS) or `us-east1` (GCP) to minimise Common Crawl egre
 Use `tmux` to keep the pipeline running through session timeouts:
 ```bash
 tmux new -s curate
-make curate SIZE=125m WORKERS=48
+make curate SIZE=125m WORKERS=62
 # Ctrl+B, D to detach — tmux attach -t curate to reattach
 ```
 

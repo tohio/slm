@@ -101,30 +101,27 @@ class TestPretrainMiniOutputs:
         After 5000 steps the model should have learned something.
         Random init loss ≈ log(32000) ≈ 10.4.
         After training we expect loss < 6.0 on training data samples.
+
+        Samples directly from the tokenized binary so this test works
+        on the GPU instance without needing curated/train.jsonl.
         """
-        from transformers import AutoConfig, PreTrainedTokenizerFast
+        from transformers import AutoConfig
         from model.config import SLMConfig
         from model.model import SLMForCausalLM
+        import numpy as np
         AutoConfig.register("slm", SLMConfig)
+
+        bin_path = pipeline_path("tokenized", "train.bin")
+        if not bin_path.exists():
+            pytest.skip("tokenized/train.bin not found")
 
         model = SLMForCausalLM.from_pretrained(str(MINI_MODEL_DIR))
         model.eval()
 
-        tokenizer = PreTrainedTokenizerFast.from_pretrained(
-            str(MINI_MODEL_DIR / "tokenizer")
-        )
-
-        # Use a sample from the curated data the model was trained on
-        curated_path = pipeline_path("curated", "train.jsonl")
-        if not curated_path.exists():
-            pytest.skip("curated/train.jsonl not found")
-
-        import json
-        with open(curated_path) as f:
-            sample_text = json.loads(f.readline()).get("text", "")[:500]
-
-        encoding = tokenizer(sample_text, return_tensors="pt", truncation=True, max_length=128)
-        input_ids = encoding["input_ids"]
+        # Sample a sequence from the start of the training data
+        data = np.memmap(str(bin_path), dtype=np.uint16, mode="r")
+        seq_len = 128
+        input_ids = torch.from_numpy(data[:seq_len].astype("int64")).unsqueeze(0)
         labels = input_ids.clone()
 
         with torch.no_grad():
