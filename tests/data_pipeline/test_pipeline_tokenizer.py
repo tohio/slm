@@ -208,9 +208,12 @@ class TestChatTemplate:
     def test_first_tokenized_id_is_bos(self):
         hf_tokenizer = load_hf_tokenizer()
         messages = [{"role": "user", "content": "Hello"}]
-        token_ids = hf_tokenizer.apply_chat_template(
+        result = hf_tokenizer.apply_chat_template(
             messages, tokenize=True, add_generation_prompt=False
         )
+        # apply_chat_template may return a list of ints or an Encoding object
+        # depending on the tokenizer version — normalise to a list of ints
+        token_ids = result.ids if hasattr(result, "ids") else result
         assert token_ids[0] == BOS_ID, (
             f"First token ID is {token_ids[0]}, expected BOS_ID={BOS_ID}"
         )
