@@ -98,28 +98,30 @@ class TestPretrainMiniOutputs:
     @skip_if_no_model()
     def test_loss_decreases_from_random_init(self):
         """
-        Verify training reduced loss by checking the saved train_loss from
-        the trainer state rather than evaluating on held-out data.
-
-        The mini model trains on ~800k tokens for 5000 steps — deep overfitting
-        is expected and loss on unseen sequences is not a reliable signal.
-        Instead we verify the final training loss is well below random init.
+        Verify training reduced loss by reading train_loss from trainer_state.json.
+        The trainer saves this in the latest checkpoint directory.
         """
         import json
-        trainer_state = MINI_MODEL_DIR.parent / "trainer_state.json"
-        if not trainer_state.exists():
-            pytest.skip("trainer_state.json not found")
+        import glob
 
-        with open(trainer_state) as f:
+        # trainer_state.json is saved in checkpoint dirs, not final/
+        checkpoint_dir = MINI_MODEL_DIR.parent
+        state_files = sorted(glob.glob(str(checkpoint_dir / "checkpoint-*" / "trainer_state.json")))
+        if not state_files:
+            pytest.skip("trainer_state.json not found in any checkpoint")
+
+        # Use the latest checkpoint
+        with open(state_files[-1]) as f:
             state = json.load(f)
 
-        # Final training loss from trainer state
-        train_loss = state.get("best_metric") or state.get("log_history", [{}])[-1].get("train_loss")
-        if train_loss is None:
-            pytest.skip("train_loss not found in trainer_state.json")
+        log_history = state.get("log_history", [])
+        train_losses = [e["loss"] for e in log_history if "loss" in e]
+        if not train_losses:
+            pytest.skip("No training loss entries in trainer_state.json")
 
-        assert train_loss < 5.0, (
-            f"Final training loss {train_loss:.2f} is too high — "
+        final_loss = train_losses[-1]
+        assert final_loss < 5.0, (
+            f"Final training loss {final_loss:.2f} is too high — "
             f"model may not have converged. Random init would be ~10.4."
         )
 
