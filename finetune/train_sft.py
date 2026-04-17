@@ -227,6 +227,14 @@ def main():
     train_dataset = load_dataset_from_jsonl(train_path)
     val_dataset   = load_dataset_from_jsonl(val_path)
 
+    # trl's is_conversational() only recognises these field names:
+    # prompt, chosen, rejected, completion, messages.
+    # Our dataset uses "conversations" — rename to "messages" so trl
+    # detects the format correctly and applies assistant_only_loss=True.
+    if "conversations" in train_dataset.column_names:
+        train_dataset = train_dataset.rename_column("conversations", "messages")
+        val_dataset   = val_dataset.rename_column("conversations", "messages")
+
     # Optionally truncate for mini validation runs
     max_samples = data_cfg.get("max_samples")
     if max_samples:
