@@ -33,6 +33,10 @@ Chat template:
     save time so tokenizer.apply_chat_template() works correctly in SFT,
     DPO, and inference — matching the special token structure exactly.
 
+    The template includes {% generation %} and {% endgeneration %} tags
+    around assistant responses, required by trl's assistant_only_loss=True
+    for answer-only loss masking in SFTTrainer.
+
 Output:
     data/tokenizer/slm_tokenizer.json   — full tokenizer (HF format)
     data/tokenizer/vocab.json           — vocabulary
@@ -121,14 +125,19 @@ ENDOFCONTEXT_ID = 15
 # DPO, and inference.
 #
 # Format:
-#   <|system|>{content}<|endofturn|>
+#   <BOS><|system|>{content}<|endofturn|>
 #   <|user|>{content}<|endofturn|>
-#   <|assistant|>{content}<|endofturn|>
+#   <|assistant|>{content}<EOS><|endofturn|>
 #   <|assistant|>   ← generation prompt (add_generation_prompt=True)
 #
 # BOS is prepended once at the start of the full sequence.
 # EOS is appended at the end of each assistant turn.
 # No BOS/EOS on system or user turns — the role tokens are the delimiters.
+#
+# {% generation %} / {% endgeneration %} tags wrap the assistant response
+# content. These are required by trl's assistant_only_loss=True for
+# answer-only loss masking in SFTTrainer — trl uses them to identify
+# which tokens to compute loss on.
 
 CHAT_TEMPLATE = (
     "{{ bos_token }}"
@@ -138,7 +147,10 @@ CHAT_TEMPLATE = (
         "{% elif message['role'] == 'user' %}"
             "<|user|>{{ message['content'] }}<|endofturn|>"
         "{% elif message['role'] == 'assistant' %}"
-            "<|assistant|>{{ message['content'] }}{{ eos_token }}<|endofturn|>"
+            "<|assistant|>"
+            "{% generation %}"
+            "{{ message['content'] }}{{ eos_token }}<|endofturn|>"
+            "{% endgeneration %}"
         "{% endif %}"
     "{% endfor %}"
     "{% if add_generation_prompt %}<|assistant|>{% endif %}"
@@ -232,7 +244,7 @@ def train_tokenizer(
     tokenizer.train_from_iterator(
         text_iterator(input_path),
         trainer=trainer,
-        length=None,  # unknown length — shows progress by docs not %
+        length=None,
     )
 
     # Verify special token IDs are correct
@@ -275,9 +287,8 @@ def _save_as_hf_tokenizer(tokenizer, output_dir: Path) -> None:
     """
     Save the tokenizer as a HuggingFace PreTrainedTokenizerFast.
 
-    Bakes in the Jinja2 chat template so tokenizer.apply_chat_template()
-    works correctly in SFT, DPO, and inference without any additional
-    configuration. This is the tokenizer used by all training scripts.
+    Bakes in the Jinja2 chat template including {% generation %} /
+    {% endgeneration %} tags required by trl's assistant_only_loss=True.
 
     Args:
         tokenizer: Trained tokenizers.Tokenizer instance.
@@ -292,18 +303,15 @@ def _save_as_hf_tokenizer(tokenizer, output_dir: Path) -> None:
             eos_token="<EOS>",
             unk_token="<UNK>",
             pad_token="<PAD>",
-            additional_special_tokens=SPECIAL_TOKENS[4:],  # chat/code/tool tokens
+            additional_special_tokens=SPECIAL_TOKENS[4:],
         )
 
-        # Bake in the chat template so apply_chat_template() works
-        # correctly in SFT, DPO, and inference. Without this,
-        # apply_chat_template() falls back to a generic template that
-        # does not match our special token structure.
         hf_tokenizer.chat_template = CHAT_TEMPLATE
 
         hf_tokenizer.save_pretrained(str(output_dir))
         log.info(f"HuggingFace tokenizer saved to {output_dir}")
         log.info(f"Chat template baked in — apply_chat_template() ready")
+        log.info(f"Generation tags included — assistant_only_loss=True supported")
 
     except Exception as e:
         log.error(f"Could not save HF tokenizer: {e}")

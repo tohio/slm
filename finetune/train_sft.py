@@ -11,14 +11,15 @@ Sequential fine-tuning preserves capabilities from earlier stages —
 the code SFT uses a lower LR to reduce catastrophic forgetting of
 chat capability learned in stage 1.
 
-Answer-only loss: loss is computed only on assistant response tokens,
-not on system/user prompt tokens. Handled natively by SFTConfig via
-completion_only_loss=True and response_template="<|assistant|>".
-DataCollatorForCompletionOnlyLM was removed in trl 0.17+.
+Answer-only loss:
+    Uses trl's native assistant_only_loss=True in SFTConfig. This requires
+    the chat template to include {% generation %} / {% endgeneration %} tags
+    around assistant responses — these are baked into the tokenizer at
+    train_tokenizer.py time.
 
-Chat template: formatting uses tokenizer.apply_chat_template() via a
-formatting_func passed to SFTTrainer — the same code path as inference.
-The "text" field from prepare_sft.py is ignored.
+    SFTTrainer automatically applies the chat template when given a
+    conversational dataset (with a "conversations" field containing
+    role/content message dicts). No formatting_func needed.
 
 Usage:
     # Chat SFT
@@ -79,11 +80,8 @@ def load_tokenizer(tokenizer_path: Path):
     """
     Load the HuggingFace tokenizer saved by train_tokenizer.py.
 
-    Uses PreTrainedTokenizerFast.from_pretrained() to load the full
-    tokenizer config including the baked-in chat_template. Do not
-    reconstruct from tokenizer.json directly — that bypasses
-    tokenizer_config.json and loses the chat template, causing
-    apply_chat_template() to fall back to a generic format.
+    Validates that the chat template includes {% generation %} /
+    {% endgeneration %} tags required by assistant_only_loss=True.
     """
     from transformers import PreTrainedTokenizerFast
 
@@ -101,42 +99,23 @@ def load_tokenizer(tokenizer_path: Path):
             f"Retrain the tokenizer: python tokenizer/train_tokenizer.py"
         )
 
-    return tokenizer
-
-
-def make_formatting_func(tokenizer):
-    """
-    Return a formatting function for SFTTrainer that applies the
-    tokenizer's baked-in chat template to each example.
-
-    SFTTrainer calls this function on each example before tokenization.
-    Using apply_chat_template() here ensures training format matches
-    inference format exactly — the same code path used in chat.py and
-    generate.py.
-
-    The "text" field from prepare_sft.py is ignored — formatting always
-    goes through the tokenizer's chat template.
-    """
-    def formatting_func(example):
-        return tokenizer.apply_chat_template(
-            example["conversations"],
-            tokenize=False,
-            add_generation_prompt=False,
+    if "{% generation %}" not in tokenizer.chat_template:
+        raise ValueError(
+            f"Chat template at {tokenizer_path} is missing {{% generation %}} tags. "
+            f"Required for assistant_only_loss=True. "
+            f"Retrain the tokenizer: python tokenizer/train_tokenizer.py"
         )
-    return formatting_func
+
+    return tokenizer
 
 
 def build_sft_args(cfg: dict, output_dir: Path):
     """
-    Build SFTConfig directly — avoids the fragile TrainingArguments.to_dict()
-    round-trip which can include keys SFTConfig doesn't accept.
+    Build SFTConfig for trl 0.17+.
 
-    SFTConfig extends TrainingArguments and adds SFT-specific fields:
-    max_seq_length, packing, completion_only_loss, response_template.
-
-    Answer-only loss is handled natively via completion_only_loss=True and
-    response_template="<|assistant|>" — DataCollatorForCompletionOnlyLM
-    was removed in trl 0.17+.
+    assistant_only_loss=True computes loss only on assistant response tokens.
+    Requires {% generation %} / {% endgeneration %} tags in the chat template.
+    SFTTrainer applies the chat template automatically for conversational datasets.
     """
     from trl import SFTConfig
 
@@ -178,13 +157,11 @@ def build_sft_args(cfg: dict, output_dir: Path):
         remove_unused_columns=False,
         seed=train_cfg.get("seed", 42),
         gradient_checkpointing=train_cfg.get("gradient_checkpointing", False),
-        # SFT-specific fields
+        # SFT-specific
         max_length=cfg["model"].get("max_seq_length", 2048),
         packing=cfg["data"].get("packing", False),
-        # Answer-only loss — compute loss on assistant responses only.
-        # trl 0.29 infers the response template from the chat template automatically.
-        # DataCollatorForCompletionOnlyLM was removed in trl 0.17+.
-        completion_only_loss=True,
+        # Answer-only loss — requires {% generation %} tags in chat template
+        assistant_only_loss=True,
     )
 
 
@@ -221,9 +198,6 @@ def main():
     log.info(f"Parameters: {n_params:,} ({n_params / 1e6:.1f}M)")
 
     # ── Tokenizer ─────────────────────────────────────────────────────────────
-    # Use from_pretrained() so tokenizer_config.json is loaded — this is what
-    # gives us the baked-in chat_template for apply_chat_template().
-    # Fall back to DATA_DIR/tokenizer if not found in the model directory.
     tokenizer_path = base_model_path / "tokenizer"
     if not (tokenizer_path / "tokenizer_config.json").exists():
         log.warning(
@@ -237,6 +211,9 @@ def main():
     log.info(f"Vocab size: {tokenizer.vocab_size:,}")
 
     # ── Dataset ───────────────────────────────────────────────────────────────
+    # Dataset has a "conversations" field with role/content message dicts.
+    # SFTTrainer detects this format and applies the chat template automatically
+    # via apply_chat_template() — no formatting_func required.
     data_cfg   = cfg["data"]
     train_path = Path(os.path.expandvars(data_cfg["train_path"]))
     val_path   = Path(os.path.expandvars(data_cfg["val_path"]))
@@ -262,7 +239,7 @@ def main():
 
     # ── SFT args ──────────────────────────────────────────────────────────────
     sft_args = build_sft_args(cfg, output_dir)
-    log.info("Answer-only loss enabled (completion_only_loss=True, response_template='<|assistant|>')")
+    log.info("Answer-only loss enabled (assistant_only_loss=True)")
 
     # ── SFTTrainer ────────────────────────────────────────────────────────────
     from trl import SFTTrainer
@@ -273,7 +250,6 @@ def main():
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         processing_class=tokenizer,
-        formatting_func=make_formatting_func(tokenizer),
     )
 
     # ── Train ─────────────────────────────────────────────────────────────────
