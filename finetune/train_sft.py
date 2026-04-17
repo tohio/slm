@@ -182,9 +182,9 @@ def build_sft_args(cfg: dict, output_dir: Path):
         max_length=cfg["model"].get("max_seq_length", 2048),
         packing=cfg["data"].get("packing", False),
         # Answer-only loss — compute loss on assistant responses only.
-        # Replaces DataCollatorForCompletionOnlyLM which was removed in trl 0.17+.
+        # trl 0.29 infers the response template from the chat template automatically.
+        # DataCollatorForCompletionOnlyLM was removed in trl 0.17+.
         completion_only_loss=True,
-        response_template="<|assistant|>",
     )
 
 
