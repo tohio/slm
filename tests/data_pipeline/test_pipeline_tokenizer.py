@@ -211,9 +211,16 @@ class TestChatTemplate:
         result = hf_tokenizer.apply_chat_template(
             messages, tokenize=True, add_generation_prompt=False
         )
-        # apply_chat_template may return a list of ints or an Encoding object
-        # depending on the tokenizer version — normalise to a list of ints
-        token_ids = result.ids if hasattr(result, "ids") else result
+        # Normalise to a flat list of ints — apply_chat_template can return:
+        #   - list[int]           (standard)
+        #   - list[Encoding]      (some tokenizer versions)
+        #   - Encoding            (rare)
+        if hasattr(result, "ids"):
+            token_ids = result.ids
+        elif result and hasattr(result[0], "ids"):
+            token_ids = result[0].ids
+        else:
+            token_ids = list(result)
         assert token_ids[0] == BOS_ID, (
             f"First token ID is {token_ids[0]}, expected BOS_ID={BOS_ID}"
         )
