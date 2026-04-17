@@ -31,6 +31,9 @@ Compatibility (transformers v5):
       going through the broken v5 dict resolution.
     - past_key_values supports both legacy list[tuple] format and v5
       DynamicCache objects for full compatibility with trl and vLLM.
+    - transformers v5 DynamicCache uses a .layers attribute containing
+      DynamicLayer objects with .keys and .values tensors. Older versions
+      used .key_cache / .value_cache list attributes. Both are handled.
     - prepare_inputs_for_generation accepts cache_position (added in v5).
     - use_cache is forced False when gradient checkpointing is enabled.
     - post_init() is called only in SLMForCausalLM, not SLMModel.
@@ -49,6 +52,48 @@ from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutpu
 from .block import SLMDecoderBlock
 from .config import SLMConfig
 from .norm import RMSNorm
+
+
+def _extract_kv_from_dynamic_cache(
+    cache: Cache,
+    n_layers: int,
+) -> list[Optional[tuple[torch.Tensor, torch.Tensor]]]:
+    """
+    Extract per-layer (k, v) tuples from a DynamicCache object.
+
+    Handles two DynamicCache formats:
+    - transformers v5: cache.layers is a list of DynamicLayer objects
+      with .keys and .values tensor attributes.
+    - older versions: cache.key_cache / cache.value_cache are lists of tensors.
+
+    Returns a list of length n_layers where each entry is either a
+    (k, v) tuple or None if no cached state exists for that layer.
+    """
+    result = []
+
+    # transformers v5 — DynamicLayer with .keys / .values
+    cache_layers = getattr(cache, "layers", None)
+    if cache_layers is not None:
+        for i in range(n_layers):
+            if i < len(cache_layers) and cache_layers[i].is_initialized():
+                result.append((cache_layers[i].keys, cache_layers[i].values))
+            else:
+                result.append(None)
+        return result
+
+    # older DynamicCache — .key_cache / .value_cache lists
+    key_cache = getattr(cache, "key_cache", None)
+    value_cache = getattr(cache, "value_cache", None)
+    if key_cache is not None:
+        for i in range(n_layers):
+            if i < len(key_cache):
+                result.append((key_cache[i], value_cache[i]))
+            else:
+                result.append(None)
+        return result
+
+    # Unknown format — return empty cache
+    return [None] * n_layers
 
 
 class SLMModel(PreTrainedModel):
@@ -116,24 +161,13 @@ class SLMModel(PreTrainedModel):
         hidden_states = inputs_embeds
 
         # Normalise past_key_values — accept both legacy list[tuple] and
-        # v5 DynamicCache. Convert to per-layer sentinels for our layer interface.
+        # v5 DynamicCache. Convert to per-layer (k, v) tuples or None.
         if past_key_values is None:
             past_key_values = [None] * len(self.layers)
         elif isinstance(past_key_values, Cache):
-            # DynamicCache passed by v5 generate() — extract per-layer KV tuples.
-            # Check per-layer directly rather than using get_seq_length() which
-            # can return per-layer lengths in v5 rather than a single scalar,
-            # making total_cached > 0 an unreliable sentinel.
-            legacy_cache = []
-            for i in range(len(self.layers)):
-                if i < len(past_key_values.key_cache):
-                    legacy_cache.append((
-                        past_key_values.key_cache[i],
-                        past_key_values.value_cache[i],
-                    ))
-                else:
-                    legacy_cache.append(None)
-            past_key_values = legacy_cache
+            past_key_values = _extract_kv_from_dynamic_cache(
+                past_key_values, len(self.layers)
+            )
 
         next_cache: list | None = [] if use_cache else None
         all_hidden_states: list | None = [] if output_hidden_states else None
