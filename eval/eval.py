@@ -20,6 +20,10 @@ Tokenizer:
     explicitly to HFLM so AutoTokenizer does not need to find it at the
     model root.
 
+lm-eval compatibility:
+    lm-eval 0.4.x requires num_fewshot to be an int, not a dict.
+    We run each benchmark separately so each uses its canonical few-shot count.
+
 Usage:
     python eval/eval.py --model results/slm-125m-dpo/final
     python eval/eval.py --model results/slm-125m-dpo/final --tasks hellaswag,arc_easy
@@ -102,15 +106,6 @@ def resolve_tokenizer_path(model_path: Path) -> Path:
     train_sft.py, and train_dpo.py copy the tokenizer alongside weights.
     Falls back to the model directory root for Hub-style checkpoints where
     the tokenizer files live alongside the model weights.
-
-    Args:
-        model_path: Path to the model checkpoint directory.
-
-    Returns:
-        Path to the tokenizer directory.
-
-    Raises:
-        FileNotFoundError: If no tokenizer_config.json can be found.
     """
     candidates = [
         model_path / "tokenizer",
@@ -126,6 +121,30 @@ def resolve_tokenizer_path(model_path: Path) -> Path:
     )
 
 
+def make_lm(model_path: Path, batch_size: int, device: str):
+    """
+    Create an HFLM wrapper for the given model checkpoint.
+    Registers SLMConfig and SLMForCausalLM with AutoModel before loading.
+    """
+    from lm_eval.models.huggingface import HFLM
+    from transformers import AutoConfig, AutoModelForCausalLM
+    from model import SLMConfig, SLMForCausalLM
+
+    AutoConfig.register("slm", SLMConfig)
+    AutoModelForCausalLM.register(SLMConfig, SLMForCausalLM)
+
+    tokenizer_path = resolve_tokenizer_path(model_path)
+    log.info(f"Loading model from {model_path}...")
+    log.info(f"Tokenizer from {tokenizer_path}")
+
+    return HFLM(
+        pretrained=str(model_path),
+        tokenizer=str(tokenizer_path),
+        device=device,
+        batch_size=batch_size,
+    )
+
+
 def run_evaluation(
     model_path: Path,
     tasks: list[str],
@@ -137,80 +156,49 @@ def run_evaluation(
     """
     Run lm-evaluation-harness on the given model and tasks.
 
-    Registers SLMConfig and SLMForCausalLM with the AutoModel classes
-    before creating the HFLM wrapper so lm-eval can load the checkpoint.
-
-    Passes the tokenizer path explicitly to HFLM — the tokenizer lives in
-    a tokenizer/ subdirectory, not at the model root, so AutoTokenizer
-    cannot find it automatically.
-
-    Passes num_fewshot as a per-task dict so each benchmark uses its
-    canonical few-shot count regardless of what other tasks are requested.
+    Runs each benchmark separately so each uses its canonical num_fewshot
+    count as an int — lm-eval 0.4.x does not accept num_fewshot as a dict.
+    Results are merged into a single dict.
     """
     try:
         from lm_eval import evaluator
-        from lm_eval.models.huggingface import HFLM
     except ImportError:
         raise ImportError("lm-eval not installed. Install with: pip install lm-eval")
 
-    from transformers import AutoConfig, AutoModelForCausalLM
-    from model import SLMConfig, SLMForCausalLM
+    lm = make_lm(model_path, batch_size, device)
 
-    # Register custom model so AutoModelForCausalLM (used internally by HFLM)
-    # can load the checkpoint without "Unrecognized configuration class".
-    AutoConfig.register("slm", SLMConfig)
-    AutoModelForCausalLM.register(SLMConfig, SLMForCausalLM)
-
-    # Resolve tokenizer — lives in tokenizer/ subdirectory of the checkpoint
-    tokenizer_path = resolve_tokenizer_path(model_path)
-    log.info(f"Loading model from {model_path}...")
-    log.info(f"Tokenizer from {tokenizer_path}")
-
-    lm = HFLM(
-        pretrained=str(model_path),
-        tokenizer=str(tokenizer_path),  # explicit path — not auto-detected
-        device=device,
-        batch_size=batch_size,
-    )
-
-    # Build task list and per-task fewshot map.
-    # Passing num_fewshot as a dict ensures each task uses its canonical
-    # few-shot count — passing a single int applies it to all tasks which
-    # is wrong when running a mix of benchmarks with different fewshot counts
-    # (e.g. HellaSwag=10, MMLU=5, TruthfulQA=0).
-    task_names:  list[str]      = []
-    fewshot_map: dict[str, int] = {}
+    merged_results: dict = {"results": {}, "config": {}}
 
     for task_key in tasks:
         if task_key not in BENCHMARKS:
             log.warning(f"Unknown task: {task_key} — skipping")
             continue
-        benchmark = BENCHMARKS[task_key]
-        task_names.append(benchmark["task"])
-        fewshot_map[benchmark["task"]] = (
-            num_fewshot_override
-            if num_fewshot_override is not None
-            else benchmark["num_fewshot"]
-        )
 
-    if not task_names:
-        raise ValueError("No valid tasks specified.")
+        benchmark   = BENCHMARKS[task_key]
+        task_name   = benchmark["task"]
+        num_fewshot = num_fewshot_override if num_fewshot_override is not None \
+                      else benchmark["num_fewshot"]
 
-    log.info(f"Evaluating on: {task_names}")
-    log.info(f"Few-shot counts: {fewshot_map}")
+        log.info(f"Evaluating {task_key} ({num_fewshot}-shot)...")
 
-    results = evaluator.simple_evaluate(
-        model=lm,
-        tasks=task_names,
-        num_fewshot=fewshot_map,   # per-task dict — not a single int
-        batch_size=batch_size,
-        device=device,
-        limit=limit,
-        log_samples=False,
-        confirm_run_unsafe_code=True,
-    )
+        try:
+            results = evaluator.simple_evaluate(
+                model=lm,
+                tasks=[task_name],
+                num_fewshot=num_fewshot,   # int — required by lm-eval 0.4.x
+                batch_size=batch_size,
+                device=device,
+                limit=limit,
+                log_samples=False,
+                confirm_run_unsafe_code=True,
+            )
+            merged_results["results"].update(results.get("results", {}))
+            merged_results["config"] = results.get("config", {})
+        except Exception as e:
+            log.error(f"Failed to evaluate {task_key}: {e}")
+            continue
 
-    return results
+    return merged_results
 
 
 def format_results(results: dict, tasks: list[str], model_name: str) -> str:
@@ -281,7 +269,6 @@ def save_results(results: dict, model_path: Path, tasks: list[str]) -> Path:
 
 def main():
     # HumanEval executes model-generated code — required by the code_eval metric.
-    # Set before any lm-eval imports to avoid ValueError at task load time.
     os.environ["HF_ALLOW_CODE_EVAL"] = "1"
 
     parser = argparse.ArgumentParser(description="SLM Benchmark Evaluation")
