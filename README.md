@@ -126,19 +126,19 @@ slm/
 │   │   └── pvc.yaml
 │   └── serve.sh
 │
-├── tests/                                  Pipeline validation tests — run after each make stage
-│   ├── conftest.py                         DATA_DIR resolution, fasttext mock, shared helpers
-│   ├── README.md                           Test documentation — what each test validates
-│   ├── data_pipeline/                      CPU instance — run after each curation stage
-│   │   ├── test_pipeline_curator.py        Validates make curate-mini outputs
-│   │   ├── test_pipeline_validate.py       Validates make validate outputs
-│   │   └── test_pipeline_tokenizer.py      Validates make tokenizer outputs
+├── tests/                                  
+│   ├── conftest.py                         
+│   ├── README.md                           
+│   ├── data_pipeline/                      
+│   │   ├── test_pipeline_curator.py        
+│   │   ├── test_pipeline_validate.py       
+│   │   └── test_pipeline_tokenizer.py      
 │   ├── model/
-│   │   └── test_model.py                   Architecture unit tests — no pipeline outputs needed
-│   └── gpu_pipeline/                       GPU instance — run after each training stage
-│       ├── test_pipeline_training.py       Validates make pretrain-mini outputs
-│       ├── test_pipeline_sft.py            Validates make sft-mini and sft-code-mini outputs
-│       └── test_pipeline_dpo.py            Validates make dpo-mini outputs
+│   │   └── test_model.py                   
+│   └── gpu_pipeline/                       
+│       ├── test_pipeline_training.py       
+│       ├── test_pipeline_sft.py            
+│       └── test_pipeline_dpo.py            
 │
 ├── notebooks/                    Exploratory analysis — one per pipeline stage
 │   ├── 01_model_exploration.ipynb
@@ -170,6 +170,8 @@ slm/
 ├── requirements.txt
 ├── environment.yml
 └── .env.sample
+
+this is the repo structure it needs to be updated as well
 ```
 
 ---

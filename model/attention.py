@@ -129,7 +129,6 @@ class GroupedQueryAttention(nn.Module):
 
     def __init__(self, config: SLMConfig, layer_idx: int):
         super().__init__()
-        self.config = config
         self.layer_idx = layer_idx
 
         self.hidden_size = config.hidden_size
@@ -151,45 +150,80 @@ class GroupedQueryAttention(nn.Module):
         attention_mask: Optional[torch.Tensor],
         q: torch.Tensor,
         kv_len: int,
+        past_len: int,
     ) -> Optional[torch.Tensor]:
         """
-        Normalise attention_mask to 4D float additive format for SDPA.
+        Build a 4D additive float mask for SDPA that combines (as needed):
+          - causal masking with an offset for populated KV cache
+          - 2D padding masks (batch, kv_len) where 1=keep, 0=pad
+          - pass-through for already-4D additive or boolean masks
 
-        Handles:
-            None  — no mask, caller uses is_causal=True
-            2D (batch, kv_len) — padding mask (1=keep, 0=pad)
-                During training: combined with causal mask → 4D additive
-                During generation (q_len=1): only padding matters, no causal needed
-            4D (batch, 1, q_len, kv_len) — full additive mask, dtype normalised
+        Args:
+            attention_mask: one of:
+                None — caller only needs causal (see past_len logic)
+                2D (batch, kv_len) — padding mask, 1=keep, 0=pad
+                4D (batch, 1, q_len, kv_len) — full additive mask
+                    (dtype normalised to q.dtype, returned as-is if already float)
+            q: query tensor (batch, n_heads, q_len, head_dim), used for
+               batch/q_len/dtype/device.
+            kv_len: total key/value length (past + current).
+            past_len: number of cached key positions before this call.
+                      0 during training or fresh forward passes.
+                      >0 during generation with an existing cache.
+
+        Returns:
+            None if no masking is needed (caller should use is_causal=True
+            with SDPA), otherwise a (batch, 1, q_len, kv_len) additive mask
+            in q.dtype with -inf at masked positions.
+
+        The offset-aware causal mask handles the case where q_len < kv_len
+        (multi-token prefill on top of a populated cache). SDPA's built-in
+        `is_causal=True` only works when q_len == kv_len.
         """
-        if attention_mask is None:
+        bsz, _, q_len, _ = q.shape
+        device = q.device
+        dtype = q.dtype
+
+        # Fast path: already a 4D additive mask — just normalise dtype.
+        if attention_mask is not None and attention_mask.dim() == 4:
+            if attention_mask.dtype == torch.bool:
+                m = torch.zeros_like(attention_mask, dtype=dtype)
+                return m.masked_fill(~attention_mask, float("-inf"))
+            if attention_mask.dtype != dtype:
+                return attention_mask.to(dtype=dtype)
+            return attention_mask
+
+        # Build causal component. Needed whenever q_len > 1.
+        # With past_len > 0, row i of the causal mask allows attending to
+        # columns 0 .. past_len + i (inclusive), i.e. tril with diagonal=past_len.
+        causal: Optional[torch.Tensor] = None
+        if q_len > 1:
+            causal = torch.ones(q_len, kv_len, dtype=torch.bool, device=device).tril(
+                diagonal=past_len
+            )
+
+        # Build padding component from 2D mask if provided.
+        # Shape: (batch, 1, 1, kv_len) — broadcasts across q_len.
+        pad: Optional[torch.Tensor] = None
+        if attention_mask is not None and attention_mask.dim() == 2:
+            pad = attention_mask[:, None, None, :].bool()
+
+        # No masking needed at all (q_len == 1 and no padding mask).
+        if causal is None and pad is None:
             return None
 
-        bsz, q_len = q.shape[0], q.shape[2]
+        # Combine causal + padding. Either may be None.
+        if causal is not None and pad is not None:
+            combined = causal.unsqueeze(0).unsqueeze(0) & pad  # (batch, 1, q_len, kv_len)
+        elif causal is not None:
+            combined = causal.unsqueeze(0).unsqueeze(0).expand(bsz, 1, q_len, kv_len)
+        else:
+            # pad only — applies across all q_len rows (used when q_len == 1
+            # during batched generation with left-padded prompts).
+            combined = pad.expand(bsz, 1, q_len, kv_len)
 
-        if attention_mask.dim() == 2:
-            if q_len == 1:
-                # Generation step — single query token attending to all cached keys.
-                # No causal mask needed (trivially causal). Just apply padding mask.
-                pad = attention_mask[:, None, None, :].bool()  # (batch, 1, 1, kv_len)
-                mask = torch.zeros(bsz, 1, 1, kv_len, dtype=q.dtype, device=q.device)
-                return mask.masked_fill(~pad, float("-inf"))
-            else:
-                # Training / prefill — combine padding mask with causal mask
-                causal = torch.ones(q_len, kv_len, dtype=torch.bool, device=q.device).tril()
-                pad = attention_mask[:, None, None, :].bool()
-                combined = causal.unsqueeze(0) & pad
-                mask = torch.zeros(bsz, 1, q_len, kv_len, dtype=q.dtype, device=q.device)
-                return mask.masked_fill(~combined, float("-inf"))
-
-        if attention_mask.dtype == torch.bool:
-            mask = torch.zeros_like(attention_mask, dtype=q.dtype)
-            return mask.masked_fill(~attention_mask, float("-inf"))
-
-        if attention_mask.dtype != q.dtype:
-            return attention_mask.to(dtype=q.dtype)
-
-        return attention_mask
+        mask = torch.zeros(bsz, 1, q_len, kv_len, dtype=dtype, device=device)
+        return mask.masked_fill(~combined, float("-inf"))
 
     def forward(
         self,
@@ -208,13 +242,17 @@ class GroupedQueryAttention(nn.Module):
         k = k.view(bsz, q_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
         v = v.view(bsz, q_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
 
-        # RoPE — pass device so cache is built on the right device
-        kv_seq_len = k.shape[2]
-        if past_key_value is not None:
-            kv_seq_len += past_key_value[0].shape[2]
+        # RoPE — pass device so cache is built on the right device.
+        # past_len is the number of positions already in the cache; the new
+        # tokens start at that offset.
+        past_len = past_key_value[0].shape[2] if past_key_value is not None else 0
+        kv_seq_len = k.shape[2] + past_len
         cos, sin = self.rotary_emb(kv_seq_len, device=q.device)
-        offset = kv_seq_len - q_len
-        q, k = apply_rotary_emb(q, k, cos[offset:offset + q_len], sin[offset:offset + q_len])
+        q, k = apply_rotary_emb(
+            q, k,
+            cos[past_len:past_len + q_len],
+            sin[past_len:past_len + q_len],
+        )
 
         # KV cache
         if past_key_value is not None:
@@ -227,18 +265,28 @@ class GroupedQueryAttention(nn.Module):
             k = k.repeat_interleave(self.num_query_groups, dim=1)
             v = v.repeat_interleave(self.num_query_groups, dim=1)
 
-        # Attention mask
-        # During training: use padding mask combined with causal mask.
-        # During inference: always use is_causal=True and ignore the attention
-        # mask — transformers v5 passes various mask formats during generation
-        # that conflict with our custom mask handling. Causal masking is always
-        # correct for decoder-only generation.
-        if self.training and attention_mask is not None:
-            attn_mask = self._prepare_mask(attention_mask, q, k.shape[2])
+        # Mask handling.
+        #
+        # We build an explicit mask whenever ANY of the following is true:
+        #   - a padding/additive mask was passed in (batched training, or
+        #     batched generation with left-padded prompts)
+        #   - we have an existing cache AND q_len > 1 (multi-token prefill
+        #     on top of cached state — SDPA's is_causal=True assumes
+        #     q_len == kv_len and would apply the mask at the wrong offset)
+        #
+        # Otherwise (single-sequence, no cache OR q_len == 1 with no padding
+        # mask) we can rely on SDPA's is_causal=True fast path.
+        kv_len = k.shape[2]
+        needs_explicit_mask = (
+            attention_mask is not None
+            or (past_len > 0 and q_len > 1)
+        )
+        if needs_explicit_mask:
+            attn_mask = self._prepare_mask(attention_mask, q, kv_len, past_len)
             is_causal = False
         else:
             attn_mask = None
-            is_causal = True
+            is_causal = q_len > 1  # q_len == 1 needs no causal mask at all
 
         dropout_p = self.attention_dropout if self.training else 0.0
         attn_output = F.scaled_dot_product_attention(

@@ -16,7 +16,8 @@ tests/
 │   └── test_pipeline_tokenizer.py      Validates make tokenizer outputs
 │
 ├── model/                              No pipeline outputs needed — runs anywhere
-│   └── test_model.py                   Model architecture unit tests
+│   ├── test_model.py                   Model architecture unit tests
+│   └── test_cache_and_mask.py          KV cache and attention mask correctness
 │
 └── gpu_pipeline/                       GPU training instance — run after each training stage
     ├── test_pipeline_training.py       Validates make pretrain-mini outputs
@@ -149,6 +150,10 @@ make test-model
 
 ### `test-model` — no pipeline outputs needed
 
+Two files cover the model layer, run together by `make test-model`:
+
+**`test_model.py` — architecture unit tests:**
+
 | Check | What it catches |
 |---|---|
 | RMSNorm output shape and dtype | Implementation bug |
@@ -158,10 +163,19 @@ make test-model
 | Forward pass logits shape | Model forward pass broken |
 | Loss finite with labels | Loss computation broken |
 | Weight tying | `tie_weights()` not working |
-| Parameter count ~25M | Architecture mismatch vs config |
-| Causal mask — future tokens don't affect past | Causal mask broken |
+| Parameter count ~25M (mini config) | Architecture mismatch vs config |
+| Causal mask — future tokens don't affect past | Causal mask broken (no-cache path) |
 | No bias parameters | Architecture deviation |
 | Save/load roundtrip | Tied weight serialisation bug |
+
+**`test_cache_and_mask.py` — KV cache and mask correctness:**
+
+| Check | What it catches |
+|---|---|
+| Prefill + continue matches full forward | Causal mask offset wrong when `q_len < kv_len` (multi-token prefill with cache) |
+| Token-by-token generation matches full forward | Bug in the `q_len == 1` cache path |
+| Batched forward respects padding mask | `attention_mask` ignored during eval (contaminates batched generation with padded prompts) |
+| Parameter counts within 10% for 125m / 350m / 1b | Config drift in any production tier |
 
 ---
 
