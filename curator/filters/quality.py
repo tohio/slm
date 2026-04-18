@@ -3,32 +3,17 @@ curator/filters/quality.py
 ---------------------------
 Quality heuristic filters for pretraining data.
 
-Applies a set of rule-based quality signals to filter out low-quality
-documents before tokenization. These heuristics are adapted from
-FineWeb, RedPajama, and Dolma — the most widely used open LLM
-pretraining pipelines.
+Applies rule-based quality signals to filter out low-quality documents
+before tokenization. Adapted from FineWeb, RedPajama, and Dolma.
 
 Filters are composable — each returns True to keep, False to discard.
 The QualityFilter class runs all filters and tracks rejection reasons.
-
-Heuristics applied:
-    - Minimum/maximum document length
-    - Minimum mean word length (filters gibberish)
-    - Maximum symbol-to-word ratio (filters SEO spam)
-    - Maximum bullet point ratio (filters list-heavy content)
-    - Maximum ellipsis ratio (filters truncated content)
-    - Minimum alphabetic character ratio (filters numeric/code spam)
-    - Repeated line deduplication within document
-    - Stop word presence (filters non-English content that slipped through)
-    - Boilerplate detection (filters cookie notices, privacy policies, etc.)
-    - Language detection via fasttext (filters non-English documents)
 
 Source-conditional filter skips:
     code source skips: symbol_ratio, mean_word_length, alpha_ratio,
                        stop_words, boilerplate, language
     These filters are designed for natural language and incorrectly reject
-    valid code — symbol-heavy syntax, long identifiers, and lack of stop
-    words are all normal properties of code, not quality signals.
+    valid code.
 
 FastText language detection:
     Requires the fasttext lid.176.ftz model — download once via:
@@ -40,7 +25,6 @@ FastText language detection:
 Reference:
     FineWeb: https://huggingface.co/spaces/HuggingFaceFW/blogpost-fineweb-v1
     Gopher: Rae et al. (2021) — https://arxiv.org/abs/2112.11446
-    CC-Net: Wenzek et al. (2019) — https://arxiv.org/abs/1911.00359
 """
 
 import logging
@@ -52,8 +36,7 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-# English stop words — presence indicates natural language.
-# Used as fallback when fasttext model is not available.
+# English stop words — fallback when fasttext is unavailable.
 EN_STOP_WORDS = {
     "the", "be", "to", "of", "and", "a", "in", "that", "have",
     "it", "for", "not", "on", "with", "he", "as", "you", "do",
@@ -61,8 +44,6 @@ EN_STOP_WORDS = {
     "say", "her", "she", "or", "an", "will", "my", "one", "all",
 }
 
-# Boilerplate patterns — common web page fragments with zero training value.
-# Matched case-insensitively against the full document text.
 BOILERPLATE_PATTERNS = [
     r"cookie policy",
     r"privacy policy",
@@ -76,29 +57,19 @@ BOILERPLATE_PATTERNS = [
     r"we use cookies",
     r"your (?:privacy|cookie) (?:settings|preferences|choices)",
 ]
-_BOILERPLATE_RE = re.compile(
-    "|".join(BOILERPLATE_PATTERNS),
-    re.IGNORECASE,
-)
+_BOILERPLATE_RE = re.compile("|".join(BOILERPLATE_PATTERNS), re.IGNORECASE)
 
-# FastText model path — resolved at import time from DATA_DIR env var.
-# The model is loaded lazily on first use and cached as a module-level
-# singleton so subprocess workers each load it once, not per document.
+# FastText model path
 _FASTTEXT_MODEL_PATH = Path(
     os.environ.get("DATA_DIR", "data")
 ) / "models" / "lid.176.ftz"
 
-_fasttext_model = None        # module-level cache
-_fasttext_warned = False      # emit missing-model warning once per process
+_fasttext_model = None
+_fasttext_warned = False
 
 
 def _get_fasttext_model():
-    """
-    Load and cache the fasttext language identification model.
-
-    Returns the model if available, None otherwise. Emits a warning
-    once per process if the model file is not found.
-    """
+    """Load and cache the fasttext language identification model."""
     global _fasttext_model, _fasttext_warned
     if _fasttext_model is not None:
         return _fasttext_model
@@ -115,7 +86,6 @@ def _get_fasttext_model():
 
     try:
         import fasttext
-        # suppress fasttext's noisy stderr output
         fasttext.FastText.eprint = lambda *args, **kwargs: None
         _fasttext_model = fasttext.load_model(str(_FASTTEXT_MODEL_PATH))
         log.info(f"FastText language model loaded from {_FASTTEXT_MODEL_PATH}")
@@ -135,44 +105,35 @@ class QualityConfig:
     """Configuration for quality filter thresholds."""
 
     # Document length
-    min_chars: int = 500           # up from 200 — removes very short fragments
-    max_chars: int = 50_000        # down from 100_000 — removes spam/boilerplate
+    min_chars: int = 500
+    max_chars: int = 50_000
 
     # Word-level signals
     min_mean_word_length: float = 3.0
     max_mean_word_length: float = 10.0
 
     # Symbol ratio — symbols / words
-    max_symbol_to_word_ratio: float = 0.08   # tightened from 0.1
+    max_symbol_to_word_ratio: float = 0.08
 
-    # Bullet point ratio — lines starting with bullet / total lines
+    # Bullet / ellipsis / alpha ratios
     max_bullet_ratio: float = 0.9
-
-    # Ellipsis ratio — lines ending with ... / total lines
     max_ellipsis_ratio: float = 0.3
+    min_alpha_ratio: float = 0.75
 
-    # Alphabetic character ratio — alpha chars / total chars
-    min_alpha_ratio: float = 0.75            # tightened from 0.70
+    # Repeated lines (duplicate occurrences) / total lines
+    max_repeated_line_ratio: float = 0.2
 
-    # Repeated lines — fraction of lines that are duplicates
-    # A line is a duplicate if it appears more than once in the document.
-    # Counted as (total occurrences beyond the first) / total lines.
-    max_repeated_line_ratio: float = 0.2     # tightened from 0.3
+    # Stop word fallback threshold (counts DISTINCT stop words in first 100
+    # words). Only used when fasttext model is unavailable.
+    min_stop_words: int = 3
 
-    # Stop word check — minimum number of EN stop words in first 100 words.
-    # Used as fallback when fasttext model is unavailable.
-    min_stop_words: int = 3                  # tightened from 2
-
-    # Boilerplate — number of boilerplate pattern matches to trigger rejection
+    # Boilerplate matches to trigger rejection
     max_boilerplate_matches: int = 2
 
-    # Language detection — minimum fasttext confidence to accept as English
+    # Language detection threshold
     min_language_score: float = 0.65
 
-    # Sources that skip certain filters.
-    # Code skips NL-specific filters because symbol-heavy syntax, long
-    # identifiers, lack of stop words, and boilerplate patterns are all
-    # normal properties of code, not quality signals.
+    # Sources to skip certain filters for
     skip_symbol_ratio_sources: list[str] = field(
         default_factory=lambda: ["code"]
     )
@@ -197,19 +158,8 @@ class QualityFilter:
     """
     Applies heuristic quality filters to a document.
 
-    Filters run in cheapest-first order so expensive checks (language
-    detection) only run on documents that passed all heuristic checks.
-
-    Args:
-        config: QualityConfig with filter thresholds.
-
-    Example::
-
-        qf = QualityFilter()
-        record = {"text": "...", "source": "common_crawl"}
-        kept, reason = qf.check(record)
-        if not kept:
-            print(f"Rejected: {reason}")
+    Filters run in cheapest-first order so expensive checks only run on
+    documents that passed cheaper ones.
     """
 
     def __init__(self, config: QualityConfig | None = None):
@@ -219,21 +169,13 @@ class QualityFilter:
             "kept": 0,
             "rejected": {},
         }
+        # Track fasttext prediction failures — previously these were silently
+        # debug-logged, which hides a systemic issue at scale.
+        self._fasttext_errors = 0
 
     def check(self, record: dict) -> tuple[bool, str | None]:
         """
         Run all quality filters on a document.
-
-        Filters execute in cheapest-first order:
-            1. Length check (O(1))
-            2. Structural checks — bullet, ellipsis, repeated lines (O(lines))
-            3. Word-level checks — mean length, symbol ratio, alpha ratio (O(words))
-            4. Boilerplate regex (O(text))
-            5. Stop words (O(100 words)) — NL fallback only
-            6. Language detection via fasttext (O(text[:500])) — most expensive
-
-        Args:
-            record: Dict with at least a "text" key and optional "source".
 
         Returns:
             (True, None) if the document passes all filters.
@@ -243,7 +185,7 @@ class QualityFilter:
         text = record.get("text", "")
         source = record.get("source", "")
 
-        # ── Tier 1: cheap structural checks (all sources) ─────────────────────
+        # Tier 1: cheap structural checks (all sources)
         checks = [
             self._check_length,
             self._check_bullet_ratio,
@@ -251,7 +193,7 @@ class QualityFilter:
             self._check_repeated_lines,
         ]
 
-        # ── Tier 2: word-level checks (skipped for code) ──────────────────────
+        # Tier 2: word-level (skipped for code)
         if source not in self.config.skip_mean_word_length_sources:
             checks.append(self._check_mean_word_length)
         if source not in self.config.skip_symbol_ratio_sources:
@@ -259,12 +201,11 @@ class QualityFilter:
         if source not in self.config.skip_alpha_ratio_sources:
             checks.append(self._check_alpha_ratio)
 
-        # ── Tier 3: content checks (skipped for code) ─────────────────────────
+        # Tier 3: content (skipped for code)
         if source not in self.config.skip_boilerplate_sources:
             checks.append(self._check_boilerplate)
 
-        # ── Tier 4: language checks (skipped for code) ────────────────────────
-        # Use fasttext if available, fall back to stop word check otherwise.
+        # Tier 4: language (skipped for code)
         if source not in self.config.skip_language_sources:
             model = _get_fasttext_model()
             if model is not None:
@@ -288,20 +229,19 @@ class QualityFilter:
         return [r for r in records if self.check(r)[0]]
 
     def reset_stats(self) -> None:
-        """Reset filter statistics."""
         self.stats = {"total": 0, "kept": 0, "rejected": {}}
+        self._fasttext_errors = 0
 
     def report(self) -> str:
-        """Return a human-readable filter report."""
         total = self.stats["total"]
         kept = self.stats["kept"]
         rejected = total - kept
         lines = [
-            f"Quality filter report:",
+            "Quality filter report:",
             f"  Total:    {total:>10,}",
             f"  Kept:     {kept:>10,}  ({100 * kept / max(total, 1):.1f}%)",
             f"  Rejected: {rejected:>10,}  ({100 * rejected / max(total, 1):.1f}%)",
-            f"  Rejection reasons:",
+            "  Rejection reasons:",
         ]
         for reason, count in sorted(
             self.stats["rejected"].items(), key=lambda x: -x[1]
@@ -309,6 +249,11 @@ class QualityFilter:
             lines.append(
                 f"    {reason:<40} {count:>8,}  "
                 f"({100 * count / max(total, 1):.1f}%)"
+            )
+        if self._fasttext_errors > 0:
+            lines.append(
+                f"  FastText prediction errors: {self._fasttext_errors:,} "
+                f"(documents passed through without language check)"
             )
         return "\n".join(lines)
 
@@ -379,11 +324,6 @@ class QualityFilter:
         lines = [l.strip() for l in text.split("\n") if l.strip()]
         if len(lines) < 4:
             return True, None
-
-        # FIX: Use Counter to correctly count all duplicate occurrences.
-        # The old set-based approach only counted whether a line had been
-        # seen before, so a line appearing 5 times counted as 1 duplicate
-        # instead of 4. Counter gives exact occurrence counts.
         counts = Counter(lines)
         duplicate_occurrences = sum(c - 1 for c in counts.values() if c > 1)
         ratio = duplicate_occurrences / len(lines)
@@ -392,32 +332,17 @@ class QualityFilter:
         return True, None
 
     def _check_boilerplate(self, text: str) -> tuple[bool, str | None]:
-        """
-        Reject documents containing multiple boilerplate patterns.
-
-        Cookie notices, privacy policies, and similar web page fragments
-        pass all heuristic checks but have zero training value. Two or
-        more matches in a single document is a strong signal the document
-        is navigation/legal boilerplate rather than content.
-        """
         matches = len(_BOILERPLATE_RE.findall(text))
         if matches >= self.config.max_boilerplate_matches:
             return False, "boilerplate"
         return True, None
 
     def _check_language_fasttext(self, text: str) -> tuple[bool, str | None]:
-        """
-        Reject non-English documents using fasttext language identification.
-
-        Scores the first 500 characters — sufficient for language ID and
-        avoids processing full documents for the language check.
-        fasttext returns predictions as [("__label__en", 0.98), ...].
-        """
+        """Reject non-English documents using fasttext."""
         model = _get_fasttext_model()
         if model is None:
-            return True, None  # model not available — skip
+            return True, None
 
-        # fasttext expects single-line input
         sample = text[:500].replace("\n", " ")
         try:
             labels, scores = model.predict(sample, k=1)
@@ -426,18 +351,21 @@ class QualityFilter:
             if lang != "en" or score < self.config.min_language_score:
                 return False, "non_english"
         except Exception as e:
-            # Log at DEBUG so persistent failures are visible without
-            # flooding logs on occasional prediction errors.
-            log.debug(f"fasttext prediction error (passing document through): {e}")
+            # Count and sample-log prediction errors. Previously silently logged
+            # to DEBUG, which hid systemic fasttext issues at scale.
+            self._fasttext_errors += 1
+            if self._fasttext_errors <= 5 or self._fasttext_errors % 10_000 == 0:
+                log.warning(
+                    f"fasttext prediction error #{self._fasttext_errors} "
+                    f"(passing through): {e}"
+                )
 
         return True, None
 
     def _check_stop_words(self, text: str) -> tuple[bool, str | None]:
         """
-        Fallback language check using English stop word presence.
-
-        Used when the fasttext model is not available. Less accurate than
-        fasttext but catches obvious non-English documents.
+        Fallback check using distinct English stop word count in the first
+        100 tokens. Less accurate than fasttext but catches obvious non-English.
         """
         words = set(text.lower().split()[:100])
         count = len(words & EN_STOP_WORDS)

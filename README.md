@@ -418,6 +418,15 @@ Runs on CPU instances. No GPU required.
 | 350m | 64 vCPU | 128GB | ~10–14 hrs |
 | 1b | 64 vCPU | 256GB | ~20–28 hrs |
 
+> **Runtimes are rough reference points — measure your own.**
+> Many variables dominate: network peering between your cloud and Common
+> Crawl's AWS `us-east-1` origin, per-WARC CloudFront throughput at your
+> time of day, disk IOPS, CPU generation, and CC's own throttling behavior.
+> Cross-cloud (Nebius → AWS, GCP → AWS) runs can be 2–3× faster or slower
+> than same-region (AWS `us-east-1`) runs. Before committing to a full 1b
+> run, time a `curate-mini` or `curate SIZE=125m` run to calibrate your
+> actual throughput.
+
 Run close to `us-east-1` (AWS) or `us-east1` (GCP) to minimise Common Crawl egress latency. Attach a persistent disk (500GB+) for `DATA_DIR` — the pipeline is fully resumable at every stage.
 
 Use `tmux` to keep the pipeline running through session timeouts:

@@ -412,16 +412,19 @@ make curate-dedup SIZE=125m WORKERS=62
 
 ### `make curate-blend`
 
-Blends deduped sources to the target token ratio (55% CC / 25% Wikipedia / 20% code) and writes the final `train.jsonl`. Uses parallel staging and a chunked shuffle — no random disk seeks, optimal I/O throughput on any block storage.
+Blends deduped sources to the target token ratio (55% CC / 25% Wikipedia / 20% code) and writes the final `train.jsonl`. Parallel staging writes one intermediate file per source, then a single-pass shuffle produces the final output. For corpora that fit in RAM (controlled by the `SHUFFLE_RAM_BUDGET_GB` env var, default 64GB), the shuffle is done in memory; for larger corpora the pipeline falls back to a two-pass chunked disk shuffle with purely sequential I/O.
 
 ```bash
 make curate-blend SIZE=125m
 make curate-blend SIZE=125m WORKERS=62
+
+# Force the chunked disk shuffle (e.g. if other processes need the RAM)
+SHUFFLE_RAM_BUDGET_GB=0 make curate-blend SIZE=1b
 ```
 
 **Requires:** All `*_deduped/` directories populated by `make curate-dedup`.
 **Produces:** `data/curated/train.jsonl`, `data/curated/blend_stats.json`
-**Resume behaviour:** Skips if `train.jsonl` already exists — delete it to re-blend.
+**Resume behaviour:** Skips if `train.jsonl` already exists — delete it to re-blend. Per-source staging files (`blend_{source}.jsonl`) are reused on restart if present.
 
 ---
 
@@ -912,6 +915,15 @@ make clean-logs
 | 350m | 64 vCPU | 128GB | ~10–14 hrs |
 | 1b | 64 vCPU | 256GB | ~20–28 hrs |
 
+> **Runtimes are rough reference points — measure your own.**
+> The CC download stage dominates total runtime and is sensitive to: network
+> peering between your cloud and AWS `us-east-1`, CloudFront throughput at
+> your time of day, disk IOPS, and CC's throttling behavior. Cross-cloud
+> (Nebius → AWS, GCP → AWS) runs can be 2–3× faster or slower than
+> same-region (AWS `us-east-1`) runs. Time a `curate-mini` or
+> `curate SIZE=125m` run on your target instance before committing to a
+> full 1b run.
+
 Run close to `us-east-1` (AWS) or `us-east1` (GCP) to minimise Common Crawl egress latency. Attach a persistent disk (500GB+) for `DATA_DIR` so data survives spot/preemptible interruptions. [Nebius](https://nebius.com) AMD Epyc Genoa instances (64 vCPU, 256GiB RAM) offer strong price/performance for curation.
 
 ### Training (GPU) — Stages 4b–6
@@ -922,6 +934,15 @@ Run close to `us-east-1` (AWS) or `us-east1` (GCP) to minimise Common Crawl egre
 | 125m | 4× H100 or A100 | 320GB+ | ~12–18 hrs |
 | 350m | 8× H100 or A100 | 640GB+ | ~24–36 hrs |
 | 1b | 8× H100 or A100 | 640GB+ | ~72–96 hrs |
+
+> **Runtimes are rough reference points — measure your own.**
+> Numbers assume bf16 training on H100s in a single-node data-parallel
+> setup with the default configs. H100s vs A100s vs older GPUs, interconnect
+> bandwidth (NVLink vs PCIe vs cross-node), and whether activation
+> checkpointing is enabled all have large effects. Use
+> `make pretrain-mini GPUS=1` to measure step time on your hardware, then
+> extrapolate by the ratio of your full-run `max_steps` to the mini run's
+> `max_steps`.
 
 ---
 

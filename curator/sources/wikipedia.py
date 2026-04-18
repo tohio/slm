@@ -3,14 +3,12 @@ curator/sources/wikipedia.py
 -----------------------------
 Wikipedia English data source.
 
-Downloads the English Wikipedia dump via HuggingFace datasets and
-extracts clean article text. Wikipedia is one of the highest quality
-text sources available — factual, well-structured, and broad in coverage.
+Downloads the English Wikipedia dump via HuggingFace datasets.
+The HuggingFace wikipedia dataset is already clean (no wikitext markup,
+no templates), so no cleaning is applied beyond whitespace normalization.
 
 Output: JSONL with one article per line:
     {"text": "...", "source": "wikipedia", "title": "...", "url": "..."}
-
-Target contribution: ~600M tokens (~20% of 3B token 125M training mix).
 
 Usage:
     from curator.sources.wikipedia import WikipediaSource
@@ -21,6 +19,7 @@ Usage:
 import logging
 from pathlib import Path
 
+import orjson
 from datasets import load_dataset
 from tqdm import tqdm
 
@@ -31,18 +30,18 @@ class WikipediaSource:
     """
     Downloads and extracts English Wikipedia articles.
 
-    Uses the HuggingFace datasets wikipedia 20220301.en dump —
-    the standard snapshot used by most LLM pretraining pipelines.
+    Uses the HuggingFace wikimedia/wikipedia 20231101.en dump — a recent
+    snapshot commonly used in LLM pretraining pipelines. The dataset is
+    already stripped of wikitext markup, so no HTML or template cleanup
+    is needed.
 
     Args:
         output_dir: Directory to write output JSONL files.
-        min_length: Minimum article character length. Articles shorter
-            than this are skipped — typically stubs or disambiguation pages.
-        num_proc: Number of processes for parallel processing.
+        min_length: Minimum article character length (articles below
+            this are skipped — typically stubs / disambiguation pages).
         shard_size: Number of articles per output JSONL shard.
-        max_docs: Maximum number of articles to write. None = no limit.
-            Used for mini runs to validate the pipeline without downloading
-            the full dataset.
+        max_docs: Maximum articles to write. None = no limit. Used for
+            mini runs to validate the pipeline.
     """
 
     DATASET_NAME = "wikimedia/wikipedia"
@@ -53,25 +52,23 @@ class WikipediaSource:
         self,
         output_dir: Path,
         min_length: int = 1000,
-        num_proc: int = 4,
         shard_size: int = 100_000,
         max_docs: int | None = None,
+        # Accepted for backwards compatibility; the HF loader manages its own
+        # parallelism so we don't currently expose it as a knob here.
+        num_proc: int | None = None,
     ):
         self.output_dir = Path(output_dir)
         self.min_length = min_length
-        self.num_proc = num_proc
         self.shard_size = shard_size
         self.max_docs = max_docs
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def download(self) -> list[Path]:
-        """
-        Download Wikipedia and write to sharded JSONL files.
-
-        Returns:
-            List of paths to output JSONL files.
-        """
-        log.info(f"Loading {self.DATASET_NAME}/{self.DATASET_CONFIG} from HuggingFace...")
+        """Download Wikipedia and write to sharded JSONL files."""
+        log.info(
+            f"Loading {self.DATASET_NAME}/{self.DATASET_CONFIG} from HuggingFace..."
+        )
         dataset = load_dataset(
             self.DATASET_NAME,
             self.DATASET_CONFIG,
@@ -83,30 +80,27 @@ class WikipediaSource:
         if self.max_docs:
             log.info(f"Wikipedia: capped at {self.max_docs:,} articles (mini run)")
 
-        output_files = []
+        output_files: list[Path] = []
         shard_idx = 0
-        buffer = []
+        buffer: list[dict] = []
         total_written = 0
         total_skipped = 0
+        stop = False
 
         for article in tqdm(dataset, desc="Processing Wikipedia", unit="article"):
             text = self._clean(article["text"])
-
             if len(text) < self.min_length:
                 total_skipped += 1
                 continue
 
-            record = {
+            buffer.append({
                 "text": text,
                 "source": self.SOURCE_TAG,
                 "title": article.get("title", ""),
                 "url": article.get("url", ""),
-            }
-            buffer.append(record)
+            })
 
-            if self.max_docs and total_written + len(buffer) >= self.max_docs:
-                break
-
+            # Flush a full shard
             if len(buffer) >= self.shard_size:
                 path = self._write_shard(buffer, shard_idx)
                 output_files.append(path)
@@ -114,7 +108,16 @@ class WikipediaSource:
                 total_written += len(buffer)
                 buffer = []
 
-        # Write remaining
+            # Enforce max_docs cap — trim to exact cap, then stop.
+            if self.max_docs is not None:
+                if total_written + len(buffer) >= self.max_docs:
+                    # Trim buffer to exactly max_docs total
+                    trim_to = max(0, self.max_docs - total_written)
+                    buffer = buffer[:trim_to]
+                    stop = True
+                    break
+
+        # Flush remainder (or trimmed cap)
         if buffer:
             path = self._write_shard(buffer, shard_idx)
             output_files.append(path)
@@ -125,49 +128,47 @@ class WikipediaSource:
             f"written: {total_written:,}, "
             f"skipped: {total_skipped:,} (< {self.min_length} chars), "
             f"shards: {len(output_files)}"
+            f"{' (stopped at max_docs cap)' if stop else ''}"
         )
         return output_files
 
     def _clean(self, text: str) -> str:
         """
-        Light cleaning of Wikipedia article text.
+        Normalize whitespace on Wikipedia article text.
 
-        The HuggingFace Wikipedia dataset already strips most markup.
-        We just normalize whitespace and remove very short lines
-        (typically section headers with no content).
+        The HuggingFace wikipedia dataset is already stripped of wikitext
+        markup, templates, and most structural artifacts. We intentionally
+        do NOT drop short lines — the previous implementation dropped any
+        line <20 chars, which silently removed short paragraphs, single-
+        sentence facts, and table rows. On a corpus of this quality that
+        cost real tokens without any quality benefit.
         """
-        lines = text.split("\n")
-        cleaned = []
-        for line in lines:
-            line = line.strip()
-            # Skip very short lines — usually section headers or empty
-            if len(line) < 20:
-                continue
-            cleaned.append(line)
-        return "\n".join(cleaned).strip()
+        return text.strip()
 
     def _write_shard(self, records: list[dict], shard_idx: int) -> Path:
-        """Write a list of records to a JSONL shard file."""
-        import json
+        """Write records to a JSONL shard."""
         path = self.output_dir / f"wikipedia_{shard_idx:04d}.jsonl"
-        with open(path, "w", encoding="utf-8") as f:
+        with open(path, "wb") as f:
             for record in records:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                f.write(orjson.dumps(record))
+                f.write(b"\n")
         log.debug(f"Wrote shard {shard_idx}: {len(records):,} articles → {path}")
         return path
 
     def stats(self) -> dict:
         """Return stats about already-downloaded shards."""
-        import json
         shards = sorted(self.output_dir.glob("wikipedia_*.jsonl"))
         total_articles = 0
         total_chars = 0
         for shard in shards:
-            with open(shard) as f:
+            with open(shard, "rb") as f:
                 for line in f:
-                    record = json.loads(line)
+                    try:
+                        record = orjson.loads(line)
+                    except Exception:
+                        continue
                     total_articles += 1
-                    total_chars += len(record["text"])
+                    total_chars += len(record.get("text", ""))
         return {
             "shards": len(shards),
             "articles": total_articles,
