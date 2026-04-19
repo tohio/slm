@@ -11,7 +11,7 @@ tests/
 ├── conftest.py                         Shared fixtures, DATA_DIR resolution, fasttext mock
 │
 ├── data_pipeline/                      CPU curation instance — run after each data stage
-│   ├── test_pipeline_curator.py        Validates make curate-mini outputs
+│   ├── test_pipeline_curator.py        Validates make curate-mini outputs (all 10 sources)
 │   ├── test_pipeline_validate.py       Validates make validate outputs
 │   └── test_pipeline_tokenizer.py      Validates make tokenizer outputs
 │
@@ -66,19 +66,30 @@ make test-model
 
 ### `test-curator` — after `make curate-mini`
 
+The mini curation run exercises all 10 data sources with small per-source budgets (a few hundred to a few thousand docs each). This validates that every source loader works, that the filter and dedup stages handle the full source set, and that the cap-and-redistribute blend logic covers any supply shortfall via FineWeb overflow.
+
 | Check | What it catches |
 |---|---|
-| Raw shards exist for all 3 sources | Download stage failed or was skipped |
+| Raw shards exist for all 10 sources | A source loader is broken or didn't run |
+| Source tag in each shard matches its directory | Source wrote to wrong directory or used wrong SOURCE_TAG |
+| `CODE_SOURCES` set matches test expectation | Drift between `quality.py` and test file |
 | Filtered docs pass quality checks | Filter stage did not run or has a bug |
-| No docs below 500 chars in filtered output | Min length filter not applied |
-| Deduped dirs exist and are non-empty | Dedup stage failed |
-| No exact duplicates in deduped output | Exact dedup not working |
+| Non-code filtered docs meet min length (500 chars) | Min length filter not applied |
+| Deduped dirs exist and are non-empty for all 10 sources | Dedup stage failed for one or more sources |
+| No exact duplicates across all deduped output | Exact dedup not working |
 | `train.jsonl` exists and is non-empty | Blend stage failed |
-| `train.jsonl` contains all 3 sources | Source mix broken |
-| No short docs in `train.jsonl` | Filtered data not used as blend input |
+| `train.jsonl` contains at least 8 of 9 required sources | Blend missing a source |
+| `train.jsonl` has no unknown source tags | Corruption or wrong source tag introduced |
+| No short non-code docs in `train.jsonl` | Filtered data not used as blend input |
 | No exact duplicates in `train.jsonl` | Deduped data not used as blend input |
-| `blend_stats.json` exists and is correct | Stats not written or incomplete |
-| `blend_stats.json` doc count matches file | Stats don't match actual output |
+| `blend_stats.json` exists with required schema | Stats not written or incomplete |
+| `blend_stats.json` per-source includes docs/chars/target_chars/deficit | Cap-and-redistribute accounting missing |
+| `blend_stats.json` doc count matches `train.jsonl` | Stats don't match actual output |
+| `blend_stats.json` chars_per_token matches constant | Drift from `curator.constants` |
+| Total chars within tolerance of target | Cap-and-redistribute not running or broken |
+| FineWeb has overflow when other sources have deficit | Overflow sink not triggered |
+
+**Why stack_v2 is allowed to be absent from `train.jsonl`.** the-stack-v2 fetches content from the Software Heritage Archive per-record. If SWH is rate-limiting or `SWH_AUTH_TOKEN` is unset, the mini run may produce very few or zero stack_v2 documents. The `test_train_jsonl_contains_required_sources` check requires 8 of 9 non-stack_v2 sources plus optionally stack_v2. The other tests (raw shards, filtered shards, deduped shards) still require stack_v2 to produce at least something — if SWH is completely unreachable, those tests will correctly fail.
 
 ### `test-validate` — after `make validate`
 
@@ -196,3 +207,5 @@ source ~/.bashrc
 # or
 export DATA_DIR=/data/slm/data
 ```
+
+**Dataset gating for `test-curator`.** The mini run exercises gated HuggingFace datasets (FineWeb, the-stack-smol, the-stack-v2-dedup). Before first run, accept Terms of Use on each dataset's HuggingFace page and set `HF_TOKEN` in `.env`. the-stack-v2 additionally benefits from `SWH_AUTH_TOKEN` for Software Heritage Archive rate limits; without it, the mini run still works but stack_v2 may contribute few documents.

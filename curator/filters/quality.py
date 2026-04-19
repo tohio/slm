@@ -10,10 +10,15 @@ Filters are composable — each returns True to keep, False to discard.
 The QualityFilter class runs all filters and tracks rejection reasons.
 
 Source-conditional filter skips:
-    code source skips: symbol_ratio, mean_word_length, alpha_ratio,
-                       stop_words, boilerplate, language
+    Code-adjacent sources skip: symbol_ratio, mean_word_length, alpha_ratio,
+                                stop_words, boilerplate, language.
     These filters are designed for natural language and incorrectly reject
     valid code.
+
+    The set of code-adjacent sources is defined at module level as
+    CODE_SOURCES. Any source tag in this set inherits the default code
+    skip behavior. Adding a new code-adjacent source is a single-line
+    change to that constant.
 
 FastText language detection:
     Requires the fasttext lid.176.ftz model — download once via:
@@ -35,6 +40,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 log = logging.getLogger(__name__)
+
+# Source tags that represent code or code-adjacent content. These sources
+# bypass English-prose-oriented quality filters (symbol ratio, alpha ratio,
+# stop words, etc.) which incorrectly reject valid code.
+#
+# Mixed-content sources (jupyter, conala) are included here because their
+# prose components would pass these filters but their code components
+# would fail them, and per-chunk filtering isn't feasible at the source
+# level. Accepting the trade-off: some non-English content in these
+# sources won't be language-filtered.
+CODE_SOURCES: frozenset[str] = frozenset({
+    "codesearchnet",
+    "stack_smol",
+    "stack_v2",
+    "jupyter",
+    "conala",
+})
 
 # English stop words — fallback when fasttext is unavailable.
 EN_STOP_WORDS = {
@@ -133,24 +155,27 @@ class QualityConfig:
     # Language detection threshold
     min_language_score: float = 0.65
 
-    # Sources to skip certain filters for
-    skip_symbol_ratio_sources: list[str] = field(
-        default_factory=lambda: ["code"]
+    # Per-filter skip lists. Default to CODE_SOURCES for filters that reject
+    # code. Kept as per-filter fields (rather than one shared set) so future
+    # tuning can customize which filters skip which sources without schema
+    # changes — e.g. to still run boilerplate on jupyter but skip language.
+    skip_symbol_ratio_sources: frozenset[str] = field(
+        default_factory=lambda: CODE_SOURCES
     )
-    skip_mean_word_length_sources: list[str] = field(
-        default_factory=lambda: ["code"]
+    skip_mean_word_length_sources: frozenset[str] = field(
+        default_factory=lambda: CODE_SOURCES
     )
-    skip_alpha_ratio_sources: list[str] = field(
-        default_factory=lambda: ["code"]
+    skip_alpha_ratio_sources: frozenset[str] = field(
+        default_factory=lambda: CODE_SOURCES
     )
-    skip_stop_word_sources: list[str] = field(
-        default_factory=lambda: ["code"]
+    skip_stop_word_sources: frozenset[str] = field(
+        default_factory=lambda: CODE_SOURCES
     )
-    skip_boilerplate_sources: list[str] = field(
-        default_factory=lambda: ["code"]
+    skip_boilerplate_sources: frozenset[str] = field(
+        default_factory=lambda: CODE_SOURCES
     )
-    skip_language_sources: list[str] = field(
-        default_factory=lambda: ["code"]
+    skip_language_sources: frozenset[str] = field(
+        default_factory=lambda: CODE_SOURCES
     )
 
 
@@ -193,7 +218,7 @@ class QualityFilter:
             self._check_repeated_lines,
         ]
 
-        # Tier 2: word-level (skipped for code)
+        # Tier 2: word-level (skipped for code sources)
         if source not in self.config.skip_mean_word_length_sources:
             checks.append(self._check_mean_word_length)
         if source not in self.config.skip_symbol_ratio_sources:
@@ -201,11 +226,11 @@ class QualityFilter:
         if source not in self.config.skip_alpha_ratio_sources:
             checks.append(self._check_alpha_ratio)
 
-        # Tier 3: content (skipped for code)
+        # Tier 3: content (skipped for code sources)
         if source not in self.config.skip_boilerplate_sources:
             checks.append(self._check_boilerplate)
 
-        # Tier 4: language (skipped for code)
+        # Tier 4: language (skipped for code sources)
         if source not in self.config.skip_language_sources:
             model = _get_fasttext_model()
             if model is not None:

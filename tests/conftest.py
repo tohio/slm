@@ -80,6 +80,10 @@ def write_jsonl(path: Path, records: list[dict]) -> Path:
 
 
 # ── Synthetic document factories ───────────────────────────────────────────────
+#
+# Factories produce documents matching the per-source output schema. Source
+# tags use the specific loader names (codesearchnet, stack_smol, etc.) —
+# the generic "code" tag is no longer valid.
 
 GOOD_TEXT = (
     "This is a well-written encyclopedia article about a subject. "
@@ -101,16 +105,133 @@ GOOD_CODE = (
 )
 
 
+# ── Non-code source factories ──────────────────────────────────────────────────
+
+def make_common_crawl_doc(text=None, url="https://example.com/article", crawl="CC-MAIN-2024-10"):
+    return {
+        "text": text or GOOD_TEXT,
+        "source": "common_crawl",
+        "url": url,
+        "crawl": crawl,
+        "language": "en",
+    }
+
+
+# Backwards-compat alias — many existing tests still call make_cc_doc.
+make_cc_doc = make_common_crawl_doc
+
+
+def make_fineweb_doc(text=None, url="https://example.com/article", dump="CC-MAIN-2024-10"):
+    return {
+        "text": text or GOOD_TEXT,
+        "source": "fineweb",
+        "url": url,
+        "dump": dump,
+        "language": "en",
+    }
+
+
 def make_wikipedia_doc(text=None, title="Test Article", url="https://en.wikipedia.org/wiki/Test"):
-    return {"text": text or GOOD_TEXT, "source": "wikipedia", "title": title, "url": url}
+    return {
+        "text": text or GOOD_TEXT,
+        "source": "wikipedia",
+        "title": title,
+        "url": url,
+    }
 
 
-def make_code_doc(text=None, language="python", repo="test/repo", path="test.py"):
-    return {"text": text or GOOD_CODE, "source": "code", "language": language, "repo": repo, "path": path}
+def make_pg19_doc(text=None, title="Test Book", publication_date="1850", url=""):
+    return {
+        "text": text or GOOD_TEXT,
+        "source": "pg19",
+        "title": title,
+        "publication_date": publication_date,
+        "url": url,
+    }
 
 
-def make_cc_doc(text=None, url="https://example.com/article", crawl="CC-MAIN-2024-10"):
-    return {"text": text or GOOD_TEXT, "source": "common_crawl", "url": url, "crawl": crawl, "language": "en"}
+def make_pes2o_doc(text=None, paper_id="test_001", subset="s2orc"):
+    return {
+        "text": text or GOOD_TEXT,
+        "source": "pes2o",
+        "paper_id": paper_id,
+        "subset": subset,
+    }
+
+
+def make_open_web_math_doc(text=None, url="https://example.com/math", date="2024-01-01"):
+    return {
+        "text": text or GOOD_TEXT,
+        "source": "open_web_math",
+        "url": url,
+        "date": date,
+        "subdomain": "",
+    }
+
+
+def make_stackexchange_doc(text=None, site="stackoverflow", question_id="12345"):
+    return {
+        "text": text or GOOD_TEXT,
+        "source": "stackexchange",
+        "site": site,
+        "question_id": question_id,
+    }
+
+
+# ── Code source factories ──────────────────────────────────────────────────────
+
+def make_codesearchnet_doc(text=None, language="python", repo="test/repo", path="test.py"):
+    return {
+        "text": text or GOOD_CODE,
+        "source": "codesearchnet",
+        "language": language,
+        "repo": repo,
+        "path": path,
+    }
+
+
+# Backwards-compat alias — the old make_code_doc produced source="code" which
+# is no longer valid. Point existing callers at codesearchnet as the closest
+# semantic match (docstring + code pattern).
+make_code_doc = make_codesearchnet_doc
+
+
+def make_stack_smol_doc(text=None, language="python", repo="test/repo", path="test.py"):
+    return {
+        "text": text or GOOD_CODE,
+        "source": "stack_smol",
+        "language": language,
+        "repo": repo,
+        "path": path,
+    }
+
+
+def make_stack_v2_doc(text=None, language="Python", repo="test/repo", path="test.py", blob_id="abc123"):
+    return {
+        "text": text or GOOD_CODE,
+        "source": "stack_v2",
+        "language": language,
+        "repo": repo,
+        "path": path,
+        "blob_id": blob_id,
+    }
+
+
+def make_jupyter_doc(text=None, repo="test/repo"):
+    return {
+        "text": text or GOOD_CODE,
+        "source": "jupyter",
+        "repo": repo,
+    }
+
+
+def make_conala_doc(text=None, question_id="12345"):
+    return {
+        "text": text or GOOD_CODE,
+        "source": "conala",
+        "language": "python",
+        "question_id": question_id,
+    }
 
 
 # ── Mini model config ──────────────────────────────────────────────────────────

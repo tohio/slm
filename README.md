@@ -2,6 +2,8 @@
 
 A decoder-only language model trained from scratch — raw web data through to an aligned, serving-ready model. Covers the full lifecycle: data curation, validation, tokenizer training, pretraining, supervised fine-tuning, preference alignment, evaluation, and production serving.
 
+> **Status:** This project is under active development. The pipeline is operational at 125m; 350m and 1b runs are pending. Items marked _TBD_ will be filled in as empirical data becomes available. Screenshots reference the previous (3-source) data mix and will be regenerated after the next 125m run.
+
 ---
 
 ## Overview
@@ -16,6 +18,20 @@ The pipeline is modular and independently runnable at each stage. Every design d
 
 ---
 
+## Choosing a size
+
+All three sizes run through the same code path — the only differences are config values and target token counts. Choose based on your time and compute budget:
+
+| Size | Curation time | Training time | Rough cost | Suits |
+|---|---|---|---|---|
+| `slm-125m` | _TBD_ | _TBD_ | _TBD_ | learning the pipeline, single-GPU runs |
+| `slm-350m` | _TBD_ | _TBD_ | _TBD_ | serious research budget, multi-GPU |
+| `slm-1b` | _TBD_ | _TBD_ | _TBD_ | production-useful small model, GPU cluster |
+
+Most readers will find `125m` fits their budget. The `1b` path is here for readers with the compute — it uses the same commands and same config structure, and produces a more capable model. The pipeline is designed for all three to work reliably; the choice is about what you can afford, not what you can trust.
+
+---
+
 ## Architecture
 
 The model is a dense decoder-only transformer with a modern architecture:
@@ -24,7 +40,7 @@ The model is a dense decoder-only transformer with a modern architecture:
 |---|---|---|
 | Positional encoding | RoPE | Better length generalisation, relative position awareness |
 | Normalization | RMSNorm | Faster than LayerNorm, modern standard |
-| Activation | SwiGLU | Better gradient flow, used by LLaMA, Mistral, Qwen |
+| Activation | SwiGLU | Better gradient flow, used by Llama, Mistral, Qwen |
 | Attention | GQA | Reduces KV memory overhead at inference |
 | Bias | None | Simpler, modern standard |
 | Embeddings | Tied | Reduces parameters, effective at small scale |
@@ -70,15 +86,25 @@ slm/
 │   └── model.py
 │
 ├── curator/
+│   ├── constants.py               
 │   ├── sources/
-│   │   ├── wikipedia.py
-│   │   ├── code_search_net.py
-│   │   └── common_crawl.py
+│   │   ├── common_crawl.py        
+│   │   ├── fineweb.py             
+│   │   ├── wikipedia.py           
+│   │   ├── pg19.py                
+│   │   ├── pes2o.py               
+│   │   ├── open_web_math.py       
+│   │   ├── stackexchange.py       
+│   │   ├── code_search_net.py     
+│   │   ├── stack_smol.py      
+│   │   ├── stack_v2.py        
+│   │   ├── jupyter.py             
+│   │   └── conala.py              
 │   ├── filters/
 │   │   ├── quality.py
 │   │   └── dedup.py
 │   └── scripts/
-│       ├── curate.py
+│       ├── curate.py              
 │       └── upload_s3.py
 │
 ├── validation/
@@ -126,21 +152,21 @@ slm/
 │   │   └── pvc.yaml
 │   └── serve.sh
 │
-├── tests/                                  
-│   ├── conftest.py                         
-│   ├── README.md                           
-│   ├── data_pipeline/                      
-│   │   ├── test_pipeline_curator.py        
-│   │   ├── test_pipeline_validate.py       
-│   │   └── test_pipeline_tokenizer.py      
+├── tests/
+│   ├── conftest.py
+│   ├── README.md
+│   ├── data_pipeline/
+│   │   ├── test_pipeline_curator.py
+│   │   ├── test_pipeline_validate.py
+│   │   └── test_pipeline_tokenizer.py
 │   ├── model/
-│   │   └── test_model.py                   
-│   └── gpu_pipeline/                       
-│       ├── test_pipeline_training.py       
-│       ├── test_pipeline_sft.py            
-│       └── test_pipeline_dpo.py            
+│   │   └── test_model.py
+│   └── gpu_pipeline/
+│       ├── test_pipeline_training.py
+│       ├── test_pipeline_sft.py
+│       └── test_pipeline_dpo.py
 │
-├── notebooks/                    Exploratory analysis — one per pipeline stage
+├── notebooks/                      
 │   ├── 01_model_exploration.ipynb
 │   ├── 02_data_exploration.ipynb
 │   ├── 03_validation_exploration.ipynb
@@ -170,8 +196,6 @@ slm/
 ├── requirements.txt
 ├── environment.yml
 └── .env.sample
-
-this is the repo structure it needs to be updated as well
 ```
 
 ---
@@ -184,11 +208,12 @@ this is the repo structure it needs to be updated as well
 - CUDA-capable GPU (for pretraining stages)
 - AWS account (S3 for data storage)
 - Weights & Biases account
+- HuggingFace account + token (several sources are gated: FineWeb, the-stack-smol, the-stack-v2-dedup)
+- Software Heritage Archive token (optional but strongly recommended for the-stack-v2 throughput)
 
 **Disk setup (separate data volume)**
 
-If you are attaching a secondary disk for your data directory (recommended for
-curation — you need 500GB+), mount it before cloning:
+If you are attaching a secondary disk for your data directory (recommended for curation — you need 500GB+), mount it before cloning:
 
 → [docs/DISK_SETUP.md](docs/DISK_SETUP.md)
 
@@ -204,7 +229,7 @@ git clone https://github.com/tohio/slm.git /data/slm
 cd /data/slm
 
 cp .env.sample .env
-vi .env   # fill in S3_BUCKET, AWS credentials, WANDB_API_KEY, HF_TOKEN
+vi .env   # fill in S3_BUCKET, AWS credentials, WANDB_API_KEY, HF_TOKEN, SWH_AUTH_TOKEN
 
 sudo apt install -y make
 
@@ -215,28 +240,26 @@ make setup-data-dir DATA_DIR=/data/slm/data
 # make setup
 ```
 
-Using pip:
+Using pip / uv / conda:
 ```bash
 make install          # creates .venv and installs all dependencies
 make install-kenlm    # kenlm not on PyPI — curation instance only
-```
 
-Using uv:
-```bash
-make install-uv
-make install-kenlm
-```
-
-Using conda:
-```bash
-make install-conda
-make install-kenlm
+make install-uv       # alternative: uv
+make install-conda    # alternative: conda
 ```
 
 GPU training instance only:
 ```bash
 make install-gpu      # skips kenlm and other curation-only dependencies
 ```
+
+**Accept dataset Terms of Use**
+
+Before first run, visit and accept terms on these HuggingFace dataset pages (required for gated datasets used in curation):
+- https://huggingface.co/datasets/HuggingFaceFW/fineweb
+- https://huggingface.co/datasets/bigcode/the-stack-smol
+- https://huggingface.co/datasets/bigcode/the-stack-v2-dedup
 
 ---
 
@@ -248,7 +271,7 @@ make download-fasttext-model DATA_DIR=/data/slm/data   # language ID model (~1MB
 make download-kenlm-model    DATA_DIR=/data/slm/data   # perplexity model (~4GB)
 
 # ── Step 2: Validate curation pipeline ───────────────────────────────────────
-# Exercises every curation stage end-to-end on tiny data.
+# Exercises every curation stage end-to-end on tiny data — all 10 sources.
 # All tests run here — catch issues before spending hours on the full run.
 make curate-mini && make test-curator
 make validate    && make test-validate
@@ -313,7 +336,7 @@ Tests validate real pipeline outputs at each stage. Each test target is paired w
 **CPU curation instance:**
 
 ```bash
-make curate-mini   && make test-curator      # validate curation outputs
+make curate-mini   && make test-curator      # validate curation outputs (all 10 sources)
 make validate      && make test-validate     # validate validation outputs
 make tokenizer     && make test-tokenizer    # validate tokenizer outputs
 
@@ -339,7 +362,7 @@ make test-model
 
 | Target | Stage | Validates |
 |---|---|---|
-| `test-curator` | `curate-mini` | Raw shards, filter quality, dedup correctness, blend output, stats |
+| `test-curator` | `curate-mini` | Raw shards exist for all 10 sources, filter quality, dedup correctness, blend output, stats |
 | `test-validate` | `validate` | Retention rate, subset correctness, quality of retained docs |
 | `test-tokenizer` | `tokenizer` | Special token IDs, roundtrip, fertility, chat template |
 | `test-data-pipeline` | all three above | Runs curator + validate + tokenizer tests |
@@ -391,11 +414,20 @@ make pretrain CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
 
 ### Source Mix
 
-| Source | Mix | Tokens (1b) | Notes |
-|---|---|---|---|
-| Common Crawl | 55% | 16.5B | Broad web coverage, aggressively filtered |
-| Wikipedia EN | 25% | 7.5B | High quality, factual, structured |
-| CodeSearchNet | 20% | 6B | Python only |
+Scale-invariant percentages — the same mix applies at every size.
+
+| Source | Share | Notes |
+|---|---|---|
+| Common Crawl | 10% | direct WARC via trafilatura |
+| FineWeb | 47.5% | `HuggingFaceFW/fineweb` sample-100BT, overflow sink |
+| Wikipedia | 10% | `wikimedia/wikipedia` EN |
+| pg19 | 2.5% | public-domain books pre-1919 |
+| peS2o | 5% | `allenai/peS2o` v2 — academic papers |
+| open-web-math | 10% | math-heavy web filtered from CC |
+| StackExchange | 5% | Q+A across dozens of sites |
+| Code (total) | 10% | split across 5 code sub-sources (see curator/README.md) |
+
+When supply-constrained sources (Wikipedia, pg19) fall short of their character budget at large scales, the deficit is automatically routed to FineWeb as an overflow sink. The mix shape is preserved; the token target is hit.
 
 ### Token Targets
 
@@ -403,7 +435,11 @@ make pretrain CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
 |---|---|---|
 | `slm-125m` | 5B | 2 |
 | `slm-350m` | 15B | 2 |
-| `slm-1b` | 30B | 2 |
+| `slm-1b` | 30B | 1 |
+
+Why 1b uses 1 epoch: at 30B tokens / 1 epoch, every source stays below its supply ceiling, so no repetition. Modern small-model training (Llama, Phi) follows the same pattern — fresh tokens outperform repeated ones. 125m and 350m retain 2 epochs because their smaller budgets leave comfortable headroom.
+
+See `curator/README.md` for full details on the mix, sub-source breakdowns, cap-and-redistribute behavior, and scaling beyond 1b.
 
 ---
 
@@ -411,23 +447,22 @@ make pretrain CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
 
 ### Data Curation (CPU) — Stages 1–4a
 
-Runs on CPU instances. No GPU required.
+Runs on CPU instances. No GPU required. Hardware recommendations below, not floors — the pipeline streams everywhere and runs on less RAM with longer wall time.
 
-| Target | vCPUs | RAM | Est. runtime |
+| Target | vCPUs | RAM | Est. curation runtime |
 |---|---|---|---|
-| mini (validation) | Any | 4GB+ | ~30–45 min |
-| 125m | 32 vCPU | 64GB | ~4–6 hrs |
-| 350m | 64 vCPU | 128GB | ~10–14 hrs |
-| 1b | 64 vCPU | 256GB | ~20–28 hrs |
+| `mini` | 4+ | 8 GB | 30–60 min |
+| `slm-125m` | 16+ | 32 GB | _TBD — pending 125m rerun_ |
+| `slm-350m` | 32+ | 64 GB | _TBD — pending 350m run_ |
+| `slm-1b` | 64+ | 128 GB | _TBD — pending 1b run_ |
 
-> **Runtimes are rough reference points — measure your own.**
-> Many variables dominate: network peering between your cloud and Common
-> Crawl's AWS `us-east-1` origin, per-WARC CloudFront throughput at your
-> time of day, disk IOPS, CPU generation, and CC's own throttling behavior.
-> Cross-cloud (Nebius → AWS, GCP → AWS) runs can be 2–3× faster or slower
-> than same-region (AWS `us-east-1`) runs. Before committing to a full 1b
-> run, time a `curate-mini` or `curate SIZE=125m` run to calibrate your
-> actual throughput.
+> **Measure your own throughput before committing.** Many variables dominate:
+> network peering between your cloud and Common Crawl's AWS `us-east-1` origin,
+> per-WARC CloudFront throughput at your time of day, disk IOPS, CPU generation,
+> Software Heritage Archive rate limits for the-stack-v2 fetches, and CC's own
+> throttling behavior. Cross-cloud (Nebius → AWS, GCP → AWS) runs can be 2–3×
+> faster or slower than same-region runs. Before committing to a full run, time
+> a `curate-mini` or `curate SIZE=125m` run to calibrate.
 
 Run close to `us-east-1` (AWS) or `us-east1` (GCP) to minimise Common Crawl egress latency. Attach a persistent disk (500GB+) for `DATA_DIR` — the pipeline is fully resumable at every stage.
 
@@ -451,10 +486,10 @@ Runtime varies significantly by GPU type and count. Use `make pretrain-mini GPUS
 
 | Target | Min VRAM | Notes |
 |---|---|---|
-| mini (validation) | 8GB+ | Any GPU — confirms training loop works |
-| 125m | 16GB+ per GPU | Fits on any modern data center GPU |
-| 350m | 24GB+ per GPU | A100 40GB or better recommended |
-| 1b | 40GB+ per GPU | A100 80GB / H100 / H200 recommended; gradient checkpointing enabled |
+| `mini` | 8 GB+ | any modern GPU — confirms training loop works |
+| `slm-125m` | 16 GB+ per GPU | fits on any modern data center GPU |
+| `slm-350m` | 24 GB+ per GPU | A100 40GB or better recommended |
+| `slm-1b` | 40 GB+ per GPU | A100 80GB / H100 / H200 recommended; gradient checkpointing enabled |
 
 SFT and DPO runtimes are roughly 20–30% of pretraining time at the same model size. Use spot/preemptible instances — all training loops support `--resume` from the last checkpoint.
 
@@ -462,9 +497,11 @@ SFT and DPO runtimes are roughly 20–30% of pretraining time at the same model 
 
 ## Screenshots
 
+_Screenshots below reflect the previous 3-source (55/25/20 CC/Wiki/Code) mix and will be regenerated after the next 125m run. Commands and output structure are unchanged; only per-source numbers differ._
+
 | Screenshot | Stage | Description |
 |---|---|---|
-| `docs/screenshots/01_blend_stats.png` | Stage 1 | `blend_stats.json` showing 55/25/20 source mix |
+| `docs/screenshots/01_blend_stats.png` | Stage 1 | `blend_stats.json` showing source mix |
 | `docs/screenshots/02_validation_report.png` | Stage 2 | Validation report — total, kept, and rejection breakdown |
 | `docs/screenshots/03_tokenizer_test.png` | Stage 3 | Tokenizer test output — special tokens and fertility score |
 | `docs/screenshots/04_pretrain_loss.png` | Stage 4 | W&B pretraining loss curve |
@@ -474,30 +511,6 @@ SFT and DPO runtimes are roughly 20–30% of pretraining time at the same model 
 | `docs/screenshots/08_hf_hub.png` | Stage 8 | HuggingFace Hub model page for `tohio/slm-125m` |
 | `docs/screenshots/09_chat_session.png` | Stage 9 | Interactive multi-turn chat session via `inference/chat.py` |
 | `docs/screenshots/10_vllm_curl.png` | Stage 10 | `curl` request to vLLM server with response |
-
-### Stage 1 — Data Curation
-
-Source mix breakdown from `blend_stats.json` — confirming the 55/25/20 Common Crawl / Wikipedia / code split.
-
-![Blend stats](docs/screenshots/01_blend_stats.png)
-
-### Stage 4 — Pretraining
-
-W&B loss curve showing steady convergence over the full pretraining run.
-
-![Pretraining loss](docs/screenshots/04_pretrain_loss.png)
-
-### Stage 7 — Evaluation
-
-Benchmark results across HellaSwag, ARC, MMLU, TruthfulQA, and HumanEval.
-
-![Eval results](docs/screenshots/07_eval_results.png)
-
-### Stage 9 — Inference
-
-Multi-turn chat session via `inference/chat.py` using the aligned chat model.
-
-![Chat session](docs/screenshots/09_chat_session.png)
 
 ---
 
@@ -512,6 +525,9 @@ Models are evaluated on standard benchmarks via `lm-evaluation-harness`:
 | MMLU | Broad knowledge |
 | TruthfulQA | Factual accuracy |
 | HumanEval | Python code generation |
+| MBPP | Basic Python programming problems |
+
+**Contamination stance.** None of these benchmarks appear in any training source. HumanEval, MBPP, APPS, HellaSwag, ARC, MMLU, and TruthfulQA are all absent from the curated data — the earlier `codeparrot/apps` source was explicitly dropped to keep APPS clean. Model cards can claim clean eval results without asterisks.
 
 ---
 
@@ -527,15 +543,39 @@ Models are evaluated on standard benchmarks via `lm-evaluation-harness`:
 
 **Why sequential SFT (chat → code)?** Sequential fine-tuning produces independently evaluable checkpoints at each stage, making regressions immediately visible. The code SFT uses a lower learning rate to reduce catastrophic forgetting of chat capability.
 
-**Why Python-only for code?** CodeSearchNet's Go and Rust corpora are thin, and including weak language coverage adds noise without meaningful benefit. Python has the strongest coverage, the highest quality docstrings, and the best downstream evaluation benchmarks (HumanEval). A focused 20% Python corpus outperforms a diluted multi-language mix at this scale.
+**Why 10 data sources?** Distribution coverage. A model pretrained only on web scrape (even filtered) has characteristic weaknesses: poor factual recall on niche topics, no long-range coherence over book-length spans, weak technical/academic prose, weak math reasoning, weak Q+A structure, weak code. Each of the 10 sources covers a specific gap. See [curator/README.md](curator/README.md) for the full mix and sub-source rationale.
+
+**Why scale-invariant mix percentages?** A reader scaling from 125m to 1b changes one number (`target_tokens`) and gets proportionally more of everything — no per-scale mix tuning. Supply variance is handled by cap-and-redistribute, not by per-scale knobs.
+
+**Why different epoch counts per scale?** Token budget versus supply. At 125m (5B tokens), 2 epochs is comfortable; at 1b (30B tokens), 1 epoch leaves every source below its supply ceiling, so no repetition. Modern small-model training (Llama, Phi, Qwen) follows the single-epoch pattern at scale — fresh tokens outperform repeated ones.
+
+**Why streaming-first curation?** At 1b with 30B+ tokens, materializing sources in memory is infeasible on reasonable hardware. FineWeb and stack-v2 require streaming; the other sources use it for consistency. RAM is not the load-bearing scaling axis — vCPU count and network throughput are. This means readers on modest hardware (32 GB RAM) can still run 1b, just slower.
+
+**Why cap-and-redistribute?** Wikipedia and pg19 have finite supply. At large scales they can't fill their character budget without repetition. Rather than add per-scale knobs or accept repetition, the overflow routes to FineWeb — which has 15T tokens of headroom — preserving mix shape and hitting the token target.
 
 **Why vLLM for serving?** PagedAttention enables continuous batching and efficient KV cache management. The OpenAI-compatible API means any client built against the OpenAI SDK works out of the box.
 
-**Why datatrove for dedup instead of datasketch?** datasketch's `MinHashLSH` is in-memory — at 350m scale it requires ~32GB RAM. datatrove's disk-based pipeline uses a sort-based approach where RAM usage is bounded by shard size, not corpus size. Same approach used by FineWeb at trillion-token scale.
+**Why datatrove for dedup instead of datasketch?** datasketch's `MinHashLSH` is in-memory — at 350m it requires ~32GB; at 1b ~85GB and may not fit on a single instance. datatrove's disk-based pipeline uses a sort-based approach (signatures → buckets → cluster → filter) where RAM usage is bounded by shard size, not corpus size. Same approach used by FineWeb at trillion-token scale.
 
 **Why HTTPS for Common Crawl instead of S3?** Direct S3 access to the `commoncrawl` bucket fails on EC2 instances with IAM roles attached — the instance role credentials are rejected by the bucket policy. HTTPS via `data.commoncrawl.org` works reliably regardless of instance credentials.
 
 **Why fasttext for language detection?** Language detection runs on every Common Crawl document — tens of millions of pages. `langdetect` is pure Python and adds ~5–10ms per document. fasttext's `lid.176.ftz` model is C-backed, covers 176 languages, and runs ~1000× faster with equivalent accuracy.
+
+---
+
+## Scaling Beyond 1b
+
+The pipeline is designed to extend past 1b. Scale-invariant percentages, streaming-first code, and cap-and-redistribute all generalise. As compute gets cheaper and faster, larger sizes become accessible.
+
+To run at 3b or beyond:
+
+1. Add a new entry to `TARGET_CONFIGS` in `curator/scripts/curate.py` with the new `total_tokens` and `cc_crawls` list.
+2. Add a matching `gpt_3b.yaml` (or equivalent) in `pretrain/configs/`.
+3. Review Wikipedia and pg19 supply: at budgets approaching 40B × 1 epoch, Wikipedia repetition approaches 1.6×. Options: drop Wikipedia's share, add multilingual Wikipedia, or accept the repetition.
+4. Consider adding a second bulk-code source to avoid stack-v2 over-epoching at 5B+ code tokens.
+5. Consider upgrading FineWeb from `sample-100BT` to a larger sample if overflow consumption gets close to 100B.
+
+No core code changes are required for scaling — the target config, source mix, and cap-and-redistribute handle supply variance automatically. See [curator/README.md](curator/README.md) for full details.
 
 ---
 
@@ -559,7 +599,7 @@ curl http://slm-service:8000/v1/chat/completions \
 This project is scoped as a complete end-to-end training pipeline and demonstration. In a larger production system:
 
 - **Data scale** — the curation pipeline would run on a distributed compute cluster over petabyte-scale crawl data rather than a single CPU instance.
-- **Training scale** — multi-node training with FSDP across 8+ nodes for the 1B model and beyond.
+- **Training scale** — multi-node training with FSDP across 8+ nodes for models beyond 1b.
 - **Continual learning** — a data flywheel feeding new curated data back into periodic pretraining runs.
 - **Reward modelling** — a trained reward model enabling online DPO for more sophisticated alignment.
 - **Observability** — per-request latency, token throughput, and generation quality metrics surfaced in Grafana.

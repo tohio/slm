@@ -16,7 +16,7 @@ record had the docstring twice.
 Output: JSONL with one function per line:
     {
         "text": "...",         # docstring-as-comment + code
-        "source": "code",
+        "source": "codesearchnet",
         "language": "python",
         "repo": "...",
         "path": "..."
@@ -24,7 +24,7 @@ Output: JSONL with one function per line:
 
 Usage:
     from curator.sources.code_search_net import CodeSearchNetSource
-    source = CodeSearchNetSource(output_dir=Path("data/raw/code"))
+    source = CodeSearchNetSource(output_dir=Path("data/raw/codesearchnet"))
     source.download()
 """
 
@@ -34,6 +34,8 @@ from pathlib import Path
 import orjson
 from datasets import load_dataset
 from tqdm import tqdm
+
+from curator.constants import CHARS_PER_TOKEN
 
 log = logging.getLogger(__name__)
 
@@ -117,7 +119,7 @@ class CodeSearchNetSource:
     """
 
     DATASET_NAME = "code_search_net"
-    SOURCE_TAG = "code"
+    SOURCE_TAG = "codesearchnet"
 
     def __init__(
         self,
@@ -263,7 +265,7 @@ class CodeSearchNetSource:
 
     def _write_shard(self, records: list[dict], shard_idx: int) -> Path:
         """Write records to a JSONL shard."""
-        path = self.output_dir / f"code_{shard_idx:04d}.jsonl"
+        path = self.output_dir / f"codesearchnet_{shard_idx:04d}.jsonl"
         with open(path, "wb") as f:
             for record in records:
                 f.write(orjson.dumps(record))
@@ -273,7 +275,7 @@ class CodeSearchNetSource:
 
     def stats(self) -> dict:
         """Return stats about already-downloaded shards."""
-        shards = sorted(self.output_dir.glob("code_*.jsonl"))
+        shards = sorted(self.output_dir.glob("codesearchnet_*.jsonl"))
         total_samples = 0
         total_chars = 0
         lang_counts: dict[str, int] = {}
@@ -295,6 +297,6 @@ class CodeSearchNetSource:
             "samples": total_samples,
             "total_chars": total_chars,
             "avg_chars_per_sample": total_chars // max(total_samples, 1),
-            "estimated_tokens": total_chars // 4,
+            "estimated_tokens": total_chars // CHARS_PER_TOKEN,
             "by_language": lang_counts,
         }

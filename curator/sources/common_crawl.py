@@ -72,6 +72,8 @@ import requests
 from tqdm import tqdm
 from warcio.archiveiterator import ArchiveIterator
 
+from curator.constants import CHARS_PER_TOKEN
+
 log = logging.getLogger(__name__)
 
 # Common Crawl base URL — HTTPS via CloudFront, no credentials needed
@@ -656,7 +658,7 @@ class CommonCrawlSource:
             "documents": total_docs,
             "total_chars": total_chars,
             "avg_chars_per_doc": total_chars // max(total_docs, 1),
-            "estimated_tokens": total_chars // 4,
+            "estimated_tokens": total_chars // CHARS_PER_TOKEN,
             "completed_segments": len(completed_segments),
             "by_crawl": crawl_counts,
         }

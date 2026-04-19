@@ -23,6 +23,8 @@ import orjson
 from datasets import load_dataset
 from tqdm import tqdm
 
+from curator.constants import CHARS_PER_TOKEN
+
 log = logging.getLogger(__name__)
 
 
@@ -174,5 +176,5 @@ class WikipediaSource:
             "articles": total_articles,
             "total_chars": total_chars,
             "avg_chars_per_article": total_chars // max(total_articles, 1),
-            "estimated_tokens": total_chars // 4,
+            "estimated_tokens": total_chars // CHARS_PER_TOKEN,
         }
