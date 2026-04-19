@@ -45,7 +45,6 @@ class SLMConfig(PretrainedConfig):
         bos_token_id (int): Beginning-of-sequence token ID. Default: 2.
         eos_token_id (int): End-of-sequence token ID. Default: 3.
         attention_dropout (float): Dropout on attention weights. Default: 0.0.
-        hidden_dropout (float): Dropout on hidden states. Default: 0.0.
 
     Example usage::
 
@@ -105,7 +104,6 @@ class SLMConfig(PretrainedConfig):
         bos_token_id: int = 2,
         eos_token_id: int = 3,
         attention_dropout: float = 0.0,
-        hidden_dropout: float = 0.0,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -121,7 +119,6 @@ class SLMConfig(PretrainedConfig):
         self.initializer_range = initializer_range
         self.use_cache = use_cache
         self.attention_dropout = attention_dropout
-        self.hidden_dropout = hidden_dropout
 
         self._validate()
 
@@ -143,6 +140,14 @@ class SLMConfig(PretrainedConfig):
             raise ValueError(
                 f"hidden_size ({self.hidden_size}) must be divisible by "
                 f"num_attention_heads ({self.num_attention_heads})"
+            )
+        if self.max_position_embeddings <= 0:
+            raise ValueError(
+                f"max_position_embeddings must be positive, got {self.max_position_embeddings}"
+            )
+        if self.rope_theta <= 0:
+            raise ValueError(
+                f"rope_theta must be positive, got {self.rope_theta}"
             )
 
     @property

@@ -107,9 +107,10 @@ class TestGroupedQueryAttention:
         from model.attention import GroupedQueryAttention
         config = make_mini_config()
         attn = GroupedQueryAttention(config, layer_idx=0)
-        for name, param in attn.named_parameters():
-            if "bias" in name and "rotary" not in name:
-                assert False, f"Found bias parameter: {name}"
+        bias_params = [
+            name for name, _ in attn.named_parameters() if "bias" in name
+        ]
+        assert not bias_params, f"Found bias parameters: {bias_params}"
 
 
 # ── Decoder Block ──────────────────────────────────────────────────────────────
@@ -149,6 +150,22 @@ class TestSLMModel:
         config = make_mini_config()
         model = SLMModel(config)
         assert len(model.layers) == config.num_hidden_layers
+
+    def test_init_respects_initializer_range(self):
+        """Standalone SLMModel should apply configured initializer_range."""
+        from model.model import SLMModel
+        config = make_mini_config()
+        model = SLMModel(config)
+
+        # The configured std is 0.02. After init, the embedding weight's
+        # standard deviation should be in a plausible range around that.
+        # PyTorch's default Embedding init is N(0, 1) — detection threshold
+        # is any std > 0.1, which indicates post_init() did not run.
+        embed_std = model.embed_tokens.weight.std().item()
+        assert embed_std < 0.05, (
+            f"Embedding std {embed_std:.4f} suggests post_init() did not run "
+            f"(expected ~{config.initializer_range})"
+        )
 
 
 # ── SLMForCausalLM ─────────────────────────────────────────────────────────────
@@ -191,14 +208,23 @@ class TestSLMForCausalLM:
         )
 
     def test_parameter_count_approximately_25m(self):
-        """Mini model should be approximately 25M parameters."""
+        """
+        Mini model should be approximately 25M parameters.
+
+        The mini config is deterministic (6 layers × 384 hidden × 32k vocab
+        × tied), so parameter count should be tightly predictable. A ±5%
+        band catches real drift (e.g. a change to _default_intermediate_size,
+        an accidental untie, vocab size change).
+        """
         from model.model import SLMForCausalLM
         config = make_mini_config()
         model = SLMForCausalLM(config)
         n_params = sum(p.numel() for p in model.parameters())
-        # Allow ±20% margin
-        assert 20_000_000 <= n_params <= 30_000_000, (
-            f"Parameter count {n_params:,} outside expected range [20M, 30M]"
+        expected = 25_000_000
+        drift = abs(n_params - expected) / expected
+        assert drift < 0.05, (
+            f"Parameter count {n_params:,} drifted {drift:.1%} from "
+            f"expected ~{expected:,} (tolerance 5%)"
         )
 
     def test_causal_mask_lower_triangular(self):
@@ -228,12 +254,20 @@ class TestSLMForCausalLM:
         )
 
     def test_no_bias_parameters(self):
+        """
+        No parameter anywhere in the model should be named '*bias*'.
+
+        The previous version of this test excluded 'norm' and 'rotary' from
+        the check. Neither RMSNorm nor RotaryEmbedding has bias parameters,
+        so the exclusions were defensive against cases that don't exist.
+        Removing them means if anyone ever adds a bias to RMSNorm (or any
+        other module) it gets caught here.
+        """
         from model.model import SLMForCausalLM
         config = make_mini_config()
         model = SLMForCausalLM(config)
         bias_params = [
-            name for name, _ in model.named_parameters()
-            if "bias" in name and "norm" not in name and "rotary" not in name
+            name for name, _ in model.named_parameters() if "bias" in name
         ]
         assert len(bias_params) == 0, f"Found bias parameters: {bias_params}"
 

@@ -27,16 +27,14 @@ Compatibility (transformers v5):
       no longer inherits from GenerationMixin from v4.50 onwards.
     - Weight tying: tie_weights() does the actual sharing; _tied_weights_keys
       is set as a dict so save_pretrained correctly handles shared tensors.
-      get_expanded_tied_weights_keys is overridden to return the keys without
-      going through the broken v5 dict resolution.
     - past_key_values supports both legacy list[tuple] format and v5
       DynamicCache objects for full compatibility with trl and vLLM.
     - transformers v5 DynamicCache uses a .layers attribute containing
       DynamicLayer objects with .keys and .values tensors. Older versions
       used .key_cache / .value_cache list attributes. Both are handled.
-    - prepare_inputs_for_generation accepts cache_position (added in v5).
+    - prepare_inputs_for_generation consumes cache_position (v5) to slice
+      input_ids correctly for single-token and multi-token resume.
     - use_cache is forced False when gradient checkpointing is enabled.
-    - post_init() is called only in SLMForCausalLM, not SLMModel.
 """
 
 from typing import Optional, Union
@@ -121,10 +119,22 @@ class SLMModel(PreTrainedModel):
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.gradient_checkpointing = False
 
-        # post_init() is intentionally NOT called here. SLMModel has no LM head
-        # and no tied weights. Calling post_init() on the base model triggers
-        # tied weight resolution in transformers v5 which errors without a head.
-        # post_init() is called in SLMForCausalLM where it belongs.
+        # Apply configured weight init. SLMModel has no LM head and no tied
+        # weights, so the dict-form _tied_weights_keys pathway in v5 is not
+        # exercised here — post_init() is safe to call.
+        self.post_init()
+
+    def _init_weights(self, module: nn.Module) -> None:
+        """Initialize weights with config.initializer_range."""
+        std = self.config.initializer_range
+        if isinstance(module, nn.Linear):
+            module.weight.data.normal_(mean=0.0, std=std)
+            if module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.Embedding):
+            module.weight.data.normal_(mean=0.0, std=std)
+            if module.padding_idx is not None:
+                module.weight.data[module.padding_idx].zero_()
 
     def get_input_embeddings(self) -> nn.Embedding:
         return self.embed_tokens
@@ -260,12 +270,28 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.post_init()
 
+    def _init_weights(self, module: nn.Module) -> None:
+        """Initialize weights with config.initializer_range."""
+        std = self.config.initializer_range
+        if isinstance(module, nn.Linear):
+            module.weight.data.normal_(mean=0.0, std=std)
+            if module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.Embedding):
+            module.weight.data.normal_(mean=0.0, std=std)
+            if module.padding_idx is not None:
+                module.weight.data[module.padding_idx].zero_()
+
     def tie_weights(self, **kwargs) -> None:
         """
         Tie LM head weights to input embeddings when tie_word_embeddings=True.
 
-        Called automatically by post_init() and init_weights(). Accepts **kwargs
-        for forward compatibility (v5 passes recompute_mapping=False).
+        Called in two places:
+        - post_init() during __init__, after weight initialization
+        - from_pretrained(), after loading weights from disk, to restore the
+          tie that save_pretrained() broke when serialising independent copies
+
+        Accepts **kwargs for forward compatibility (v5 passes recompute_mapping=False).
         """
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
@@ -374,10 +400,19 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         """
         Called by HuggingFace generate() at each decoding step.
 
-        Accepts cache_position (added in transformers v5) and past_key_values
-        as either legacy list[tuple] or DynamicCache for full v5 compatibility.
+        Slices input_ids to only the positions that haven't been processed yet:
+        - If cache_position is provided (transformers v5), trim to len(cache_position)
+          tokens from the end. This correctly handles both single-token
+          generation (cache_position has length 1) and multi-token resume
+          used by assisted/speculative decoding (cache_position has length > 1).
+        - If cache_position is absent (older callers) and past_key_values is
+          set, fall back to trimming to the last token, which matches the
+          common autoregressive case.
         """
-        if past_key_values is not None:
+        if cache_position is not None:
+            # v5 path: slice to exactly the new positions implied by cache_position.
+            input_ids = input_ids[:, -cache_position.shape[0]:]
+        elif past_key_values is not None:
             input_ids = input_ids[:, -1:]
 
         if inputs_embeds is not None and past_key_values is None:

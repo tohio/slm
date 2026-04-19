@@ -25,6 +25,8 @@ Custom decoder-only transformer architecture registered as a HuggingFace `PreTra
 | `slm-350m` | 24 | 1024 | 2816 | 16 | 8 | 2048 | ~350M |
 | `slm-1b` | 32 | 2048 | 5632 | 32 | 8 | 4096 | ~1B |
 
+The `intermediate_size` column is computed from `hidden_size` via the LLaMA formula: `round(8/3 × hidden_size)` rounded up to the nearest multiple of 256. The `8/3` factor compensates for SwiGLU's three projections so the total parameter count matches a standard FFN with 4× expansion. If you pass `intermediate_size=None` (the default), `SLMConfig` computes it automatically; passing an explicit value overrides.
+
 ---
 
 ## Files
@@ -93,6 +95,38 @@ output = model.generate(
     do_sample=True,
 )
 ```
+
+---
+
+## Why two classes?
+
+`model.py` defines two classes — `SLMModel` and `SLMForCausalLM` — and the split isn't obvious from the code alone.
+
+**`SLMModel`** is the backbone: embeddings, decoder layers, final norm. It takes token IDs and returns hidden-state vectors. No head. No loss.
+
+**`SLMForCausalLM`** wraps `SLMModel` and adds a linear LM head projecting hidden states to vocabulary logits. It also adds the language-modelling loss and `generate()` compatibility.
+
+```python
+class SLMForCausalLM(PreTrainedModel, GenerationMixin):
+    def __init__(self, config):
+        self.model = SLMModel(config)   # the backbone
+        self.lm_head = nn.Linear(...)   # the head
+```
+
+This matches the HuggingFace convention used by Llama, Mistral, Qwen, and essentially every modern causal LM in the `transformers` library. The pattern exists so one backbone can serve multiple task heads. Hypothetical variants would share the `SLMModel` weights:
+
+- `SLMForCausalLM` — linear to vocab (what we use)
+- `SLMForSequenceClassification` — linear to N classes, pooled
+- `SLMForTokenClassification` — linear per-token (NER, tagging)
+- `SLMForQuestionAnswering` — two linears for answer span start/end
+
+This project only trains `SLMForCausalLM`, but the split is still worth preserving because:
+
+1. **Tools in the ecosystem assume it.** `trl`, `lm-evaluation-harness`, and `vLLM` expect a `.model` attribute on the causal-LM class and a `base_model_prefix` of `"model"` in state dicts. Flattening the architecture into one class would break these integrations.
+2. **`from_pretrained` uses the split to load cross-head.** If you ever add a classification head for fine-tuning, `SLMForSequenceClassification.from_pretrained(causal_lm_checkpoint)` will load the backbone weights correctly and only re-initialise the new head. That's free functionality from the HF machinery.
+3. **It keeps the LM-specific concerns separate from the architecture.** Loss computation, generation logic, and the vocabulary projection all live in `SLMForCausalLM`. The transformer itself stays task-agnostic.
+
+If you see `self.model.embed_tokens` or `self.model.layers` in training or inference code, that's the outer `SLMForCausalLM` reaching into its wrapped `SLMModel` — not a weird double-nesting, just the convention.
 
 ---
 
