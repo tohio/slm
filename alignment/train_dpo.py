@@ -22,6 +22,15 @@ where:
 Base model: slm-{size}-chat-code (after both SFT stages)
 Dataset:    Blended hh-rlhf + orca_dpo_pairs + dpo-mix-7k
 
+Best-checkpoint selection:
+    load_best_model_at_end=True with metric_for_best_model="eval_loss".
+    DPO reward margins typically peak early then degrade, so the best
+    checkpoint is usually NOT the last. final/ contains the lowest-
+    eval-loss checkpoint.
+
+Target library versions: trl 0.29.x, transformers 5.5.x.
+See requirements.txt for the full compatible stack.
+
 Usage:
     python alignment/train_dpo.py --config alignment/configs/dpo_125m.yaml
 
@@ -104,27 +113,67 @@ def load_tokenizer(tokenizer_path: Path):
 
 def build_dpo_args(cfg: dict, output_dir: Path, beta: float):
     """
-    Build DPOConfig for trl 0.29.
+    Build DPOConfig for trl 0.29.x.
 
-    DPO-specific fields in trl 0.29: beta, max_length.
-    max_prompt_length was removed — trl 0.29 handles prompt truncation
-    via max_length only.
+    DPO-specific fields read from cfg["dpo"]:
+        beta                — KL penalty temperature
+        max_prompt_length   — per-prompt truncation applied by trl's data
+                              collator. We also pre-filter overlong pairs
+                              in prepare_dpo.py as defense in depth (the
+                              pre-filter uses the real SLM tokenizer, so
+                              counts are exact and the filtered dataset can
+                              serve all model sizes).
+
+    DPO-specific fields read from cfg["model"]:
+        max_seq_length      → DPOConfig.max_length (prompt + completion).
+
+    NOTE: max_prompt_length was removed in trl 1.0. If we upgrade past 0.29,
+    the pre-filter in prepare_dpo.py becomes load-bearing rather than
+    defense in depth — revisit the filter threshold at that point.
+
+    load_best_model_at_end=True with metric_for_best_model="eval_loss".
+    Constraints:
+        - save_strategy must equal eval_strategy (both "steps")
+        - save_steps must be a multiple of eval_steps
+        - save_total_limit keeps N recent checkpoints PLUS always the best,
+          so disk usage is up to save_total_limit + 1 checkpoints.
     """
     from trl import DPOConfig
 
     train_cfg = cfg["training"]
     optim_cfg = cfg["optimizer"]
+    dpo_cfg   = cfg["dpo"]
 
     has_cuda = torch.cuda.is_available()
     precision = train_cfg.get("precision", "bf16")
     use_bf16  = has_cuda and precision == "bf16"
     use_fp16  = has_cuda and precision == "fp16"
 
+    # Warmup: prefer warmup_ratio; warn if both set (HF Trainer ignores ratio
+    # when warmup_steps is non-zero).
+    warmup_ratio = train_cfg.get("warmup_ratio", 0.0)
+    warmup_steps = train_cfg.get("warmup_steps", 0)
+    if warmup_ratio and warmup_steps:
+        log.warning(
+            "Both warmup_ratio and warmup_steps set — HF Trainer uses "
+            "warmup_steps when non-zero and ignores warmup_ratio. "
+            "Drop warmup_steps from config to use the ratio."
+        )
+
+    save_steps = train_cfg.get("save_steps", 200)
+    eval_steps = train_cfg.get("eval_steps", 200)
+    if save_steps % eval_steps != 0:
+        raise ValueError(
+            f"save_steps ({save_steps}) must be a multiple of eval_steps "
+            f"({eval_steps}) when load_best_model_at_end=True."
+        )
+
     return DPOConfig(
         output_dir=str(output_dir),
         num_train_epochs=train_cfg.get("epochs", 1),
         max_steps=train_cfg.get("max_steps", -1),
-        warmup_steps=train_cfg.get("warmup_steps", 100),
+        warmup_ratio=warmup_ratio,
+        warmup_steps=warmup_steps,
         per_device_train_batch_size=train_cfg["micro_batch_size"],
         per_device_eval_batch_size=train_cfg["micro_batch_size"],
         gradient_accumulation_steps=train_cfg.get("gradient_accumulation_steps", 4),
@@ -137,11 +186,13 @@ def build_dpo_args(cfg: dict, output_dir: Path, beta: float):
         bf16=use_bf16,
         fp16=use_fp16,
         eval_strategy="steps",
-        eval_steps=train_cfg.get("eval_steps", 200),
+        eval_steps=eval_steps,
         save_strategy="steps",
-        save_steps=train_cfg.get("save_steps", 200),
+        save_steps=save_steps,
         save_total_limit=train_cfg.get("save_total_limit", 3),
-        load_best_model_at_end=False,
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
         logging_steps=train_cfg.get("log_steps", 10),
         report_to=train_cfg.get("report_to", ["wandb"]),
         run_name=cfg.get("name", "slm-dpo"),
@@ -153,6 +204,7 @@ def build_dpo_args(cfg: dict, output_dir: Path, beta: float):
         # DPO-specific fields
         beta=beta,
         max_length=cfg["model"].get("max_seq_length", 2048),
+        max_prompt_length=dpo_cfg.get("max_prompt_length", 512),
     )
 
 
@@ -184,9 +236,19 @@ def main():
 
     AutoConfig.register("slm", SLMConfig)
     model = SLMForCausalLM.from_pretrained(str(base_model_path))
-    # trl 0.26 DPOTrainer sets warnings_issued on the model object.
-    # PreTrainedModel normally has this but our model's __getattr__ raises
-    # AttributeError for unknown attributes — set it explicitly.
+    # trl 0.29's DPOTrainer does `model.warnings_issued["estimate_tokens"] = True`
+    # during __init__ to suppress a transformers FLOPs-estimation warning for
+    # DPO batches (which contain prompt_input_ids, not input_ids).
+    # `warnings_issued` used to be set by transformers' PreTrainedModel.__init__,
+    # but transformers 5.x no longer initialises it — the dict doesn't exist
+    # and the assignment raises AttributeError. Pre-seed it here.
+    #
+    # This is NOT related to SLMForCausalLM's __getattr__ (it does not override
+    # one). It's a transformers-5 / trl-0.29 compat gap that would affect any
+    # model loaded under this stack.
+    #
+    # trl removed this access in PR #4960 (post-0.29, pre-1.0). When we upgrade
+    # past 0.29 verify the hack is no longer needed and remove it.
     model.warnings_issued = {}
     log.info(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
@@ -232,6 +294,11 @@ def main():
 
     # ── DPO args ──────────────────────────────────────────────────────────────
     dpo_args = build_dpo_args(cfg, output_dir, beta)
+    log.info(
+        f"DPOConfig: max_length={dpo_args.max_length}, "
+        f"max_prompt_length={dpo_args.max_prompt_length}, beta={beta}"
+    )
+    log.info("Best-checkpoint selection enabled (metric_for_best_model=eval_loss)")
 
     # ── DPOTrainer ────────────────────────────────────────────────────────────
     from trl import DPOTrainer
@@ -250,6 +317,9 @@ def main():
     trainer.train(resume_from_checkpoint=args.resume)
 
     # ── Save ──────────────────────────────────────────────────────────────────
+    # load_best_model_at_end=True means trainer.model is now the best
+    # checkpoint by eval_loss, not the last.
+    log.info("Saving best model (lowest eval_loss)...")
     final_dir = output_dir / "final"
     trainer.save_model(str(final_dir))
 

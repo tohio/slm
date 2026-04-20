@@ -2,6 +2,8 @@
 
 Direct Preference Optimization (DPO) pipeline for SLM. Aligns the SFT model to human preferences using a blended dataset of three complementary preference sources.
 
+Target library versions: **trl 0.29.x**, **transformers 5.5.x**. See `requirements.txt`.
+
 ---
 
 ## Pipeline
@@ -20,11 +22,27 @@ results/slm-{size}-dpo/final         (aligned model)
 
 ## Datasets
 
-| Dataset | Size | Signal |
-|---|---|---|
-| `Anthropic/hh-rlhf` | ~170k pairs | Human preference — helpfulness + harmlessness |
-| `Intel/orca_dpo_pairs` | ~30k pairs | Synthetic — GPT-4 vs GPT-3.5 on reasoning tasks |
-| `argilla/dpo-mix-7k` | ~7k pairs | Curated high quality mix |
+| Dataset | Upstream | After cap + length filter | Signal |
+|---|---|---|---|
+| `Anthropic/hh-rlhf` | ~170k pairs | ≤50k (shuffled, then capped) | Human preference — helpfulness + harmlessness |
+| `Intel/orca_dpo_pairs` | ~12k pairs | all kept | Synthetic — GPT-4 vs GPT-3.5 on reasoning tasks |
+| `argilla/dpo-mix-7k` | ~7k pairs | all kept | Curated high-quality mix |
+
+`prepare_dpo.py` caps hh-rlhf at 50k for blend balance with the smaller sources. The cap is applied **after** a seeded shuffle, so the subset is representative and not a biased head-slice of the upstream ordering.
+
+After blending, a length filter drops any pair where `len(prompt) + max(len(chosen), len(rejected))` exceeds `MAX_TOTAL_TOKENS` (default 2048). See *Length filtering* below.
+
+---
+
+## Length filtering
+
+trl 0.29 supports `DPOConfig.max_prompt_length` and `max_length` at the data collator level, so at training time trl will truncate anything too long. `prepare_dpo.py` additionally pre-filters overlong pairs up front, for three reasons:
+
+1. **Exact counts.** The pre-filter uses the real SLM tokenizer (loaded from `$DATA_DIR/tokenizer`), so the drop decision matches exactly what trl will see. trl's truncation silently drops tokens; the filter means that never happens on the prepared dataset.
+2. **One dataset, all sizes.** The threshold is set to 2048 — the `max_length` of the 125m and 350m configs — so one prepared dataset serves all three model sizes without re-preparation.
+3. **Forward-compatible.** `max_prompt_length` was removed in trl 1.0. If/when we upgrade, the pre-filter becomes the only length guarantee. Building it in now means the upgrade is just a version bump, not a new data prep step.
+
+Drop rates by source are logged during `prepare_dpo.py` and recorded in `$DATA_DIR/dpo/stats.json`.
 
 ---
 
@@ -42,6 +60,9 @@ python alignment/data/prepare_dpo.py
 python alignment/data/prepare_dpo.py --source hh-rlhf
 python alignment/data/prepare_dpo.py --source orca
 python alignment/data/prepare_dpo.py --source argilla
+
+# Regenerate if output already exists
+python alignment/data/prepare_dpo.py --force
 ```
 
 **Step 2 — DPO training**
@@ -73,9 +94,9 @@ alignment/
 │   ├── dpo_125m.yaml     DPO config — 125M, LR=5e-7, beta=0.1
 │   ├── dpo_350m.yaml     DPO config — 350M, LR=3e-7, beta=0.1
 │   ├── dpo_1b.yaml       DPO config — 1B,   LR=2e-7, beta=0.1
-│   └── dpo_mini.yaml     DPO config — mini, pipeline validation only
+│   └── dpo_mini.yaml     DPO config — mini pipeline smoke test
 ├── data/
-│   └── prepare_dpo.py    download and blend preference datasets
+│   └── prepare_dpo.py    download, blend, and length-filter preference datasets
 └── train_dpo.py          trl DPOTrainer entry point
 ```
 
@@ -86,20 +107,19 @@ alignment/
 `gradient_accumulation_steps` targets an effective batch size of 64. Adjust based on your GPU count:
 `gradient_accumulation_steps = 64 / (micro_batch_size × num_gpus)`
 
-| Config | Base model | LR | Beta | Micro batch | Grad accum (4 GPU) | Epochs |
-|---|---|---|---|---|---|---|
-| `dpo_125m` | `slm-125m-chat-code/final` | 5e-7 | 0.1 | 2 | 8 | 1 |
-| `dpo_350m` | `slm-350m-chat-code/final` | 3e-7 | 0.1 | 1 | 16 | 1 |
-| `dpo_1b` | `slm-1b-chat-code/final` | 2e-7 | 0.1 | 1 | 16 | 1 |
+| Config | Base model | LR | Beta | max_prompt_length | Micro batch | Grad accum (1 GPU) | Seq len | Grad ckpt |
+|---|---|---|---|---|---|---|---|---|
+| `dpo_125m` | `slm-125m-chat-code/final` | 5e-7 | 0.1 | 1024 | 2 | 32 | 2048 | No |
+| `dpo_350m` | `slm-350m-chat-code/final` | 3e-7 | 0.1 | 1024 | 1 | 64 | 2048 | No |
+| `dpo_1b` | `slm-1b-chat-code/final` | 2e-7 | 0.1 | 2048 | 1 | 64 | 4096 | Yes |
+
+All configs run 1 epoch with `warmup_ratio=0.05` on a cosine schedule. `max_length` is taken from `model.max_seq_length`.
 
 ---
 
 ## DPO Data Format
 
-Each record in `data/dpo/train.jsonl` uses the trl conversational format —
-prompt, chosen, and rejected are lists of message dicts. `DPOTrainer` calls
-`apply_chat_template()` on these automatically using the tokenizer's baked-in
-template, producing consistent formatting with SFT and inference.
+Each record in `data/dpo/train.jsonl` uses the trl conversational format — prompt, chosen, and rejected are lists of message dicts. `DPOTrainer` calls `apply_chat_template()` on these automatically using the tokenizer's baked-in template, producing consistent formatting with SFT and inference.
 
 ```json
 {
@@ -125,12 +145,17 @@ template, producing consistent formatting with SFT and inference.
 results/
 ├── slm-125m-dpo/
 │   ├── checkpoint-200/
-│   └── final/
+│   ├── checkpoint-400/
+│   └── final/                best checkpoint (lowest eval loss)
 ├── slm-350m-dpo/
 │   └── final/
 └── slm-1b-dpo/
     └── final/
 ```
+
+`final/` contains the **lowest-eval-loss** checkpoint. This is enforced in `train_dpo.py` by `load_best_model_at_end=True` with `metric_for_best_model="eval_loss"`. DPO reward margins typically peak early in training and degrade with further steps, so for DPO the best checkpoint is usually *not* the last — best-checkpoint selection matters more here than in SFT.
+
+Because HF Trainer always keeps the best checkpoint in addition to the N most recent (`save_total_limit=3`), disk usage is up to 4 checkpoints per run during training.
 
 ---
 
@@ -143,6 +168,10 @@ results/
 **Why LR in the 1e-7 range?** DPO is extremely sensitive to learning rate — too high and the model collapses, too low and the alignment signal doesn't propagate. The 1e-7 range is significantly lower than SFT and has been validated across multiple open DPO runs.
 
 **Why 1 epoch?** DPO over-optimizes quickly — after one epoch the reward margin typically saturates and further training degrades model quality. Most production DPO runs use 1–2 epochs.
+
+**Why cap hh-rlhf at 50k?** hh-rlhf is ~170k pairs upstream; blending it at full size would drown out orca (~12k) and argilla (~7k), losing the signal diversity the blend is meant to provide. 50k keeps hh-rlhf as the dominant source (~73% of the mix) while still letting the other two contribute meaningfully.
+
+**Why both pre-filter and trl's max_prompt_length?** The pre-filter guarantees exact control using the real tokenizer. trl's own `max_prompt_length` is a training-time safety net — any pair that somehow slipped past the pre-filter still gets truncated rather than crashing the trainer. Together they ensure clean training batches on 0.29, and when we upgrade to trl 1.0 (which removes `max_prompt_length`) the pre-filter covers the full responsibility without any config change.
 
 **Why blend three sources?** Each dataset provides a different alignment signal. hh-rlhf provides broad human preference coverage. Orca provides high-quality reasoning preference signal. Argilla provides a carefully curated quality baseline. The blend reduces dataset-specific biases.
 
