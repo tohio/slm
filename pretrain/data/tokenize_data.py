@@ -1,16 +1,16 @@
 """
 pretrain/data/tokenize_data.py
 --------------------------
-Tokenize the validated JSONL dataset into a memory-mapped binary file
+Tokenize the validated JSONL datasets into memory-mapped binary files
 for efficient pretraining.
 
 Tokenizes once, saves to disk as a flat array of uint16 token IDs.
-During training, the dataset is loaded with np.memmap — zero-copy,
+During training, each dataset is loaded with np.memmap — zero-copy,
 constant memory regardless of dataset size, and much faster than
 tokenizing on the fly.
 
 Format:
-    Single flat binary file of uint16 token IDs.
+    Single flat binary file of uint16 token IDs per split.
     Documents are concatenated with EOS token as separator.
     No padding — sequences are packed end-to-end.
 
@@ -21,7 +21,15 @@ Format:
 
 Output:
     data/tokenized/train.bin    — token IDs as uint16
-    data/tokenized/train.json   — metadata (n_tokens, n_docs, vocab_size)
+    data/tokenized/train.json   — metadata (n_tokens, n_docs, dtype, vocab_size)
+    data/tokenized/val.bin      — same, for validation split
+    data/tokenized/val.json
+
+Inputs:
+    By default both curated/train.jsonl and curated/val.jsonl are tokenized.
+    The val split was produced upstream by the curator's blend stage as a
+    uniform random sample of the shuffled documents, so val and train come
+    from the same distribution.
 
 Tokenizer:
     Uses the raw tokenizers.Tokenizer from slm_tokenizer.json directly —
@@ -33,13 +41,15 @@ Tokenizer:
 Performance notes:
     - Tokenizer is loaded once per worker process (not per document)
     - Documents are batched into chunks before dispatch to amortise IPC overhead
-    - Tokens are streamed directly to disk in shard-sized chunks — peak RAM
-      is O(shard_size) not O(corpus_size)
-    - One persistent mp.Pool for the full run — no per-shard pool startup cost
+    - Tokens are streamed directly to disk as chunks complete via
+      pool.imap_unordered — peak RAM per split is O(chunk_size × avg_tokens),
+      not O(shard_size) or O(corpus_size).
+    - One persistent mp.Pool for both splits — no pool startup cost per split
 
 Usage:
     python pretrain/data/tokenize_data.py
-    python pretrain/data/tokenize_data.py --input data/validated/train.jsonl
+    python pretrain/data/tokenize_data.py --train data/validated/train.jsonl \\
+                                          --val   data/validated/val.jsonl
     python pretrain/data/tokenize_data.py --workers 24
 """
 
@@ -49,7 +59,6 @@ import logging
 import multiprocessing as mp
 import os
 import sys
-from itertools import chain
 from pathlib import Path
 
 import numpy as np
@@ -70,8 +79,14 @@ log = logging.getLogger(__name__)
 DATA_DIR      = Path(os.environ.get("DATA_DIR", "data"))
 TOKENIZED_DIR = DATA_DIR / "tokenized"
 
+# uint16 supports up to this vocab size (exclusive). If our tokenizer ever
+# exceeds this we must switch the binary format to uint32 — silently
+# overflowing uint16 would corrupt every token ID above 65535.
+UINT16_MAX_VOCAB = 65_536
+
 # Global tokenizer instance — loaded once per worker process via initializer,
-# not once per document. Avoids 3.4M tokenizer loads in the original code.
+# not once per document. Avoids one tokenizer load per document in the
+# original code.
 _worker_tokenizer = None
 _worker_eos_id    = None
 
@@ -105,7 +120,7 @@ def _tokenize_chunk(texts: list[str]) -> list[int]:
     the multiprocessing IPC overhead across many documents per round-trip.
     """
     global _worker_tokenizer, _worker_eos_id
-    tokens = []
+    tokens: list[int] = []
     # encode_batch encodes all texts in one call — faster than a loop
     encodings = _worker_tokenizer.encode_batch(texts)
     for enc in encodings:
@@ -114,102 +129,97 @@ def _tokenize_chunk(texts: list[str]) -> list[int]:
     return tokens
 
 
-def tokenize_dataset(
+def _count_docs(path: Path) -> int:
+    """
+    Count documents (non-empty lines) in a JSONL file.
+
+    This is a separate pass over the input so tqdm can show an ETA during
+    the main tokenization loop. For a multi-hour run at 1b scale the extra
+    ~30 seconds of counting is a good trade for actionable progress
+    reporting. For small runs the overhead is negligible.
+    """
+    return sum(1 for line in open(path) if line.strip())
+
+
+def _chunked(iterable, size: int):
+    """Yield successive size-sized chunks from iterable."""
+    buf: list = []
+    for item in iterable:
+        buf.append(item)
+        if len(buf) >= size:
+            yield buf
+            buf = []
+    if buf:
+        yield buf
+
+
+def _tokenize_split(
     input_path: Path,
     output_dir: Path,
+    split: str,
+    pool: mp.Pool,
+    eos_id: int,
     tokenizer_path: Path,
-    eos_id: int = 3,
-    workers: int = 4,
-    split: str = "train",
-    shard_size: int = 100_000,
-    chunk_size: int = 256,
+    chunk_size: int,
 ) -> dict:
     """
-    Tokenize a JSONL dataset to a memory-mapped binary file.
+    Tokenize one JSONL file to {output_dir}/{split}.bin + .json.
 
-    Uses a persistent multiprocessing pool with one tokenizer per worker
-    process. Documents are batched into chunks before dispatch to amortise
-    IPC overhead. Tokens are streamed to disk in shard-sized batches so
-    peak RAM is O(shard_size), not O(corpus_size).
+    Streams through the input file, batching documents into chunks and
+    dispatching via pool.imap_unordered. Results arrive in whatever order
+    workers finish — the order of documents in the output binary differs
+    from the input, but since documents are separated by EOS and position
+    within the binary carries no meaning, this has no effect on training.
 
-    Args:
-        input_path:     Path to validated JSONL file.
-        output_dir:     Directory to write output files.
-        tokenizer_path: Path to slm_tokenizer.json.
-        eos_id:         EOS token ID used as document separator. Default: 3.
-        workers:        Number of parallel tokenization worker processes.
-        split:          Dataset split name (used in output filenames).
-        shard_size:     Documents per shard — controls how often tokens are
-                        flushed to disk. Lower = less RAM, more I/O.
-        chunk_size:     Documents per worker task. Higher = less IPC overhead,
-                        more latency before first result.
-
-    Returns:
-        Metadata dict with n_tokens, n_docs, etc.
+    Returns the metadata dict written to disk.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     bin_path  = output_dir / f"{split}.bin"
     meta_path = output_dir / f"{split}.json"
 
     if bin_path.exists() and meta_path.exists():
-        log.info(f"Already tokenized: {bin_path}")
+        log.info(f"[{split}] Already tokenized: {bin_path}")
         with open(meta_path) as f:
             return json.load(f)
 
-    log.info(f"Tokenizing {input_path} → {bin_path}")
-    log.info(f"Workers: {workers}, Shard size: {shard_size:,}, Chunk size: {chunk_size}")
+    log.info(f"[{split}] Counting documents in {input_path}...")
+    n_docs_total = _count_docs(input_path)
+    log.info(f"[{split}] Total documents: {n_docs_total:,}")
 
-    # Count documents for progress bar
-    log.info("Counting documents...")
-    n_docs = sum(1 for _ in open(input_path))
-    log.info(f"Total documents: {n_docs:,}")
-
-    tokenizer_path_str = str(tokenizer_path)
     n_tokens    = 0
     n_processed = 0
 
-    # Open output file for streaming writes — no large in-memory accumulation
-    with open(bin_path, "wb") as bin_file, \
-         open(input_path) as f, \
-         mp.Pool(
-             processes=workers,
-             initializer=_worker_init,
-             initargs=(tokenizer_path_str, eos_id),
-         ) as pool:
+    with open(bin_path, "wb") as bin_file, open(input_path) as f:
+        # Read and chunk documents lazily — no full-corpus list in RAM.
+        def _doc_iter():
+            for line in f:
+                record = json.loads(line)
+                text = record.get("text", "").strip()
+                if text:
+                    yield text
 
-        shard_texts: list[str] = []
-        pbar = tqdm(total=n_docs, desc="Tokenizing", unit="doc")
+        chunks = _chunked(_doc_iter(), chunk_size)
 
-        for line in f:
-            record = json.loads(line)
-            text   = record.get("text", "").strip()
-            if text:
-                shard_texts.append(text)
-
-            if len(shard_texts) >= shard_size:
-                tokens = _flush_shard(shard_texts, pool, chunk_size)
-                _write_tokens(tokens, bin_file)
-                n_tokens     += len(tokens)
-                n_processed  += len(shard_texts)
-                pbar.update(len(shard_texts))
-                shard_texts = []
-
-        # Flush remainder
-        if shard_texts:
-            tokens = _flush_shard(shard_texts, pool, chunk_size)
+        # imap_unordered streams results back as each worker finishes a
+        # chunk. The token list for each chunk is written immediately and
+        # discarded, so peak RAM is bounded by (pool size × chunk size).
+        pbar = tqdm(total=n_docs_total, desc=f"Tokenizing {split}", unit="doc")
+        for tokens in pool.imap_unordered(_tokenize_chunk, chunks):
             _write_tokens(tokens, bin_file)
             n_tokens    += len(tokens)
-            n_processed += len(shard_texts)
-            pbar.update(len(shard_texts))
-
+            # Can't know exactly how many docs produced this chunk (workers
+            # drop empty texts upstream), but we know each chunk holds at
+            # most chunk_size. EOS tokens produced = docs produced.
+            docs_in_chunk = sum(1 for t in tokens if t == eos_id)
+            n_processed  += docs_in_chunk
+            pbar.update(docs_in_chunk)
         pbar.close()
 
-    log.info(f"Total tokens:     {n_tokens:,} ({n_tokens / 1e9:.2f}B)")
-    log.info(f"Total documents:  {n_processed:,}")
-    log.info(f"Avg tokens/doc:   {n_tokens // max(n_processed, 1):,}")
-    log.info(f"Binary size:      {bin_path.stat().st_size / 1e9:.2f} GB")
+    log.info(f"[{split}] Total tokens:     {n_tokens:,} ({n_tokens / 1e9:.2f}B)")
+    log.info(f"[{split}] Total documents:  {n_processed:,}")
+    log.info(f"[{split}] Avg tokens/doc:   {n_tokens // max(n_processed, 1):,}")
+    log.info(f"[{split}] Binary size:      {bin_path.stat().st_size / 1e9:.2f} GB")
 
-    # Save metadata
     meta = {
         "n_tokens":  n_tokens,
         "n_docs":    n_processed,
@@ -221,31 +231,38 @@ def tokenize_dataset(
     }
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
-    log.info(f"Metadata saved:   {meta_path}")
+    log.info(f"[{split}] Metadata saved:   {meta_path}")
 
     return meta
-
-
-def _flush_shard(texts: list[str], pool: mp.Pool, chunk_size: int) -> list[int]:
-    """
-    Tokenize a shard of documents using the worker pool.
-
-    Splits texts into chunks of chunk_size and dispatches to workers
-    via pool.map. Returns a flat list of all token IDs.
-    """
-    chunks = [
-        texts[i : i + chunk_size]
-        for i in range(0, len(texts), chunk_size)
-    ]
-    results = pool.map(_tokenize_chunk, chunks)
-    # chain.from_iterable avoids repeated list concatenation
-    return list(chain.from_iterable(results))
 
 
 def _write_tokens(tokens: list[int], bin_file) -> None:
     """Write a flat list of token IDs to the binary file as uint16."""
     arr = np.array(tokens, dtype=np.uint16)
     bin_file.write(arr.tobytes())
+
+
+def _assert_vocab_fits_uint16(tokenizer_path: Path) -> int:
+    """
+    Verify the tokenizer's vocab size fits in uint16. Returns vocab size.
+
+    If vocab_size > 65535, uint16 silently overflows and every token ID
+    above 65535 gets written as (id mod 65536). Training on the resulting
+    garbage would not fail — the model would just see a corrupted vocab
+    distribution. This check makes the failure mode loud.
+    """
+    from tokenizers import Tokenizer
+    tok = Tokenizer.from_file(str(tokenizer_path))
+    vocab_size = tok.get_vocab_size()
+    if vocab_size >= UINT16_MAX_VOCAB:
+        raise RuntimeError(
+            f"Tokenizer vocab_size={vocab_size:,} does not fit in uint16 "
+            f"(max {UINT16_MAX_VOCAB - 1:,}). Either reduce the vocab size "
+            f"or switch the binary format in tokenize_data.py and "
+            f"dataset.py to uint32."
+        )
+    log.info(f"Tokenizer vocab size: {vocab_size:,} (fits in uint16)")
+    return vocab_size
 
 
 def verify_dataset(bin_path: Path, meta_path: Path) -> None:
@@ -271,10 +288,16 @@ def verify_dataset(bin_path: Path, meta_path: Path) -> None:
 def main():
     parser = argparse.ArgumentParser(description="Tokenize dataset for pretraining")
     parser.add_argument(
-        "--input",
+        "--train",
         type=Path,
         default=DATA_DIR / "validated" / "train.jsonl",
-        help="Input JSONL file",
+        help="Input train JSONL file",
+    )
+    parser.add_argument(
+        "--val",
+        type=Path,
+        default=DATA_DIR / "validated" / "val.jsonl",
+        help="Input val JSONL file (skipped if missing)",
     )
     parser.add_argument(
         "--output",
@@ -301,18 +324,6 @@ def main():
         help="Documents per worker task. Higher = less IPC overhead. Default: 256",
     )
     parser.add_argument(
-        "--shard-size",
-        type=int,
-        default=100_000,
-        help="Documents per disk flush. Lower = less RAM. Default: 100000",
-    )
-    parser.add_argument(
-        "--split",
-        type=str,
-        default="train",
-        help="Split name (train/val)",
-    )
-    parser.add_argument(
         "--verify",
         action="store_true",
         help="Verify output after tokenization",
@@ -320,8 +331,8 @@ def main():
     args = parser.parse_args()
 
     # Pre-flight checks — fail with clear messages before spawning the pool
-    if not args.input.exists():
-        log.error(f"Input not found: {args.input}")
+    if not args.train.exists():
+        log.error(f"Train input not found: {args.train}")
         log.error("Run: make validate")
         sys.exit(1)
 
@@ -331,28 +342,64 @@ def main():
         log.error("Or:  make tokenizer-download")
         sys.exit(1)
 
-    log.info(f"Input:      {args.input}")
+    # Verify vocab fits in uint16 BEFORE spawning workers — fail fast
+    eos_id = 3
+    _assert_vocab_fits_uint16(args.tokenizer)
+
+    val_available = args.val.exists()
+    if not val_available:
+        log.warning(
+            f"Val input not found: {args.val}\n"
+            f"Only train will be tokenized. The curator's blend stage produces "
+            f"both train.jsonl and val.jsonl — re-run 'make curate' to get val."
+        )
+
+    log.info(f"Train:      {args.train}")
+    log.info(f"Val:        {args.val if val_available else '(not found, skipping)'}")
     log.info(f"Output:     {args.output}")
     log.info(f"Tokenizer:  {args.tokenizer}")
     log.info(f"Workers:    {args.workers}")
     log.info(f"Chunk size: {args.chunk_size}")
-    log.info(f"Shard size: {args.shard_size:,}")
 
-    meta = tokenize_dataset(
-        input_path=args.input,
-        output_dir=args.output,
-        tokenizer_path=args.tokenizer,
-        workers=args.workers,
-        split=args.split,
-        chunk_size=args.chunk_size,
-        shard_size=args.shard_size,
-    )
+    tokenizer_path_str = str(args.tokenizer)
+
+    # One persistent pool for both splits — avoids pool startup cost twice.
+    with mp.Pool(
+        processes=args.workers,
+        initializer=_worker_init,
+        initargs=(tokenizer_path_str, eos_id),
+    ) as pool:
+        _tokenize_split(
+            input_path=args.train,
+            output_dir=args.output,
+            split="train",
+            pool=pool,
+            eos_id=eos_id,
+            tokenizer_path=args.tokenizer,
+            chunk_size=args.chunk_size,
+        )
+
+        if val_available:
+            _tokenize_split(
+                input_path=args.val,
+                output_dir=args.output,
+                split="val",
+                pool=pool,
+                eos_id=eos_id,
+                tokenizer_path=args.tokenizer,
+                chunk_size=args.chunk_size,
+            )
 
     if args.verify:
         verify_dataset(
-            bin_path=args.output / f"{args.split}.bin",
-            meta_path=args.output / f"{args.split}.json",
+            bin_path=args.output / "train.bin",
+            meta_path=args.output / "train.json",
         )
+        if val_available:
+            verify_dataset(
+                bin_path=args.output / "val.bin",
+                meta_path=args.output / "val.json",
+            )
 
     log.info("Tokenization complete.")
     log.info("Next step: make tokenize-upload")

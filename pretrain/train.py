@@ -4,7 +4,7 @@ pretrain/train.py
 Pretraining entry point using HuggingFace Trainer.
 
 Trains SLMForCausalLM from scratch on the tokenized memory-mapped
-dataset. Supports single-GPU and multi-GPU training via accelerate.
+datasets. Supports single-GPU and multi-GPU training via accelerate.
 
 Usage:
     # Single GPU
@@ -18,6 +18,7 @@ Usage:
 """
 
 import argparse
+import json
 import logging
 import os
 import shutil
@@ -50,23 +51,23 @@ def load_config(config_path: Path) -> dict:
 
 def validate_tokenizer(tokenizer_dir: Path) -> None:
     """
-    Verify the tokenizer directory is complete before training starts.
+    Verify the tokenizer directory is complete AND parseable before training.
 
-    Fails hard rather than silently continuing — a missing or incomplete
+    Fails hard rather than silently continuing — a missing or corrupt
     tokenizer at this point means the saved checkpoint will be unusable
     by train_sft.py, which requires tokenizer_config.json to load the
     chat_template via PreTrainedTokenizerFast.from_pretrained().
 
     Checks:
         - tokenizer_dir exists and is non-empty
-        - tokenizer_config.json is present (contains baked-in chat_template)
-        - slm_tokenizer.json is present (raw BPE tokenizer for tokenize_data.py)
+        - tokenizer_config.json is present and parses as valid JSON
+        - slm_tokenizer.json is present and parses as valid JSON
 
     Args:
         tokenizer_dir: Path to the tokenizer directory.
 
     Raises:
-        RuntimeError: If any required file is missing.
+        RuntimeError: If any required file is missing or unparseable.
     """
     if not tokenizer_dir.exists() or not any(tokenizer_dir.iterdir()):
         raise RuntimeError(
@@ -87,13 +88,55 @@ def validate_tokenizer(tokenizer_dir: Path) -> None:
     }
 
     for filename, hint in required_files.items():
-        if not (tokenizer_dir / filename).exists():
+        path = tokenizer_dir / filename
+        if not path.exists():
             raise RuntimeError(
-                f"Missing tokenizer file: {tokenizer_dir / filename}\n"
-                f"{hint}"
+                f"Missing tokenizer file: {path}\n{hint}"
             )
+        # Parse each JSON to catch truncated or otherwise-corrupt files.
+        # A zero-byte or truncated tokenizer_config.json would pass a naive
+        # existence check and then crash much later in training.
+        try:
+            with open(path) as f:
+                json.load(f)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(
+                f"Tokenizer file is not valid JSON: {path}\n"
+                f"  Error: {e}\n"
+                f"  Hint: {hint}"
+            ) from e
 
     log.info(f"Tokenizer validated at {tokenizer_dir}")
+
+
+def _find_latest_checkpoint(output_dir: Path) -> Path | None:
+    """
+    Return the latest checkpoint in output_dir, or None if none exist.
+
+    HF Trainer stores checkpoints as `checkpoint-<step>` subdirectories.
+    The latest is the one with the highest step number.
+    """
+    if not output_dir.exists():
+        return None
+    candidates = [
+        p for p in output_dir.iterdir()
+        if p.is_dir() and p.name.startswith("checkpoint-")
+    ]
+    if not candidates:
+        return None
+    # Parse the step from the name. Skip any checkpoint-* dirs with a
+    # non-numeric suffix — they shouldn't exist but robust is cheap here.
+    numbered = []
+    for p in candidates:
+        try:
+            step = int(p.name.split("-", 1)[1])
+            numbered.append((step, p))
+        except (IndexError, ValueError):
+            continue
+    if not numbered:
+        return None
+    numbered.sort()
+    return numbered[-1][1]
 
 
 def build_training_args(cfg: dict, output_dir: Path, resume: bool):
@@ -202,9 +245,25 @@ def main():
     log.info(f"Output:     {output_dir}")
     log.info(f"Device:     {'cuda' if torch.cuda.is_available() else 'cpu'}")
 
+    # ── Resume checkpoint discovery ───────────────────────────────────────────
+    # Log which checkpoint we're resuming from BEFORE the model is built, so
+    # if anything goes wrong the user can tell at a glance which state was
+    # loaded. HF Trainer does log this internally, but it's buried in noise.
+    resume_checkpoint = None
+    if args.resume:
+        resume_checkpoint = _find_latest_checkpoint(output_dir)
+        if resume_checkpoint is None:
+            log.warning(
+                f"--resume passed but no checkpoint found in {output_dir}. "
+                f"Training will start from scratch."
+            )
+        else:
+            log.info(f"Resuming from checkpoint: {resume_checkpoint}")
+
     # ── Validate tokenizer before starting ────────────────────────────────────
-    # Fail early — a missing tokenizer discovered after hours of training
-    # produces an unusable checkpoint that can't be loaded by train_sft.py.
+    # Fail early — a missing or corrupt tokenizer discovered after hours of
+    # training produces an unusable checkpoint that can't be loaded by
+    # train_sft.py.
     tokenizer_dir = args.data_dir / "tokenizer"
     validate_tokenizer(tokenizer_dir)
 
@@ -232,22 +291,18 @@ def main():
     log.info(f"Parameters: {n_params:,} ({n_params / 1e6:.1f}M)")
 
     # ── Dataset ───────────────────────────────────────────────────────────────
-    from pretrain.data.dataset import PretrainingDatasetWithValidation
+    from pretrain.data.dataset import load_train_val
 
-    bin_path = args.data_dir / "tokenized" / "train.bin"
-    seq_len  = model_cfg_dict["max_position_embeddings"]
+    tokenized_dir = args.data_dir / "tokenized"
+    seq_len = model_cfg_dict["max_position_embeddings"]
 
-    log.info(f"Loading dataset from {bin_path}")
-    splits = PretrainingDatasetWithValidation(
-        bin_path=bin_path,
-        seq_len=seq_len,
-        val_fraction=cfg["data"].get("val_fraction", 0.005),
-    )
+    log.info(f"Loading datasets from {tokenized_dir}")
+    train_ds, val_ds = load_train_val(tokenized_dir=tokenized_dir, seq_len=seq_len)
 
-    log.info(f"Train examples: {len(splits.train):,}")
-    log.info(f"Val examples:   {len(splits.val):,}")
+    log.info(f"Train examples: {len(train_ds):,}")
+    log.info(f"Val examples:   {len(val_ds):,}")
 
-    budget = splits.train.token_budget()
+    budget = train_ds.token_budget()
     log.info(f"Training tokens: {budget['total_training_tokens'] / 1e9:.2f}B")
 
     # ── Training args ─────────────────────────────────────────────────────────
@@ -265,6 +320,7 @@ def main():
                 "optimizer":       cfg["optimizer"],
                 "n_params":        n_params,
                 "n_train_tokens":  budget["total_training_tokens"],
+                "n_val_examples":  len(val_ds),
             },
         )
 
@@ -274,13 +330,24 @@ def main():
     trainer = Trainer(
         model=model,
         args=training_args,
-        train_dataset=splits.train,
-        eval_dataset=splits.val,
+        train_dataset=train_ds,
+        eval_dataset=val_ds,
     )
+
+    # ── Baseline eval ─────────────────────────────────────────────────────────
+    # Run eval before training begins so the W&B eval curve starts from
+    # random-init loss. Without this, the first eval point is ~500-1000
+    # steps in — you lose the "loss at step 0 vs step N" comparison that
+    # confirms the model is actually learning. Skipped when resuming since
+    # the baseline already exists from the original run.
+    if not args.resume:
+        log.info("Running baseline eval before training (step 0)...")
+        baseline = trainer.evaluate()
+        log.info(f"Baseline eval: {baseline}")
 
     # ── Train ─────────────────────────────────────────────────────────────────
     log.info("Starting training...")
-    trainer.train(resume_from_checkpoint=args.resume)
+    trainer.train(resume_from_checkpoint=resume_checkpoint if args.resume else None)
 
     # ── Save ──────────────────────────────────────────────────────────────────
     log.info("Saving final model...")
@@ -290,7 +357,7 @@ def main():
 
     # Copy tokenizer alongside model.
     # tokenizer_dir was already validated above — if we reach this point it is
-    # complete and contains tokenizer_config.json. No need to re-check here.
+    # complete, parseable, and contains tokenizer_config.json. No re-check.
     shutil.copytree(tokenizer_dir, final_dir / "tokenizer", dirs_exist_ok=True)
     log.info(f"Tokenizer copied to {final_dir / 'tokenizer'}")
 

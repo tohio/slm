@@ -4,8 +4,9 @@ curator/scripts/curate.py
 Main data curation pipeline.
 
 Orchestrates 10 data sources through quality filtering, deduplication,
-blending, and upload. Produces a single train.jsonl ready for tokenizer
-training and model pretraining.
+blending, and upload. Produces train.jsonl + val.jsonl ready for tokenizer
+training and model pretraining. The val split is sampled uniformly from
+the shuffled blend output, so it represents the same distribution as train.
 
 Pipeline:
     1. Download sources
@@ -204,6 +205,14 @@ CURATED_DIR  = DATA_DIR / "curated"
 # instance this still fits; on a 256 GB instance we have lots of headroom.
 SHUFFLE_RAM_BUDGET_GB = float(os.environ.get("SHUFFLE_RAM_BUDGET_GB", "12"))
 
+# Fraction of blended documents to hold out for validation. The split happens
+# at the end of the blend stage (after shuffle), so val is a uniform random
+# sample from the same distribution as train. Fixed at 0.5% — at 125m (~5M
+# docs) this gives ~25k val docs, plenty for stable perplexity measurement;
+# at 1b (~30M docs) it gives ~150k, which is generous. Per-target override
+# available via the TARGET_CONFIGS val_fraction key.
+VAL_FRACTION = 0.005
+
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -303,7 +312,7 @@ def _build_source(
     if name == "codesearchnet":
         return CodeSearchNetSource(output_dir=raw_dir, max_docs=cap)
     if name == "stack_smol":
-        return tackSmolSource(output_dir=raw_dir, max_docs=cap)
+        return StackSmolSource(output_dir=raw_dir, max_docs=cap)
     if name == "stack_v2":
         return StackV2Source(output_dir=raw_dir, max_docs=cap)
     if name == "jupyter":
@@ -549,14 +558,23 @@ def _append_overflow(
 
 def _shuffle_in_memory(
     staging_paths: dict[str, Path],
-    output_path: Path,
+    train_path: Path,
+    val_path: Path,
+    val_fraction: float,
     rng: random.Random,
-) -> int:
+) -> tuple[int, int]:
     """
-    Fast-path shuffle: read everything into RAM, shuffle once, write once.
+    Fast-path shuffle: read everything into RAM, shuffle once, split, write twice.
+
+    After shuffle the order is uniformly random, so taking the first N lines
+    as train and the last M lines as val gives an unbiased val sample from
+    the same distribution as train.
 
     Used when the total staging size (scaled by Python object overhead)
     fits in SHUFFLE_RAM_BUDGET_GB.
+
+    Returns:
+        (n_train_lines, n_val_lines)
     """
     log.info("Shuffle: reading all staging data into memory...")
     lines: list[bytes] = []
@@ -566,31 +584,52 @@ def _shuffle_in_memory(
                 lines.append(line)
         staging.unlink()
 
-    log.info(f"  Loaded {len(lines):,} lines — shuffling...")
+    total = len(lines)
+    log.info(f"  Loaded {total:,} lines — shuffling...")
     rng.shuffle(lines)
 
-    log.info(f"  Writing {len(lines):,} lines to {output_path}...")
-    with open(output_path, "wb") as fout:
-        fout.writelines(lines)
-    return len(lines)
+    n_val = max(1, int(total * val_fraction))
+    n_train = total - n_val
+    train_lines = lines[:n_train]
+    val_lines = lines[n_train:]
+
+    log.info(f"  Writing {n_train:,} lines to {train_path}...")
+    with open(train_path, "wb") as fout:
+        fout.writelines(train_lines)
+
+    log.info(f"  Writing {n_val:,} lines to {val_path}...")
+    with open(val_path, "wb") as fout:
+        fout.writelines(val_lines)
+
+    return n_train, n_val
 
 
 def _shuffle_chunked_from_sources(
     staging_paths: dict[str, Path],
-    output_path: Path,
+    train_path: Path,
+    val_path: Path,
+    val_fraction: float,
     rng: random.Random,
     chunk_lines: int = 500_000,
-) -> int:
+) -> tuple[int, int]:
     """
-    Chunked shuffle collapsing merge and shuffle into one pass.
+    Chunked shuffle collapsing merge and shuffle into one pass, then split
+    the shuffled output into train.jsonl and val.jsonl.
 
     Pass 1 — read sequentially from all staging files into chunks,
              shuffle each chunk, write to disk.
-    Pass 2 — shuffle chunk order, concatenate sequentially.
+    Pass 2 — shuffle chunk order, concatenate sequentially. First
+             (1 - val_fraction) of lines go to train.jsonl; the tail
+             goes to val.jsonl. Because the chunks themselves are
+             shuffled and the chunk order is shuffled, the tail slice
+             is a uniform random sample.
 
     Peak RAM = chunk_lines × avg_line_size.
+
+    Returns:
+        (n_train_lines, n_val_lines)
     """
-    chunk_dir = output_path.parent / "shuffle_chunks"
+    chunk_dir = train_path.parent / "shuffle_chunks"
     chunk_dir.mkdir(exist_ok=True)
     chunk_paths: list[Path] = []
     total_lines = 0
@@ -624,29 +663,42 @@ def _shuffle_chunked_from_sources(
 
     log.info(f"  Wrote {len(chunk_paths)} chunks ({total_lines:,} lines total)")
 
-    log.info("Shuffle pass 2/2: interleaving chunks in random order...")
+    n_val = max(1, int(total_lines * val_fraction))
+    n_train = total_lines - n_val
+
+    log.info(
+        f"Shuffle pass 2/2: interleaving chunks, splitting "
+        f"{n_train:,} train / {n_val:,} val..."
+    )
     rng.shuffle(chunk_paths)
 
-    with open(output_path, "wb") as fout:
+    written = 0
+    train_out = open(train_path, "wb")
+    val_out = open(val_path, "wb")
+    try:
         for cp in chunk_paths:
             with open(cp, "rb") as fin:
-                while True:
-                    block = fin.read(8 * 1024 * 1024)
-                    if not block:
-                        break
-                    fout.write(block)
+                for line in fin:
+                    if written < n_train:
+                        train_out.write(line)
+                    else:
+                        val_out.write(line)
+                    written += 1
             cp.unlink()
+    finally:
+        train_out.close()
+        val_out.close()
 
     try:
         chunk_dir.rmdir()
     except OSError:
         pass
-    return total_lines
+    return n_train, n_val
 
 
 def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None:
     """
-    Blend sources to the target token ratio and write final train.jsonl.
+    Blend sources to the target token ratio and write final train.jsonl + val.jsonl.
 
     Pass 1 (parallel): each source streams to its own staging file up to
                        its character target or its supply, whichever is
@@ -655,8 +707,11 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
     Pass 2 (sequential): FineWeb appends extra content to cover the total
                          deficit from all supply-constrained sources.
 
-    Pass 3 (shuffle): single-pass shuffle, in-memory or chunked depending
-                      on size.
+    Pass 3 (shuffle + split): single-pass shuffle followed by a clean
+                              (1 - val_fraction) / val_fraction split.
+                              Because the shuffle makes order uniformly
+                              random, the val slice is an unbiased sample
+                              from the same distribution as train.
 
     Staging files are always rewritten — any existing files from prior
     runs with different mixes would have wrong char counts and are
@@ -665,12 +720,14 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
     log.info(f"=== Stage 4: Blend (target={target}) ===")
     cfg = TARGET_CONFIGS[target]
     total_tokens = cfg["total_tokens"]
+    val_fraction = cfg.get("val_fraction", VAL_FRACTION)
 
     CURATED_DIR.mkdir(parents=True, exist_ok=True)
-    output_path = CURATED_DIR / "train.jsonl"
+    train_path = CURATED_DIR / "train.jsonl"
+    val_path = CURATED_DIR / "val.jsonl"
 
-    if output_path.exists():
-        log.info("train.jsonl already exists — delete to re-blend")
+    if train_path.exists() and val_path.exists():
+        log.info("train.jsonl and val.jsonl already exist — delete to re-blend")
         return
 
     rng = random.Random(seed)
@@ -763,28 +820,33 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
             f"unavailable — total token count will be below target"
         )
 
-    # ── Pass 3: shuffle ────────────────────────────────────────────────────────
+    # ── Pass 3: shuffle + split ────────────────────────────────────────────────
     total_staging_bytes = sum(p.stat().st_size for p in staging_paths.values())
     total_staging_gb = total_staging_bytes / 1e9
     # Python list + bytes object overhead pushes RAM usage to ~5× disk size.
     effective_ram_gb = total_staging_gb * 5
     log.info(
-        f"Pass 3/3: shuffling — staging on disk {total_staging_gb:.2f} GB, "
+        f"Pass 3/3: shuffling + splitting (val_fraction={val_fraction}) — "
+        f"staging on disk {total_staging_gb:.2f} GB, "
         f"effective RAM ~{effective_ram_gb:.2f} GB, "
         f"budget {SHUFFLE_RAM_BUDGET_GB:.1f} GB"
     )
 
     if effective_ram_gb < SHUFFLE_RAM_BUDGET_GB:
-        total_lines = _shuffle_in_memory(staging_paths, output_path, rng)
+        n_train, n_val = _shuffle_in_memory(
+            staging_paths, train_path, val_path, val_fraction, rng,
+        )
     else:
         log.info("  Effective RAM exceeds budget — using chunked disk shuffle")
-        total_lines = _shuffle_chunked_from_sources(
-            staging_paths, output_path, rng,
+        n_train, n_val = _shuffle_chunked_from_sources(
+            staging_paths, train_path, val_path, val_fraction, rng,
         )
 
+    total_lines = n_train + n_val
     total_chars = sum(s["chars"] for s in source_stats.values())
     log.info(
-        f"Blend complete — {total_lines:,} documents, "
+        f"Blend complete — {total_lines:,} documents total "
+        f"({n_train:,} train + {n_val:,} val), "
         f"~{total_chars // CHARS_PER_TOKEN / 1e9:.2f}B tokens "
         f"(target {total_tokens / 1e9:.2f}B)"
     )
@@ -797,6 +859,9 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
             "target_tokens": total_tokens,
             "chars_per_token": CHARS_PER_TOKEN,
             "total_documents": total_lines,
+            "train_documents": n_train,
+            "val_documents": n_val,
+            "val_fraction": val_fraction,
             "estimated_tokens": total_chars // CHARS_PER_TOKEN,
             "source_mix": {
                 s: {

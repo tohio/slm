@@ -86,25 +86,25 @@ slm/
 │   └── model.py
 │
 ├── curator/
-│   ├── constants.py               
+│   ├── constants.py
 │   ├── sources/
-│   │   ├── common_crawl.py        
-│   │   ├── fineweb.py             
-│   │   ├── wikipedia.py           
-│   │   ├── pg19.py                
-│   │   ├── pes2o.py               
-│   │   ├── open_web_math.py       
-│   │   ├── stackexchange.py       
-│   │   ├── code_search_net.py     
-│   │   ├── stack_smol.py      
-│   │   ├── stack_v2.py        
-│   │   ├── jupyter.py             
-│   │   └── conala.py              
+│   │   ├── common_crawl.py
+│   │   ├── fineweb.py
+│   │   ├── wikipedia.py
+│   │   ├── pg19.py
+│   │   ├── pes2o.py
+│   │   ├── open_web_math.py
+│   │   ├── stackexchange.py
+│   │   ├── code_search_net.py
+│   │   ├── stack_smol.py
+│   │   ├── stack_v2.py
+│   │   ├── jupyter.py
+│   │   └── conala.py
 │   ├── filters/
 │   │   ├── quality.py
 │   │   └── dedup.py
 │   └── scripts/
-│       ├── curate.py              
+│       ├── curate.py
 │       └── upload_s3.py
 │
 ├── validation/
@@ -166,7 +166,7 @@ slm/
 │       ├── test_pipeline_sft.py
 │       └── test_pipeline_dpo.py
 │
-├── notebooks/                      
+├── notebooks/
 │   ├── 01_model_exploration.ipynb
 │   ├── 02_data_exploration.ipynb
 │   ├── 03_validation_exploration.ipynb
@@ -276,21 +276,21 @@ make download-kenlm-model    DATA_DIR=/data/slm/data   # perplexity model (~4GB)
 make curate-mini && make test-curator
 make validate    && make test-validate
 make tokenizer   && make test-tokenizer
-make tokenize
-make tokenize-upload SIZE=mini    # push mini tokenized binary to S3 for GPU instance
+make tokenize                     # produces train.bin + val.bin
+make tokenize-upload SIZE=mini    # push mini tokenized binaries to S3 for GPU instance
 make tokenizer-upload             # push tokenizer to S3 (shared across all sizes)
 
 # ── Step 3: Full curation ─────────────────────────────────────────────────────
-make curate SIZE=125m WORKERS=62    # Stage 1: download, filter, dedup, blend, upload
-make validate                       # Stage 2: perplexity filter
+make curate SIZE=125m WORKERS=62    # Stage 1: download, filter, dedup, blend (→ train.jsonl + val.jsonl), upload
+make validate                       # Stage 2: perplexity filter (applied to both splits)
 make validate-upload SIZE=125m      # Stage 2: push validated data to S3
 make tokenizer                      # Stage 3: train BPE tokenizer
 make tokenizer-upload               # Stage 3: push tokenizer to S3
-make tokenize                       # Stage 4a: tokenize to binary
-make tokenize-upload SIZE=125m      # Stage 4a: push tokenized binary to S3
+make tokenize                       # Stage 4a: tokenize both splits to binary
+make tokenize-upload SIZE=125m      # Stage 4a: push tokenized binaries to S3
 
 # ── Step 4: GPU instance setup ───────────────────────────────────────────────
-# For mini validation — pulls mini tokenized binary and tokenizer from S3
+# For mini validation — pulls mini tokenized binaries and tokenizer from S3
 make setup-gpu DATA_DIR=/data/slm/data SIZE=mini DATE=YYYY-MM-DD
 source ~/.bashrc
 
@@ -311,7 +311,7 @@ make eval-mini
 # pretrain/configs/gpt_125m.yaml, alignment/configs/dpo_125m.yaml,
 # finetune/configs/sft_chat_125m.yaml, finetune/configs/sft_code_125m.yaml for your GPU count.
 # See docs/COMMANDS.md — Multi-GPU Config Scaling for exact values.
-# Re-run setup-gpu to pull the 125m tokenized binary before training.
+# Re-run setup-gpu to pull the 125m tokenized binaries before training.
 make setup-gpu DATA_DIR=/data/slm/data SIZE=125m DATE=YYYY-MM-DD
 make accelerate-config-single        # single GPU — change to: make accelerate-config-multi GPUS=x for multi-GPU
 make pretrain  SIZE=125m GPUS=1      # Stage 4b: pretrain from scratch
@@ -429,6 +429,10 @@ Scale-invariant percentages — the same mix applies at every size.
 
 When supply-constrained sources (Wikipedia, pg19) fall short of their character budget at large scales, the deficit is automatically routed to FineWeb as an overflow sink. The mix shape is preserved; the token target is hit.
 
+### Train / val split
+
+The curator's blend stage produces both `train.jsonl` and `val.jsonl` at the same time. After the blend shuffle, the last 0.5% of documents are routed to `val.jsonl` and the rest to `train.jsonl`. Because the shuffle makes document order uniformly random, val is an unbiased sample from the same distribution as train. Both splits go through the same validation and tokenization stages — so at training time, eval loss on val is a meaningful comparison against training loss.
+
 ### Token Targets
 
 | Model | Total tokens | Epochs |
@@ -438,6 +442,10 @@ When supply-constrained sources (Wikipedia, pg19) fall short of their character 
 | `slm-1b` | 30B | 1 |
 
 Why 1b uses 1 epoch: at 30B tokens / 1 epoch, every source stays below its supply ceiling, so no repetition. Modern small-model training (Llama, Phi) follows the same pattern — fresh tokens outperform repeated ones. 125m and 350m retain 2 epochs because their smaller budgets leave comfortable headroom.
+
+### Train / val split
+
+The train and val splits are produced by the curator's blend stage, not at training time. After the blend stage shuffles all staging sources, it writes the last 0.5% of documents to `val.jsonl` and the rest to `train.jsonl`. Because the shuffle makes order uniformly random, val is a clean random sample from the same distribution as train. Validation (KenLM perplexity filtering) and tokenization both process each split independently, so `val.bin` receives the same quality treatment as `train.bin`.
 
 See `curator/README.md` for full details on the mix, sub-source breakdowns, cap-and-redistribute behavior, and scaling beyond 1b.
 
@@ -547,11 +555,17 @@ Models are evaluated on standard benchmarks via `lm-evaluation-harness`:
 
 **Why scale-invariant mix percentages?** A reader scaling from 125m to 1b changes one number (`target_tokens`) and gets proportionally more of everything — no per-scale mix tuning. Supply variance is handled by cap-and-redistribute, not by per-scale knobs.
 
+**Why `rope_theta=500000` everywhere, not just at 1b?** RoPE's base period is the slow axis of the position encoding — larger values give the model room to extrapolate to longer contexts than it was trained on. Using 500000 uniformly across 125m, 350m, and 1b means any size can be length-extended later without retraining positional encodings. The cost at 2048 context (125m, 350m) is negligible; the benefit is that "train a 125m at 2048, run it at 4096 after YaRN/linear scaling" actually works. Llama 3 and Qwen follow this same pre-stretched-base pattern.
+
 **Why different epoch counts per scale?** Token budget versus supply. At 125m (5B tokens), 2 epochs is comfortable; at 1b (30B tokens), 1 epoch leaves every source below its supply ceiling, so no repetition. Modern small-model training (Llama, Phi, Qwen) follows the single-epoch pattern at scale — fresh tokens outperform repeated ones.
 
 **Why streaming-first curation?** At 1b with 30B+ tokens, materializing sources in memory is infeasible on reasonable hardware. FineWeb and stack-v2 require streaming; the other sources use it for consistency. RAM is not the load-bearing scaling axis — vCPU count and network throughput are. This means readers on modest hardware (32 GB RAM) can still run 1b, just slower.
 
 **Why cap-and-redistribute?** Wikipedia and pg19 have finite supply. At large scales they can't fill their character budget without repetition. Rather than add per-scale knobs or accept repetition, the overflow routes to FineWeb — which has 15T tokens of headroom — preserving mix shape and hitting the token target.
+
+**Why split train/val at blend time, not at training time?** Runtime splitting has two correctness bugs: split files silently drift out of sync with the underlying tokenization, and the tail-of-stream slice isn't a uniform sample when the shuffle is disk-chunked at 1b scale. Splitting right after the blend shuffle — where order is provably random — gives a clean uniform sample and eliminates the staleness concern by construction.
+
+**Why `rope_theta=500000` across all sizes?** The same RoPE base across 125m, 350m, and 1b means any size can have its context extended later (via YaRN, dynamic scaling, or similar) without retraining from scratch. The tradeoff at 2048 context is negligible — large base values don't hurt in-context quality at short sequence lengths, and consistency across sizes is worth more than micro-optimising each tier.
 
 **Why vLLM for serving?** PagedAttention enables continuous batching and efficient KV cache management. The OpenAI-compatible API means any client built against the OpenAI SDK works out of the box.
 

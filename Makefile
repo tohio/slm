@@ -91,7 +91,7 @@ curate-upload:
 # ── Stage 2: Validation ───────────────────────────────────────────────────────
 
 validate:
-	@echo "==> Stage 2: Validation"
+	@echo "==> Stage 2: Validation (train + val splits)"
 	$(PYTHON) validation/scripts/validate.py
 
 validate-upload:
@@ -113,15 +113,15 @@ tokenizer-test:
 # ── Stage 4: Pretrain ─────────────────────────────────────────────────────────
 
 tokenize:
-	@echo "==> Stage 4a: Tokenize dataset"
+	@echo "==> Stage 4a: Tokenize dataset (train + val splits)"
 	$(PYTHON) pretrain/data/tokenize_data.py --chunk-size 256 --verify
 
 tokenize-upload:
-	@echo "==> Stage 4a: Upload tokenized binary to S3 (target=$(SIZE))"
+	@echo "==> Stage 4a: Upload tokenized binaries to S3 (target=$(SIZE))"
 	$(PYTHON) pretrain/data/upload_tokenized.py upload --target $(SIZE)
 
 tokenize-download:
-	@echo "==> Stage 4a: Download tokenized binary from S3 (target=$(SIZE), date=$(DATE))"
+	@echo "==> Stage 4a: Download tokenized binaries from S3 (target=$(SIZE), date=$(DATE))"
 	$(PYTHON) pretrain/data/upload_tokenized.py download --target $(SIZE) --date $(DATE)
 
 tokenizer-upload:
@@ -426,16 +426,16 @@ help:
 	@echo "  test-model               Model architecture unit tests"
 	@echo ""
 	@echo "Pipeline:"
-	@echo "  curate             Stage 1  — download, curate, and upload to S3"
+	@echo "  curate             Stage 1  — download, curate, blend to train.jsonl + val.jsonl, upload"
 	@echo "  curate-mini        Stage 1  — mini run for pipeline validation (~30 min)"
-	@echo "  validate           Stage 2  — perplexity filter and validate"
+	@echo "  validate           Stage 2  — perplexity filter on train + val splits"
 	@echo "  validate-upload    Stage 2  — upload validated data to S3"
 	@echo "  tokenizer          Stage 3  — train BPE tokenizer"
-	@echo "  tokenize           Stage 4a — tokenize dataset to binary"
-	@echo "  tokenize-upload    Stage 4a — upload tokenized binary to S3"
+	@echo "  tokenize           Stage 4a — tokenize train + val to binaries"
+	@echo "  tokenize-upload    Stage 4a — upload tokenized binaries to S3"
 	@echo "  tokenizer-upload   Stage 3  — upload tokenizer to S3"
 	@echo "  tokenizer-download Stage 3  — download tokenizer from S3"
-	@echo "  tokenize-download  Stage 4a — download tokenized binary from S3"
+	@echo "  tokenize-download  Stage 4a — download tokenized binaries from S3"
 	@echo "  pretrain           Stage 4b — pretrain from scratch"
 	@echo "  pretrain-mini      Stage 4b — mini pretrain run for pipeline validation"
 	@echo "  sft-mini           Stage 5b — mini chat SFT for pipeline validation"
@@ -459,7 +459,7 @@ help:
 	@echo "  curate-download    Download raw data only"
 	@echo "  curate-filter      Quality filter only"
 	@echo "  curate-dedup       Deduplication only"
-	@echo "  curate-blend       Blend to train.jsonl only"
+	@echo "  curate-blend       Blend to train.jsonl + val.jsonl only"
 	@echo "  curate-upload      Upload curated data to S3 only"
 	@echo ""
 	@echo "Resume targets:"

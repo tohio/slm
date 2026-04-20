@@ -8,7 +8,7 @@ model:
   num_attention_heads: 32
   num_key_value_heads: 8
   max_position_embeddings: 4096
-  rope_theta: 500000.0             # extended base for longer context
+  rope_theta: 500000.0           # pre-stretched base (consistent across all sizes)
   rms_norm_eps: 1.0e-5
   initializer_range: 0.02
   tie_word_embeddings: true
@@ -25,13 +25,17 @@ training:
   #
   # Dataset: 30B tokens
   # Tokens/step (1 GPU): 2 × 64 × 1 × 4096 = ~524k tokens/step
-  # 1 epoch  → ~57,000 steps
-  # 2 epochs → ~114,000 steps  ← recommended
+  # 1 epoch  → ~57,000 steps  ← recommended
   #
-  # 1 GPU:  grad_accum=64, max_steps=114000
-  # 4 GPU:  grad_accum=16, max_steps=28500
-  # 8 GPU:  grad_accum=8,  max_steps=14250
-  max_steps: 114000
+  # At 30B tokens / 1 epoch every source stays below its supply ceiling, so
+  # no repetition is needed. Modern small-model training (Llama, Phi, Qwen)
+  # follows the single-epoch pattern at this scale — fresh tokens outperform
+  # repeated ones.
+  #
+  # 1 GPU:  grad_accum=64, max_steps=57000
+  # 4 GPU:  grad_accum=16, max_steps=14250
+  # 8 GPU:  grad_accum=8,  max_steps=7125
+  max_steps: 57000
   warmup_steps: 2000
   micro_batch_size: 2
   gradient_accumulation_steps: 64  # 1 GPU default — see scaling note above
