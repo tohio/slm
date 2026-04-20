@@ -10,11 +10,13 @@ Formats all data into the SLM conversation format:
         {"role": "assistant", "content": "..."}
     ]
 
-The "text" field is intentionally omitted. train_sft.py applies
-tokenizer.apply_chat_template() at training time via a formatting_func
-passed to SFTTrainer — the same code path used during inference.
-Pre-formatting with a manual formatter would bypass the tokenizer's
-baked-in chat template and produce the wrong training format.
+Chat template application:
+    No "text" field is produced. train_sft.py renames "conversations" →
+    "messages" at load time; trl's SFTTrainer then auto-detects the
+    conversational format and applies tokenizer.apply_chat_template()
+    internally. Pre-formatting here would bypass the tokenizer's baked-in
+    chat template (including {% generation %} tags) and break
+    assistant_only_loss=True.
 
 Stage 1 — Chat SFT:
     Dataset: teknium/OpenHermes-2.5
@@ -70,6 +72,13 @@ SFT_DIR  = DATA_DIR / "sft"
 DEFAULT_SYSTEM = "You are a helpful, harmless, and honest assistant."
 CODE_SYSTEM    = "You are an expert programming assistant. Write clean, efficient, and well-documented code."
 
+# Per-stage defaults for validation fraction. These are the sources of truth;
+# CLI --val-fraction overrides them only when explicitly passed.
+DEFAULT_VAL_FRACTION = {
+    "chat": 0.02,
+    "code": 0.05,
+}
+
 
 def write_jsonl(records: list[dict], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -81,7 +90,7 @@ def write_jsonl(records: list[dict], path: Path) -> None:
 
 # ── Chat SFT — OpenHermes-2.5 ─────────────────────────────────────────────────
 
-def prepare_chat(val_fraction: float = 0.02) -> None:
+def prepare_chat(val_fraction: float) -> None:
     """
     Download and format OpenHermes-2.5 for chat SFT.
 
@@ -169,13 +178,17 @@ def prepare_chat(val_fraction: float = 0.02) -> None:
 
 # ── Code SFT — Magicoder-OSS-Instruct ─────────────────────────────────────────
 
-def prepare_code(val_fraction: float = 0.05) -> None:
+def prepare_code(val_fraction: float) -> None:
     """
     Download and format Magicoder-OSS-Instruct-75K for code SFT.
 
     Magicoder generates coding problems inspired by real open-source code,
     then generates solutions. Higher quality and diversity than CodeAlpaca.
     Each example is a single-turn instruction/response pair.
+
+    Solutions are passed through unchanged. Magicoder's solutions typically
+    include triple-backtick code fences where appropriate; we do not apply
+    any language-specific wrapping heuristic.
     """
     from datasets import load_dataset
 
@@ -203,19 +216,10 @@ def prepare_code(val_fraction: float = 0.05) -> None:
             skipped += 1
             continue
 
-        # Wrap solution in code tags if it looks like code
-        if any(kw in solution for kw in ["def ", "class ", "import ", "function ", "```"]):
-            if "```" in solution:
-                assistant_content = solution
-            else:
-                assistant_content = f"<|code|>\n{solution}\n<|endofcode|>"
-        else:
-            assistant_content = solution
-
         messages = [
             {"role": "system",    "content": CODE_SYSTEM},
             {"role": "user",      "content": instruction},
-            {"role": "assistant", "content": assistant_content},
+            {"role": "assistant", "content": solution},
         ]
 
         records.append({
@@ -251,18 +255,23 @@ def main():
     parser.add_argument(
         "--val-fraction",
         type=float,
-        default=0.02,
-        help="Fraction of data to use for validation",
+        default=None,
+        help=(
+            "Override validation fraction. If unset, uses stage-specific "
+            f"defaults: {DEFAULT_VAL_FRACTION}"
+        ),
     )
     args = parser.parse_args()
 
     if args.stage in ("chat", "both"):
         log.info("=== Preparing Chat SFT data (OpenHermes-2.5) ===")
-        prepare_chat(val_fraction=args.val_fraction)
+        frac = args.val_fraction if args.val_fraction is not None else DEFAULT_VAL_FRACTION["chat"]
+        prepare_chat(val_fraction=frac)
 
     if args.stage in ("code", "both"):
         log.info("=== Preparing Code SFT data (Magicoder-OSS-Instruct) ===")
-        prepare_code(val_fraction=args.val_fraction)
+        frac = args.val_fraction if args.val_fraction is not None else DEFAULT_VAL_FRACTION["code"]
+        prepare_code(val_fraction=frac)
 
     log.info("SFT data preparation complete.")
     log.info(f"Output: {SFT_DIR}")

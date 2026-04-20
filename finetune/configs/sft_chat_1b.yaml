@@ -1,18 +1,15 @@
 name: slm-1b-chat
 wandb_project: slm
-
 model:
-  base_model_path: results/slm-1b/final
+  base_model_path: $RESULTS_DIR/slm-1b/final
   max_seq_length: 4096
-
 data:
   train_path: $DATA_DIR/sft/chat/train.jsonl
   val_path:   $DATA_DIR/sft/chat/val.jsonl
   packing: false
-
 training:
-  epochs: 3
-  warmup_steps: 100
+  epochs: 2
+  warmup_ratio: 0.03
   micro_batch_size: 1
   # Target effective batch size: 128
   # gradient_accumulation_steps = 128 / (micro_batch_size x num_gpus)
@@ -32,7 +29,6 @@ training:
   lr_scheduler: cosine
   report_to:
     - wandb
-
 optimizer:
   lr: 5.0e-6                         # lower for larger model
   weight_decay: 0.01

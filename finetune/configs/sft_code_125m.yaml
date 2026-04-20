@@ -1,18 +1,15 @@
 name: slm-125m-chat-code
 wandb_project: slm
-
 model:
-  base_model_path: results/slm-125m-chat/final
+  base_model_path: $RESULTS_DIR/slm-125m-chat/final
   max_seq_length: 2048
-
 data:
   train_path: $DATA_DIR/sft/code/train.jsonl
   val_path:   $DATA_DIR/sft/code/val.jsonl
   packing: false
-
 training:
-  epochs: 3
-  warmup_steps: 50
+  epochs: 2
+  warmup_ratio: 0.03
   micro_batch_size: 4
   # Target effective batch size: 128
   # gradient_accumulation_steps = 128 / (micro_batch_size x num_gpus)
@@ -32,7 +29,6 @@ training:
   lr_scheduler: cosine
   report_to:
     - wandb
-
 optimizer:
   lr: 5.0e-6                         # lower than chat SFT — preserve chat capability
   weight_decay: 0.01

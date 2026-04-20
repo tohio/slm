@@ -18,8 +18,13 @@ Answer-only loss:
     train_tokenizer.py time.
 
     SFTTrainer automatically applies the chat template when given a
-    conversational dataset (with a "conversations" field containing
+    conversational dataset (with a "messages" field containing
     role/content message dicts). No formatting_func needed.
+
+Best-checkpoint selection:
+    load_best_model_at_end=True with metric_for_best_model="eval_loss".
+    SFTTrainer reloads the lowest-eval-loss checkpoint before save_model(),
+    so results/<name>/final/ is the best checkpoint, not the last.
 
 Usage:
     # Chat SFT
@@ -116,6 +121,13 @@ def build_sft_args(cfg: dict, output_dir: Path):
     assistant_only_loss=True computes loss only on assistant response tokens.
     Requires {% generation %} / {% endgeneration %} tags in the chat template.
     SFTTrainer applies the chat template automatically for conversational datasets.
+
+    load_best_model_at_end=True with metric_for_best_model="eval_loss" means
+    final/ contains the lowest-eval-loss checkpoint, not the last. Constraints:
+        - save_strategy must equal eval_strategy (both "steps")
+        - save_steps must be a multiple of eval_steps
+        - save_total_limit keeps N recent checkpoints PLUS always the best,
+          so disk usage is up to save_total_limit + 1 checkpoints.
     """
     from trl import SFTConfig
 
@@ -127,11 +139,32 @@ def build_sft_args(cfg: dict, output_dir: Path):
     use_bf16  = has_cuda and precision == "bf16"
     use_fp16  = has_cuda and precision == "fp16"
 
+    # Warmup: prefer warmup_ratio (scales with total steps under varying
+    # epochs/dataset sizes). warmup_steps is honoured if set for backward
+    # compatibility, but configs should use warmup_ratio.
+    warmup_ratio = train_cfg.get("warmup_ratio", 0.0)
+    warmup_steps = train_cfg.get("warmup_steps", 0)
+    if warmup_ratio and warmup_steps:
+        log.warning(
+            "Both warmup_ratio and warmup_steps set — HF Trainer uses "
+            "warmup_steps when non-zero and ignores warmup_ratio. "
+            "Drop warmup_steps from config to use the ratio."
+        )
+
+    save_steps = train_cfg.get("save_steps", 200)
+    eval_steps = train_cfg.get("eval_steps", 200)
+    if save_steps % eval_steps != 0:
+        raise ValueError(
+            f"save_steps ({save_steps}) must be a multiple of eval_steps "
+            f"({eval_steps}) when load_best_model_at_end=True."
+        )
+
     return SFTConfig(
         output_dir=str(output_dir),
-        num_train_epochs=train_cfg.get("epochs", 3),
+        num_train_epochs=train_cfg.get("epochs", 2),
         max_steps=train_cfg.get("max_steps", -1),
-        warmup_steps=train_cfg.get("warmup_steps", 100),
+        warmup_ratio=warmup_ratio,
+        warmup_steps=warmup_steps,
         per_device_train_batch_size=train_cfg["micro_batch_size"],
         per_device_eval_batch_size=train_cfg["micro_batch_size"],
         gradient_accumulation_steps=train_cfg.get("gradient_accumulation_steps", 4),
@@ -144,11 +177,13 @@ def build_sft_args(cfg: dict, output_dir: Path):
         bf16=use_bf16,
         fp16=use_fp16,
         eval_strategy="steps",
-        eval_steps=train_cfg.get("eval_steps", 200),
+        eval_steps=eval_steps,
         save_strategy="steps",
-        save_steps=train_cfg.get("save_steps", 200),
+        save_steps=save_steps,
         save_total_limit=train_cfg.get("save_total_limit", 3),
-        load_best_model_at_end=False,
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
         logging_steps=train_cfg.get("log_steps", 10),
         report_to=train_cfg.get("report_to", ["wandb"]),
         run_name=cfg.get("name", "slm-sft"),
@@ -212,8 +247,11 @@ def main():
 
     # ── Dataset ───────────────────────────────────────────────────────────────
     # Dataset has a "conversations" field with role/content message dicts.
-    # SFTTrainer detects this format and applies the chat template automatically
-    # via apply_chat_template() — no formatting_func required.
+    # trl's is_conversational() only recognises these field names:
+    # prompt, chosen, rejected, completion, messages. Rename "conversations"
+    # → "messages" so trl auto-detects the conversational format and applies
+    # tokenizer.apply_chat_template() internally. assistant_only_loss=True then
+    # uses the {% generation %} tags in the template to mask prompt tokens.
     data_cfg   = cfg["data"]
     train_path = Path(os.path.expandvars(data_cfg["train_path"]))
     val_path   = Path(os.path.expandvars(data_cfg["val_path"]))
@@ -227,10 +265,6 @@ def main():
     train_dataset = load_dataset_from_jsonl(train_path)
     val_dataset   = load_dataset_from_jsonl(val_path)
 
-    # trl's is_conversational() only recognises these field names:
-    # prompt, chosen, rejected, completion, messages.
-    # Our dataset uses "conversations" — rename to "messages" so trl
-    # detects the format correctly and applies assistant_only_loss=True.
     if "conversations" in train_dataset.column_names:
         train_dataset = train_dataset.rename_column("conversations", "messages")
         val_dataset   = val_dataset.rename_column("conversations", "messages")
@@ -248,6 +282,7 @@ def main():
     # ── SFT args ──────────────────────────────────────────────────────────────
     sft_args = build_sft_args(cfg, output_dir)
     log.info("Answer-only loss enabled (assistant_only_loss=True)")
+    log.info("Best-checkpoint selection enabled (metric_for_best_model=eval_loss)")
 
     # ── SFTTrainer ────────────────────────────────────────────────────────────
     from trl import SFTTrainer
@@ -265,7 +300,9 @@ def main():
     trainer.train(resume_from_checkpoint=args.resume)
 
     # ── Save ──────────────────────────────────────────────────────────────────
-    log.info("Saving final model...")
+    # load_best_model_at_end=True means trainer.model is now the best
+    # checkpoint by eval_loss, not the last. save_model() persists that.
+    log.info("Saving best model (lowest eval_loss)...")
     final_dir = output_dir / "final"
     trainer.save_model(str(final_dir))
 

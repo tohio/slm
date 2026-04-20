@@ -1,20 +1,18 @@
 name: slm-mini-chat
 wandb_project: slm-mini
-
 model:
   base_model_path: $RESULTS_DIR/slm-mini/final
   max_seq_length: 1024
-
 data:
   train_path: $DATA_DIR/sft/chat/train.jsonl
   val_path:   $DATA_DIR/sft/chat/val.jsonl
   packing: false
   max_samples: 500                   # truncate for mini validation
-
 training:
-  epochs: 3
+  # max_steps governs run length; num_train_epochs defaults to 1 and is
+  # effectively ignored. Do not set both.
   max_steps: 50                      # enough to validate the training loop
-  warmup_steps: 5
+  warmup_ratio: 0.03                 # ~1-2 warmup steps at this scale
   micro_batch_size: 2
   gradient_accumulation_steps: 2     # not performance-sensitive for validation
   precision: bf16
@@ -29,7 +27,6 @@ training:
   lr_scheduler: cosine
   report_to:
     - wandb
-
 optimizer:
   lr: 1.0e-5
   weight_decay: 0.01
