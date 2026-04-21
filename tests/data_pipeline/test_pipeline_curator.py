@@ -21,33 +21,20 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import DATA_DIR, requires_stage, read_jsonl, pipeline_path
-from curator.filters.quality import QualityFilter, CODE_SOURCES
+from curator.filters.quality import QualityFilter, CODE_SOURCES as QUALITY_CODE_SOURCES
 from curator.filters.dedup import exact_hash
+
+# Import source lists from config — the single source of truth. Previously
+# NON_CODE_SOURCES / CODE_SOURCE_NAMES / ALL_SOURCES were hand-maintained
+# here, which meant every change to the mix needed a matching edit in this
+# file. TestConfigurationDrift still guards the separate quality-filter
+# CODE_SOURCES constant (defined in curator.filters.quality) against drift
+# from config.
+from config import ALL_SOURCES, CODE_SOURCES, NON_CODE_SOURCES
 
 
 pytestmark = requires_stage("curate-mini")
 
-
-# All 10 sources the mini run exercises — matches ALL_SOURCES in curate.py.
-# Kept in sync by convention; any drift here vs curate.py should surface as
-# a presence test failure.
-NON_CODE_SOURCES = [
-    "common_crawl",
-    "fineweb",
-    "wikipedia",
-    "pg19",
-    "pes2o",
-    "open_web_math",
-    "stackexchange",
-]
-CODE_SOURCE_NAMES = [
-    "codesearchnet",
-    "stack_smol",
-    "stack_v2",
-    "jupyter",
-    "conala",
-]
-ALL_SOURCES = NON_CODE_SOURCES + CODE_SOURCE_NAMES
 
 # Sources whose presence in train.jsonl is required. stack_v2 is excluded
 # because its SWH content fetching is the one external dependency we don't
@@ -55,21 +42,23 @@ ALL_SOURCES = NON_CODE_SOURCES + CODE_SOURCE_NAMES
 # run may produce very few stack_v2 docs. The rest must be present.
 REQUIRED_IN_TRAIN = [s for s in ALL_SOURCES if s != "stack_v2"]
 
-# Sources exempt from English-prose quality checks (mixed or code content).
-# Matches curator.filters.quality.CODE_SOURCES; imported separately so this
-# test catches drift between the two definitions.
-EXPECTED_CODE_SOURCES = set(CODE_SOURCE_NAMES)
-
 
 # ── Configuration drift guard ──────────────────────────────────────────────────
 
 class TestConfigurationDrift:
-    """Catch drift between this test file and curator module definitions."""
+    """Catch drift between the two CODE_SOURCES definitions."""
 
-    def test_code_sources_match_quality_filter_set(self):
-        assert EXPECTED_CODE_SOURCES == set(CODE_SOURCES), (
-            f"CODE_SOURCES in quality.py ({set(CODE_SOURCES)}) drifted from "
-            f"test expectation ({EXPECTED_CODE_SOURCES}). Update one or both."
+    def test_quality_filter_code_sources_match_config(self):
+        """
+        curator.filters.quality defines its own CODE_SOURCES set for filter
+        routing; config defines CODE_SOURCES for data-mix bookkeeping. They
+        must stay in sync — if a source is code in the mix it must bypass
+        the English-prose quality filters, and vice versa.
+        """
+        assert set(QUALITY_CODE_SOURCES) == set(CODE_SOURCES), (
+            f"CODE_SOURCES in quality.py ({set(QUALITY_CODE_SOURCES)}) drifted "
+            f"from CODE_SOURCES in config ({set(CODE_SOURCES)}). "
+            f"Update one or both."
         )
 
 
@@ -144,7 +133,7 @@ class TestFilteredData:
             + "\n".join(failures[:5])
         )
 
-    @pytest.mark.parametrize("source", [s for s in NON_CODE_SOURCES])
+    @pytest.mark.parametrize("source", list(NON_CODE_SOURCES))
     def test_filtered_non_code_has_minimum_length(self, source):
         """
         Non-code sources go through the full length filter. Every filtered
@@ -245,7 +234,7 @@ class TestCuratedOutput:
         docs = read_jsonl(pipeline_path("curated", "train.jsonl"))
         short_non_code = [
             d for d in docs
-            if d.get("source") not in EXPECTED_CODE_SOURCES
+            if d.get("source") not in CODE_SOURCES
             and len(d.get("text", "")) < MIN_CHARS
         ]
         assert len(short_non_code) == 0, (
@@ -383,10 +372,10 @@ class TestBlendStats:
             )
 
     def test_blend_stats_chars_per_token_set(self):
-        """chars_per_token should be the constant from curator.constants."""
-        from curator.constants import CHARS_PER_TOKEN
+        """chars_per_token should be the constant from config."""
+        from config import CHARS_PER_TOKEN
         stats = self._load_stats()
         assert stats["chars_per_token"] == CHARS_PER_TOKEN, (
             f"blend_stats.json chars_per_token={stats['chars_per_token']} "
-            f"does not match curator.constants.CHARS_PER_TOKEN={CHARS_PER_TOKEN}"
+            f"does not match config.CHARS_PER_TOKEN={CHARS_PER_TOKEN}"
         )

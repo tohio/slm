@@ -23,22 +23,19 @@ import pytest
 
 from tests.conftest import DATA_DIR, requires_stage, read_jsonl, pipeline_path
 
+# Import special tokens and ID constants from the training module, not
+# hand-copies. train_tokenizer.py runs an import-time consistency assertion
+# between SPECIAL_TOKENS ordering and the ID constants, so the single
+# import below is safe — drift fails at import, not silently at assert time.
+from tokenizer.train_tokenizer import SPECIAL_TOKENS, BOS_ID, EOS_ID, PAD_ID
+# CODE_SOURCES is the authoritative "which sources are code" set — imported
+# from config/data_mix.py where it lives alongside DATA_MIX. Previously we
+# hand-maintained a `source != "code"` filter, which was dead code under
+# the 10-source mix (no source is literally named "code").
+from config import CODE_SOURCES
+
 
 pytestmark = requires_stage("tokenizer")
-
-# Special tokens from train_tokenizer.py
-SPECIAL_TOKENS = [
-    "<PAD>", "<UNK>", "<BOS>", "<EOS>",
-    "<|system|>", "<|user|>", "<|assistant|>", "<|endofturn|>",
-    "<|code|>", "<|endofcode|>",
-    "<|tool|>", "<|endoftool|>",
-    "<|reasoning|>", "<|endofreasoning|>",
-    "<|context|>", "<|endofcontext|>",
-]
-
-BOS_ID = 2
-EOS_ID = 3
-PAD_ID = 0
 
 
 def load_raw_tokenizer():
@@ -130,14 +127,18 @@ class TestFertility:
         if not validated_path.exists():
             pytest.skip("validated/train.jsonl not found — run make validate first")
 
+        # Filter out code sources using the authoritative set from config.
+        # The previous filter was `source != "code"` which is dead — no
+        # document has source="code" under the 10-source mix.
         sample_texts = []
         with open(validated_path) as f:
             for i, line in enumerate(f):
                 if i >= 500:
                     break
                 doc = json.loads(line)
-                if doc.get("source") != "code":
-                    sample_texts.append(doc.get("text", ""))
+                if doc.get("source") in CODE_SOURCES:
+                    continue
+                sample_texts.append(doc.get("text", ""))
 
         if not sample_texts:
             pytest.skip("No natural language samples found in validated data")

@@ -72,7 +72,7 @@ The mini curation run exercises all 10 data sources with small per-source budget
 |---|---|
 | Raw shards exist for all 10 sources | A source loader is broken or didn't run |
 | Source tag in each shard matches its directory | Source wrote to wrong directory or used wrong SOURCE_TAG |
-| `CODE_SOURCES` set matches test expectation | Drift between `quality.py` and test file |
+| `quality.py` `CODE_SOURCES` matches `config.CODE_SOURCES` | Drift between the filter-routing set and the data-mix source of truth |
 | Filtered docs pass quality checks | Filter stage did not run or has a bug |
 | Non-code filtered docs meet min length (500 chars) | Min length filter not applied |
 | Deduped dirs exist and are non-empty for all 10 sources | Dedup stage failed for one or more sources |
@@ -85,7 +85,7 @@ The mini curation run exercises all 10 data sources with small per-source budget
 | `blend_stats.json` exists with required schema | Stats not written or incomplete |
 | `blend_stats.json` per-source includes docs/chars/target_chars/deficit | Cap-and-redistribute accounting missing |
 | `blend_stats.json` doc count matches `train.jsonl` | Stats don't match actual output |
-| `blend_stats.json` chars_per_token matches constant | Drift from `curator.constants` |
+| `blend_stats.json` chars_per_token matches `config.CHARS_PER_TOKEN` | Drift from `config` |
 | Total chars within tolerance of target | Cap-and-redistribute not running or broken |
 | FineWeb has overflow when other sources have deficit | Overflow sink not triggered |
 
