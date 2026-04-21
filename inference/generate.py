@@ -6,24 +6,29 @@ Batch text generation from a trained SLM checkpoint.
 Supports greedy, top-p, and top-k sampling. Reads prompts from
 stdin or a file and writes completions to stdout or a file.
 
+Special-token IDs and model+tokenizer loading are delegated to
+inference.utils — IDs come from the loaded tokenizer, not hardcoded.
+
+For batched chat, left-padding is performed by tokenizer.pad() rather than
+a hand-rolled loop; this guarantees correct attention masks and interacts
+properly with the model's positional-encoding path.
+
 Usage:
-    # Single prompt
-    echo "The history of AI" | python inference/generate.py --model results/slm-125m-dpo/final
+    # Single prompt (base model completion)
+    echo "The history of AI" | python inference/generate.py --model results/slm-125m/final
 
     # From file
-    python inference/generate.py \
-        --model results/slm-125m-dpo/final \
-        --input prompts.txt \
-        --output completions.jsonl
+    python inference/generate.py \\
+        --model results/slm-125m-dpo/final \\
+        --input prompts.txt \\
+        --output completions.jsonl \\
+        --chat
 
     # From Hub
     python inference/generate.py --model tohio/slm-125m
 
-    # Chat format — wrap prompts in the chat template
-    python inference/generate.py \
-        --model results/slm-125m-dpo/final \
-        --chat \
-        --input prompts.txt
+    # Raw completion without a BOS prefix
+    python inference/generate.py --model results/slm-125m/final --no-bos
 """
 
 import argparse
@@ -41,61 +46,71 @@ log = logging.getLogger(__name__)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-# Token IDs for stop tokens — read from tokenizer config at load time,
-# but also defined here as fallback constants for eos_token_id.
-EOS_TOKEN_ID       = 3   # <EOS>
-ENDOFTURN_TOKEN_ID = 7   # <|endofturn|> — model uses this to end turns
-PAD_TOKEN_ID       = 0   # <PAD>
+from inference.utils import load_model_and_tokenizer
 
 
-def load_model_and_tokenizer(model_path: str):
+def _prepare_batch(tokenizer, prompts: list[str], *, chat: bool, add_bos: bool):
     """
-    Load model and tokenizer from local path or Hub.
+    Tokenize and left-pad a batch of prompts for generation.
 
-    Loads the tokenizer via PreTrainedTokenizerFast.from_pretrained() so
-    special tokens and chat_template are read from the saved
-    tokenizer_config.json rather than hardcoded constants. Do not
-    reconstruct from tokenizer.json directly — that bypasses the config.
+    Left-padding via tokenizer.pad is the correct, battle-tested path for
+    causal-LM batch generation: attention masks are produced automatically
+    and pad tokens are placed where the model won't attend to them, so
+    content positions start at consistent logical offsets in each row.
+
+    chat=True wraps each prompt as a single user message through
+    apply_chat_template — the format the model was trained on.
+    chat=False tokenizes the prompt raw, with BOS prepended by default
+    (the base model saw BOS at sequence start during pretraining).
     """
-    import torch
-    from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedTokenizerFast
-    from model import SLMConfig, SLMForCausalLM
-
-    # Register unconditionally — required for both local and Hub loading
-    AutoConfig.register("slm", SLMConfig)
-    AutoModelForCausalLM.register(SLMConfig, SLMForCausalLM)
-
-    log.info(f"Loading model from {model_path}...")
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path,
-        dtype=torch.bfloat16,
-        device_map="auto",
-    )
-    model.eval()
-
-    # Resolve tokenizer path — check for a tokenizer/ subdirectory first
-    # (local checkpoints), then fall back to the model directory itself
-    # (Hub checkpoints and exported models).
-    local_path = Path(model_path)
-    if local_path.exists():
-        tokenizer_path = local_path / "tokenizer"
-        if not (tokenizer_path / "tokenizer_config.json").exists():
-            tokenizer_path = local_path
+    if chat:
+        encoded = [
+            {
+                "input_ids": tokenizer.apply_chat_template(
+                    [{"role": "user", "content": p}],
+                    tokenize=True,
+                    add_generation_prompt=True,
+                    truncation=True,
+                    max_length=2048,
+                )
+            }
+            for p in prompts
+        ]
     else:
-        tokenizer_path = model_path  # Hub ID
+        encoded = [
+            {
+                "input_ids": tokenizer(
+                    p,
+                    truncation=True,
+                    max_length=2048,
+                    add_special_tokens=add_bos,
+                )["input_ids"]
+            }
+            for p in prompts
+        ]
 
-    tokenizer = PreTrainedTokenizerFast.from_pretrained(str(tokenizer_path))
+    # Left-pad via the tokenizer so attention_mask is produced correctly.
+    # Save and restore padding_side in case the caller set it elsewhere.
+    previous_side = tokenizer.padding_side
+    tokenizer.padding_side = "left"
+    try:
+        batch = tokenizer.pad(
+            encoded,
+            padding=True,
+            return_tensors="pt",
+        )
+    finally:
+        tokenizer.padding_side = previous_side
 
-    n_params = sum(p.numel() for p in model.parameters())
-    log.info(f"Model loaded — {n_params / 1e6:.1f}M parameters")
-
-    return model, tokenizer
+    return batch
 
 
 def generate(
     model,
     tokenizer,
+    special_ids,
     prompts: list[str],
+    *,
     max_new_tokens: int = 256,
     temperature: float = 0.8,
     top_p: float = 0.95,
@@ -103,75 +118,33 @@ def generate(
     do_sample: bool = True,
     repetition_penalty: float = 1.1,
     chat: bool = False,
+    add_bos: bool = True,
 ) -> list[str]:
     """
     Generate completions for a list of prompts.
 
-    Args:
-        model: Loaded model.
-        tokenizer: Loaded tokenizer.
-        prompts: List of input prompt strings.
-        max_new_tokens: Maximum tokens to generate per prompt.
-        temperature: Sampling temperature. 0 = greedy.
-        top_p: Nucleus sampling probability.
-        top_k: Top-k sampling.
-        do_sample: Whether to sample. False = greedy.
-        repetition_penalty: Penalize repeated tokens.
-        chat: If True, wrap each prompt in the chat template as a user
-              message before generating. Uses apply_chat_template() so
-              the format matches what the model was trained on.
-
-    Returns:
-        List of generated completion strings (prompt stripped).
+    Returns completions with input prompts stripped. See module docstring
+    for parameter notes.
     """
     import torch
 
-    if chat:
-        # Wrap each prompt as a user message and apply the chat template.
-        # This produces the same format used during SFT training.
-        input_ids_list = [
-            tokenizer.apply_chat_template(
-                [{"role": "user", "content": p}],
-                tokenize=True,
-                add_generation_prompt=True,
-                truncation=True,
-                max_length=2048,
-            )
-            for p in prompts
-        ]
-        # Pad to same length for batch processing
-        max_len = max(len(ids) for ids in input_ids_list)
-        padded = [
-            [PAD_TOKEN_ID] * (max_len - len(ids)) + ids
-            for ids in input_ids_list
-        ]
-        import torch
-        input_ids = torch.tensor(padded, dtype=torch.long).to(model.device)
-        attention_mask = (input_ids != PAD_TOKEN_ID).long()
-        inputs = {"input_ids": input_ids, "attention_mask": attention_mask}
-    else:
-        inputs = tokenizer(
-            prompts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=2048,
-            add_special_tokens=False,
-        ).to(model.device)
-
-    input_length = inputs["input_ids"].shape[1]
+    batch = _prepare_batch(tokenizer, prompts, chat=chat, add_bos=add_bos)
+    input_ids      = batch["input_ids"].to(model.device)
+    attention_mask = batch["attention_mask"].to(model.device)
+    input_length   = input_ids.shape[1]
 
     with torch.no_grad():
         outputs = model.generate(
-            **inputs,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
             max_new_tokens=max_new_tokens,
             temperature=temperature if do_sample else 1.0,
             top_p=top_p if do_sample else 1.0,
             top_k=top_k if do_sample else 0,
             do_sample=do_sample,
             repetition_penalty=repetition_penalty,
-            pad_token_id=PAD_TOKEN_ID,
-            eos_token_id=[EOS_TOKEN_ID, ENDOFTURN_TOKEN_ID],
+            pad_token_id=special_ids.pad,
+            eos_token_id=special_ids.eos_list,
         )
 
     completions = []
@@ -179,7 +152,6 @@ def generate(
         new_tokens = output[input_length:]
         completion = tokenizer.decode(new_tokens, skip_special_tokens=True)
         completions.append(completion.strip())
-
     return completions
 
 
@@ -199,9 +171,24 @@ def main():
         action="store_true",
         help="Wrap prompts in the chat template as user messages (use for chat/instruct models)",
     )
+    parser.add_argument(
+        "--no-bos",
+        action="store_true",
+        help="(raw mode only) Do not prepend BOS. Default prepends BOS, matching pretraining.",
+    )
+    parser.add_argument(
+        "--dtype",
+        type=str,
+        default="bfloat16",
+        choices=["bfloat16", "float16", "float32"],
+        help="Model precision (default: bfloat16)",
+    )
     args = parser.parse_args()
 
-    model, tokenizer = load_model_and_tokenizer(args.model)
+    # For chat mode, require_chat_template=True catches missing templates.
+    # For raw mode, the template is irrelevant — still required to be present
+    # so downstream users of the checkpoint don't get silently-broken chat.
+    model, tokenizer, special_ids = load_model_and_tokenizer(args.model, dtype=args.dtype)
 
     if args.input:
         prompts = [l.strip() for l in open(args.input) if l.strip()]
@@ -212,20 +199,24 @@ def main():
         log.error("No prompts provided")
         sys.exit(1)
 
-    log.info(f"Generating {len(prompts)} completions (chat={args.chat}, greedy={args.greedy})...")
+    log.info(
+        f"Generating {len(prompts)} completions "
+        f"(chat={args.chat}, greedy={args.greedy}, add_bos={not args.no_bos})..."
+    )
 
     out_file = open(args.output, "w") if args.output else None
 
     for i in range(0, len(prompts), args.batch_size):
         batch = prompts[i : i + args.batch_size]
         completions = generate(
-            model, tokenizer, batch,
+            model, tokenizer, special_ids, batch,
             max_new_tokens=args.max_new_tokens,
             temperature=args.temperature,
             top_p=args.top_p,
             top_k=args.top_k,
             do_sample=not args.greedy,
             chat=args.chat,
+            add_bos=not args.no_bos,
         )
 
         for prompt, completion in zip(batch, completions):

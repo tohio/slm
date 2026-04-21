@@ -8,6 +8,9 @@ using the SLM chat template via tokenizer.apply_chat_template().
 This is the same code path used by SFTTrainer and DPOTrainer during
 training — inference must use it too for the model to respond correctly.
 
+Special-token IDs (PAD, EOS, ENDOFTURN) are read from the loaded tokenizer
+via inference.utils.resolve_special_token_ids() — never hardcoded here.
+
 Usage:
     python inference/chat.py --model results/slm-125m-dpo/final
     python inference/chat.py --model tohio/slm-125m
@@ -24,13 +27,9 @@ log = logging.getLogger(__name__)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-DEFAULT_SYSTEM = "You are a helpful, harmless, and honest assistant."
+from inference.utils import load_model_and_tokenizer
 
-# Token IDs for stop tokens — read from tokenizer config, but also defined
-# here as fallback constants for the eos_token_id list passed to generate().
-EOS_TOKEN_ID       = 3   # <EOS>
-ENDOFTURN_TOKEN_ID = 7   # <|endofturn|> — model uses this to end assistant turns
-PAD_TOKEN_ID       = 0   # <PAD>
+DEFAULT_SYSTEM = "You are a helpful, harmless, and honest assistant."
 
 COMMANDS = {
     "/reset":   "Clear conversation history",
@@ -41,60 +40,10 @@ COMMANDS = {
 }
 
 
-def load_model_and_tokenizer(model_path: str):
-    """
-    Load model and tokenizer from local path or Hub.
-
-    Loads the tokenizer via PreTrainedTokenizerFast.from_pretrained() so
-    the baked-in chat_template from train_tokenizer.py is available for
-    apply_chat_template(). Do not reconstruct from tokenizer.json directly
-    as that bypasses tokenizer_config.json and loses the chat template.
-
-    Always registers SLMConfig and SLMForCausalLM with AutoConfig and
-    AutoModelForCausalLM — required whether loading from a local path or
-    the HuggingFace Hub, since the custom model_type 'slm' is not known
-    to transformers out of the box.
-    """
-    import torch
-    from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedTokenizerFast
-    from model import SLMConfig, SLMForCausalLM
-
-    # Register unconditionally — required for both local and Hub loading
-    AutoConfig.register("slm", SLMConfig)
-    AutoModelForCausalLM.register(SLMConfig, SLMForCausalLM)
-
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path,
-        dtype=torch.bfloat16,
-        device_map="auto",
-    )
-    model.eval()
-
-    # Resolve tokenizer path — check for a tokenizer/ subdirectory first
-    # (local checkpoints saved by train_sft.py), then fall back to the
-    # model directory itself (Hub checkpoints and exported models).
-    local_path = Path(model_path)
-    if local_path.exists():
-        tokenizer_path = local_path / "tokenizer"
-        if not (tokenizer_path / "tokenizer_config.json").exists():
-            tokenizer_path = local_path
-    else:
-        tokenizer_path = model_path  # Hub ID — from_pretrained handles it
-
-    tokenizer = PreTrainedTokenizerFast.from_pretrained(str(tokenizer_path))
-
-    if not getattr(tokenizer, "chat_template", None):
-        raise ValueError(
-            f"Tokenizer at {tokenizer_path} has no chat_template. "
-            f"Retrain the tokenizer: python tokenizer/train_tokenizer.py"
-        )
-
-    return model, tokenizer
-
-
 def generate_response(
     model,
     tokenizer,
+    special_ids,
     messages: list[dict],
     max_new_tokens: int = 512,
     temperature: float = 0.7,
@@ -106,6 +55,10 @@ def generate_response(
 
     Uses tokenizer.apply_chat_template() to format the conversation —
     the same code path used during SFT and DPO training.
+
+    Passes an explicit attention_mask even though there's no padding
+    (single-prompt, single-batch) — avoids the transformers warning
+    and keeps the call-site robust if we ever extend to batched chat.
     """
     import torch
 
@@ -118,25 +71,27 @@ def generate_response(
         max_length=2048,
     ).to(model.device)
 
+    attention_mask = torch.ones_like(input_ids)
     in_len = input_ids.shape[1]
 
     with torch.no_grad():
         outputs = model.generate(
             input_ids,
+            attention_mask=attention_mask,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_p=top_p,
             do_sample=True,
             repetition_penalty=repetition_penalty,
-            pad_token_id=PAD_TOKEN_ID,
-            eos_token_id=[EOS_TOKEN_ID, ENDOFTURN_TOKEN_ID],
+            pad_token_id=special_ids.pad,
+            eos_token_id=special_ids.eos_list,
         )
 
     new_tokens = outputs[0][in_len:].tolist()
     # Strip trailing stop tokens if included in output
-    for stop_id in [ENDOFTURN_TOKEN_ID, EOS_TOKEN_ID]:
+    for stop_id in special_ids.eos_list:
         if stop_id in new_tokens:
-            new_tokens = new_tokens[:new_tokens.index(stop_id)]
+            new_tokens = new_tokens[: new_tokens.index(stop_id)]
 
     return tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
 
@@ -148,7 +103,21 @@ def print_help():
     print()
 
 
-def chat_loop(model, tokenizer, system_prompt: str, args):
+def _context_usage(tokenizer, messages: list[dict], model) -> tuple[int, int]:
+    """
+    Return (current_tokens, max_context_tokens) for the given conversation.
+    Used for the "conversation getting long" warning, measured against actual
+    model context rather than a hardcoded character count.
+    """
+    token_ids = tokenizer.apply_chat_template(
+        messages, tokenize=True, add_generation_prompt=False,
+    )
+    current = len(token_ids)
+    max_ctx = getattr(model.config, "max_position_embeddings", 2048)
+    return current, max_ctx
+
+
+def chat_loop(model, tokenizer, special_ids, system_prompt: str, args):
     """Main interactive chat loop."""
     messages = [{"role": "system", "content": system_prompt}]
 
@@ -191,7 +160,8 @@ def chat_loop(model, tokenizer, system_prompt: str, args):
                 print("\nConversation history:")
                 for msg in messages:
                     content = msg["content"][:100]
-                    print(f"  [{msg['role'].upper()}]: {content}{'...' if len(msg['content']) > 100 else ''}")
+                    print(f"  [{msg['role'].upper()}]: {content}"
+                          f"{'...' if len(msg['content']) > 100 else ''}")
                 print()
             elif cmd == "/help":
                 print_help()
@@ -204,7 +174,7 @@ def chat_loop(model, tokenizer, system_prompt: str, args):
         try:
             print("Assistant: ", end="", flush=True)
             response = generate_response(
-                model, tokenizer, messages,
+                model, tokenizer, special_ids, messages,
                 max_new_tokens=args.max_new_tokens,
                 temperature=args.temperature,
                 top_p=args.top_p,
@@ -218,9 +188,13 @@ def chat_loop(model, tokenizer, system_prompt: str, args):
 
         messages.append({"role": "assistant", "content": response})
 
-        total_chars = sum(len(m["content"]) for m in messages)
-        if total_chars > 6000:
-            print("[Note: conversation is getting long — consider /reset to start fresh]\n")
+        # Warn at 75% of context window, measured in actual tokens.
+        current, max_ctx = _context_usage(tokenizer, messages, model)
+        if current > 0.75 * max_ctx:
+            print(
+                f"[Note: conversation uses {current}/{max_ctx} tokens "
+                f"({100 * current / max_ctx:.0f}%) — consider /reset]\n"
+            )
 
 
 def main():
@@ -230,10 +204,17 @@ def main():
     parser.add_argument("--max-new-tokens", type=int,   default=512)
     parser.add_argument("--temperature",    type=float, default=0.7)
     parser.add_argument("--top-p",          type=float, default=0.9)
+    parser.add_argument(
+        "--dtype",
+        type=str,
+        default="bfloat16",
+        choices=["bfloat16", "float16", "float32"],
+        help="Model precision (default: bfloat16)",
+    )
     args = parser.parse_args()
 
-    model, tokenizer = load_model_and_tokenizer(args.model)
-    chat_loop(model, tokenizer, args.system, args)
+    model, tokenizer, special_ids = load_model_and_tokenizer(args.model, dtype=args.dtype)
+    chat_loop(model, tokenizer, special_ids, args.system, args)
 
 
 if __name__ == "__main__":

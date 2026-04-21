@@ -1,16 +1,14 @@
 # export
 
-Exports trained SLM checkpoints to the HuggingFace Hub. Registers the custom
-architecture with AutoConfig and AutoModelForCausalLM, generates a fully
-populated model card, and pushes weights, tokenizer, and config.
+Exports trained SLM checkpoints to the HuggingFace Hub. Registers the custom architecture with AutoConfig and AutoModelForCausalLM, generates a fully populated model card, and pushes weights, tokenizer, and config in a single commit.
 
 Three variants are exported per model size, each to a separate Hub repository:
 
 | Variant | Checkpoint | Hub repo | Description |
 |---|---|---|---|
-| `base` | `results/slm-{size}/final` | `tohio/slm-{size}` | Pretrained only |
-| `instruct` | `results/slm-{size}-chat-code/final` | `tohio/slm-{size}-instruct` | Chat + code SFT |
-| `chat` | `results/slm-{size}-dpo/final` | `tohio/slm-{size}-chat` | SFT + DPO aligned |
+| `base` | `results/slm-{size}/final` | `$HF_USERNAME/slm-{size}` | Pretrained only |
+| `instruct` | `results/slm-{size}-chat-code/final` | `$HF_USERNAME/slm-{size}-instruct` | Chat + code SFT |
+| `chat` | `results/slm-{size}-dpo/final` | `$HF_USERNAME/slm-{size}-chat` | SFT + DPO aligned |
 
 ---
 
@@ -19,11 +17,17 @@ Three variants are exported per model size, each to a separate Hub repository:
 ```bash
 # Set HuggingFace credentials in .env
 HF_TOKEN=hf_...
-HF_USERNAME=tohio
+HF_USERNAME=<your-hub-username>    # required — export aborts if unset
 
-# Run evaluation before export — eval results are embedded in the model card
-make eval SIZE=125m
+# Run evaluation before export — each variant's checkpoint is evaluated
+# separately, and the model card for each variant embeds its own scores.
+python eval/eval.py --model results/slm-125m/final
+python eval/eval.py --model results/slm-125m-chat-code/final
+python eval/eval.py --model results/slm-125m-dpo/final
+# Or: make eval-all SIZE=125m
 ```
+
+`HF_USERNAME` has no default — export fails loudly if it's unset, to prevent a fork from accidentally writing links that point at someone else's Hub namespace.
 
 ---
 
@@ -38,7 +42,7 @@ make export-base     SIZE=125m
 make export-instruct SIZE=125m
 make export-chat     SIZE=125m
 
-# Dry run — validate without pushing
+# Dry run — validate and preview the model card without pushing
 python export/export.py --size 125m --variant chat --dry-run
 
 # Private repositories
@@ -52,42 +56,47 @@ python export/export.py --size 125m --variant chat --model path/to/checkpoint
 
 ## What Gets Pushed
 
+Pushed in a single commit per variant:
+
 - `model.safetensors` — model weights in safetensors format
 - `config.json` — SLMConfig with architecture details
-- `tokenizer.json` — trained BPE tokenizer
-- `tokenizer_config.json` — tokenizer metadata including chat template
-- `README.md` — auto-generated model card
+- `tokenizer.json`, `tokenizer_config.json` — trained BPE tokenizer including the baked-in chat template
+- `README.md` — auto-generated model card (written to the checkpoint directory first, then included in the same commit as the weights)
 
 ---
 
 ## Model Card
 
-The model card is generated automatically at export time and includes:
+Generated automatically at export time. Every variant gets:
 
 - **Architecture table** — component choices and rationale
-- **Training table** — dataset names, Hub links, and sizes per stage (55% CC / 25% Wikipedia / 20% Python)
+- **Training section**
+  - Pretraining corpus table: all 10 sources with their percentage share, sourced from `model/data_mix.py` (single source of truth shared with the curator and notebooks)
+  - Fine-tuning tables for the `instruct` and `chat` variants, listing SFT and (for chat) DPO datasets
 - **Parameter count** — actual value from the loaded checkpoint
-- **Token targets** — 5B (125m), 15B (350m), 30B (1b)
-- **Benchmark results** — populated from the most recent `make eval` run (chat variant only)
+- **Token targets** — sourced from `model/data_mix.py` (5B/15B/30B for 125m/350m/1b)
+- **Benchmark results** — populated from the most recent `eval.py` run for **this variant's checkpoint**. `base` shows base-model scores, `instruct` shows SFT scores, `chat` shows post-DPO scores
 - **Hardware** — training hardware used
 - **Limitations** — scale, hallucination, safety, language, and code coverage
-- **Usage example** — copy-paste ready code with `apply_chat_template`
+- **Usage example** — copy-paste ready code using `apply_chat_template`
 
-If `make eval` has not been run before `make export-chat`, the benchmark table
-will contain a placeholder. Run `make eval SIZE={size}` first.
+If a variant has no eval results yet, its benchmark table is rendered with a placeholder ("_Benchmark results will be added after evaluation._") rather than a stale table. A warning is logged during export.
+
+---
+
+## Pre-push Validation
+
+Before any Hub push, `export.py` runs a short generation and asserts the model produced at least one non-stop token. This catches checkpoints that silently break (NaN weights, broken tied-weight restore, corrupted save) and would otherwise be published to the Hub. The check takes a few seconds and uses the real tokenizer's special-token IDs resolved via `inference.utils`.
+
+A failing validation aborts the export with a clear error — nothing reaches the Hub.
 
 ---
 
 ## Chat Template
 
-The exported tokenizer includes the baked-in Jinja2 chat template from
-`tokenizer/train_tokenizer.py`. `export.py` loads the tokenizer via
-`PreTrainedTokenizerFast.from_pretrained()` — it never reconstructs or
-overwrites the template. The template on the Hub is always identical to
-the one the model was trained with.
+The exported tokenizer includes the baked-in Jinja2 chat template from `tokenizer/train_tokenizer.py`. `export.py` loads the tokenizer via `PreTrainedTokenizerFast.from_pretrained()` — it never reconstructs or overwrites the template. The template on the Hub is always identical to the one the model was trained with.
 
-Export will raise an error if the tokenizer has no `chat_template`, preventing
-a model with a broken chat format from being pushed to the Hub.
+Export will raise an error if the tokenizer has no `chat_template`, preventing a model with a broken chat format from being pushed.
 
 ---
 
@@ -98,8 +107,8 @@ Models are loadable anywhere with the standard HuggingFace API:
 ```python
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-model = AutoModelForCausalLM.from_pretrained("tohio/slm-125m-chat")
-tokenizer = AutoTokenizer.from_pretrained("tohio/slm-125m-chat")
+model = AutoModelForCausalLM.from_pretrained("<user>/slm-125m-chat")
+tokenizer = AutoTokenizer.from_pretrained("<user>/slm-125m-chat")
 
 messages = [
     {"role": "system", "content": "You are a helpful assistant."},
@@ -114,13 +123,3 @@ inputs = tokenizer.apply_chat_template(
 output = model.generate(inputs, max_new_tokens=200, do_sample=True, temperature=0.7)
 print(tokenizer.decode(output[0], skip_special_tokens=True))
 ```
-
----
-
-## Hub Repositories
-
-| Size | Base | Instruct | Chat |
-|---|---|---|---|
-| 125M | [tohio/slm-125m](https://huggingface.co/tohio/slm-125m) | [tohio/slm-125m-instruct](https://huggingface.co/tohio/slm-125m-instruct) | [tohio/slm-125m-chat](https://huggingface.co/tohio/slm-125m-chat) |
-| 350M | [tohio/slm-350m](https://huggingface.co/tohio/slm-350m) | [tohio/slm-350m-instruct](https://huggingface.co/tohio/slm-350m-instruct) | [tohio/slm-350m-chat](https://huggingface.co/tohio/slm-350m-chat) |
-| 1B | [tohio/slm-1b](https://huggingface.co/tohio/slm-1b) | [tohio/slm-1b-instruct](https://huggingface.co/tohio/slm-1b-instruct) | [tohio/slm-1b-chat](https://huggingface.co/tohio/slm-1b-chat) |

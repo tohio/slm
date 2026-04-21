@@ -25,6 +25,15 @@ Trains a domain-specific BPE tokenizer on the validated dataset using HuggingFac
 | 14 | `<\|context\|>` | RAG context start |
 | 15 | `<\|endofcontext\|>` | RAG context end |
 
+### Token ID source of truth
+
+There are two ways to reference these IDs in code, and they have different rules:
+
+- **Training-time code** (`tokenizer/`, `pretrain/`, `finetune/`, `alignment/`, tests) may import integer constants directly from `tokenizer.train_tokenizer` — `BOS_ID`, `EOS_ID`, `PAD_ID`, `UNK_ID` and the chat/code/tool/reasoning/context IDs. These constants are authoritative because the trainer asserts the tokens land at these IDs at training time, and an internal consistency check in `train_tokenizer.py` prevents the constants and `SPECIAL_TOKENS` list from drifting apart.
+- **Runtime code** (`inference/`, `serve/`) does **not** import these constants. Instead it resolves IDs via `tokenizer.convert_tokens_to_ids("<BOS>")` on the loaded tokenizer at process start (see `inference/utils.py::resolve_special_token_ids`). This means that if a tokenizer is ever re-trained with a different special-token layout, inference cannot silently mis-map IDs — a changed layout produces a lookup failure at startup, not wrong outputs.
+
+This split is intentional. Training code needs compile-time IDs for data-pipeline pre-allocation and loss masking; runtime code prefers late binding against whatever tokenizer the checkpoint ships with.
+
 ---
 
 ## Usage
@@ -150,13 +159,15 @@ Automatic injection via `TemplateProcessing` was intentionally removed. It corru
 
 ```
 data/tokenizer/
-├── slm_tokenizer.json        full tokenizer (HF tokenizers format)
-├── tokenizer.json            HuggingFace PreTrainedTokenizerFast
-├── tokenizer_config.json     HF tokenizer config — includes chat_template
-├── vocab.json                vocabulary (token → ID)
-├── merges.txt                BPE merge rules
-└── special_tokens.json       special token ID mapping
+├── slm_tokenizer.json        raw tokenizers-library format (loaded via Tokenizer.from_file)
+├── tokenizer.json            identical tokenizer data in the HuggingFace layout
+├── tokenizer_config.json     HF tokenizer config — includes chat_template, special tokens map
+├── vocab.json                vocabulary (token → ID) — inspection only
+├── merges.txt                BPE merge rules — inspection only
+└── special_tokens.json       special token ID mapping — inspection only
 ```
+
+`slm_tokenizer.json` and `tokenizer.json` describe the same tokenizer. The first is written by the raw `tokenizers` library (`Tokenizer.save(...)`) and is what `Tokenizer.from_file(...)` expects. The second is written by `PreTrainedTokenizerFast.save_pretrained(...)` alongside `tokenizer_config.json` so that `PreTrainedTokenizerFast.from_pretrained("data/tokenizer")` works. All downstream training, SFT, DPO, and inference code loads via `PreTrainedTokenizerFast.from_pretrained(...)`. The raw `slm_tokenizer.json` is kept for low-level tokenizer inspection in `test_tokenizer.py` and for cases where the raw library is preferred.
 
 ---
 
@@ -175,3 +186,5 @@ data/tokenizer/
 **Why train on validated data?** The tokenizer vocabulary reflects the frequency distribution of the training corpus. Training on validated (higher quality) data ensures the vocabulary is optimized for the actual pretraining distribution, not the noisier raw web data.
 
 **Why bake in special tokens now?** Adding special tokens after training requires resizing the embedding matrix and the LM head — the new token embeddings start randomly initialized and the model must relearn their semantics. Baking them in at tokenizer training time means they're part of the vocabulary from day one.
+
+**Why the split between static ID constants and runtime `convert_tokens_to_ids`?** Training code is coupled to a specific tokenizer layout by design — the data pipeline preallocates with `BOS_ID` and `EOS_ID`, `SFTTrainer` filters on `ENDOFTURN_ID`, and tests pre-assert the full layout. Runtime code is deliberately decoupled so a re-trained tokenizer cannot silently mis-map IDs at inference — `convert_tokens_to_ids("<BOS>")` fails loudly if `<BOS>` is not in the vocab, while a stale `BOS_ID = 2` import would happily produce wrong outputs.

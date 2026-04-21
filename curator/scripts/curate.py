@@ -15,35 +15,25 @@ Pipeline:
     4. Blend sources to target token ratios (with cap-and-redistribute)
     5. Upload to S3
 
-Data mix (scale-invariant):
-    common_crawl   10%    unlimited (time-bound)
-    fineweb        47.5%  15T supply (also overflow sink)
-    wikipedia      10%    ~3.7B supply
-    pg19           2.5%   ~2.9B supply
-    pes2o          5%     ~42B supply
-    open_web_math  10%    ~14.7B supply
-    stackexchange  5%     ~15B supply
-    code           10%    (see code sub-mix below)
-
-Code sub-mix (percentages of the 10% code share):
-    stack_v2       50%    (capped — bulk code, 4 langs)
-    codesearchnet  35%    (curated function-level, 6 langs)
-    stack_smol     10%    (raw code, 30 langs)
-    jupyter        4%     (notebook cells)
-    conala         1%     (NL-to-code pairs)
+Data mix + token targets are defined in config/data_mix.py and imported
+here. Do not add local copies of the source list, percentages, token
+targets, CHARS_PER_TOKEN, or CC_CHARS_PER_SEGMENT — those values are
+referenced by export.py, notebooks, and tests, and drift between copies
+is what this refactor exists to prevent.
 
 Cap-and-redistribute:
     Finite sources (Wikipedia, pg19, etc.) may supply less than their
     character budget allows at large scales. Each source writes up to
     its budget or until its supply is exhausted, whichever comes first.
-    The total shortfall is added to FineWeb's budget at the end, which
-    acts as the overflow sink. FineWeb has effectively unlimited supply
-    (15T tokens) so this always closes the gap.
+    The total shortfall is added to OVERFLOW_SINK's budget at the end,
+    which acts as the sink. FineWeb (the default sink) has effectively
+    unlimited supply (15T tokens) so this always closes the gap.
 
-Blend stage improvements:
+Blend stage:
     - Pass 1 (parallel): stream each source to a staging file, recording
                          chars written vs target.
-    - Pass 2 (sequential): write FineWeb overflow to cover deficit.
+    - Pass 2 (sequential): write overflow source's extra content to cover
+                           deficit.
     - Pass 3 (shuffled write): if total size fits in RAM budget, one-shot
                                in-memory shuffle; otherwise chunked disk
                                shuffle.
@@ -73,7 +63,25 @@ load_dotenv()
 # Add repo root to path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from curator.constants import CHARS_PER_TOKEN, CC_CHARS_PER_SEGMENT
+# ── Shared config (single source of truth) ─────────────────────────────────────
+# DATA_MIX, CODE_SUBMIX, TARGET_CONFIGS, source lists, and all the locked
+# curator constants live in config/data_mix.py. Nothing in this file
+# redeclares them.
+from config import (
+    DATA_MIX,
+    CODE_SUBMIX,
+    OVERFLOW_SINK,
+    NON_CODE_SOURCES,
+    CODE_SOURCES,
+    ALL_SOURCES,
+    TARGET_CONFIGS,
+    CHARS_PER_TOKEN,
+    CC_CHARS_PER_SEGMENT,
+    SHUFFLE_RAM_BUDGET_GB,
+    PRETRAIN_VAL_FRACTION,
+    MINI_OVERRIDES,
+)
+
 from curator.filters.dedup import Deduplicator
 from curator.filters.quality import QualityFilter
 
@@ -109,85 +117,16 @@ def default_workers() -> int:
     return max(1, cpu - 2)
 
 
-# ── Target configurations ──────────────────────────────────────────────────────
+# ── Local share lookups ────────────────────────────────────────────────────────
 #
-# cc_segments is computed at runtime from total_tokens × CC_share × CHARS_PER_TOKEN
-# / CC_CHARS_PER_SEGMENT — see compute_cc_segments() below. The empirical
-# chars-per-segment value (17M) comes from the 125m run; the previous hardcoded
-# values assumed 24M which caused the 125m run to undershoot its 5B target.
-
-TARGET_CONFIGS = {
-    "mini": {
-        "total_tokens":  1_000_000,
-        "cc_crawls":     ["CC-MAIN-2024-10"],
-    },
-    "125m": {
-        "total_tokens":  5_000_000_000,
-        "cc_crawls":     ["CC-MAIN-2024-10"],
-    },
-    "350m": {
-        "total_tokens":  15_000_000_000,
-        "cc_crawls":     ["CC-MAIN-2024-10", "CC-MAIN-2023-50"],
-    },
-    "1b": {
-        "total_tokens":  30_000_000_000,
-        "cc_crawls":     ["CC-MAIN-2024-10", "CC-MAIN-2023-50", "CC-MAIN-2023-40"],
-    },
+# DATA_MIX stores percentages as floats (10.0, 47.5 ...) for display. The
+# curator's math wants shares as fractions (0.10, 0.475 ...). Derive the
+# fractional views once here.
+_TOP_LEVEL_SHARE: dict[str, float] = {
+    name: entry["pct"] / 100.0 for name, entry in DATA_MIX.items()
 }
-
-# Top-level source mix — scale-invariant percentages. All sizes use these.
-SOURCE_MIX: dict[str, float] = {
-    "common_crawl":   0.10,
-    "fineweb":        0.475,
-    "wikipedia":      0.10,
-    "pg19":           0.025,
-    "pes2o":          0.05,
-    "open_web_math":  0.10,
-    "stackexchange":  0.05,
-    "code":           0.10,  # dispatched across CODE_SUB_MIX
-}
-
-# Code sub-mix — percentages of the 10% code share (not of total).
-# stack_v2 capped at 50% so raw bulk code doesn't dominate the curated
-# sources.
-CODE_SUB_MIX: dict[str, float] = {
-    "stack_v2":       0.50,
-    "codesearchnet":  0.35,
-    "stack_smol":     0.10,
-    "jupyter":        0.04,
-    "conala":         0.01,
-}
-
-# FineWeb is the overflow sink. When finite sources (Wikipedia, pg19, etc.)
-# can't fill their character budget, the deficit is added to FineWeb's
-# budget at the end of staging.
-OVERFLOW_SINK = "fineweb"
-
-# All non-code source names for iteration. The "code" entry in SOURCE_MIX
-# is a share; the actual source names for iteration come from CODE_SUB_MIX.
-NON_CODE_SOURCES: list[str] = [s for s in SOURCE_MIX if s != "code"]
-CODE_SOURCES: list[str] = list(CODE_SUB_MIX.keys())
-ALL_SOURCES: list[str] = NON_CODE_SOURCES + CODE_SOURCES
-
-# ── Mini overrides ─────────────────────────────────────────────────────────────
-#
-# Mini run exercises every source at small scale to validate the pipeline
-# end-to-end before committing to a full run. Caps are rough per-source
-# proportions of a 1M-token total.
-
-MINI_OVERRIDES: dict[str, int] = {
-    "common_crawl":  2,        # segments, not docs
-    "fineweb":       10_000,
-    "wikipedia":     5_000,
-    "pg19":          50,
-    "pes2o":         2_000,
-    "open_web_math": 3_000,
-    "stackexchange": 2_000,
-    "codesearchnet": 5_000,
-    "stack_smol":    2_000,
-    "stack_v2":      3_000,
-    "jupyter":       500,
-    "conala":        500,
+_CODE_SUB_SHARE: dict[str, float] = {
+    name: entry["pct"] / 100.0 for name, entry in CODE_SUBMIX.items()
 }
 
 # Data directories
@@ -196,23 +135,6 @@ RAW_DIR      = DATA_DIR / "raw"
 FILTERED_DIR = DATA_DIR / "filtered"
 CURATED_DIR  = DATA_DIR / "curated"
 
-# In-memory shuffle fast path — if the merged corpus fits in this many GB,
-# shuffle in one go instead of the chunked disk algorithm.
-#
-# Default is intentionally conservative: Python list objects carry ~5× the
-# on-disk size in RAM due to per-object overhead. A 12 GB disk-size staging
-# set occupies roughly 60 GB of process memory once loaded. On a 64 GB
-# instance this still fits; on a 256 GB instance we have lots of headroom.
-SHUFFLE_RAM_BUDGET_GB = float(os.environ.get("SHUFFLE_RAM_BUDGET_GB", "12"))
-
-# Fraction of blended documents to hold out for validation. The split happens
-# at the end of the blend stage (after shuffle), so val is a uniform random
-# sample from the same distribution as train. Fixed at 0.5% — at 125m (~5M
-# docs) this gives ~25k val docs, plenty for stable perplexity measurement;
-# at 1b (~30M docs) it gives ~150k, which is generous. Per-target override
-# available via the TARGET_CONFIGS val_fraction key.
-VAL_FRACTION = 0.005
-
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -220,11 +142,11 @@ def compute_cc_segments(total_tokens: int) -> int:
     """
     Segments of Common Crawl needed to hit CC's character share.
 
-    Computed from: total_tokens × SOURCE_MIX[cc] × CHARS_PER_TOKEN bytes of
-    text, divided by CC_CHARS_PER_SEGMENT bytes produced per segment after
-    trafilatura + language filtering.
+    Computed from: total_tokens × DATA_MIX[common_crawl] share × CHARS_PER_TOKEN
+    bytes of text, divided by CC_CHARS_PER_SEGMENT bytes produced per segment
+    after trafilatura + language filtering.
     """
-    cc_share = SOURCE_MIX["common_crawl"]
+    cc_share = _TOP_LEVEL_SHARE["common_crawl"]
     target_chars = int(total_tokens * cc_share * CHARS_PER_TOKEN)
     return max(1, math.ceil(target_chars / CC_CHARS_PER_SEGMENT))
 
@@ -233,18 +155,18 @@ def compute_source_char_targets(total_tokens: int) -> dict[str, int]:
     """
     Compute the character budget for each source from the target tokens.
 
-    Returns a dict mapping each source name (all 12: 7 non-code + 5 code)
+    Returns a dict mapping each concrete source name (7 non-code + 5 code)
     to its target character count. Code sources get their share of the
-    10% code budget according to CODE_SUB_MIX.
+    10% code budget according to CODE_SUBMIX.
     """
     targets: dict[str, int] = {}
-    for source, share in SOURCE_MIX.items():
+    for source, share in _TOP_LEVEL_SHARE.items():
         if source == "code":
             continue
         targets[source] = int(total_tokens * share * CHARS_PER_TOKEN)
 
-    code_total_chars = int(total_tokens * SOURCE_MIX["code"] * CHARS_PER_TOKEN)
-    for code_source, sub_share in CODE_SUB_MIX.items():
+    code_total_chars = int(total_tokens * _TOP_LEVEL_SHARE["code"] * CHARS_PER_TOKEN)
+    for code_source, sub_share in _CODE_SUB_SHARE.items():
         targets[code_source] = int(code_total_chars * sub_share)
 
     return targets
@@ -324,7 +246,7 @@ def _build_source(
 
 
 def stage_download(target: str, mini: bool = False, workers: int | None = None) -> None:
-    """Download every source in SOURCE_MIX + CODE_SUB_MIX."""
+    """Download every source in DATA_MIX + CODE_SUBMIX."""
     n_workers = workers or default_workers()
     log.info(f"=== Stage 1: Download (target={target}, mini={mini}) ===")
 
@@ -333,7 +255,7 @@ def stage_download(target: str, mini: bool = False, workers: int | None = None) 
         log.info(
             f"Common Crawl: computed {cc_segments} segments from "
             f"{TARGET_CONFIGS[target]['total_tokens']:,} tokens × "
-            f"{SOURCE_MIX['common_crawl']:.2%} × {CHARS_PER_TOKEN} chars/tok "
+            f"{_TOP_LEVEL_SHARE['common_crawl']:.2%} × {CHARS_PER_TOKEN} chars/tok "
             f"÷ {CC_CHARS_PER_SEGMENT:,} chars/segment"
         )
 
@@ -464,7 +386,7 @@ def _write_staging(args: tuple) -> tuple[str, int, int]:
 
     Writes until the source's character target is hit OR its supply is
     exhausted (whichever comes first). Returns how much was actually
-    written so the main process can compute deficits for FineWeb overflow.
+    written so the main process can compute deficits for overflow.
 
     Returns:
         (source, docs_written, chars_written)
@@ -495,16 +417,14 @@ def _write_staging(args: tuple) -> tuple[str, int, int]:
     return source, docs, chars
 
 
-def _append_overflow(
-    args: tuple,
-) -> tuple[int, int]:
+def _append_overflow(args: tuple) -> tuple[int, int]:
     """
-    Append FineWeb docs to its staging file to cover the total deficit.
+    Append overflow-source docs to its staging file to cover the total deficit.
     Runs in a subprocess.
 
-    Reads FineWeb deduped shards from where the initial staging pass left
-    off (determined by counting chars already in the staging file) and
-    appends until `overflow_chars` additional chars have been written.
+    Reads OVERFLOW_SINK deduped shards from where the initial staging pass
+    left off (determined by counting chars already in the staging file)
+    and appends until `overflow_chars` additional chars have been written.
 
     Returns: (docs_appended, chars_appended)
     """
@@ -528,7 +448,6 @@ def _append_overflow(
     chars_seen = 0
     chars_appended = 0
     docs_appended = 0
-    target_chars = already_chars + overflow_chars
 
     with open(staging_path, "ab", buffering=8 * 1024 * 1024) as fout:
         for shard in shards:
@@ -704,8 +623,8 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
                        its character target or its supply, whichever is
                        smaller. Deficits are recorded per source.
 
-    Pass 2 (sequential): FineWeb appends extra content to cover the total
-                         deficit from all supply-constrained sources.
+    Pass 2 (sequential): OVERFLOW_SINK appends extra content to cover the
+                         total deficit from all supply-constrained sources.
 
     Pass 3 (shuffle + split): single-pass shuffle followed by a clean
                               (1 - val_fraction) / val_fraction split.
@@ -720,7 +639,7 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
     log.info(f"=== Stage 4: Blend (target={target}) ===")
     cfg = TARGET_CONFIGS[target]
     total_tokens = cfg["total_tokens"]
-    val_fraction = cfg.get("val_fraction", VAL_FRACTION)
+    val_fraction = cfg.get("val_fraction", PRETRAIN_VAL_FRACTION)
 
     CURATED_DIR.mkdir(parents=True, exist_ok=True)
     train_path = CURATED_DIR / "train.jsonl"
@@ -791,14 +710,14 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
                 f"(target {target_chars[source] / 1e9:.3f}B){flag}"
             )
 
-    # ── Pass 2: FineWeb overflow ───────────────────────────────────────────────
+    # ── Pass 2: overflow ───────────────────────────────────────────────────────
     total_deficit = sum(s["deficit"] for s in source_stats.values())
     overflow_chars = 0
     overflow_docs = 0
 
     if total_deficit > 0 and OVERFLOW_SINK in staging_paths:
         log.info(
-            f"Pass 2/3: FineWeb overflow — covering "
+            f"Pass 2/3: {OVERFLOW_SINK} overflow — covering "
             f"{total_deficit / 1e9:.3f}B character deficit..."
         )
         src_dir = source_dirs[OVERFLOW_SINK]
@@ -811,12 +730,12 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
         source_stats[OVERFLOW_SINK]["overflow_docs"] = overflow_docs
         source_stats[OVERFLOW_SINK]["overflow_chars"] = overflow_chars
         log.info(
-            f"  FineWeb overflow: +{overflow_docs:,} docs, "
+            f"  {OVERFLOW_SINK} overflow: +{overflow_docs:,} docs, "
             f"+{overflow_chars / 1e9:.3f}B chars"
         )
     elif total_deficit > 0:
         log.warning(
-            f"Deficit of {total_deficit / 1e9:.3f}B chars but FineWeb "
+            f"Deficit of {total_deficit / 1e9:.3f}B chars but {OVERFLOW_SINK} "
             f"unavailable — total token count will be below target"
         )
 

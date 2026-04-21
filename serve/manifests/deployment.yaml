@@ -22,7 +22,15 @@ spec:
         - name: vllm
           # Pin to a specific version — never use :latest in production.
           # Check https://github.com/vllm-project/vllm/releases for latest stable.
-          image: vllm/vllm-openai:v0.6.3
+          #
+          # v0.19.0 (Apr 2026): first release line with full transformers-5
+          # compatibility, which our SLM codebase depends on (tie_weights
+          # kwargs, dict-form _tied_weights_keys, DynamicCache.layers API,
+          # cache_position in prepare_inputs_for_generation).
+          #
+          # Preferred over the v0.19.1 patch release for stability — v0.19.1
+          # bundles a transformers 5.5.4 bump that is newer than our pin.
+          image: vllm/vllm-openai:v0.19.0
           args:
             - --model
             - tohio/slm-125m
@@ -32,15 +40,24 @@ spec:
             - "8000"
             - --dtype
             - bfloat16
-            - --max-model-len
-            - "2048"
+            # --max-model-len intentionally omitted — vLLM introspects the
+            # max context length from the model's config.json. Hardcoding
+            # 2048 here silently truncates the 1B variant's 4096 context;
+            # this deployment serves 125m (2048 native) but the template
+            # should be identical across variants and rely on the config.
             - --gpu-memory-utilization
-            - "0.90"
+            # 0.85 leaves ~15% of HBM as scratch for KV cache growth and
+            # CUDA graph memory. 0.90 is aggressive on smaller GPUs —
+            # ~2.4GB scratch on a 24GB card is tight once multiple
+            # concurrent sequences fill the KV cache.
+            - "0.85"
             - --served-model-name
             - slm-125m
             # --trust-remote-code is required because SLMConfig and SLMForCausalLM
             # are custom classes not known to the base transformers library.
-            # The model is loaded from our own Hub repo — not arbitrary third-party code.
+            # The model is loaded from our own Hub repo, which bundles the
+            # architecture as slm_arch/ alongside the weights — see
+            # export/export.py and model/config.py::auto_map.
             - --trust-remote-code
           ports:
             - containerPort: 8000

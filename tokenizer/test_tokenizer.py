@@ -32,6 +32,7 @@ log = logging.getLogger(__name__)
 DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
 
 from tokenizer.train_tokenizer import SPECIAL_TOKENS, BOS_ID, EOS_ID, PAD_ID, UNK_ID
+from config import CODE_SOURCES
 
 
 def load_tokenizer(tokenizer_dir: Path):
@@ -80,7 +81,9 @@ def test_roundtrip(tokenizer) -> bool:
         "The quick brown fox jumps over the lazy dog.",
         "def fibonacci(n):\n    if n <= 1:\n        return n\n    return fibonacci(n-1) + fibonacci(n-2)",
         "Machine learning is a subset of artificial intelligence.",
-        "こんにちは世界",  # Japanese — should still encode via byte fallback
+        # Byte-level BPE encodes every UTF-8 byte natively — this isn't a
+        # fallback path, it's how all non-ASCII characters are represented.
+        "こんにちは世界",
         "1 + 1 = 2",
         "   ",  # whitespace
     ]
@@ -301,7 +304,10 @@ def main():
     roundtrip_ok = test_roundtrip(tokenizer)
     no_auto_bos_eos_ok = test_no_auto_bos_eos(tokenizer)
 
-    # Load sample texts for fertility
+    # Load sample texts for fertility — natural language only. Validated
+    # records are tagged with their source (one of the 10 sources defined
+    # in config/data_mix.py); filter out code sources so fertility reflects
+    # English rather than Python/notebooks.
     sample_texts = []
     if args.sample_data.exists():
         with open(args.sample_data) as f:
@@ -309,8 +315,9 @@ def main():
                 if i >= 1000:
                     break
                 record = json.loads(line)
-                if record.get("source") != "code":  # test on natural language
-                    sample_texts.append(record.get("text", ""))
+                if record.get("source") in CODE_SOURCES:
+                    continue
+                sample_texts.append(record.get("text", ""))
     else:
         sample_texts = ["The quick brown fox jumps over the lazy dog."] * 100
 

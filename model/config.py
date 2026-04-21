@@ -14,6 +14,16 @@ Architecture: dense decoder-only transformer
     - Grouped Query Attention (GQA)
     - No bias
     - Tied input/output embeddings
+
+Remote-code loading:
+    auto_map is set so that Hub-pushed checkpoints can be loaded on any
+    machine without a local install of this package, via:
+        AutoModelForCausalLM.from_pretrained(
+            "tohio/slm-125m", trust_remote_code=True,
+        )
+    For this to work, export/export.py bundles the model source into the
+    Hub repo as a subpackage named `slm_arch` — the auto_map targets below
+    reference that bundled copy, not the training-time `model` package.
 """
 
 from transformers import PretrainedConfig
@@ -84,6 +94,20 @@ class SLMConfig(PretrainedConfig):
     """
 
     model_type = "slm"
+
+    # auto_map is serialised into the pushed config.json so that
+    # AutoConfig / AutoModelForCausalLM with trust_remote_code=True can
+    # locate our classes inside the Hub repo.
+    #
+    # Targets reference `slm_arch.*`, NOT `model.*`, because export.py
+    # bundles the model source into the Hub repo under that subpackage
+    # name to avoid colliding with the generic name `model` on sys.path
+    # where third-party `trust_remote_code` would load it.
+    auto_map = {
+        "AutoConfig": "slm_arch.config.SLMConfig",
+        "AutoModel": "slm_arch.model.SLMModel",
+        "AutoModelForCausalLM": "slm_arch.model.SLMForCausalLM",
+    }
 
     def __init__(
         self,

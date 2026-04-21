@@ -8,9 +8,19 @@ spec:
     - ReadWriteOnce
   resources:
     requests:
-      # 125m: ~500MB, 350m: ~1.5GB, 1b: ~4GB
-      # 20Gi gives comfortable headroom for all three variants plus tokenizer cache
-      storage: 20Gi
+      # Weights per variant (bf16, parameters only — tokenizer adds ~5MB each):
+      #   125m base/instruct/chat:  ~250MB each  -> ~750MB
+      #   350m base/instruct/chat:  ~700MB each  -> ~2.1GB
+      #   1b base/instruct/chat:    ~2GB each    -> ~6GB
+      # Plus bundled slm_arch/ remote code, tokenizer, README per repo —
+      # negligible. HuggingFace also caches intermediate download blobs
+      # (refs/, snapshots/, blobs/) which roughly double the on-disk size.
+      #
+      # All 9 variants cached: ~9GB on disk -> ~18GB with HF cache overhead.
+      # 40Gi gives headroom for the ~5GB scratch HF uses during downloads,
+      # plus growth for future experiments without re-resizing the PVC
+      # (which requires StorageClass support for volume expansion).
+      storage: 40Gi
   # Remove storageClassName to use the cluster default storage class.
   # Set explicitly if your cluster requires a specific class (e.g. gp3, ssd).
   # storageClassName: gp3

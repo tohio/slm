@@ -7,34 +7,43 @@ Registers the custom SLMConfig and SLMForCausalLM with AutoConfig and
 AutoModelForCausalLM so the model can be loaded anywhere with:
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
-    model = AutoModelForCausalLM.from_pretrained("tohio/slm-125m")
+    model = AutoModelForCausalLM.from_pretrained(
+        "<username>/slm-125m", trust_remote_code=True,
+    )
 
 Three variants are exported per model size:
 
-    Variant     Checkpoint                         Hub repo
-    --------    ---------                          --------
-    base        results/slm-{size}/final           tohio/slm-{size}
-    instruct    results/slm-{size}-chat-code/final tohio/slm-{size}-instruct
-    chat        results/slm-{size}-dpo/final        tohio/slm-{size}-chat
+    Variant     Checkpoint                                    Hub repo
+    --------    ----------                                    --------
+    base        results/slm-{size}/final                      <user>/slm-{size}
+    instruct    results/slm-{size}-chat-code/final            <user>/slm-{size}-instruct
+    chat        results/slm-{size}-dpo/final                  <user>/slm-{size}-chat
 
-Pushes:
-    - Model weights (model.safetensors)
-    - Config (config.json)
-    - Tokenizer files (including chat_template from train_tokenizer.py)
-    - Model card (README.md) — populated with actual parameter count,
-      eval benchmark results, training details, and limitations
+Data mix and token targets are imported from config/data_mix.py — the
+single source of truth shared with curator, notebooks, and tests.
 
-Usage:
-    python export/export.py --size 125m --variant base
-    python export/export.py --size 125m --variant instruct
-    python export/export.py --size 125m --variant chat
-    python export/export.py --size 125m --variant chat --dry-run
+Eval results come from the most recent JSON written by eval/eval.py for
+the matching checkpoint. Each variant is evaluated against its own
+checkpoint directory, so the Hub tables reflect real scores for that
+specific variant.
+
+Remote-code bundling:
+    SLMConfig declares auto_map pointing at a `slm_arch` subpackage. The
+    push below copies the entire local `model/` folder into the checkpoint
+    staging dir as `slm_arch/` before uploading, so that loaders calling
+    trust_remote_code=True find SLMConfig / SLMModel / SLMForCausalLM on
+    the Hub without needing this repo installed locally.
+
+    We use `slm_arch` as the bundled package name rather than `model`
+    because `model` is too generic to collide-safely on sys.path when
+    transformers dynamically imports remote code.
 """
 
 import argparse
 import json
 import logging
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -44,6 +53,9 @@ load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from eval.eval import metric_score                                 # noqa: E402
+from config import DATA_MIX, dataset_link, token_target_display    # noqa: E402
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -51,62 +63,68 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-HF_USERNAME = os.environ.get("HF_USERNAME", "tohio")
+HF_USERNAME = os.environ.get("HF_USERNAME")
 HF_TOKEN    = os.environ.get("HF_TOKEN", "")
 RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", "results"))
 
-# Import CHAT_TEMPLATE from train_tokenizer — single source of truth.
-# Do not duplicate or redefine the template here. The exported tokenizer
-# must use exactly the same template the model was trained with.
-from tokenizer.train_tokenizer import CHAT_TEMPLATE
+REPO_ROOT   = Path(__file__).resolve().parents[1]
+MODEL_PKG_DIR = REPO_ROOT / "model"
 
-# ── Variant definitions ────────────────────────────────────────────────────────
+# Name of the subpackage bundled into Hub repos. Must match the prefix
+# in SLMConfig.auto_map. If you change this, change both places.
+BUNDLED_PKG_NAME = "slm_arch"
 
-VARIANTS = {
+# Source files copied from model/ into the Hub repo's slm_arch/ subpackage.
+# Listed explicitly rather than globbed so that auxiliary files (tests,
+# scratch files, __pycache__) don't accidentally get pushed to the Hub.
+BUNDLED_SOURCE_FILES = [
+    "config.py",
+    "model.py",
+    "block.py",
+    "attention.py",
+    "mlp.py",
+    "norm.py",
+]
+
+
+VARIANTS: dict[str, dict] = {
     "base": {
-        "checkpoint": lambda size: RESULTS_DIR / f"slm-{size}" / "final",
-        "hub_suffix":   "",           # tohio/slm-125m
-        "description":  "base pretrained model",
-        "pipeline_tag": "text-generation",
+        "checkpoint":    lambda size: RESULTS_DIR / f"slm-{size}" / "final",
+        "eval_dir":      lambda size: RESULTS_DIR / "eval" / f"slm-{size}",
+        "hub_suffix":    "",
+        "description":   "base pretrained model",
+        "pipeline_tag":  "text-generation",
     },
     "instruct": {
-        "checkpoint": lambda size: RESULTS_DIR / f"slm-{size}-chat-code" / "final",
-        "hub_suffix":   "-instruct",  # tohio/slm-125m-instruct
-        "description":  "instruction-tuned via chat SFT + code SFT",
-        "pipeline_tag": "text-generation",
+        "checkpoint":    lambda size: RESULTS_DIR / f"slm-{size}-chat-code" / "final",
+        "eval_dir":      lambda size: RESULTS_DIR / "eval" / f"slm-{size}-chat-code",
+        "hub_suffix":    "-instruct",
+        "description":   "instruction-tuned via chat SFT + code SFT",
+        "pipeline_tag":  "text-generation",
     },
     "chat": {
-        "checkpoint": lambda size: RESULTS_DIR / f"slm-{size}-dpo" / "final",
-        "hub_suffix":   "-chat",      # tohio/slm-125m-chat
-        "description":  "chat-aligned via SFT + DPO preference learning",
-        "pipeline_tag": "text-generation",
+        "checkpoint":    lambda size: RESULTS_DIR / f"slm-{size}-dpo" / "final",
+        "eval_dir":      lambda size: RESULTS_DIR / "eval" / f"slm-{size}-dpo",
+        "hub_suffix":    "-chat",
+        "description":   "chat-aligned via SFT + DPO preference learning",
+        "pipeline_tag":  "text-generation",
     },
 }
 
-# ── Benchmark metadata ─────────────────────────────────────────────────────────
 
 BENCHMARK_META = {
-    "hellaswag":     {"name": "HellaSwag",     "metric": "acc_norm", "few_shot": 10},
-    "arc_easy":      {"name": "ARC-Easy",      "metric": "acc_norm", "few_shot": 25},
-    "arc_challenge": {"name": "ARC-Challenge", "metric": "acc_norm", "few_shot": 25},
-    "mmlu":          {"name": "MMLU",          "metric": "acc",      "few_shot": 5},
-    "truthfulqa":    {"name": "TruthfulQA",    "metric": "acc",      "few_shot": 0},
-    "humaneval":     {"name": "HumanEval",     "metric": "pass@1",   "few_shot": 0},
+    "hellaswag":     {"name": "HellaSwag",     "task": "hellaswag",      "metric": "acc_norm", "few_shot": 10},
+    "arc_easy":      {"name": "ARC-Easy",      "task": "arc_easy",       "metric": "acc_norm", "few_shot": 25},
+    "arc_challenge": {"name": "ARC-Challenge", "task": "arc_challenge",  "metric": "acc_norm", "few_shot": 25},
+    "mmlu":          {"name": "MMLU",          "task": "mmlu",           "metric": "acc",      "few_shot": 5},
+    "truthfulqa":    {"name": "TruthfulQA",    "task": "truthfulqa_mc2", "metric": "acc",      "few_shot": 0},
+    "humaneval":     {"name": "HumanEval",     "task": "humaneval",      "metric": "pass@1",   "few_shot": 0},
 }
 
 
-# ── Eval results ───────────────────────────────────────────────────────────────
-
-def load_eval_results(size: str) -> dict:
-    """
-    Load the most recent eval results for the given model size.
-
-    Eval results are written by make eval to:
-        results/eval/slm-{size}-dpo/eval_<timestamp>.json
-
-    Returns a flat dict of {task_key: score} or empty dict if not found.
-    """
-    eval_dir = RESULTS_DIR / "eval" / f"slm-{size}-dpo"
+def load_eval_results(variant: str, size: str) -> dict[str, float]:
+    """Load the most recent eval results for this variant's checkpoint."""
+    eval_dir = VARIANTS[variant]["eval_dir"](size)
     if not eval_dir.exists():
         return {}
 
@@ -118,35 +136,28 @@ def load_eval_results(size: str) -> dict:
     try:
         with open(latest) as f:
             data = json.load(f)
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError) as e:
+        log.warning(f"Failed to read eval results from {latest}: {e}")
         return {}
 
     raw_results = data.get("results", {})
-    scores = {}
+    raw_groups  = data.get("groups", {})
+
+    scores: dict[str, float] = {}
     for task_key, meta in BENCHMARK_META.items():
-        task_name = {
-            "hellaswag":     "hellaswag",
-            "arc_easy":      "arc_easy",
-            "arc_challenge": "arc_challenge",
-            "mmlu":          "mmlu",
-            "truthfulqa":    "truthfulqa_mc2",
-            "humaneval":     "humaneval",
-        }[task_key]
-        if task_name in raw_results:
-            metric = meta["metric"]
-            score = (
-                raw_results[task_name].get(metric)
-                or raw_results[task_name].get(f"{metric},none")
-                or raw_results[task_name].get(f"{metric},create_test")
-            )
-            if isinstance(score, (int, float)):
-                scores[task_key] = score
+        task_name   = meta["task"]
+        metric      = meta["metric"]
+        task_result = raw_results.get(task_name) or raw_groups.get(task_name)
+        if task_result is None:
+            continue
+        score = metric_score(task_result, metric)
+        if isinstance(score, (int, float)):
+            scores[task_key] = float(score)
 
     return scores
 
 
-def _format_eval_table(scores: dict) -> str:
-    """Format eval scores as a markdown table."""
+def _format_eval_table(scores: dict[str, float]) -> str:
     if not scores:
         return "_Benchmark results will be added after evaluation._"
 
@@ -154,49 +165,46 @@ def _format_eval_table(scores: dict) -> str:
         "| Benchmark | Few-shot | Metric | Score |",
         "|---|---|---|---|",
     ]
-    for task_key, score in scores.items():
+    for task_key in BENCHMARK_META:
+        if task_key not in scores:
+            continue
         meta = BENCHMARK_META[task_key]
         lines.append(
-            f"| {meta['name']} | {meta['few_shot']}-shot | {meta['metric']} | {score:.4f} |"
+            f"| {meta['name']} | {meta['few_shot']}-shot | {meta['metric']} | {scores[task_key]:.4f} |"
         )
     return "\n".join(lines)
 
 
-# ── Model card ────────────────────────────────────────────────────────────────
+def _format_data_mix_table() -> str:
+    """Render DATA_MIX from config/data_mix.py as a markdown table."""
+    lines = [
+        "| Source | Share | Link |",
+        "|---|---|---|",
+    ]
+    for name, entry in DATA_MIX.items():
+        lines.append(f"| `{name}` | {entry['pct']:.1f}% | {dataset_link(entry)} |")
+    return "\n".join(lines)
+
 
 def generate_model_card(
     size: str,
     variant: str,
     hub_name: str,
     n_params: int,
-    eval_scores: dict,
+    eval_scores: dict[str, float],
 ) -> str:
-    """
-    Generate a fully populated model card for the HuggingFace Hub.
-
-    Args:
-        size:        Model size string (125m, 350m, 1b).
-        variant:     Model variant (base, instruct, chat).
-        hub_name:    HuggingFace repo name (e.g. slm-125m-chat).
-        n_params:    Actual parameter count from the loaded model.
-        eval_scores: Benchmark scores from the most recent eval run.
-                     Only populated for the chat variant (post-DPO).
-    """
     size_upper    = size.upper()
     variant_cfg   = VARIANTS[variant]
     description   = variant_cfg["description"]
     pipeline_tag  = variant_cfg["pipeline_tag"]
-    token_target  = _token_target(size)
+    token_tgt     = token_target_display(size)
     param_str     = f"{n_params / 1e6:.1f}M ({n_params:,} parameters)"
 
-    if variant == "base":
-        base_model_yaml = ""
-    else:
-        base_model_yaml = f"base_model: {HF_USERNAME}/slm-{size}"
+    base_model_yaml = "" if variant == "base" else f"base_model: {HF_USERNAME}/slm-{size}"
 
     variant_section = {
         "base": f"""\
-This is the **base** variant — pretrained on {token_target} tokens with no fine-tuning.
+This is the **base** variant — pretrained on {token_tgt} tokens with no fine-tuning.
 It is suitable for research and as a starting point for further fine-tuning.
 Use [`{HF_USERNAME}/slm-{size}-instruct`](https://huggingface.co/{HF_USERNAME}/slm-{size}-instruct) for instruction following or
 [`{HF_USERNAME}/slm-{size}-chat`](https://huggingface.co/{HF_USERNAME}/slm-{size}-chat) for aligned conversation.
@@ -215,33 +223,42 @@ Use [`{HF_USERNAME}/slm-{size}`](https://huggingface.co/{HF_USERNAME}/slm-{size}
 """,
     }[variant]
 
-    # Source mix updated to 55/25/20 CC/Wikipedia/Python
+    pretrain_table = _format_data_mix_table()
+
     training_section = {
         "base": f"""\
-| Stage | Dataset | Size |
-|---|---|---|
-| Pretraining | Wikipedia EN (25%) + [CodeSearchNet Python](https://huggingface.co/datasets/code_search_net) (20%) + [Common Crawl](https://commoncrawl.org) (55%) | {token_target} tokens |
+**Pretraining corpus** — {token_tgt} tokens blended across the following sources:
+
+{pretrain_table}
 """,
         "instruct": f"""\
+**Pretraining corpus** — {token_tgt} tokens blended across the following sources:
+
+{pretrain_table}
+
+**Fine-tuning**
+
 | Stage | Dataset | Size |
 |---|---|---|
-| Pretraining | Wikipedia EN (25%) + [CodeSearchNet Python](https://huggingface.co/datasets/code_search_net) (20%) + [Common Crawl](https://commoncrawl.org) (55%) | {token_target} tokens |
 | Chat SFT | [OpenHermes-2.5](https://huggingface.co/datasets/teknium/OpenHermes-2.5) | ~1M examples |
 | Code SFT | [Magicoder-OSS-Instruct-75K](https://huggingface.co/datasets/ise-uiuc/Magicoder-OSS-Instruct-75K) | ~75K examples |
 """,
         "chat": f"""\
+**Pretraining corpus** — {token_tgt} tokens blended across the following sources:
+
+{pretrain_table}
+
+**Fine-tuning and alignment**
+
 | Stage | Dataset | Size |
 |---|---|---|
-| Pretraining | Wikipedia EN (25%) + [CodeSearchNet Python](https://huggingface.co/datasets/code_search_net) (20%) + [Common Crawl](https://commoncrawl.org) (55%) | {token_target} tokens |
 | Chat SFT | [OpenHermes-2.5](https://huggingface.co/datasets/teknium/OpenHermes-2.5) | ~1M examples |
 | Code SFT | [Magicoder-OSS-Instruct-75K](https://huggingface.co/datasets/ise-uiuc/Magicoder-OSS-Instruct-75K) | ~75K examples |
-| DPO alignment | [Anthropic/hh-rlhf](https://huggingface.co/datasets/Anthropic/hh-rlhf) + [Intel/orca_dpo_pairs](https://huggingface.co/datasets/Intel/orca_dpo_pairs) + [argilla/dpo-mix-7k](https://huggingface.co/datasets/argilla/dpo-mix-7k) | ~80K pairs |
+| DPO alignment | [Anthropic/hh-rlhf](https://huggingface.co/datasets/Anthropic/hh-rlhf) + [Intel/orca_dpo_pairs](https://huggingface.co/datasets/Intel/orca_dpo_pairs) + [argilla/dpo-mix-7k](https://huggingface.co/datasets/argilla/dpo-mix-7k) | ~60K pairs after filtering |
 """,
     }[variant]
 
-    eval_section = ""
-    if variant == "chat":
-        eval_section = f"""
+    eval_section = f"""
 ## Evaluation
 
 Evaluated using [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness).
@@ -305,7 +322,10 @@ built entirely from scratch, from raw web data through to a production-ready ali
 ```python
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-model = AutoModelForCausalLM.from_pretrained("{HF_USERNAME}/{hub_name}")
+model = AutoModelForCausalLM.from_pretrained(
+    "{HF_USERNAME}/{hub_name}",
+    trust_remote_code=True,
+)
 tokenizer = AutoTokenizer.from_pretrained("{HF_USERNAME}/{hub_name}")
 
 messages = [
@@ -322,13 +342,15 @@ output = model.generate(inputs, max_new_tokens=200, temperature=0.7, do_sample=T
 print(tokenizer.decode(output[0], skip_special_tokens=True))
 ```
 
+`trust_remote_code=True` loads the custom SLM architecture bundled in the `slm_arch/` subpackage of this repo — no local install of the `tohio/slm` codebase required.
+
 ## Limitations
 
 - **Scale:** At {size_upper} parameters this model is significantly smaller than frontier models. It will underperform on complex reasoning, long-context tasks, and domains not well-represented in the pretraining data.
 - **Hallucination:** Like all language models, this model can generate plausible-sounding but factually incorrect content. Outputs should not be used as a source of truth without independent verification.
 - **Safety:** DPO alignment provides basic harmlessness training but does not guarantee safe outputs in all contexts. This model has not undergone red-teaming or adversarial safety evaluation.
 - **Languages:** Training data is predominantly English. Performance on other languages will be significantly degraded.
-- **Code:** Code generation is Python-only, reflecting the pretraining and SFT data distribution.
+- **Code:** Code generation is primarily Python-oriented, reflecting the code sub-mix distribution used in pretraining and SFT.
 
 ## Related
 
@@ -337,24 +359,8 @@ print(tokenizer.decode(output[0], skip_special_tokens=True))
 """
 
 
-def _token_target(size: str) -> str:
-    """Token targets matching TARGET_CONFIGS in curator/scripts/curate.py."""
-    return {"125m": "5B", "350m": "15B", "1b": "30B"}.get(size, "N/A")
-
-
-# ── Tokenizer loader ──────────────────────────────────────────────────────────
-
 def load_tokenizer(tokenizer_path: Path):
-    """
-    Load the HuggingFace tokenizer saved by train_tokenizer.py.
-
-    Loads directly via PreTrainedTokenizerFast.from_pretrained() which
-    reads the saved tokenizer_config.json — including the baked-in
-    chat_template. Do not reconstruct from tokenizer.json and re-set
-    the template manually, as that would overwrite the saved template
-    with whatever is in this file at export time rather than what was
-    used during training.
-    """
+    """Load tokenizer via PreTrainedTokenizerFast — never reconstruct."""
     from transformers import PreTrainedTokenizerFast
 
     if not (tokenizer_path / "tokenizer_config.json").exists():
@@ -365,8 +371,6 @@ def load_tokenizer(tokenizer_path: Path):
 
     tokenizer = PreTrainedTokenizerFast.from_pretrained(str(tokenizer_path))
 
-    # Verify the chat template was loaded correctly — fail loudly if missing
-    # rather than silently exporting a model with a broken chat template.
     if not getattr(tokenizer, "chat_template", None):
         raise ValueError(
             f"Tokenizer at {tokenizer_path} has no chat_template. "
@@ -376,7 +380,67 @@ def load_tokenizer(tokenizer_path: Path):
     return tokenizer
 
 
-# ── Export ────────────────────────────────────────────────────────────────────
+def _bundle_remote_code(checkpoint: Path) -> None:
+    """
+    Copy the model source into the checkpoint dir as `slm_arch/` so it
+    gets pushed to the Hub in the single-commit upload, making the repo
+    loadable with trust_remote_code=True on any machine.
+
+    The bundled subpackage is a minimal re-export — deliberately different
+    from the local model/__init__.py, which points users at AutoConfig
+    registration. Inside remote code we must NOT call AutoConfig.register
+    at import time, because transformers' trust_remote_code loader handles
+    registration itself via auto_map and a double-register would collide.
+
+    Raises if source files are missing — a broken bundle is worse than a
+    missing one because it would be silently wrong at load time on the Hub.
+    """
+    dest = checkpoint / BUNDLED_PKG_NAME
+
+    # Remove any stale bundle from a previous export — the checkpoint dir
+    # is reused across runs, so old files would otherwise accumulate.
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True)
+
+    missing = []
+    for filename in BUNDLED_SOURCE_FILES:
+        src = MODEL_PKG_DIR / filename
+        if not src.is_file():
+            missing.append(str(src))
+            continue
+        shutil.copy2(src, dest / filename)
+    if missing:
+        raise FileNotFoundError(
+            f"Cannot bundle remote code — missing source files: {missing}. "
+            f"Expected in {MODEL_PKG_DIR}. "
+            f"This would push a broken Hub repo; aborting."
+        )
+
+    # Minimal __init__.py — re-exports only, no AutoConfig.register calls.
+    (dest / "__init__.py").write_text(
+        '"""\n'
+        f'{BUNDLED_PKG_NAME}/\n'
+        '-' * len(BUNDLED_PKG_NAME) + '-\n'
+        'Bundled copy of the SLM model source, shipped inside the Hub repo\n'
+        'so that AutoModelForCausalLM.from_pretrained(..., trust_remote_code=True)\n'
+        'can load the model without a local install of tohio/slm.\n'
+        '\n'
+        'Do not edit this file by hand — it is written by export/export.py.\n'
+        'The source of truth lives at model/ in the tohio/slm repo.\n'
+        '"""\n'
+        '\n'
+        'from .config import SLMConfig\n'
+        'from .model import SLMForCausalLM, SLMModel\n'
+        '\n'
+        '__all__ = ["SLMConfig", "SLMModel", "SLMForCausalLM"]\n'
+    )
+
+    log.info(
+        f"Bundled remote code: {len(BUNDLED_SOURCE_FILES)} files + __init__.py -> "
+        f"{dest.relative_to(checkpoint)}/"
+    )
+
 
 def export(
     size: str,
@@ -385,19 +449,16 @@ def export(
     dry_run: bool = False,
     private: bool = False,
 ) -> None:
-    """
-    Export a model checkpoint to the HuggingFace Hub.
-
-    Args:
-        size:       Model size string (125m, 350m, 1b).
-        variant:    Model variant (base, instruct, chat).
-        model_path: Override checkpoint path. Defaults to VARIANTS mapping.
-        dry_run:    If True, validate without pushing to Hub.
-        private:    If True, create a private repository.
-    """
     from transformers import AutoConfig, AutoModelForCausalLM
-    from huggingface_hub import HfApi, login
+    from huggingface_hub import login
     from model import SLMConfig, SLMForCausalLM
+
+    if not HF_USERNAME:
+        log.error(
+            "HF_USERNAME not set in the environment. "
+            "Add HF_USERNAME=<your-hub-username> to .env before running export."
+        )
+        sys.exit(1)
 
     variant_cfg = VARIANTS[variant]
     checkpoint  = model_path or variant_cfg["checkpoint"](size)
@@ -414,79 +475,108 @@ def export(
 
     if not checkpoint.exists():
         log.error(f"Checkpoint not found: {checkpoint}")
-        log.error(f"Run the full training pipeline first: make pretrain sft sft-code dpo SIZE={size}")
+        log.error(
+            f"Run the training pipeline first. For chat variant: "
+            f"make pretrain sft sft-code dpo SIZE={size}"
+        )
         sys.exit(1)
 
-    # Register custom model
     AutoConfig.register("slm", SLMConfig)
     AutoModelForCausalLM.register(SLMConfig, SLMForCausalLM)
 
-    # Load model
     log.info("Loading model...")
     config   = SLMConfig.from_pretrained(str(checkpoint))
     model    = SLMForCausalLM.from_pretrained(str(checkpoint))
     n_params = sum(p.numel() for p in model.parameters())
     log.info(f"Parameters: {n_params:,} ({n_params / 1e6:.1f}M)")
 
-    # Load tokenizer — from_pretrained reads the saved tokenizer_config.json
-    # including the baked-in chat_template from train_tokenizer.py
     tokenizer_path = checkpoint / "tokenizer"
     if not (tokenizer_path / "tokenizer_config.json").exists():
         tokenizer_path = Path(os.environ.get("DATA_DIR", "data")) / "tokenizer"
     tokenizer = load_tokenizer(tokenizer_path)
     log.info(f"Tokenizer loaded from {tokenizer_path}")
 
-    # Load eval results
-    eval_scores = load_eval_results(size) if variant == "chat" else {}
-    if variant == "chat":
-        if eval_scores:
-            log.info(f"Eval results loaded: {list(eval_scores.keys())}")
-        else:
-            log.warning("No eval results found — benchmark table will be empty in model card")
-            log.warning(f"Run: make eval SIZE={size} before exporting")
+    eval_scores = load_eval_results(variant, size)
+    if eval_scores:
+        log.info(f"Eval results loaded: {list(eval_scores.keys())}")
+    else:
+        log.warning(
+            f"No eval results found for variant={variant}, size={size}. "
+            f"Benchmark table will be empty. Run: "
+            f"python eval/eval.py --model {variant_cfg['checkpoint'](size)}"
+        )
 
     if dry_run:
         log.info("Dry run — skipping Hub push")
         log.info(f"Would push to: https://huggingface.co/{repo_id}")
         _validate_model(model, tokenizer, config)
+        # Exercise the bundling path in dry-run too — catches missing source
+        # files before a real push is attempted.
+        _bundle_remote_code(checkpoint)
+        card = generate_model_card(size, variant, hub_name, n_params, eval_scores)
+        log.info(f"Model card preview ({len(card):,} chars, first 400):")
+        log.info(card[:400].replace("\n", "\n  "))
         return
 
-    # Login
     if not HF_TOKEN:
         log.error("HF_TOKEN not set in .env")
         sys.exit(1)
     login(token=HF_TOKEN)
 
-    # Generate and write model card
+    _validate_model(model, tokenizer, config)
+
+    # Bundle the custom architecture into the checkpoint dir before the
+    # single-commit push, so the Hub repo contains slm_arch/ alongside the
+    # weights and config. auto_map in config.json then resolves correctly
+    # under trust_remote_code=True loads.
+    _bundle_remote_code(checkpoint)
+
     model_card = generate_model_card(size, variant, hub_name, n_params, eval_scores)
     card_path  = checkpoint / "README.md"
     with open(card_path, "w") as f:
         f.write(model_card)
-    log.info(f"Model card written ({len(model_card):,} chars)")
+    log.info(f"Model card written to {card_path} ({len(model_card):,} chars)")
 
-    # Push to Hub
-    log.info(f"Pushing to {repo_id}...")
-    model.push_to_hub(repo_id, token=HF_TOKEN, private=private)
-    tokenizer.push_to_hub(repo_id, token=HF_TOKEN, private=private)
-    config.push_to_hub(repo_id, token=HF_TOKEN, private=private)
+    # Single-commit push of the entire checkpoint dir — weights, config
+    # (with auto_map), tokenizer, README.md, and the bundled slm_arch/.
+    # Using push_to_hub on the model would omit the bundled subpackage and
+    # README, so we upload the folder directly.
+    from huggingface_hub import HfApi
 
-    api = HfApi()
-    api.upload_file(
-        path_or_fileobj=str(card_path),
-        path_in_repo="README.md",
+    api = HfApi(token=HF_TOKEN)
+    api.create_repo(repo_id=repo_id, private=private, exist_ok=True)
+
+    log.info(f"Pushing {checkpoint} to {repo_id} (single commit)...")
+    api.upload_folder(
         repo_id=repo_id,
-        token=HF_TOKEN,
+        folder_path=str(checkpoint),
+        commit_message=f"Export {hub_name} ({n_params / 1e6:.1f}M params)",
+        # Don't upload training-only artefacts even if they happen to be
+        # in the checkpoint dir.
+        ignore_patterns=[
+            "optimizer.pt",
+            "scheduler.pt",
+            "trainer_state.json",
+            "training_args.bin",
+            "rng_state*.pth",
+            "global_step*",
+            "*.log",
+            "__pycache__",
+            "*.pyc",
+        ],
     )
 
     log.info(f"Export complete: https://huggingface.co/{repo_id}")
 
 
 def _validate_model(model, tokenizer, config) -> None:
-    """Quick sanity check — generate a short sequence before pushing."""
+    """Generate a short sequence; assert non-empty output. Aborts export on failure."""
     import torch
+    from inference.utils import resolve_special_token_ids
 
     log.info("Validating model...")
     model.eval()
+    special_ids = resolve_special_token_ids(tokenizer)
 
     messages = [
         {"role": "system", "content": "You are a helpful assistant."},
@@ -497,21 +587,34 @@ def _validate_model(model, tokenizer, config) -> None:
         return_tensors="pt",
         add_generation_prompt=True,
     )
+    attention_mask = torch.ones_like(input_ids)
+    input_length   = input_ids.shape[1]
 
     with torch.no_grad():
         output = model.generate(
             input_ids,
+            attention_mask=attention_mask,
             max_new_tokens=20,
-            pad_token_id=0,
-            eos_token_id=[3, 7],
+            pad_token_id=special_ids.pad,
+            eos_token_id=special_ids.eos_list,
         )
 
-    decoded = tokenizer.decode(output[0], skip_special_tokens=True)
-    log.info(f"Validation output: {decoded[:100]}")
+    new_tokens = output[0][input_length:].tolist()
+    for stop_id in special_ids.eos_list:
+        if stop_id in new_tokens:
+            new_tokens = new_tokens[: new_tokens.index(stop_id)]
+
+    if len(new_tokens) == 0:
+        raise RuntimeError(
+            "Validation failed: model produced only stop tokens. "
+            "This suggests the checkpoint is broken (e.g. NaN weights, "
+            "wrong tied-weight restore, corrupted save). Aborting export."
+        )
+
+    decoded = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+    log.info(f"Validation output ({len(new_tokens)} tokens): {decoded[:100]}")
     log.info("✓ Model validation passed")
 
-
-# ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
@@ -526,8 +629,13 @@ Examples:
         """,
     )
     parser.add_argument("--size",    type=str,  required=True, choices=["125m", "350m", "1b"])
-    parser.add_argument("--variant", type=str,  required=True, choices=list(VARIANTS.keys()),
-                        help="base (pretrain only) | instruct (SFT) | chat (SFT + DPO)")
+    parser.add_argument(
+        "--variant",
+        type=str,
+        required=True,
+        choices=list(VARIANTS.keys()),
+        help="base (pretrain only) | instruct (SFT) | chat (SFT + DPO)",
+    )
     parser.add_argument("--model",   type=Path, default=None,
                         help="Override checkpoint path (defaults to variant mapping)")
     parser.add_argument("--dry-run", action="store_true", help="Validate without pushing to Hub")

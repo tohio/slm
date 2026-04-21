@@ -77,6 +77,9 @@ The model is a dense decoder-only transformer with a modern architecture:
 
 ```
 slm/
+├── config/
+│   └── data_mix.py              single source of truth for data mix, token targets, curator constants
+│
 ├── model/
 │   ├── config.py
 │   ├── attention.py
@@ -86,7 +89,7 @@ slm/
 │   └── model.py
 │
 ├── curator/
-│   ├── constants.py
+│   ├── constants.py             re-exports from config/ (backward compat)
 │   ├── sources/
 │   │   ├── common_crawl.py
 │   │   ├── fineweb.py
@@ -141,6 +144,7 @@ slm/
 │   └── export.py
 │
 ├── inference/
+│   ├── utils.py
 │   ├── chat.py
 │   └── generate.py
 │
@@ -229,7 +233,7 @@ git clone https://github.com/tohio/slm.git /data/slm
 cd /data/slm
 
 cp .env.sample .env
-vi .env   # fill in S3_BUCKET, AWS credentials, WANDB_API_KEY, HF_TOKEN, SWH_AUTH_TOKEN
+vi .env   # fill in S3_BUCKET, AWS credentials, WANDB_API_KEY, HF_TOKEN, HF_USERNAME, SWH_AUTH_TOKEN
 
 sudo apt install -y make
 
@@ -414,7 +418,7 @@ make pretrain CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
 
 ### Source Mix
 
-Scale-invariant percentages — the same mix applies at every size.
+Scale-invariant percentages — the same mix applies at every size. Defined in `config/data_mix.py` and referenced by the curator, export, and notebooks — do not duplicate these numbers elsewhere.
 
 | Source | Share | Notes |
 |---|---|---|
@@ -429,10 +433,6 @@ Scale-invariant percentages — the same mix applies at every size.
 
 When supply-constrained sources (Wikipedia, pg19) fall short of their character budget at large scales, the deficit is automatically routed to FineWeb as an overflow sink. The mix shape is preserved; the token target is hit.
 
-### Train / val split
-
-The curator's blend stage produces both `train.jsonl` and `val.jsonl` at the same time. After the blend shuffle, the last 0.5% of documents are routed to `val.jsonl` and the rest to `train.jsonl`. Because the shuffle makes document order uniformly random, val is an unbiased sample from the same distribution as train. Both splits go through the same validation and tokenization stages — so at training time, eval loss on val is a meaningful comparison against training loss.
-
 ### Token Targets
 
 | Model | Total tokens | Epochs |
@@ -445,7 +445,9 @@ Why 1b uses 1 epoch: at 30B tokens / 1 epoch, every source stays below its suppl
 
 ### Train / val split
 
-The train and val splits are produced by the curator's blend stage, not at training time. After the blend stage shuffles all staging sources, it writes the last 0.5% of documents to `val.jsonl` and the rest to `train.jsonl`. Because the shuffle makes order uniformly random, val is a clean random sample from the same distribution as train. Validation (KenLM perplexity filtering) and tokenization both process each split independently, so `val.bin` receives the same quality treatment as `train.bin`.
+The train and val splits are produced by the curator's blend stage, not at training time. After the blend stage shuffles all staging sources, it writes the last 0.5% of documents to `val.jsonl` and the rest to `train.jsonl`. Because the shuffle makes order uniformly random, val is an unbiased sample from the same distribution as train. Validation (KenLM perplexity filtering) and tokenization both process each split independently, so `val.bin` receives the same quality treatment as `train.bin`.
+
+Splitting at blend time (rather than at training time) avoids two correctness bugs: runtime splitting silently drifts out of sync with the underlying tokenization, and the tail-of-stream slice isn't a uniform sample when the shuffle is disk-chunked at 1b scale. Splitting right after the blend shuffle — where order is provably random — gives a clean uniform sample and eliminates the staleness concern by construction.
 
 See `curator/README.md` for full details on the mix, sub-source breakdowns, cap-and-redistribute behavior, and scaling beyond 1b.
 
@@ -555,7 +557,7 @@ Models are evaluated on standard benchmarks via `lm-evaluation-harness`:
 
 **Why scale-invariant mix percentages?** A reader scaling from 125m to 1b changes one number (`target_tokens`) and gets proportionally more of everything — no per-scale mix tuning. Supply variance is handled by cap-and-redistribute, not by per-scale knobs.
 
-**Why `rope_theta=500000` everywhere, not just at 1b?** RoPE's base period is the slow axis of the position encoding — larger values give the model room to extrapolate to longer contexts than it was trained on. Using 500000 uniformly across 125m, 350m, and 1b means any size can be length-extended later without retraining positional encodings. The cost at 2048 context (125m, 350m) is negligible; the benefit is that "train a 125m at 2048, run it at 4096 after YaRN/linear scaling" actually works. Llama 3 and Qwen follow this same pre-stretched-base pattern.
+**Why `rope_theta=500000` across all sizes?** RoPE's base period is the slow axis of the position encoding — larger values give the model room to extrapolate to longer contexts than it was trained on. Using 500000 uniformly across 125m, 350m, and 1b means any size can be length-extended later (via YaRN, dynamic scaling, or similar) without retraining from scratch. The tradeoff at 2048 context (125m, 350m) is negligible — large base values don't hurt in-context quality at short sequence lengths, and consistency across sizes is worth more than micro-optimising each tier. Llama 3 and Qwen follow this same pre-stretched-base pattern.
 
 **Why different epoch counts per scale?** Token budget versus supply. At 125m (5B tokens), 2 epochs is comfortable; at 1b (30B tokens), 1 epoch leaves every source below its supply ceiling, so no repetition. Modern small-model training (Llama, Phi, Qwen) follows the single-epoch pattern at scale — fresh tokens outperform repeated ones.
 
@@ -563,9 +565,7 @@ Models are evaluated on standard benchmarks via `lm-evaluation-harness`:
 
 **Why cap-and-redistribute?** Wikipedia and pg19 have finite supply. At large scales they can't fill their character budget without repetition. Rather than add per-scale knobs or accept repetition, the overflow routes to FineWeb — which has 15T tokens of headroom — preserving mix shape and hitting the token target.
 
-**Why split train/val at blend time, not at training time?** Runtime splitting has two correctness bugs: split files silently drift out of sync with the underlying tokenization, and the tail-of-stream slice isn't a uniform sample when the shuffle is disk-chunked at 1b scale. Splitting right after the blend shuffle — where order is provably random — gives a clean uniform sample and eliminates the staleness concern by construction.
-
-**Why `rope_theta=500000` across all sizes?** The same RoPE base across 125m, 350m, and 1b means any size can have its context extended later (via YaRN, dynamic scaling, or similar) without retraining from scratch. The tradeoff at 2048 context is negligible — large base values don't hurt in-context quality at short sequence lengths, and consistency across sizes is worth more than micro-optimising each tier.
+**Why a single `config/` package for locked values?** The data mix, token targets, CHARS_PER_TOKEN, CC_CHARS_PER_SEGMENT, PRETRAIN_VAL_FRACTION, and a few other constants are each read by multiple stages (curator, export, pretrain, notebooks, tests). Previously they were duplicated — and the duplicates drifted, most visibly in an export pipeline that was writing stale 3-source pretraining tables to the Hub while the curator was actually running the 10-source mix. Centralising into `config/data_mix.py` with an import-time `validate()` makes drift impossible: every consumer sees the same values, and percentages sum-to-100 at the moment the module is loaded.
 
 **Why vLLM for serving?** PagedAttention enables continuous batching and efficient KV cache management. The OpenAI-compatible API means any client built against the OpenAI SDK works out of the box.
 
@@ -583,7 +583,7 @@ The pipeline is designed to extend past 1b. Scale-invariant percentages, streami
 
 To run at 3b or beyond:
 
-1. Add a new entry to `TARGET_CONFIGS` in `curator/scripts/curate.py` with the new `total_tokens` and `cc_crawls` list.
+1. Add a new entry to `TARGET_CONFIGS` in `config/data_mix.py` with the new `total_tokens`, `epochs`, and `cc_crawls` list.
 2. Add a matching `gpt_3b.yaml` (or equivalent) in `pretrain/configs/`.
 3. Review Wikipedia and pg19 supply: at budgets approaching 40B × 1 epoch, Wikipedia repetition approaches 1.6×. Options: drop Wikipedia's share, add multilingual Wikipedia, or accept the repetition.
 4. Consider adding a second bulk-code source to avoid stack-v2 over-epoching at 5B+ code tokens.

@@ -22,6 +22,18 @@ Special tokens:
 
 Vocab size: 32,000 (sufficient for English + code at 125M–1B scale)
 
+Token ID source of truth:
+    This module exports both the string list SPECIAL_TOKENS and integer
+    constants (PAD_ID, BOS_ID, ...). These are authoritative at training
+    time — the trainer guarantees they land at the IDs asserted below.
+
+    Runtime code (inference/utils.py) does NOT import these constants.
+    Instead it resolves IDs via tokenizer.convert_tokens_to_ids(...) on
+    the loaded tokenizer, so that a re-trained tokenizer with a different
+    special-token layout cannot silently mis-map IDs at inference time.
+    Tests and training scripts that pre-assert the layout can use these
+    constants directly.
+
 BOS/EOS handling:
     BOS and EOS are NOT added automatically by the tokenizer post-processor.
     They must be added explicitly by the training data pipeline where needed.
@@ -76,12 +88,21 @@ TOKENIZER_DIR = DATA_DIR / "tokenizer"
 
 # ── Special tokens ─────────────────────────────────────────────────────────────
 
-SPECIAL_TOKENS = [
-    # Structural — must be first for correct IDs
+# The four structural tokens MUST come first and MUST be in this order —
+# PAD_ID, UNK_ID, BOS_ID, EOS_ID are referenced by integer ID throughout
+# the training pipeline.
+STRUCTURAL_TOKENS = [
     "<PAD>",            # 0
     "<UNK>",            # 1
     "<BOS>",            # 2
     "<EOS>",            # 3
+]
+
+# Additional special tokens registered with the HuggingFace tokenizer via
+# `additional_special_tokens`. Order here determines IDs 4..15 but none of
+# these IDs are hard-referenced by integer in training code — runtime
+# lookup is done by string via convert_tokens_to_ids().
+ADDITIONAL_SPECIAL_TOKENS = [
     # Chat
     "<|system|>",       # 4
     "<|user|>",         # 5
@@ -101,7 +122,11 @@ SPECIAL_TOKENS = [
     "<|endofcontext|>", # 15
 ]
 
-# Token ID constants for use in training scripts
+SPECIAL_TOKENS = STRUCTURAL_TOKENS + ADDITIONAL_SPECIAL_TOKENS
+
+# Token ID constants for use in training scripts. These are authoritative
+# only when the tokenizer was trained by this script with this ordering —
+# runtime code should resolve IDs via tokenizer.convert_tokens_to_ids().
 PAD_ID = 0
 UNK_ID = 1
 BOS_ID = 2
@@ -118,6 +143,22 @@ REASONING_ID = 12
 ENDOFREASONING_ID = 13
 CONTEXT_ID = 14
 ENDOFCONTEXT_ID = 15
+
+# Internal consistency check — makes sure nobody renumbers the constants
+# without also reordering SPECIAL_TOKENS.
+_ID_TO_TOKEN = {
+    PAD_ID: "<PAD>", UNK_ID: "<UNK>", BOS_ID: "<BOS>", EOS_ID: "<EOS>",
+    SYSTEM_ID: "<|system|>", USER_ID: "<|user|>", ASSISTANT_ID: "<|assistant|>",
+    ENDOFTURN_ID: "<|endofturn|>", CODE_ID: "<|code|>", ENDOFCODE_ID: "<|endofcode|>",
+    TOOL_ID: "<|tool|>", ENDOFTOOL_ID: "<|endoftool|>",
+    REASONING_ID: "<|reasoning|>", ENDOFREASONING_ID: "<|endofreasoning|>",
+    CONTEXT_ID: "<|context|>", ENDOFCONTEXT_ID: "<|endofcontext|>",
+}
+for _i, _tok in enumerate(SPECIAL_TOKENS):
+    assert _ID_TO_TOKEN[_i] == _tok, (
+        f"SPECIAL_TOKENS[{_i}]={_tok!r} does not match ID constant "
+        f"mapping {_i} -> {_ID_TO_TOKEN[_i]!r}. Update both together."
+    )
 
 # ── Chat template ──────────────────────────────────────────────────────────────
 # Jinja2 template baked into the HuggingFace tokenizer so that
@@ -303,7 +344,10 @@ def _save_as_hf_tokenizer(tokenizer, output_dir: Path) -> None:
             eos_token="<EOS>",
             unk_token="<UNK>",
             pad_token="<PAD>",
-            additional_special_tokens=SPECIAL_TOKENS[4:],
+            # Use the explicit ADDITIONAL_SPECIAL_TOKENS list rather than a
+            # positional slice of SPECIAL_TOKENS — reordering the structural
+            # tokens would silently break a positional slice.
+            additional_special_tokens=ADDITIONAL_SPECIAL_TOKENS,
         )
 
         hf_tokenizer.chat_template = CHAT_TEMPLATE
