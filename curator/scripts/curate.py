@@ -93,8 +93,8 @@ from curator.sources.pes2o import PeS2oSource
 from curator.sources.open_web_math import OpenWebMathSource
 from curator.sources.stackexchange import StackExchangeSource
 from curator.sources.code_search_net import CodeSearchNetSource
-from curator.sources.the_stack_smol import StackSmolSource
-from curator.sources.the_stack_v2 import StackV2Source
+from curator.sources.stack_smol import StackSmolSource
+from curator.sources.stack_v2 import StackV2Source
 from curator.sources.jupyter import JupyterSource
 from curator.sources.conala import ConalaSource
 
