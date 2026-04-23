@@ -1,3 +1,4 @@
+--extra-index-url https://download.pytorch.org/whl/cu121
 # ── Core ──────────────────────────────────────────────────────────────────────
 # torch 2.5.1 is the highest version available for CUDA 12.1.
 # trl 0.29 is compatible with torch 2.5.1 — trl does not require FSDPModule
