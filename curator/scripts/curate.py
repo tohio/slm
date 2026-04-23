@@ -262,7 +262,11 @@ def stage_download(target: str, mini: bool = False, workers: int | None = None) 
     for name in ALL_SOURCES:
         log.info(f"Downloading {name}...")
         source = _build_source(name, mini=mini, target=target, workers=n_workers)
-        source.download()
+        try:
+            source.download()
+        except Exception:
+            log.exception(f"{name}: download failed — continuing with remaining sources")
+            continue
         try:
             log.info(f"{name} stats: {source.stats()}")
         except Exception as e:
@@ -288,19 +292,24 @@ def _filter_shard(args: tuple[Path, Path]) -> str:
         return f"skip:{shard.name}"
 
     qf = _worker_qf or QualityFilter()
+    parse_errors = 0
     with open(shard, "rb", buffering=8 * 1024 * 1024) as fin, \
          open(out_path, "wb", buffering=8 * 1024 * 1024) as fout:
         for line in fin:
             try:
                 record = orjson.loads(line)
             except Exception:
+                parse_errors += 1
                 continue
             kept, _ = qf.check(record)
             if kept:
                 fout.write(orjson.dumps(record))
                 fout.write(b"\n")
 
-    return qf.report()
+    report = qf.report()
+    if parse_errors:
+        report = f"{report} | parse_errors={parse_errors} in {shard.name}"
+    return report
 
 
 def stage_filter(workers: int | None = None) -> None:
