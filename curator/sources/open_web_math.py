@@ -88,6 +88,7 @@ class OpenWebMathSource:
             self.DATASET_NAME,
             split="train",
             streaming=True,
+            trust_remote_code=True,
         )
 
         if self.max_docs:

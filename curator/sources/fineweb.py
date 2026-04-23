@@ -99,6 +99,7 @@ class FineWebSource:
             self.config,
             split="train",
             streaming=True,
+            trust_remote_code=True,
         )
 
         if self.max_docs:
