@@ -14,9 +14,9 @@ Why per-language iteration?
     `data/<Language>/`. Streaming the full dataset iterates alphabetically
     through 600+ languages (AMPL, ABAP, ...) before reaching Python, Rust,
     Shell. That's billions of records of filter-and-skip before the first
-    match — unusable at any scale, not just mini. Instead we load each
-    target language's data_dir directly, iterate only records we care
-    about, and stop when we hit our cap.
+    match — unusable at any scale, not just mini. Instead we use
+    data_files with an explicit glob per language so HF only fetches
+    the matching parquet shards.
 
 Why content fetching?
     The-stack-v2 stores only file metadata and blob IDs in the HF
@@ -222,54 +222,109 @@ class StackV2Source:
                     streaming=True,
                     trust_remote_code=True,
                 )
-            except Exception as e:
+            except Exception:
                 log.exception(f"  Failed to load {lang} — skipping")
                 continue
 
             batch: list[dict] = []
+            # Debug instrumentation: track iterator progress per language so
+            # we can distinguish "iterator never yielded" from "records
+            # yielded but all rejected" from "records yielded, batches
+            # triggered but SWH slow".
+            records_seen = 0
+            lang_start_time = time.time()
+            lang_no_blob = 0
 
-            for sample in ds:
-                if stop:
-                    break
+            try:
+                for sample in ds:
+                    records_seen += 1
 
-                blob_id = sample.get("blob_id", "")
-                if not blob_id:
-                    total_no_blob += 1
-                    continue
+                    # Log first record received, and every 100 thereafter.
+                    # This is the only way to know the stream is actually
+                    # alive vs. stuck in HF internals.
+                    if records_seen == 1:
+                        elapsed = time.time() - lang_start_time
+                        log.info(
+                            f"    {lang}: first record after {elapsed:.1f}s — "
+                            f"keys={sorted(sample.keys())[:8]}"
+                        )
+                    if records_seen % 100 == 0:
+                        elapsed = time.time() - lang_start_time
+                        rate = records_seen / max(elapsed, 0.01)
+                        log.info(
+                            f"    {lang}: seen={records_seen}, "
+                            f"batched={len(batch)}, "
+                            f"no_blob_this_lang={lang_no_blob}, "
+                            f"rate={rate:.1f} rec/s"
+                        )
 
-                # The language is known from the data_dir we loaded, but keep
-                # the record's own field when present (useful for provenance).
-                if not sample.get("language"):
-                    sample = dict(sample)
-                    sample["language"] = lang
+                    if stop:
+                        break
 
-                batch.append(sample)
+                    blob_id = sample.get("blob_id", "")
+                    if not blob_id:
+                        total_no_blob += 1
+                        lang_no_blob += 1
+                        continue
 
-                if len(batch) >= fetch_batch_size:
-                    records, failed = self._fetch_batch(batch)
-                    total_fetch_failed += failed
-                    kept = [r for r in records if r is not None]
-                    total_skipped_short += (len(records) - failed - len(kept))
-                    buffer.extend(kept)
-                    batch = []
+                    # The language is known from the data_dir we loaded,
+                    # but keep the record's own field when present.
+                    if not sample.get("language"):
+                        sample = dict(sample)
+                        sample["language"] = lang
 
-                    while len(buffer) >= self.shard_size:
-                        chunk = buffer[: self.shard_size]
-                        del buffer[: self.shard_size]
-                        path = self._write_shard(chunk, shard_idx)
-                        output_files.append(path)
-                        shard_idx += 1
-                        total_written += len(chunk)
-                        pbar.update(len(chunk))
+                    batch.append(sample)
 
-                    if self.max_docs is not None:
-                        if total_written + len(buffer) >= self.max_docs:
-                            trim_to = max(0, self.max_docs - total_written)
-                            buffer = buffer[:trim_to]
-                            stop = True
+                    if len(batch) >= fetch_batch_size:
+                        log.info(
+                            f"    {lang}: flushing batch of {len(batch)} to SWH"
+                        )
+                        records, failed = self._fetch_batch(batch)
+                        total_fetch_failed += failed
+                        kept = [r for r in records if r is not None]
+                        total_skipped_short += (len(records) - failed - len(kept))
+                        log.info(
+                            f"    {lang}: batch returned "
+                            f"{len(kept)} kept, {failed} failed"
+                        )
+                        buffer.extend(kept)
+                        batch = []
+
+                        while len(buffer) >= self.shard_size:
+                            chunk = buffer[: self.shard_size]
+                            del buffer[: self.shard_size]
+                            path = self._write_shard(chunk, shard_idx)
+                            output_files.append(path)
+                            shard_idx += 1
+                            total_written += len(chunk)
+                            pbar.update(len(chunk))
+
+                        if self.max_docs is not None:
+                            if total_written + len(buffer) >= self.max_docs:
+                                trim_to = max(0, self.max_docs - total_written)
+                                buffer = buffer[:trim_to]
+                                stop = True
+            except Exception:
+                log.exception(
+                    f"    {lang}: iteration crashed at "
+                    f"records_seen={records_seen}"
+                )
+                # Don't re-raise — try to drain and move to next language.
+
+            elapsed = time.time() - lang_start_time
+            log.info(
+                f"    {lang}: iteration ended — "
+                f"total_seen={records_seen} in {elapsed:.1f}s "
+                f"({records_seen / max(elapsed, 0.01):.1f} rec/s), "
+                f"no_blob_this_lang={lang_no_blob}, "
+                f"batch_pending={len(batch)}"
+            )
 
             # End of this language's stream — drain any leftover batch.
             if batch and not stop:
+                log.info(
+                    f"    {lang}: draining final partial batch of {len(batch)}"
+                )
                 records, failed = self._fetch_batch(batch)
                 total_fetch_failed += failed
                 kept = [r for r in records if r is not None]
