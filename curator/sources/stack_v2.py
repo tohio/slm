@@ -217,7 +217,7 @@ class StackV2Source:
             try:
                 ds = load_dataset(
                     self.DATASET_NAME,
-                    data_dir=f"data/{lang}",
+                    data_files=f"data/{lang}/*.parquet",
                     split="train",
                     streaming=True,
                     trust_remote_code=True,
