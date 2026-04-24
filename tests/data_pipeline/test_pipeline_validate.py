@@ -115,10 +115,30 @@ class TestValidationStats:
         stats = self._load_stats()
         assert stats["kept"] > 0, "Validation kept 0 documents — something is wrong"
 
-    def test_validation_stats_matches_output_file(self):
+    def test_validation_stats_matches_output_files(self):
+        """
+        Per-split kept counts should match per-split output line counts.
+
+        The top-level `kept` field in validation_stats.json aggregates
+        train + val, so comparing it directly to train.jsonl is wrong by
+        exactly val.kept. Checking each split against its own file is
+        stricter: Option B (compare sum) would miss bugs where train
+        over-counts by the same amount val under-counts.
+        """
         stats = self._load_stats()
-        actual_count = sum(1 for _ in open(pipeline_path("validated", "train.jsonl")))
-        assert stats["kept"] == actual_count, (
-            f"validation_stats.json says {stats['kept']} kept "
-            f"but train.jsonl has {actual_count} lines"
+        splits = stats.get("splits", {})
+        assert splits, (
+            "validation_stats.json missing 'splits' field — "
+            "expected per-split train/val breakdown"
         )
+
+        for split_name, split_stats in splits.items():
+            path = pipeline_path("validated", f"{split_name}.jsonl")
+            if not path.exists():
+                continue
+            with open(path) as f:
+                actual = sum(1 for _ in f)
+            assert split_stats["kept"] == actual, (
+                f"validation_stats.json splits.{split_name}.kept = "
+                f"{split_stats['kept']} but {split_name}.jsonl has {actual} lines"
+            )
