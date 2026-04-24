@@ -8,6 +8,14 @@ BigCode's The Stack, covering 30 programming languages. Each record is
 a full source file with its content inline (no external fetch needed,
 unlike the-stack-v2).
 
+File layout note:
+    the-stack-smol stores each language as a single `data/<lang>/data.json`
+    file (not parquet, not sharded). We load each language via the
+    data_files pattern rather than data_dir or get_dataset_config_names,
+    both of which fail on this repo: get_dataset_config_names returns an
+    empty list because there's no loading script or dataset_infos.json,
+    and data_dir auto-detection can't resolve the single-JSON layout.
+
 No language filtering — we take all 30 languages. This gives the model
 broad syntactic exposure across the language ecosystem, including
 languages (Rust, Shell, TypeScript, Scala, Haskell, etc.) that have no
@@ -37,7 +45,8 @@ import logging
 from pathlib import Path
 
 import orjson
-from datasets import load_dataset, get_dataset_config_names
+from datasets import load_dataset
+from huggingface_hub import HfApi
 from tqdm import tqdm
 
 from curator.constants import CHARS_PER_TOKEN
@@ -47,11 +56,12 @@ log = logging.getLogger(__name__)
 
 class StackSmolSource:
     """
-    Downloads the-stack-smol across all 30 languages.
+    Downloads the-stack-smol across all available languages.
 
     Args:
         output_dir: Directory to write output JSONL files.
-        languages: Specific language configs to include. None = all 30.
+        languages: Specific languages to include. None = discover from
+            the HF repo's data/<lang>/data.json layout.
         min_length: Minimum file character length.
         shard_size: Files per output JSONL shard.
         max_docs: Maximum files to write. None = no limit. Used for
@@ -77,21 +87,29 @@ class StackSmolSource:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def _resolve_languages(self) -> list[str]:
-        """Discover all available language configs unless user specified."""
+        """
+        Discover available languages by listing the HF repo's data/<lang>/
+        subdirectories. Falls back to a hard-coded list if the API call
+        fails (e.g. network or auth issue).
+        """
         if self.languages is not None:
             return list(self.languages)
+
         try:
-            configs = get_dataset_config_names(
-                self.DATASET_NAME,
-                trust_remote_code=True,
-            )
-            # Filter out "default" and other non-language configs if present
-            configs = [c for c in configs if c not in ("default",)]
-            log.info(f"the-stack-smol: discovered {len(configs)} language configs")
-            return configs
+            api = HfApi()
+            files = api.list_repo_files(self.DATASET_NAME, repo_type="dataset")
+            langs = sorted({
+                f.split("/")[1]
+                for f in files
+                if f.startswith("data/") and f.endswith("/data.json")
+            })
+            if not langs:
+                raise RuntimeError("No data/<lang>/data.json paths found")
+            log.info(f"the-stack-smol: discovered {len(langs)} languages")
+            return langs
         except Exception as e:
             log.error(
-                f"Could not list configs for {self.DATASET_NAME}: {e}. "
+                f"Could not list languages for {self.DATASET_NAME}: {e}. "
                 f"Have you accepted the dataset's Terms of Use on HuggingFace?"
             )
             raise
@@ -115,22 +133,13 @@ class StackSmolSource:
             try:
                 ds = load_dataset(
                     self.DATASET_NAME,
-                    data_dir=f"data/{lang}",
+                    data_files=f"data/{lang}/data.json",
                     split="train",
                     trust_remote_code=True,
                 )
-            except Exception:
-                # Fall back to config-name loading if data_dir pattern fails.
-                try:
-                    ds = load_dataset(
-                        self.DATASET_NAME,
-                        lang,
-                        split="train",
-                        trust_remote_code=True,
-                    )
-                except Exception as e:
-                    log.warning(f"  Failed to load {lang}: {e} — skipping")
-                    continue
+            except Exception as e:
+                log.warning(f"  Failed to load {lang}: {e} — skipping")
+                continue
 
             for sample in tqdm(ds, desc=f"stack-smol {lang}", unit="file", leave=False):
                 record = self._format(sample, lang)
