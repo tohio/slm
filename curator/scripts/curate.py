@@ -236,7 +236,7 @@ def _build_source(
     if name == "stack_smol":
         return StackSmolSource(output_dir=raw_dir, max_docs=cap)
     if name == "stack_v1":
-        return StackV2Source(output_dir=raw_dir, max_docs=cap)
+        return StackV1Source(output_dir=raw_dir, max_docs=cap)
     if name == "jupyter":
         return JupyterSource(output_dir=raw_dir, max_docs=cap)
     if name == "conala":
