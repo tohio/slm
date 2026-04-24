@@ -320,7 +320,7 @@ Run close to `us-east-1` (AWS) or `us-east1` (GCP) to minimise Common Crawl egre
 ### Preemptible interruption handling
 
 - **Common Crawl** tracks progress per WARC segment in `cc_progress.json`.
-- **FineWeb / peS2o / open-web-math / StackExchange / the-stack-v1** (streaming sources) track progress by counting completed shards and skipping that many records on restart.
+- **FineWeb / peS2o / open-web-math / StackExchange / the-stack-v1 / pg19** (streaming sources) track progress by counting completed shards and skipping that many records on restart.
 - **Filter / dedup / blend** skip files that already exist on disk.
 
 Restart the exact same command to resume. At most one segment or shard of work is lost per interruption.
@@ -351,7 +351,7 @@ make curate SIZE=125m WORKERS=62
 
 **Why HTTPS for Common Crawl instead of S3?** Direct S3 access to the `commoncrawl` bucket fails on EC2 instances with IAM roles attached — the role credentials are rejected by the bucket policy. HTTPS via `data.commoncrawl.org` works reliably regardless of instance credentials.
 
-**Why streaming-first code?** At 1b scale with 30B+ tokens, materializing any large source in memory is infeasible on reasonable hardware. FineWeb and stack-v2 require streaming; the other sources use streaming for consistency so the pipeline works uniformly across hardware sizes. RAM is not the load-bearing scaling axis here — vCPU count and network throughput are.
+**Why streaming-first code?** At 1b scale with 30B+ tokens, materializing any large source in memory is infeasible on reasonable hardware. FineWeb, stack-v1, and pg19 use streaming because their on-HF layouts (large volume or many small parquet files) make full-dataset downloads impractical. The other sources use streaming for consistency so the pipeline works uniformly across hardware sizes. RAM is not the load-bearing scaling axis here — vCPU count and network throughput are.
 
 **Why datatrove for dedup instead of datasketch?** datasketch's `MinHashLSH` is in-memory. At 350m it requires ~32GB; at 1b it requires ~85GB and may not fit on a single instance. datatrove's disk-based pipeline keeps RAM bounded by shard size regardless of corpus size — the same pattern used by FineWeb and RedPajama at trillion-token scale.
 
@@ -398,3 +398,5 @@ One source worth flagging: peS2o overlaps with academic papers. If future evals 
 **Jupyter and CoNaLa prose components are not language-filtered.** Labeling them as code-adjacent skips English-prose filters, which means non-English prose in these sources passes through. The prose volume is small and largely English-coded on GitHub/StackOverflow, so this is not a meaningful corpus contamination, but the model will see the occasional non-English notebook comment or SO intent.
 
 **Char-to-token ratio is approximate.** `CHARS_PER_TOKEN = 5` is a fleet-wide default in `curator/constants.py`. Real ratios vary by domain: English prose ~4.5, code ~3.5, math ~3. The approximation is fine for target sizing but will produce slightly under-target tokens if the corpus skews code-heavy. Recalibrate from a tokenized 125m run if needed.
+
+**wikipedia cold-cache overhead.** wikipedia's `wikimedia/wikipedia` 20231101.en config loads the full ~19GB dataset (~6.4M articles) before iteration starts, even though mini only uses 5000 articles and 125m/1b only use a fraction. Cold-cache runs spend 10–15 minutes on wikipedia alone; once cached, subsequent runs are instant. Could be migrated to streaming like pg19 was, if this overhead becomes disruptive.
