@@ -82,7 +82,7 @@ VALIDATED_DIR = DATA_DIR / "validated"
 CODE_SOURCES: frozenset[str] = frozenset({
     "codesearchnet",
     "stack_smol",
-    "stack_v2",
+    "stack_v1",
     "jupyter",
     "conala",
 })
@@ -221,7 +221,7 @@ def validate_manual_split(
         - Repeated line ratio (Gopher-style) — prose sources only
         - Perplexity filter (KenLM, if model available) — all sources
 
-    Code sources (codesearchnet, stack_smol, stack_v2, jupyter, conala)
+    Code sources (codesearchnet, stack_smol, stack_v1, jupyter, conala)
     bypass the structural prose checks because code does not always end
     in terminal punctuation and may have legitimate repeated lines
     (boilerplate imports, standard patterns). They still go through the

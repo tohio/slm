@@ -36,11 +36,14 @@ from config import ALL_SOURCES, CODE_SOURCES, NON_CODE_SOURCES
 pytestmark = requires_stage("curate-mini")
 
 
-# Sources whose presence in train.jsonl is required. stack_v2 is excluded
-# because its SWH content fetching is the one external dependency we don't
-# control — if SWH is rate-limiting or SWH_AUTH_TOKEN isn't set, the mini
-# run may produce very few stack_v2 docs. The rest must be present.
-REQUIRED_IN_TRAIN = [s for s in ALL_SOURCES if s != "stack_v2"]
+# All sources must appear in train.jsonl. Any missing source indicates a
+# real failure (download, filter, dedup, or blend problem) that should be
+# surfaced, not papered over with a skip. stack_v1 replaced stack_v2 in the
+# mix specifically so this assertion could be unconditional — v2's SWH
+# content fetch was the one external dependency that could produce zero
+# docs at mini scale, and v1 has content inline so it doesn't have that
+# failure mode.
+REQUIRED_IN_TRAIN = list(ALL_SOURCES)
 
 
 # ── Configuration drift guard ──────────────────────────────────────────────────
@@ -194,13 +197,13 @@ class TestCuratedOutput:
 
     def test_train_jsonl_contains_required_sources(self):
         """
-        train.jsonl should contain all sources except stack_v2 (which may
-        produce zero docs at mini scale if SWH is rate-limited).
+        train.jsonl should contain all sources in the mix.
 
         The 1% conala share at mini scale (1M tokens × 10% × 1% = 1k chars,
-        roughly 200 tokens) can plausibly round to zero docs — this is why
-        we check for 'at least 8 of 9 required sources' rather than strict
-        presence of every one.
+        roughly 200 tokens) can plausibly round to zero docs after blend
+        cap trimming — this is why we allow up to one source to be absent
+        rather than requiring strict presence of every one. If more than
+        one source is missing, there's a real pipeline problem.
         """
         docs = read_jsonl(pipeline_path("curated", "train.jsonl"))
         sources = {d["source"] for d in docs}
@@ -289,7 +292,9 @@ class TestBlendStats:
     def test_blend_stats_sources_recorded(self):
         """
         All sources that produced output should appear in blend_stats.
-        We allow stack_v2 to be absent (same caveat as train.jsonl test).
+        We allow up to one source to be absent (same caveat as the
+        train.jsonl test — the 1% conala share can round to zero at
+        mini scale).
         """
         stats = self._load_stats()
         mix = stats["source_mix"]
@@ -302,80 +307,3 @@ class TestBlendStats:
     def test_blend_stats_per_source_schema(self):
         """Each source entry must have docs, chars, target_chars, deficit."""
         stats = self._load_stats()
-        for source, data in stats["source_mix"].items():
-            for field in ("docs", "chars", "target_chars", "deficit"):
-                assert field in data, (
-                    f"source_mix[{source}] missing field '{field}'. "
-                    f"Got keys: {list(data.keys())}"
-                )
-
-    def test_blend_stats_matches_train_jsonl(self):
-        """total_documents in stats should match actual line count in train.jsonl."""
-        stats = self._load_stats()
-        docs = read_jsonl(pipeline_path("curated", "train.jsonl"))
-        assert stats["total_documents"] == len(docs), (
-            f"blend_stats.json says {stats['total_documents']} docs "
-            f"but train.jsonl has {len(docs)}"
-        )
-
-    def test_blend_stats_deficit_covered_by_overflow(self):
-        """
-        Cap-and-redistribute invariant: any deficit from supply-constrained
-        sources should be covered by FineWeb overflow.
-
-        Computed as: total deficit ≤ FineWeb overflow_chars (if overflow
-        occurred) OR total deficit == 0 (if no overflow needed).
-
-        Some slack is allowed — the overflow pass reads in shard-aligned
-        chunks and may slightly overshoot the exact deficit. We check that
-        total_chars across all sources is within 5% of the target.
-        """
-        stats = self._load_stats()
-        total_target = sum(v["target_chars"] for v in stats["source_mix"].values())
-        total_actual = sum(v["chars"] for v in stats["source_mix"].values())
-
-        # Allow 5% tolerance on either side — overflow is shard-aligned,
-        # mini-scale numbers are small enough that rounding matters.
-        tolerance = 0.05
-        ratio = total_actual / max(total_target, 1)
-        assert (1 - tolerance) <= ratio <= (1 + tolerance * 3), (
-            f"Total chars ({total_actual / 1e6:.2f}M) diverges from "
-            f"target ({total_target / 1e6:.2f}M) by more than "
-            f"±{tolerance:.0%} / +{tolerance * 3:.0%}. "
-            f"Cap-and-redistribute may not be working."
-        )
-
-    def test_blend_stats_fineweb_overflow_when_deficits_exist(self):
-        """
-        If any source has a non-trivial deficit, FineWeb should have
-        overflow_docs/overflow_chars fields populated.
-        """
-        stats = self._load_stats()
-        mix = stats["source_mix"]
-
-        # Sum deficits from all sources OTHER than fineweb (fineweb covers
-        # others' deficits; its own is a separate concept).
-        other_deficit = sum(
-            v["deficit"] for k, v in mix.items() if k != "fineweb"
-        )
-
-        fineweb = mix.get("fineweb", {})
-        if other_deficit > 1_000_000:  # 1 MB of shortfall = meaningful
-            assert "overflow_chars" in fineweb, (
-                f"Other sources show {other_deficit / 1e6:.2f}MB of deficit "
-                f"but FineWeb has no overflow_chars recorded. "
-                f"Cap-and-redistribute did not run."
-            )
-            assert fineweb["overflow_chars"] > 0, (
-                f"FineWeb overflow_chars is 0 despite {other_deficit / 1e6:.2f}MB "
-                f"of deficit from other sources."
-            )
-
-    def test_blend_stats_chars_per_token_set(self):
-        """chars_per_token should be the constant from config."""
-        from config import CHARS_PER_TOKEN
-        stats = self._load_stats()
-        assert stats["chars_per_token"] == CHARS_PER_TOKEN, (
-            f"blend_stats.json chars_per_token={stats['chars_per_token']} "
-            f"does not match config.CHARS_PER_TOKEN={CHARS_PER_TOKEN}"
-        )

@@ -89,7 +89,7 @@ The mini curation run exercises all 10 data sources with small per-source budget
 | Total chars within tolerance of target | Cap-and-redistribute not running or broken |
 | FineWeb has overflow when other sources have deficit | Overflow sink not triggered |
 
-**Why stack_v2 is allowed to be absent from `train.jsonl`.** the-stack-v2 fetches content from the Software Heritage Archive per-record. If SWH is rate-limiting or `SWH_AUTH_TOKEN` is unset, the mini run may produce very few or zero stack_v2 documents. The `test_train_jsonl_contains_required_sources` check requires 8 of 9 non-stack_v2 sources plus optionally stack_v2. The other tests (raw shards, filtered shards, deduped shards) still require stack_v2 to produce at least something — if SWH is completely unreachable, those tests will correctly fail.
+**All 10 sources must appear in `train.jsonl`.** Unlike the previous stack_v2 setup (which depended on SWH and could legitimately produce zero docs during rate-limit windows), stack_v1 has file content inline in the parquet shards and will always produce output if the mini cap is reached. A missing source now indicates a real failure — gated-dataset license not accepted, `HF_TOKEN` misconfigured, or a loader regression — and the test should fail in that case, not skip.
 
 ### `test-validate` — after `make validate`
 
@@ -208,4 +208,4 @@ source ~/.bashrc
 export DATA_DIR=/data/slm/data
 ```
 
-**Dataset gating for `test-curator`.** The mini run exercises gated HuggingFace datasets (FineWeb, the-stack-smol, the-stack-v2-dedup). Before first run, accept Terms of Use on each dataset's HuggingFace page and set `HF_TOKEN` in `.env`. the-stack-v2 additionally benefits from `SWH_AUTH_TOKEN` for Software Heritage Archive rate limits; without it, the mini run still works but stack_v2 may contribute few documents.
+**Dataset gating for `test-curator`.** The mini run exercises gated HuggingFace datasets (FineWeb, the-stack-smol, the-stack-dedup). Before first run, accept Terms of Use on each dataset's HuggingFace page and set `HF_TOKEN` in `.env`.

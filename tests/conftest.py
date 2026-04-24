@@ -206,14 +206,13 @@ def make_stack_smol_doc(text=None, language="python", repo="test/repo", path="te
     }
 
 
-def make_stack_v2_doc(text=None, language="Python", repo="test/repo", path="test.py", blob_id="abc123"):
+def make_stack_v1_doc(text=None, language="python", repo="test/repo", path="test.py"):
     return {
         "text": text or GOOD_CODE,
-        "source": "stack_v2",
+        "source": "stack_v1",
         "language": language,
         "repo": repo,
         "path": path,
-        "blob_id": blob_id,
     }
 
 

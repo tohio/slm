@@ -100,7 +100,8 @@ slm/
 │   │   ├── stackexchange.py
 │   │   ├── code_search_net.py
 │   │   ├── stack_smol.py
-│   │   ├── stack_v2.py
+│   │   ├── stack_v1.py
+│   │   ├── stack_v2.py          disabled — see file header
 │   │   ├── jupyter.py
 │   │   └── conala.py
 │   ├── filters/
@@ -212,8 +213,7 @@ slm/
 - CUDA-capable GPU (for pretraining stages)
 - AWS account (S3 for data storage)
 - Weights & Biases account
-- HuggingFace account + token (several sources are gated: FineWeb, the-stack-smol, the-stack-v2-dedup)
-- Software Heritage Archive token (optional but strongly recommended for the-stack-v2 throughput)
+- HuggingFace account + token (several sources are gated: FineWeb, the-stack-smol, the-stack-dedup)
 
 **Disk setup (separate data volume)**
 
@@ -263,7 +263,7 @@ make install-gpu      # skips kenlm and other curation-only dependencies
 Before first run, visit and accept terms on these HuggingFace dataset pages (required for gated datasets used in curation):
 - https://huggingface.co/datasets/HuggingFaceFW/fineweb
 - https://huggingface.co/datasets/bigcode/the-stack-smol
-- https://huggingface.co/datasets/bigcode/the-stack-v2-dedup
+- https://huggingface.co/datasets/bigcode/the-stack-dedup
 
 ---
 
@@ -469,10 +469,9 @@ Runs on CPU instances. No GPU required. Hardware recommendations below, not floo
 > **Measure your own throughput before committing.** Many variables dominate:
 > network peering between your cloud and Common Crawl's AWS `us-east-1` origin,
 > per-WARC CloudFront throughput at your time of day, disk IOPS, CPU generation,
-> Software Heritage Archive rate limits for the-stack-v2 fetches, and CC's own
-> throttling behavior. Cross-cloud (Nebius → AWS, GCP → AWS) runs can be 2–3×
-> faster or slower than same-region runs. Before committing to a full run, time
-> a `curate-mini` or `curate SIZE=125m` run to calibrate.
+> and CC's own throttling behavior. Cross-cloud (Nebius → AWS, GCP → AWS) runs
+> can be 2–3× faster or slower than same-region runs. Before committing to a
+> full run, time a `curate-mini` or `curate SIZE=125m` run to calibrate.
 
 Run close to `us-east-1` (AWS) or `us-east1` (GCP) to minimise Common Crawl egress latency. Attach a persistent disk (500GB+) for `DATA_DIR` — the pipeline is fully resumable at every stage.
 
@@ -561,7 +560,7 @@ Models are evaluated on standard benchmarks via `lm-evaluation-harness`:
 
 **Why different epoch counts per scale?** Token budget versus supply. At 125m (5B tokens), 2 epochs is comfortable; at 1b (30B tokens), 1 epoch leaves every source below its supply ceiling, so no repetition. Modern small-model training (Llama, Phi, Qwen) follows the single-epoch pattern at scale — fresh tokens outperform repeated ones.
 
-**Why streaming-first curation?** At 1b with 30B+ tokens, materializing sources in memory is infeasible on reasonable hardware. FineWeb and stack-v2 require streaming; the other sources use it for consistency. RAM is not the load-bearing scaling axis — vCPU count and network throughput are. This means readers on modest hardware (32 GB RAM) can still run 1b, just slower.
+**Why streaming-first curation?** At 1b with 30B+ tokens, materializing sources in memory is infeasible on reasonable hardware. FineWeb and stack-v1 require streaming; the other sources use it for consistency. RAM is not the load-bearing scaling axis — vCPU count and network throughput are. This means readers on modest hardware (32 GB RAM) can still run 1b, just slower.
 
 **Why cap-and-redistribute?** Wikipedia and pg19 have finite supply. At large scales they can't fill their character budget without repetition. Rather than add per-scale knobs or accept repetition, the overflow routes to FineWeb — which has 15T tokens of headroom — preserving mix shape and hitting the token target.
 
@@ -586,7 +585,7 @@ To run at 3b or beyond:
 1. Add a new entry to `TARGET_CONFIGS` in `config/data_mix.py` with the new `total_tokens`, `epochs`, and `cc_crawls` list.
 2. Add a matching `gpt_3b.yaml` (or equivalent) in `pretrain/configs/`.
 3. Review Wikipedia and pg19 supply: at budgets approaching 40B × 1 epoch, Wikipedia repetition approaches 1.6×. Options: drop Wikipedia's share, add multilingual Wikipedia, or accept the repetition.
-4. Consider adding a second bulk-code source to avoid stack-v2 over-epoching at 5B+ code tokens.
+4. Consider adding a second bulk-code source to avoid stack-v1 over-epoching at 5B+ code tokens.
 5. Consider upgrading FineWeb from `sample-100BT` to a larger sample if overflow consumption gets close to 100B.
 
 No core code changes are required for scaling — the target config, source mix, and cap-and-redistribute handle supply variance automatically. See [curator/README.md](curator/README.md) for full details.

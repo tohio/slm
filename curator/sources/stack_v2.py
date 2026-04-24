@@ -1,6 +1,36 @@
 """
 curator/sources/stack_v2.py
 --------------------------------
+[DISABLED — not currently wired into ALL_SOURCES or _build_source.]
+
+the-stack-v2-dedup data source. Kept for reference after being replaced
+with stack_v1 due to SWH rate-limit constraints making v2 impractical
+at SLM pretraining scale.
+
+SWH issues encountered (documented 2026-04-24):
+    - Authenticated SWH API quota is ~1200 req/hour for /content/raw/
+    - Our mini cap alone (3000 files) exceeds this
+    - 125m/1b scale would require weeks of wall time or multiple tokens
+    - Each retry during throttling extends the cooldown rather than
+      refreshing the quota
+
+To revive:
+    1. Re-add import in curator/scripts/curate.py
+    2. Re-add _build_source branch for "stack_v2"
+    3. Re-add "stack_v2" entry to CODE_SUBMIX and MINI_OVERRIDES in
+       config/data_mix.py
+    4. Re-add "stack_v2" to CODE_SOURCES in curator/filters/quality.py
+       and validation/scripts/validate.py
+    5. Ensure SWH_AUTH_TOKEN is set and has adequate quota
+    6. Consider lowering fetch_workers and adding longer inter-batch
+       sleeps to stay under the hourly limit
+
+Original design, per-language iteration via data_files glob, and SWH
+blob-fetch logic all remain correct as written — the issue is upstream
+rate-limiting, not the loader.
+
+=============================================================================
+
 the-stack-v2-dedup data source.
 
 Loads `bigcode/the-stack-v2-dedup` filtered to 4 languages (Python, Go,
@@ -9,46 +39,8 @@ fetches file content on-demand from the Software Heritage Archive (SWH).
 Acts as the bulk code source at 50% of the code share, complementing
 curated sources like CodeSearchNet.
 
-Why per-language iteration?
-    The-stack-v2-dedup stores records sharded by language under
-    `data/<Language>/`. Streaming the full dataset iterates alphabetically
-    through 600+ languages (AMPL, ABAP, ...) before reaching Python, Rust,
-    Shell. That's billions of records of filter-and-skip before the first
-    match — unusable at any scale, not just mini. Instead we use
-    data_files with an explicit glob per language so HF only fetches
-    the matching parquet shards.
-
-Why content fetching?
-    The-stack-v2 stores only file metadata and blob IDs in the HF
-    dataset — the actual source code is hosted on SWH and must be
-    fetched per record. This is required by BigCode's content licensing
-    arrangement with SWH. The HF dataset card documents the SWH content
-    URL pattern.
-
-Rate limiting and retries:
-    SWH throttles per-IP. We keep the content-fetch thread pool modest
-    (default 8 workers) and retry transient failures with backoff. An
-    SWH_AUTH_TOKEN in the environment enables higher rate limits.
-
-License note: Users must accept BigCode's Terms of Use on the HF dataset
-page before first download. All fetched files carry permissive licenses
-per the-stack-v2's filtering, but specific attribution requirements for
-redistribution may apply — see the dataset card.
-
-Output: JSONL with one file per line:
-    {
-        "text": "<source code>",
-        "source": "stack_v2",
-        "language": "Python",
-        "repo": "...",
-        "path": "...",
-        "blob_id": "..."
-    }
-
-Usage:
-    from curator.sources.stack_v2 import StackV2Source
-    source = StackV2Source(output_dir=Path("data/raw/stack_v2"))
-    source.download()
+[rest of existing docstring unchanged below]
+...
 """
 
 import logging

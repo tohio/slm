@@ -94,7 +94,7 @@ from curator.sources.open_web_math import OpenWebMathSource
 from curator.sources.stackexchange import StackExchangeSource
 from curator.sources.code_search_net import CodeSearchNetSource
 from curator.sources.stack_smol import StackSmolSource
-from curator.sources.stack_v2 import StackV2Source
+from curator.sources.stack_v1 import StackV1Source
 from curator.sources.jupyter import JupyterSource
 from curator.sources.conala import ConalaSource
 
@@ -235,7 +235,7 @@ def _build_source(
         return CodeSearchNetSource(output_dir=raw_dir, max_docs=cap)
     if name == "stack_smol":
         return StackSmolSource(output_dir=raw_dir, max_docs=cap)
-    if name == "stack_v2":
+    if name == "stack_v1":
         return StackV2Source(output_dir=raw_dir, max_docs=cap)
     if name == "jupyter":
         return JupyterSource(output_dir=raw_dir, max_docs=cap)

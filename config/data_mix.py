@@ -96,14 +96,14 @@ DATA_MIX: dict[str, dict] = {
 
 # ── 2. Code sub-mix ────────────────────────────────────────────────────────────
 #
-# Percentages of the 10% code share (not of total tokens). stack_v2 is capped
+# Percentages of the 10% code share (not of total tokens). stack_v1 is capped
 # at 50% so bulk raw code doesn't drown out the curated code sources.
 
 CODE_SUBMIX: dict[str, dict] = {
-    "stack_v2": {
+    "stack_v1": {
         "pct":     50.0,
-        "display": "The Stack v2 (capped)",
-        "hub":     "bigcode/the-stack-v2-dedup",
+        "display": "The Stack v1 dedup (capped)",
+        "hub":     "bigcode/the-stack-dedup",
     },
     "codesearchnet": {
         "pct":     35.0,
@@ -231,7 +231,7 @@ MINI_OVERRIDES: dict[str, int] = {
     "stackexchange": 2_000,
     "codesearchnet": 5_000,
     "stack_smol":    2_000,
-    "stack_v2":      3_000,
+    "stack_v1":      3_000,
     "jupyter":       500,
     "conala":        500,
 }

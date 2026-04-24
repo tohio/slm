@@ -53,7 +53,7 @@ log = logging.getLogger(__name__)
 CODE_SOURCES: frozenset[str] = frozenset({
     "codesearchnet",
     "stack_smol",
-    "stack_v2",
+    "stack_v1",
     "jupyter",
     "conala",
 })

@@ -38,7 +38,7 @@ Each source runs independently through filtering and deduplication. The blend st
 
 | Code source | Sub-share | Languages | Notes |
 |---|---|---|---|
-| the-stack-v2-dedup | 50% | Python, Go, Rust, Shell | `bigcode/the-stack-v2-dedup` — bulk raw code, content fetched from Software Heritage Archive |
+| the-stack-dedup (v1) | 50% | python, go, rust, shell | `bigcode/the-stack-dedup` — bulk raw code, content inline in parquet shards |
 | CodeSearchNet | 35% | Python, Java, JavaScript, PHP, Ruby, Go | `code_search_net` — curated function-level with docstrings |
 | the-stack-smol | 10% | 30 languages | `bigcode/the-stack-smol` — diverse small sample |
 | Jupyter notebooks | 4% | mostly Python | `codeparrot/github-jupyter-code-to-text` — code+prose |
@@ -84,7 +84,8 @@ curator/
 │   ├── stackexchange.py       HuggingFaceH4 stack-exchange Q+A (streaming)
 │   ├── code_search_net.py     CodeSearchNet — 6 languages
 │   ├── stack_smol.py          bigcode/the-stack-smol — 30 languages
-│   ├── stack_v2.py            bigcode/the-stack-v2-dedup + SWH fetch
+│   ├── stack_v1.py            bigcode/the-stack-dedup (inline content)
+│   ├── stack_v2.py            DISABLED — see file header
 │   ├── jupyter.py             codeparrot jupyter-code-to-text
 │   └── conala.py              neulab/conala-mined
 ├── filters/
@@ -110,9 +111,8 @@ cp .env.sample .env
 make download-fasttext-model
 ```
 
-Two environment variables need to be set beyond the existing requirements:
-- `HF_TOKEN` — required for gated datasets (FineWeb, the-stack-smol, the-stack-v2-dedup). Accept Terms of Use on each dataset's HuggingFace page before first run.
-- `SWH_AUTH_TOKEN` — optional but strongly recommended. Unauthenticated SWH fetches are aggressively rate-limited; at 1b scale this multiplies stack-v2 fetch time by 10×+. Register at https://archive.softwareheritage.org/.
+One environment variable is required beyond the existing ones:
+- `HF_TOKEN` — required for gated datasets (FineWeb, the-stack-smol, the-stack-dedup). Accept Terms of Use on each dataset's HuggingFace page before first run.
 
 **Minimal run — validate the pipeline before committing to a full run**
 
@@ -120,7 +120,7 @@ Two environment variables need to be set beyond the existing requirements:
 python curator/scripts/curate.py --target mini --mini
 ```
 
-Mini exercises every source at small scale (~100 docs to a few thousand per source) to validate end-to-end that all 10 source loaders, filter logic, dedup, and the mix layer work correctly. Total runtime 30–60 min; the stack-v2 SWH fetch dominates.
+Mini exercises every source at small scale (~100 docs to a few thousand per source) to validate end-to-end that all 10 source loaders, filter logic, dedup, and the mix layer work correctly. Total runtime 30–60 min.
 
 Run each stage individually to inspect output between steps:
 
@@ -187,7 +187,8 @@ data/
 │   ├── stackexchange/              streamed SE Q+A shards
 │   ├── codesearchnet/              CSN 6-language shards
 │   ├── stack_smol/                 stack-smol 30-language shards
-│   ├── stack_v2/                   stack-v2 4-language shards (with SWH fetch)
+│   ├── stack_v1/                   stack-v1 4-language shards (content inline)
+│   ├── stack_v2/                   (disabled — present only if re-enabled)
 │   ├── jupyter/                    jupyter notebook shards
 │   └── conala/                     CoNaLa pair shards
 ├── filtered/
@@ -312,14 +313,14 @@ These are recommendations, not floors. The pipeline streams everywhere, so RAM i
 | `slm-350m` | 32+ | 64 GB | _TBD — pending 350m run_ |
 | `slm-1b` | 64+ | 128 GB | _TBD — pending 1b run_ |
 
-Runtimes are CPU-bound on MinHash dedup and I/O-bound on Common Crawl download. The-stack-v2 fetching from Software Heritage is rate-limited and adds multi-hour wall time at 1b scale; set `SWH_AUTH_TOKEN` for higher throughput.
+Runtimes are CPU-bound on MinHash dedup and I/O-bound on Common Crawl download.
 
 Run close to `us-east-1` (AWS) or `us-east1` (GCP) to minimise Common Crawl egress latency. Attach a persistent disk (500GB+) for `DATA_DIR` — the pipeline is fully resumable at every stage.
 
 ### Preemptible interruption handling
 
 - **Common Crawl** tracks progress per WARC segment in `cc_progress.json`.
-- **FineWeb / peS2o / open-web-math / StackExchange / the-stack-v2** (streaming sources) track progress by counting completed shards and skipping that many records on restart.
+- **FineWeb / peS2o / open-web-math / StackExchange / the-stack-v1** (streaming sources) track progress by counting completed shards and skipping that many records on restart.
 - **Filter / dedup / blend** skip files that already exist on disk.
 
 Restart the exact same command to resume. At most one segment or shard of work is lost per interruption.
@@ -342,7 +343,7 @@ make curate SIZE=125m WORKERS=62
 
 **Why FineWeb as overflow sink?** It has the largest supply (15T tokens, ~500× our largest target) and is the most web-representative of the non-CC sources. Routing deficit there preserves the mix shape while guaranteeing token targets are hit.
 
-**Why stack-v2 capped at 50% of code?** stack-v2 is raw code files with minimal metadata; CodeSearchNet has docstrings, Jupyter has prose-and-code, CoNaLa has NL-intent pairs. Those sources teach the model *how humans describe and explain code*, not just syntax. Letting stack-v2 dominate at 90%+ would trade the describe-and-explain signal away for more raw-completion data.
+**Why stack-v1 capped at 50% of code?** stack-v1 is raw code files with minimal metadata; CodeSearchNet has docstrings, Jupyter has prose-and-code, CoNaLa has NL-intent pairs. Those sources teach the model *how humans describe and explain code*, not just syntax. Letting stack-v1 dominate at 90%+ would trade the describe-and-explain signal away for more raw-completion data.
 
 **Why sample-100BT for FineWeb instead of a specific CC snapshot?** Reproducibility. `sample-100BT` is a deterministic 100B-token subset of FineWeb — anyone who runs the same code gets the same data. Named snapshots also work but are subject to FineWeb re-releases and can drift.
 
@@ -368,7 +369,7 @@ The pipeline is designed to scale. Scale-invariant mix percentages, streaming-fi
 
 1. Add an entry to `TARGET_CONFIGS` in `curate.py` with the new `total_tokens` and `cc_crawls` list.
 2. Review Wikipedia and pg19 supply: at token budgets approaching 40B × 1 epoch (equivalent to 1b × 2 epochs), Wikipedia repetition approaches 1.6×. Either drop Wikipedia's share to ~7% at that scale, or accept the repetition.
-3. At 5B+ code tokens, consider adding a second bulk-code source (stack-v2-dedup unfiltered, or a newer release) to avoid stack-v2 over-epoching.
+3. At 5B+ code tokens, consider adding a second bulk-code source to avoid stack-v1 over-epoching.
 4. Consider upgrading FineWeb from `sample-100BT` to a larger sample or the full dataset, depending on how much of FineWeb's headroom the new target consumes.
 
 No code changes are required for scaling — the target config, source mix, and cap-and-redistribute handle supply variance automatically.
@@ -392,7 +393,7 @@ One source worth flagging: peS2o overlaps with academic papers. If future evals 
 
 ## Known Limitations
 
-**the-stack-v2 content fetching.** stack-v2 stores only metadata; actual source code is fetched from Software Heritage Archive per-record at download time. This is multi-hour at 1b scale even with SWH auth, and longer without. A future optimization would be caching blob IDs and their fetched content in a local sqlite index so reruns don't re-fetch.
+**stack-v1 near-duplicate coverage.** stack-v1 applies exact deduplication but not near-duplicate removal. Near-dups in code (forks, templates, auto-generated files with small variants) slip through. The downstream MinHash dedup stage catches some of this, but v2's dataset-level near-dup filtering was stronger. Acceptable tradeoff for avoiding SWH's rate-limit problems; re-evaluate if repetition shows up in eval.
 
 **Jupyter and CoNaLa prose components are not language-filtered.** Labeling them as code-adjacent skips English-prose filters, which means non-English prose in these sources passes through. The prose volume is small and largely English-coded on GitHub/StackOverflow, so this is not a meaningful corpus contamination, but the model will see the occasional non-English notebook comment or SO intent.
 
