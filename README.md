@@ -78,7 +78,7 @@ The model is a dense decoder-only transformer with a modern architecture:
 ```
 slm/
 ├── config/
-│   └── data_mix.py              single source of truth for data mix, token targets, curator constants
+│   └── data_mix.py              
 │
 ├── model/
 │   ├── config.py
@@ -89,7 +89,7 @@ slm/
 │   └── model.py
 │
 ├── curator/
-│   ├── constants.py             re-exports from config/ (backward compat)
+│   ├── constants.py             
 │   ├── sources/
 │   │   ├── common_crawl.py
 │   │   ├── fineweb.py
@@ -156,6 +156,9 @@ slm/
 │   │   ├── hpa.yaml
 │   │   └── pvc.yaml
 │   └── serve.sh
+│
+├── scripts/
+│   └── sanity_train.py          
 │
 ├── tests/
 │   ├── conftest.py

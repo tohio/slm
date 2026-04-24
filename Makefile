@@ -55,6 +55,7 @@ endif
         s3-upload s3-download s3-list \
         test-curator test-validate test-tokenizer test-data-pipeline \
         test-training test-sft-chat test-sft-code test-dpo test-gpu-pipeline test-model \
+        sanity-train sanity-train-small sanity-train-save \
         clean clean-data clean-results clean-logs help
 
 # ── Full pipeline ──────────────────────────────────────────────────────────────
@@ -370,6 +371,26 @@ test-model:
 	@echo "==> Running model unit tests..."
 	.venv/bin/pytest tests/model/ -v --tb=short
 
+# ── Sanity check ──────────────────────────────────────────────────────────────
+# Self-contained model + training-code diagnostic. Uses the Mistral tokenizer
+# and FineWeb-Edu data — bypasses the curator and SLM tokenizer entirely. Run
+# when you need to confirm the model architecture and training loop can learn
+# at scale, with data and tokenizer ruled out as variables.
+#
+# Delete scripts/sanity_train.py and these targets when no longer needed.
+
+sanity-train:
+	@echo "==> Sanity training: Mistral tokenizer + FineWeb-Edu + mini arch (~500M tokens)"
+	$(PYTHON) scripts/sanity_train.py
+
+sanity-train-small:
+	@echo "==> Sanity training: 100M tokens (fast iteration)"
+	$(PYTHON) scripts/sanity_train.py --target-tokens 100000000
+
+sanity-train-save:
+	@echo "==> Sanity training: full run, saves model to results/sanity/"
+	$(PYTHON) scripts/sanity_train.py --save
+
 # ── Clean ─────────────────────────────────────────────────────────────────────
 
 clean-data:
@@ -424,6 +445,11 @@ help:
 	@echo ""
 	@echo "Tests (unit — no pipeline outputs needed):"
 	@echo "  test-model               Model architecture unit tests"
+	@echo ""
+	@echo "Sanity check (model + training code only):"
+	@echo "  sanity-train             Train mini arch on FineWeb-Edu w/ Mistral tokenizer (~500M tokens)"
+	@echo "  sanity-train-small       Same as sanity-train but 100M tokens (fast iteration)"
+	@echo "  sanity-train-save        Same as sanity-train but saves model to results/sanity/"
 	@echo ""
 	@echo "Pipeline:"
 	@echo "  curate             Stage 1  — download, curate, blend to train.jsonl + val.jsonl, upload"

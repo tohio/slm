@@ -225,3 +225,143 @@ class TestChatTemplate:
         assert token_ids[0] == BOS_ID, (
             f"First token ID is {token_ids[0]}, expected BOS_ID={BOS_ID}"
         )
+class TestSpecialTokensDistinct:
+    def test_bos_eos_pad_have_distinct_ids(self):
+        assert BOS_ID != EOS_ID, f"BOS_ID and EOS_ID are both {BOS_ID}"
+        assert BOS_ID != PAD_ID, f"BOS_ID and PAD_ID are both {BOS_ID}"
+        assert EOS_ID != PAD_ID, f"EOS_ID and PAD_ID are both {EOS_ID}"
+
+
+class TestRoundtripBreadth:
+    """
+    Domain-breadth roundtrip. The TestRoundtrip class above covers common
+    cases; these catch silent information loss on edge cases that matter
+    for training data quality.
+    """
+    @pytest.mark.parametrize("text,label", [
+        # Punctuation-heavy
+        ('Dr. Smith said, "It\'s 3:14 p.m.—let\'s go!"', "punctuation"),
+        # URL + number + date (common in web text)
+        ("Visit https://example.com on 2024-03-15 for $49.99.", "url_number_date"),
+        # Whitespace — leading, trailing, repeated
+        ("  leading spaces\n\n\ttabs and\n    newlines  ", "whitespace"),
+        # Unicode / multilingual
+        ("Café résumé naïve façade — 你好 — مرحبا", "unicode"),
+        # Code with common operators
+        ("x = [i**2 for i in range(10) if i % 2 == 0]", "code_operators"),
+        # Markdown-ish formatting common in training data
+        ("## Section\n\n- **bold** item\n- _italic_ item\n\n```python\ncode\n```", "markdown"),
+    ])
+    def test_roundtrip_breadth(self, text, label):
+        tokenizer = load_raw_tokenizer()
+        encoded = tokenizer.encode(text)
+        decoded = tokenizer.decode(encoded.ids, skip_special_tokens=True)
+        # Whitespace-only differences are expected (decoders often normalize);
+        # the test is that content survives, not exact byte equality.
+        assert text.strip() == decoded.strip(), (
+            f"Roundtrip failed on {label}:\n"
+            f"  input:  {repr(text)}\n"
+            f"  output: {repr(decoded)}"
+        )
+
+
+class TestTokenizedBinIntegrity:
+    """
+    After tokenize_data.py runs, sanity-check that the resulting bin files
+    contain valid IDs and decode to real text. Catches bugs where the
+    tokenizer is fine but the tokenization pipeline (batching, special
+    token insertion, EOS separators) is broken.
+    """
+    def test_tokenized_bin_ids_in_vocab_range(self):
+        tokenized_dir = pipeline_path("tokenized")
+        if not (tokenized_dir / "train.bin").exists():
+            pytest.skip("train.bin not found — run make tokenize first")
+        
+        import numpy as np
+        train = np.memmap(tokenized_dir / "train.bin", dtype=np.uint16, mode="r")
+        # Sample 10k random positions rather than scanning the whole file
+        import random
+        rng = random.Random(42)
+        positions = rng.sample(range(len(train)), min(10_000, len(train)))
+        sample = train[positions]
+        
+        assert sample.max() < 32000, f"Token ID {sample.max()} exceeds vocab_size 32000"
+        assert sample.min() >= 0, f"Negative token ID found: {sample.min()}"
+
+    def test_tokenized_bin_decodes_to_real_text(self):
+        tokenized_dir = pipeline_path("tokenized")
+        if not (tokenized_dir / "train.bin").exists():
+            pytest.skip("train.bin not found — run make tokenize first")
+        
+        import numpy as np
+        tokenizer = load_hf_tokenizer()
+        train = np.memmap(tokenized_dir / "train.bin", dtype=np.uint16, mode="r")
+        
+        # Decode three 200-token windows from different positions
+        positions = [0, len(train) // 2, max(0, len(train) - 200)]
+        for pos in positions:
+            window = train[pos:pos + 200].tolist()
+            decoded = tokenizer.decode(window, skip_special_tokens=True)
+            # Real text has letters. Garbage bytes interpreted as IDs would
+            # decode to mostly control chars or single-byte pieces.
+            alpha_ratio = sum(c.isalpha() for c in decoded) / max(len(decoded), 1)
+            assert alpha_ratio > 0.3, (
+                f"Decoded window at position {pos} is {alpha_ratio:.1%} alphabetic — "
+                f"expected >30%. Sample: {repr(decoded[:100])}"
+            )
+
+
+class TestFertilityBaseline:
+    """
+    Compare compression against a reference tokenizer on the same text.
+    Flags if your tokenizer is significantly less efficient than a
+    well-trained public tokenizer — which would mean more training tokens
+    needed to learn the same patterns.
+    """
+    def test_compression_within_range_of_reference(self):
+        validated_path = pipeline_path("validated", "train.jsonl")
+        if not validated_path.exists():
+            pytest.skip("validated/train.jsonl not found")
+        
+        try:
+            from transformers import AutoTokenizer
+            # Mistral's tokenizer is vocab=32000 (same as ours) and widely
+            # validated. If you don't have network access in CI, skip.
+            ref_tok = AutoTokenizer.from_pretrained(
+                "mistralai/Mistral-7B-v0.1", use_fast=True
+            )
+        except Exception as e:
+            pytest.skip(f"Reference tokenizer unavailable: {e}")
+        
+        our_tok = load_raw_tokenizer()
+        
+        # Collect 200 prose samples
+        samples = []
+        with open(validated_path) as f:
+            for i, line in enumerate(f):
+                if len(samples) >= 200:
+                    break
+                doc = json.loads(line)
+                if doc.get("source") in CODE_SOURCES:
+                    continue
+                samples.append(doc.get("text", ""))
+        
+        total_chars = sum(len(s) for s in samples)
+        our_tokens = sum(len(our_tok.encode(s).ids) for s in samples)
+        ref_tokens = sum(len(ref_tok.encode(s, add_special_tokens=False)) for s in samples)
+        
+        our_cpt = total_chars / our_tokens
+        ref_cpt = total_chars / ref_tokens
+        ratio = our_cpt / ref_cpt  # >1 means ours is more efficient, <1 less
+        
+        # Fail if we're more than 20% less efficient than reference.
+        # Some gap is expected (Mistral was trained on way more data),
+        # but >20% suggests a real problem.
+        assert ratio > 0.80, (
+            f"Tokenizer efficiency vs Mistral:\n"
+            f"  ours:      {our_cpt:.2f} chars/token\n"
+            f"  reference: {ref_cpt:.2f} chars/token\n"
+            f"  ratio:     {ratio:.2f} (threshold: > 0.80)\n"
+            f"Your tokenizer is significantly less efficient than the reference. "
+            f"Consider retraining on more data or inspecting the training corpus."
+        )
