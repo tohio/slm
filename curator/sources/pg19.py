@@ -8,7 +8,15 @@ books published before 1919, ~2.9B tokens total. Provides long-form
 coherent prose that complements the web-heavy sources (FineWeb, CC) and
 the short-form reference sources (Wikipedia).
 
-The dataset is small enough that we load it in full rather than streaming.
+We use streaming mode instead of materializing the full dataset. pg19
+on HF stores each book as an individual parquet file (~30k files total),
+so a non-streaming load_dataset call triggers ~30k sequential HTTP
+requests just to populate the cache — pathologically slow even at
+125m/350m/1b scale, and utterly wasted for mini (50 books). Streaming
+pulls parquet files lazily as iteration progresses, so the number of
+downloads is proportional to how many books we actually read, not
+the full corpus size.
+
 Split: train only (validation/test are held out for downstream use).
 
 Output: JSONL with one book per line:
@@ -40,10 +48,10 @@ log = logging.getLogger(__name__)
 
 class PG19Source:
     """
-    Downloads and extracts pg19 public-domain books.
+    Downloads and extracts pg19 public-domain books via HF streaming.
 
-    pg19 books are quite long (mean ~100k tokens each), so we use a smaller
-    shard_size to keep individual JSONL files manageable.
+    pg19 books are long (mean ~100k tokens each), so shard_size is
+    kept small to keep individual JSONL files manageable.
 
     Args:
         output_dir: Directory to write output JSONL files.
@@ -74,14 +82,14 @@ class PG19Source:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def download(self) -> list[Path]:
-        """Download pg19 and write to sharded JSONL files."""
-        log.info(f"Loading {self.DATASET_NAME} from HuggingFace...")
+        """Stream pg19 and write to sharded JSONL files."""
+        log.info(f"Streaming {self.DATASET_NAME} from HuggingFace...")
         dataset = load_dataset(
             self.DATASET_NAME,
             split="train",
+            streaming=True,
             trust_remote_code=True,
         )
-        log.info(f"pg19: {len(dataset):,} books loaded")
 
         if self.max_docs:
             log.info(f"pg19: capped at {self.max_docs:,} books (mini run)")
@@ -93,10 +101,14 @@ class PG19Source:
         total_skipped = 0
         stop = False
 
-        for book in tqdm(dataset, desc="Processing pg19", unit="book"):
+        # Streaming dataset has no len(); use tqdm without a total.
+        pbar = tqdm(desc="Processing pg19", unit="book")
+
+        for book in dataset:
             text = (book.get("text") or "").strip()
             if len(text) < self.min_length:
                 total_skipped += 1
+                pbar.update(1)
                 continue
 
             buffer.append({
@@ -106,6 +118,7 @@ class PG19Source:
                 "publication_date": str(book.get("publication_date", "")),
                 "url": book.get("url", ""),
             })
+            pbar.update(1)
 
             if len(buffer) >= self.shard_size:
                 path = self._write_shard(buffer, shard_idx)
@@ -125,6 +138,8 @@ class PG19Source:
             path = self._write_shard(buffer, shard_idx)
             output_files.append(path)
             total_written += len(buffer)
+
+        pbar.close()
 
         log.info(
             f"pg19 complete — "
