@@ -204,8 +204,18 @@ class GroupedQueryAttention(nn.Module):
 
         # Build padding component from 2D mask if provided.
         # Shape: (batch, 1, 1, kv_len) — broadcasts across q_len.
+        #
+        # HF `generate` passes a 2D mask of length (past_len + q_len) covering
+        # the full conceptual sequence, but `kv_len` reflects what's actually
+        # in the cache + current step. These can diverge in edge cases (e.g.
+        # the cache gets reset between decode steps, or use_cache=False is
+        # flipped mid-generation). Align to kv_len by taking the rightmost
+        # kv_len entries — this preserves causal alignment because the most
+        # recent mask values correspond to the most recent kv positions.
         pad: Optional[torch.Tensor] = None
         if attention_mask is not None and attention_mask.dim() == 2:
+            if attention_mask.shape[1] != kv_len:
+                attention_mask = attention_mask[:, -kv_len:]
             pad = attention_mask[:, None, None, :].bool()
 
         # No masking needed at all (q_len == 1 and no padding mask).
