@@ -127,9 +127,9 @@ def build_dpo_args(cfg: dict, output_dir: Path, beta: float):
     DPO-specific fields read from cfg["model"]:
         max_seq_length      → DPOConfig.max_length (prompt + completion).
 
-    NOTE: max_prompt_length was removed in trl 1.0. If we upgrade past 0.29,
-    the pre-filter in prepare_dpo.py becomes load-bearing rather than
-    defense in depth — revisit the filter threshold at that point.
+    NOTE: (max_prompt_length was removed in trl 0.29 — prompt-length capping
+        is now entirely handled by the pre-filter in prepare_dpo.py, which
+        uses the real SLM tokenizer so counts are exact.)
 
     load_best_model_at_end=True with metric_for_best_model="eval_loss".
     Constraints:
@@ -204,7 +204,8 @@ def build_dpo_args(cfg: dict, output_dir: Path, beta: float):
         # DPO-specific fields
         beta=beta,
         max_length=cfg["model"].get("max_seq_length", 2048),
-        max_prompt_length=dpo_cfg.get("max_prompt_length", 512),
+        # max_prompt_length was removed in trl <=0.29. Prompt-length capping
+        # is now enforced upstream in prepare_dpo.py via max_total_tokens.
     )
 
 
@@ -295,8 +296,7 @@ def main():
     # ── DPO args ──────────────────────────────────────────────────────────────
     dpo_args = build_dpo_args(cfg, output_dir, beta)
     log.info(
-        f"DPOConfig: max_length={dpo_args.max_length}, "
-        f"max_prompt_length={dpo_args.max_prompt_length}, beta={beta}"
+        f"DPOConfig: max_length={dpo_args.max_length}, beta={beta}"
     )
     log.info("Best-checkpoint selection enabled (metric_for_best_model=eval_loss)")
 

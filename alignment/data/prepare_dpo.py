@@ -315,6 +315,18 @@ def prepare_orca_dpo() -> list[dict]:
 # ── Source 3: argilla/dpo-mix-7k ──────────────────────────────────────────────
 
 def prepare_argilla_dpo() -> list[dict]:
+    """
+    argilla/dpo-mix-7k uses OpenAI chat format: `chosen` and `rejected` are
+    each a list of {role, content} message dicts. Both share the prompt
+    turns; only the final assistant message differs.
+
+    Strategy: take the prefix (everything before the final turn) from the
+    chosen list as the conversation, and the two differing final assistant
+    messages as the chosen/rejected responses. The system message, if any,
+    lives in the prefix; otherwise fall back to DEFAULT_SYSTEM. Multi-turn
+    user content (rare in this corpus) is flattened with "\n\n" joins to
+    match orca/hh-rlhf's single-question shape in make_prompt().
+    """
     from datasets import load_dataset
 
     log.info("Loading argilla/dpo-mix-7k...")
@@ -325,19 +337,48 @@ def prepare_argilla_dpo() -> list[dict]:
     skipped = 0
 
     for example in dataset:
-        system      = extract_text(example.get("system")) or DEFAULT_SYSTEM
-        instruction = extract_text(example.get("instruction")).strip()
-        chosen      = extract_text(example.get("chosen")).strip()
-        rejected    = extract_text(example.get("rejected")).strip()
+        chosen_msgs   = example.get("chosen")
+        rejected_msgs = example.get("rejected")
 
-        if not instruction or not chosen or not rejected or chosen == rejected:
+        # Schema guards — argilla occasionally has malformed rows.
+        if not isinstance(chosen_msgs, list) or not isinstance(rejected_msgs, list):
+            skipped += 1
+            continue
+        if len(chosen_msgs) < 2 or len(rejected_msgs) < 1:
+            skipped += 1
+            continue
+        if chosen_msgs[-1].get("role") != "assistant":
+            skipped += 1
+            continue
+        if rejected_msgs[-1].get("role") != "assistant":
+            skipped += 1
+            continue
+
+        # Final assistant responses — the two sides that actually differ.
+        chosen_resp   = (chosen_msgs[-1].get("content") or "").strip()
+        rejected_resp = (rejected_msgs[-1].get("content") or "").strip()
+        if not chosen_resp or not rejected_resp or chosen_resp == rejected_resp:
+            skipped += 1
+            continue
+
+        # Rebuild prompt from the chosen prefix. argilla's prefix is shared
+        # between chosen and rejected, so either side works. Flatten into
+        # (system, question) so the record shape matches orca/hh-rlhf.
+        prefix = chosen_msgs[:-1]
+        system_parts = [m.get("content", "") for m in prefix if m.get("role") == "system"]
+        user_parts   = [m.get("content", "") for m in prefix if m.get("role") == "user"]
+
+        system   = (system_parts[0].strip() if system_parts else "") or DEFAULT_SYSTEM
+        question = "\n\n".join(p.strip() for p in user_parts if p and p.strip())
+
+        if not question:
             skipped += 1
             continue
 
         records.append({
-            "prompt":   make_prompt(system, instruction),
-            "chosen":   make_response(chosen),
-            "rejected": make_response(rejected),
+            "prompt":   make_prompt(system, question),
+            "chosen":   make_response(chosen_resp),
+            "rejected": make_response(rejected_resp),
             "source":   "argilla",
         })
 
