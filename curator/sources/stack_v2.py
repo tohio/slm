@@ -107,7 +107,7 @@ def _fetch_blob(
             elif response.status_code == 429:
                 # Rate limited — back off harder
                 sleep = backoff * attempt * 2
-                log.debug(f"SWH 429 for {blob_id[:12]} — sleeping {sleep:.1f}s")
+                log.warning(f"SWH 429 for {blob_id[:12]} — sleeping {sleep:.1f}s")
                 time.sleep(sleep)
             elif response.status_code == 404:
                 # File gone from SWH — permanent, don't retry
