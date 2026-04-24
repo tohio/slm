@@ -44,6 +44,9 @@ else
   WORKERS_FLAG =
 endif
 
+# Sanity-train size selector (separate from SIZE to avoid clashing with pretrain SIZE).
+SANITY_SIZE ?= 125m
+
 .PHONY: all curate curate-mini curate-download curate-filter curate-dedup \
         curate-blend curate-upload validate validate-upload validate-datatrove \
         tokenizer tokenizer-test tokenize tokenize-upload tokenize-download tokenizer-upload tokenizer-download \
@@ -55,7 +58,7 @@ endif
         s3-upload s3-download s3-list \
         test-curator test-validate test-tokenizer test-data-pipeline \
         test-training test-sft-chat test-sft-code test-dpo test-gpu-pipeline test-model \
-        sanity-train sanity-train-small sanity-train-save \
+        sanity-train sanity-train-small sanity-train-tiny sanity-train-save \
         clean clean-data clean-results clean-logs help
 
 # ── Full pipeline ──────────────────────────────────────────────────────────────
@@ -377,19 +380,38 @@ test-model:
 # when you need to confirm the model architecture and training loop can learn
 # at scale, with data and tokenizer ruled out as variables.
 #
+# Sizes:
+#   sanity-train       — 125m arch, 2.5B tokens
+#   sanity-train-small — mini arch, 500M tokens
+#   sanity-train-tiny  — mini arch, 50M tokens
+#   sanity-train-save  — same as sanity-train but keeps the model;
+#                        override with SANITY_SIZE={small,tiny} for smaller runs.
+#
+# See scripts/README.md for timing estimates and GPU sizing notes.
+#
 # Delete scripts/sanity_train.py and these targets when no longer needed.
 
 sanity-train:
-	@echo "==> Sanity training: Mistral tokenizer + FineWeb-Edu + mini arch (~500M tokens)"
-	$(PYTHON) scripts/sanity_train.py
+	@echo "==> Sanity training: 125m arch on FineWeb-Edu (~2.5B tokens)"
+	$(PYTHON) scripts/sanity_train.py --arch 125m --target-tokens 2500000000
 
 sanity-train-small:
-	@echo "==> Sanity training: 100M tokens (fast iteration)"
-	$(PYTHON) scripts/sanity_train.py --target-tokens 100000000
+	@echo "==> Sanity training: mini arch on FineWeb-Edu (~500M tokens)"
+	$(PYTHON) scripts/sanity_train.py --arch mini --target-tokens 500000000
+
+sanity-train-tiny:
+	@echo "==> Sanity training: mini arch on FineWeb-Edu (~50M tokens)"
+	$(PYTHON) scripts/sanity_train.py --arch mini --target-tokens 50000000
 
 sanity-train-save:
-	@echo "==> Sanity training: full run, saves model to results/sanity/"
-	$(PYTHON) scripts/sanity_train.py --save
+	@echo "==> Sanity training (SANITY_SIZE=$(SANITY_SIZE), saves to results/sanity-*)"
+ifeq ($(SANITY_SIZE),small)
+	$(PYTHON) scripts/sanity_train.py --arch mini --target-tokens 500000000 --save
+else ifeq ($(SANITY_SIZE),tiny)
+	$(PYTHON) scripts/sanity_train.py --arch mini --target-tokens 50000000 --save
+else
+	$(PYTHON) scripts/sanity_train.py --arch 125m --target-tokens 2500000000 --save
+endif
 
 # ── Clean ─────────────────────────────────────────────────────────────────────
 
@@ -447,9 +469,11 @@ help:
 	@echo "  test-model               Model architecture unit tests"
 	@echo ""
 	@echo "Sanity check (model + training code only):"
-	@echo "  sanity-train             Train mini arch on FineWeb-Edu w/ Mistral tokenizer (~500M tokens)"
-	@echo "  sanity-train-small       Same as sanity-train but 100M tokens (fast iteration)"
-	@echo "  sanity-train-save        Same as sanity-train but saves model to results/sanity/"
+	@echo "  sanity-train             125m arch, 2.5B tokens"
+	@echo "  sanity-train-small       mini arch, 500M tokens"
+	@echo "  sanity-train-tiny        mini arch, 50M tokens"
+	@echo "  sanity-train-save        same as sanity-train but saves model to results/sanity-<arch>/"
+	@echo "                           override with SANITY_SIZE=small or SANITY_SIZE=tiny"
 	@echo ""
 	@echo "Pipeline:"
 	@echo "  curate             Stage 1  — download, curate, blend to train.jsonl + val.jsonl, upload"
@@ -480,37 +504,4 @@ help:
 	@echo "  export-chat        Stage 8  — push chat model only"
 	@echo "  serve              Stage 10 — launch vLLM server (Hub model)"
 	@echo "  serve-local        Stage 10 — launch vLLM server (local checkpoint)"
-	@echo ""
-	@echo "Curation sub-stages:"
-	@echo "  curate-download    Download raw data only"
-	@echo "  curate-filter      Quality filter only"
-	@echo "  curate-dedup       Deduplication only"
-	@echo "  curate-blend       Blend to train.jsonl + val.jsonl only"
-	@echo "  curate-upload      Upload curated data to S3 only"
-	@echo ""
-	@echo "Resume targets:"
-	@echo "  pretrain-resume    Resume pretraining from last checkpoint"
-	@echo "  sft-resume         Resume chat SFT from last checkpoint"
-	@echo "  sft-code-resume    Resume code SFT from last checkpoint"
-	@echo "  dpo-resume         Resume DPO from last checkpoint"
-	@echo ""
-	@echo "S3 utilities:"
-	@echo "  s3-upload          Upload curated data to S3 (unversioned)"
-	@echo "  s3-download        Download curated data from S3"
-	@echo "  s3-list            List S3 contents"
-	@echo ""
-	@echo "Clean:"
-	@echo "  clean              Remove cache files and logs"
-	@echo "  clean-data         Remove all data directories"
-	@echo "  clean-results      Remove all training results"
-	@echo "  clean-logs         Remove logs directory"
-	@echo ""
-	@echo "Examples:"
-	@echo "  make curate SIZE=125m WORKERS=62"
-	@echo "  make pretrain SIZE=125m GPUS=4"
-	@echo "  make pretrain CONFIG=pretrain/configs/gpt_1b.yaml GPUS=8"
-	@echo "  make sft SIZE=125m GPUS=4"
-	@echo "  make dpo SIZE=125m GPUS=2"
-	@echo "  make download-kenlm-model DATA_DIR=/data/slm/data"
-	@echo "  make download-fasttext-model DATA_DIR=/data/slm/data"
 	@echo ""

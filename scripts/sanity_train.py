@@ -4,17 +4,19 @@ scripts/sanity_train.py
 Self-contained sanity check for the SLM model + training code.
 
 Removes tokenizer and curated data as variables: tokenizes FineWeb-Edu with
-Mistral's tokenizer (vocab=32000, matches our architecture) and trains the
-mini-architecture model on it. If learning fails here, the issue is in
-model/ or the training loop. If it succeeds, both are fine and any failure
-on the real pipeline is in the curator or the SLM tokenizer.
+Mistral's tokenizer (vocab=32000, matches our architecture) and trains
+either the mini or the 125m architecture on it. If learning fails here,
+the issue is in model/ or the training loop. If it succeeds, both are
+fine and any failure on the real pipeline is in the curator or the SLM
+tokenizer.
 
 Usage:
-    python scripts/sanity_train.py
-    python scripts/sanity_train.py --target-tokens 500_000_000
-    python scripts/sanity_train.py --target-tokens 100_000_000 --save
+    python scripts/sanity_train.py                                  # 125m, 2.5B tokens
+    python scripts/sanity_train.py --arch mini                      # mini, default 2.5B (override w/ --target-tokens)
+    python scripts/sanity_train.py --arch mini --target-tokens 500000000
+    python scripts/sanity_train.py --save                           # keep the trained model
 
-Delete this file and the `sanity-train` Makefile target when no longer
+Delete this file and the `sanity-train*` Makefile targets when no longer
 needed — nothing else in the codebase depends on it.
 """
 
@@ -39,8 +41,8 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ── Architecture (mirrors gpt_mini.yaml) ─────────────────────────────────────
-MODEL_ARCH = {
+# ── Architectures (mirror gpt_mini.yaml and gpt_125m.yaml) ──────────────────
+MODEL_ARCH_MINI = {
     "hidden_size":             384,
     "num_hidden_layers":       6,
     "num_attention_heads":     6,
@@ -50,6 +52,23 @@ MODEL_ARCH = {
     "rms_norm_eps":            1e-5,
     "initializer_range":       0.02,
     "tie_word_embeddings":     True,
+}
+
+MODEL_ARCH_125M = {
+    "hidden_size":             768,
+    "num_hidden_layers":       12,
+    "num_attention_heads":     12,
+    "num_key_value_heads":     4,
+    "max_position_embeddings": 2048,
+    "rope_theta":              500_000.0,
+    "rms_norm_eps":            1e-5,
+    "initializer_range":       0.02,
+    "tie_word_embeddings":     True,
+}
+
+ARCH_REGISTRY = {
+    "mini": MODEL_ARCH_MINI,
+    "125m": MODEL_ARCH_125M,
 }
 
 REFERENCE_TOKENIZER = "mistralai/Mistral-7B-v0.1"
@@ -161,7 +180,7 @@ def evaluate(model, dataset, batch_size: int, device) -> float:
     return sum(losses) / max(len(losses), 1)
 
 
-def train(model, dataset, args, device):
+def train(model, dataset, args, device, arch):
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=args.lr,
@@ -180,9 +199,10 @@ def train(model, dataset, args, device):
     autocast_dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
     use_autocast   = device.type == "cuda"
 
+    seq_len = arch["max_position_embeddings"]
     log.info(f"Training: {args.max_steps:,} steps, batch={args.batch_size}, "
-             f"seq_len={MODEL_ARCH['max_position_embeddings']}, "
-             f"~{args.batch_size * MODEL_ARCH['max_position_embeddings']:,} tokens/step")
+             f"seq_len={seq_len}, "
+             f"~{args.batch_size * seq_len:,} tokens/step")
 
     log.info("Baseline eval (step 0)...")
     eval_loss = evaluate(model, dataset, args.batch_size, device)
@@ -288,21 +308,29 @@ def run_qa_suite(model, tokenizer, device):
 
 def main():
     p = argparse.ArgumentParser(description="SLM sanity training (model + training code only)")
-    p.add_argument("--target-tokens", type=int, default=500_000_000)
-    p.add_argument("--batch-size",    type=int, default=8)
+    p.add_argument("--arch",          type=str, default="125m",
+                   choices=list(ARCH_REGISTRY.keys()),
+                   help="Architecture to use: mini (21.7M) or 125m")
+    p.add_argument("--target-tokens", type=int, default=2_500_000_000)
+    p.add_argument("--batch-size",    type=int, default=16,
+                   help="H200 default; lower for smaller GPUs")
     p.add_argument("--lr",            type=float, default=3e-4)
     p.add_argument("--warmup-steps",  type=int, default=200)
     p.add_argument("--log-every",     type=int, default=50)
     p.add_argument("--eval-every",    type=int, default=2000)
     p.add_argument("--scratch-dir",   type=Path, default=Path("/tmp/slm-sanity"))
     p.add_argument("--save",          action="store_true",
-                   help="Save trained model to results/sanity/ instead of discarding")
+                   help="Save trained model to results/sanity-<arch>/ instead of discarding")
     p.add_argument("--reuse-tokens",  action="store_true",
                    help="Skip tokenization if scratch bin already exists")
     args = p.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    arch   = ARCH_REGISTRY[args.arch]
     log.info(f"Device: {device}")
+    log.info(f"Architecture: {args.arch} "
+             f"(hidden={arch['hidden_size']}, layers={arch['num_hidden_layers']}, "
+             f"seq_len={arch['max_position_embeddings']})")
 
     # ── Tokenizer ────────────────────────────────────────────────────────────
     from transformers import AutoTokenizer
@@ -325,30 +353,27 @@ def main():
 
     # ── Model ────────────────────────────────────────────────────────────────
     from model import SLMConfig, SLMForCausalLM
-    config = SLMConfig(vocab_size=32000, **MODEL_ARCH)
+    config = SLMConfig(vocab_size=32000, **arch)
     model = SLMForCausalLM(config).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     log.info(f"Model: {n_params:,} parameters ({n_params / 1e6:.1f}M)")
 
     # ── Dataset ──────────────────────────────────────────────────────────────
-    dataset = PackedTokensDataset(
-        bin_path,
-        seq_len=MODEL_ARCH["max_position_embeddings"],
-        n_tokens=n_tokens,
-    )
-    tokens_per_step = args.batch_size * MODEL_ARCH["max_position_embeddings"]
+    seq_len = arch["max_position_embeddings"]
+    dataset = PackedTokensDataset(bin_path, seq_len=seq_len, n_tokens=n_tokens)
+    tokens_per_step = args.batch_size * seq_len
     args.max_steps  = n_tokens // tokens_per_step
     log.info(f"Dataset: {len(dataset):,} train sequences, max_steps={args.max_steps:,}")
 
     # ── Train ────────────────────────────────────────────────────────────────
-    train(model, dataset, args, device)
+    train(model, dataset, args, device, arch)
 
     # ── QA suite ─────────────────────────────────────────────────────────────
     run_qa_suite(model, tokenizer, device)
 
     # ── Save (optional) ──────────────────────────────────────────────────────
     if args.save:
-        out_dir = Path("results/sanity")
+        out_dir = Path(f"results/sanity-{args.arch}")
         out_dir.mkdir(parents=True, exist_ok=True)
         model.save_pretrained(str(out_dir))
         tokenizer.save_pretrained(str(out_dir / "tokenizer"))
