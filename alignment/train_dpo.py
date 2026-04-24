@@ -28,7 +28,7 @@ Best-checkpoint selection:
     checkpoint is usually NOT the last. final/ contains the lowest-
     eval-loss checkpoint.
 
-Target library versions: trl 0.29.x, transformers 5.5.x.
+Target library versions: trl 0.28.x, transformers 5.5.x.
 See requirements.txt for the full compatible stack.
 
 Usage:

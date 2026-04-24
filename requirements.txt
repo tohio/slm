@@ -20,7 +20,7 @@ torchvision==0.20.1+cu121
 # All four libraries must be upgraded together — mixing versions breaks training.
 transformers>=5.5.0,<5.6.0
 accelerate>=1.6.0,<2.0.0
-trl==0.29.0
+trl>=0.28,<0.29
 datasets>=3.0.0,<4.0.0
 tokenizers>=0.22.0,<0.24.0
 huggingface-hub>=1.5.0,<2.0.0
