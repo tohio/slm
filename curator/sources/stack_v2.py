@@ -3,10 +3,20 @@ curator/sources/stack_v2.py
 --------------------------------
 the-stack-v2-dedup data source.
 
-Streams `bigcode/the-stack-v2-dedup` filtered to 4 languages (Python, Go,
-Rust, Shell) and fetches file content on-demand from the Software
-Heritage Archive (SWH). Acts as the bulk code source at 50% of the
-code share, complementing curated sources like CodeSearchNet.
+Loads `bigcode/the-stack-v2-dedup` filtered to 4 languages (Python, Go,
+Rust, Shell) by iterating each language's data shard independently, and
+fetches file content on-demand from the Software Heritage Archive (SWH).
+Acts as the bulk code source at 50% of the code share, complementing
+curated sources like CodeSearchNet.
+
+Why per-language iteration?
+    The-stack-v2-dedup stores records sharded by language under
+    `data/<Language>/`. Streaming the full dataset iterates alphabetically
+    through 600+ languages (AMPL, ABAP, ...) before reaching Python, Rust,
+    Shell. That's billions of records of filter-and-skip before the first
+    match — unusable at any scale, not just mini. Instead we load each
+    target language's data_dir directly, iterate only records we care
+    about, and stop when we hit our cap.
 
 Why content fetching?
     The-stack-v2 stores only file metadata and blob IDs in the HF
@@ -17,10 +27,8 @@ Why content fetching?
 
 Rate limiting and retries:
     SWH throttles per-IP. We keep the content-fetch thread pool modest
-    (default 8 workers) and retry transient failures with backoff.
-    At 1b scale with ~4B code tokens needed, and 50% of those coming
-    from stack-v2, we need ~400M tokens of stack-v2 content → roughly
-    1M–2M files to fetch. Expect multi-hour fetching at 1b scale.
+    (default 8 workers) and retry transient failures with backoff. An
+    SWH_AUTH_TOKEN in the environment enables higher rate limits.
 
 License note: Users must accept BigCode's Terms of Use on the HF dataset
 page before first download. All fetched files carry permissive licenses
@@ -31,7 +39,7 @@ Output: JSONL with one file per line:
     {
         "text": "<source code>",
         "source": "stack_v2",
-        "language": "python",
+        "language": "Python",
         "repo": "...",
         "path": "...",
         "blob_id": "..."
@@ -117,8 +125,8 @@ def _fetch_blob(
 
 class StackV2Source:
     """
-    Streams the-stack-v2-dedup filtered to a language subset, fetching
-    content from SWH on-demand.
+    Loads the-stack-v2-dedup one language at a time, fetching content from
+    SWH on-demand.
 
     Args:
         output_dir: Directory to write output JSONL files.
@@ -151,7 +159,8 @@ class StackV2Source:
         request_timeout: int = 30,
     ):
         self.output_dir = Path(output_dir)
-        self.languages = set(languages or DEFAULT_LANGUAGES)
+        # Keep as list (not set) so iteration order is deterministic.
+        self.languages = list(languages or DEFAULT_LANGUAGES)
         self.min_length = min_length
         self.shard_size = shard_size
         self.max_docs = max_docs
@@ -166,12 +175,12 @@ class StackV2Source:
         self._swh_token = os.environ.get("SWH_AUTH_TOKEN")
 
     def download(self) -> list[Path]:
-        """Stream the-stack-v2-dedup and write to sharded JSONL files."""
+        """Iterate per-language shards of the-stack-v2-dedup and write JSONL."""
         existing_shards = sorted(self.output_dir.glob("stack_v2_*.jsonl"))
         shard_idx = len(existing_shards)
 
-        log.info(f"Streaming {self.DATASET_NAME} from HuggingFace...")
-        log.info(f"  Language filter: {sorted(self.languages)}")
+        log.info(f"Loading {self.DATASET_NAME} per-language...")
+        log.info(f"  Languages: {self.languages}")
         if not self._swh_token:
             log.warning(
                 "No SWH_AUTH_TOKEN set — unauthenticated SWH fetches are "
@@ -180,52 +189,92 @@ class StackV2Source:
                 "in .env for higher throughput."
             )
 
-        stream = load_dataset(
-            self.DATASET_NAME,
-            split="train",
-            streaming=True,
-            trust_remote_code=True,
-        )
-
         if self.max_docs:
             log.info(f"the-stack-v2: capped at {self.max_docs:,} files (mini run)")
 
         output_files: list[Path] = []
         buffer: list[dict] = []
         total_written = 0
-        total_skipped_lang = 0
         total_skipped_short = 0
         total_fetch_failed = 0
+        total_no_blob = 0
         stop = False
 
-        pbar = tqdm(desc="Streaming the-stack-v2", unit="file")
+        pbar = tqdm(desc="the-stack-v2", unit="file")
 
-        # Collect metadata in batches, fetch content in parallel per batch.
-        # Batch size = shard_size so we can flush a shard after each fetch wave.
-        batch: list[dict] = []
+        # Per-language metadata batch before hitting SWH. We intentionally
+        # don't fill the metadata batch to shard_size (which would be 10k
+        # fetches in one blocking wave); instead we keep it modest so the
+        # first shard lands soon, mini runs finish fast, and a crash
+        # mid-fetch loses at most one batch.
+        fetch_batch_size = min(self.shard_size, 500)
 
-        for sample in stream:
+        for lang in self.languages:
             if stop:
                 break
 
-            lang = sample.get("language", "")
-            if lang not in self.languages:
-                total_skipped_lang += 1
+            log.info(f"  Loading language: {lang}")
+            try:
+                ds = load_dataset(
+                    self.DATASET_NAME,
+                    data_dir=f"data/{lang}",
+                    split="train",
+                    streaming=True,
+                    trust_remote_code=True,
+                )
+            except Exception as e:
+                log.exception(f"  Failed to load {lang} — skipping")
                 continue
 
-            blob_id = sample.get("blob_id", "")
-            if not blob_id:
-                continue
+            batch: list[dict] = []
 
-            batch.append(sample)
+            for sample in ds:
+                if stop:
+                    break
 
-            if len(batch) >= self.shard_size:
+                blob_id = sample.get("blob_id", "")
+                if not blob_id:
+                    total_no_blob += 1
+                    continue
+
+                # The language is known from the data_dir we loaded, but keep
+                # the record's own field when present (useful for provenance).
+                if not sample.get("language"):
+                    sample = dict(sample)
+                    sample["language"] = lang
+
+                batch.append(sample)
+
+                if len(batch) >= fetch_batch_size:
+                    records, failed = self._fetch_batch(batch)
+                    total_fetch_failed += failed
+                    kept = [r for r in records if r is not None]
+                    total_skipped_short += (len(records) - failed - len(kept))
+                    buffer.extend(kept)
+                    batch = []
+
+                    while len(buffer) >= self.shard_size:
+                        chunk = buffer[: self.shard_size]
+                        del buffer[: self.shard_size]
+                        path = self._write_shard(chunk, shard_idx)
+                        output_files.append(path)
+                        shard_idx += 1
+                        total_written += len(chunk)
+                        pbar.update(len(chunk))
+
+                    if self.max_docs is not None:
+                        if total_written + len(buffer) >= self.max_docs:
+                            trim_to = max(0, self.max_docs - total_written)
+                            buffer = buffer[:trim_to]
+                            stop = True
+
+            # End of this language's stream — drain any leftover batch.
+            if batch and not stop:
                 records, failed = self._fetch_batch(batch)
                 total_fetch_failed += failed
-                total_skipped_short += self._count_skipped_short(records)
                 kept = [r for r in records if r is not None]
+                total_skipped_short += (len(records) - failed - len(kept))
                 buffer.extend(kept)
-                batch = []
 
                 while len(buffer) >= self.shard_size:
                     chunk = buffer[: self.shard_size]
@@ -242,14 +291,7 @@ class StackV2Source:
                         buffer = buffer[:trim_to]
                         stop = True
 
-        # Drain any remaining batch
-        if batch and not stop:
-            records, failed = self._fetch_batch(batch)
-            total_fetch_failed += failed
-            total_skipped_short += self._count_skipped_short(records)
-            buffer.extend([r for r in records if r is not None])
-
-        # Flush any remaining buffer
+        # Flush any remaining buffer (mini cap usually lands here).
         if buffer:
             if self.max_docs is not None:
                 overflow = (total_written + len(buffer)) - self.max_docs
@@ -265,8 +307,8 @@ class StackV2Source:
         log.info(
             f"the-stack-v2 complete — "
             f"written: {total_written:,}, "
-            f"skipped lang: {total_skipped_lang:,}, "
             f"skipped short: {total_skipped_short:,} (< {self.min_length} chars), "
+            f"no blob_id: {total_no_blob:,}, "
             f"fetch failures: {total_fetch_failed:,}, "
             f"new shards: {len(output_files)}"
             f"{' (stopped at max_docs cap)' if stop else ''}"
@@ -278,8 +320,8 @@ class StackV2Source:
         Fetch content for a batch of records in parallel.
 
         Returns (records_or_none_list, num_failed). None entries in the
-        list represent fetches that failed or content below min_length —
-        they're counted separately for stats.
+        returned list represent either fetch failures OR content below
+        min_length. The caller uses `failed` to distinguish the two.
         """
         results: list[dict | None] = [None] * len(batch)
         failed = 0
@@ -315,7 +357,7 @@ class StackV2Source:
 
                 content = content.strip()
                 if len(content) < self.min_length:
-                    # Mark as None so it's counted as "skipped short"
+                    # Left as None; counted as "skipped short" by the caller.
                     continue
 
                 results[idx] = {
@@ -328,20 +370,6 @@ class StackV2Source:
                 }
 
         return results, failed
-
-    def _count_skipped_short(self, records: list[dict | None]) -> int:
-        """Count how many None results were due to short content.
-
-        Hard to distinguish from fetch failures without more tracking; we
-        rely on _fetch_batch to return the fetch-failure count separately
-        and attribute the remaining None entries to short content. The
-        caller passes the failed count in via total_fetch_failed.
-        """
-        # Since _fetch_batch already counted failures separately, this is
-        # a placeholder in the current structure — the caller increments
-        # short-skip count in _fetch_batch itself. Kept as a hook for
-        # future refinement; returns 0 here so we don't double-count.
-        return 0
 
     def _write_shard(self, records: list[dict], shard_idx: int) -> Path:
         """Write records to a JSONL shard atomically via .tmp rename."""
