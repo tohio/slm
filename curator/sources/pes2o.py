@@ -17,10 +17,10 @@ is too large to materialize. Resume works at shard granularity: existing
 shards on disk mean that many records of the stream are skipped before
 writing resumes.
 
-Schema note: peS2o splits documents into s2orc (full-text papers) and
-s2ag (abstracts + titles). We consume both — s2ag provides broad topical
-coverage, s2orc provides long-form reasoning chains. Filtering on
-document length happens at the shared filter step.
+Schema note: peS2o v2 tags each record's subset in the `source` field as
+"s2orc/train" or "s2ag/train" (i.e., `<subset>/<split>`). We strip the
+split suffix before matching against the whitelist. s2orc is full-text
+papers, s2ag is abstracts + titles — we consume both.
 
 Output: JSONL with one document per line:
     {
@@ -133,7 +133,10 @@ class PeS2oSource:
                     )
                 continue
 
-            subset = sample.get("source", "")  # peS2o's own source tag: s2orc or s2ag
+            # peS2o v2 tags the source as "s2orc/train" or "s2ag/train" —
+            # strip the split suffix before matching against our whitelist.
+            raw_subset = sample.get("source", "")
+            subset = raw_subset.split("/", 1)[0]
             if subset not in self.subsets:
                 total_skipped_subset += 1
                 continue

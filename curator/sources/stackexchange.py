@@ -17,6 +17,16 @@ Format: each document is a Q+A pair formatted as:
 Only answers with score >= min_answer_score (default 1) are kept, so
 downvoted/wrong answers are excluded.
 
+Schema note: HuggingFaceH4/stack-exchange-preferences stores each answer
+with fields {answer_id, author, author_id, author_profile, pm_score,
+selected, text}. The body text lives in `text`, NOT `answer_body` as
+older versions of this file assumed — with the wrong key, every answer
+came back as "" and every record was silently dropped. pm_score is
+stored as a string (e.g. "2"), so we cast it to int defensively.
+
+Note: answer bodies are raw HTML (they start with <p> etc.). Downstream
+quality filtering strips markup; we leave it alone here.
+
 Output: JSONL with one Q+A per line:
     {
         "text": "Q: ...\\n\\nA: ...",
@@ -174,12 +184,16 @@ class StackExchangeSource:
         Format a raw StackExchange sample into a Q+A document.
 
         HuggingFaceH4/stack-exchange-preferences schema:
-            question: str     — the question body (HTML stripped)
-            answers:  list    — each with {answer_body, pm_score, ...}
-            metadata: list    — [question_url, ...] per site
             qid:      int
+            question: str     — the question body (raw HTML)
+            answers:  list    — each with {answer_id, author, author_id,
+                                           author_profile, pm_score,
+                                           selected, text}
+            metadata: list    — [question_url, ...]
 
-        We pick the highest-scoring answer and concatenate with the question.
+        We pick the highest-scoring answer above min_answer_score and
+        concatenate with the question. pm_score is stored as a string;
+        cast defensively.
         """
         question = (sample.get("question") or "").strip()
         if not question:
@@ -204,7 +218,10 @@ class StackExchangeSource:
         if best is None:
             return None
 
-        answer_body = (best.get("answer_body") or "").strip()
+        # The HF dataset stores the answer body in `text`. Older versions
+        # of this file read `answer_body`, which returned "" for every
+        # answer and silently dropped every record.
+        answer_body = (best.get("text") or "").strip()
         if not answer_body:
             return None
 
