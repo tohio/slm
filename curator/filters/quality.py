@@ -20,6 +20,11 @@ Source-conditional filter skips:
     skip behavior. Adding a new code-adjacent source is a single-line
     change to that constant.
 
+    Length filters (min_chars / max_chars) have separate per-source skip
+    lists because a source may legitimately fail one bound without the
+    other — pg19 books exceed max_chars, conala NL→code pairs fall
+    below min_chars, and jupyter notebooks can fall on either side.
+
 FastText language detection:
     Requires the fasttext lid.176.ftz model — download once via:
         make download-fasttext-model
@@ -126,7 +131,9 @@ def _get_fasttext_model():
 class QualityConfig:
     """Configuration for quality filter thresholds."""
 
-    # Document length
+    # Document length (defaults). Per-source skip lists below let specific
+    # sources opt out of the min or max bound independently — see
+    # skip_min_length_sources / skip_max_length_sources.
     min_chars: int = 500
     max_chars: int = 50_000
 
@@ -178,6 +185,18 @@ class QualityConfig:
         default_factory=lambda: CODE_SOURCES
     )
 
+    # Length filter skip lists. Separate min/max so sources can opt out
+    # of one bound without the other:
+    #   pg19     — books run 200k–1M chars; skip max only (keep min).
+    #   conala   — NL→code pairs run 50–500 chars; skip min only (keep max).
+    #   jupyter  — wide range; skip both bounds.
+    skip_min_length_sources: frozenset[str] = field(
+        default_factory=lambda: frozenset({"conala", "jupyter"})
+    )
+    skip_max_length_sources: frozenset[str] = field(
+        default_factory=lambda: frozenset({"pg19", "jupyter"})
+    )
+
 
 class QualityFilter:
     """
@@ -210,9 +229,17 @@ class QualityFilter:
         text = record.get("text", "")
         source = record.get("source", "")
 
+        # Length uses per-source skip lists, so call it separately from
+        # the uniform-signature checks below.
+        passed, reason = self._check_length(text, source)
+        if not passed:
+            self.stats["rejected"][reason] = (
+                self.stats["rejected"].get(reason, 0) + 1
+            )
+            return False, reason
+
         # Tier 1: cheap structural checks (all sources)
         checks = [
-            self._check_length,
             self._check_bullet_ratio,
             self._check_ellipsis_ratio,
             self._check_repeated_lines,
@@ -284,11 +311,25 @@ class QualityFilter:
 
     # ── Individual filter methods ──────────────────────────────────────────────
 
-    def _check_length(self, text: str) -> tuple[bool, str | None]:
+    def _check_length(self, text: str, source: str = "") -> tuple[bool, str | None]:
+        """
+        Length check with per-source skip lists.
+
+        A source in skip_min_length_sources bypasses the min_chars check;
+        a source in skip_max_length_sources bypasses the max_chars check.
+        The two lists are independent because real sources fail them
+        asymmetrically (conala: always short, pg19: always long).
+        """
         n = len(text)
-        if n < self.config.min_chars:
+        if (
+            source not in self.config.skip_min_length_sources
+            and n < self.config.min_chars
+        ):
             return False, "too_short"
-        if n > self.config.max_chars:
+        if (
+            source not in self.config.skip_max_length_sources
+            and n > self.config.max_chars
+        ):
             return False, "too_long"
         return True, None
 
