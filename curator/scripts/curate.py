@@ -220,7 +220,26 @@ def _build_source(
         )
 
     if name == "fineweb":
-        return FineWebSource(output_dir=raw_dir, max_docs=cap)
+        if mini:
+            return FineWebSource(output_dir=raw_dir, max_docs=cap)
+        # Non-mini: derive cap from target tokens to prevent unbounded streaming.
+        # FineWeb is OVERFLOW_SINK — small sources (pg19, wikipedia, etc.) may
+        # come up short and route their deficit here, so size for that on top
+        # of FineWeb's nominal share.
+        target_tokens = TARGET_CONFIGS[target]["total_tokens"]
+        fineweb_share = _TOP_LEVEL_SHARE["fineweb"]
+        # 5× over-download absorbs filter losses (~50%), dedup losses (~30%),
+        # and leaves headroom for overflow absorption.
+        target_chars = target_tokens * fineweb_share * CHARS_PER_TOKEN
+        # FineWeb averages ~3000 chars/doc post-extraction.
+        max_docs_derived = int((target_chars / 3000) * 5)
+        log.info(
+            f"FineWeb cap derived from {target}: "
+            f"{max_docs_derived:,} docs "
+            f"(target tokens {target_tokens:,} × {fineweb_share:.1%} × "
+            f"5× inflation)"
+        )
+        return FineWebSource(output_dir=raw_dir, max_docs=max_docs_derived)
     if name == "wikipedia":
         return WikipediaSource(output_dir=raw_dir, max_docs=cap)
     if name == "pg19":
