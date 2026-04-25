@@ -29,6 +29,18 @@ Cap-and-redistribute:
     which acts as the sink. FineWeb (the default sink) has effectively
     unlimited supply (15T tokens) so this always closes the gap.
 
+Per-source download caps:
+    Each finite source has a derived `max_docs` cap based on the target
+    token budget × the source's share × an inflation factor that absorbs
+    filter and dedup losses. This prevents unbounded streaming (which
+    bit FineWeb in an earlier run) and keeps download volumes bounded
+    per target. See `_AVG_CHARS_PER_DOC`, `_DOWNLOAD_INFLATION`, and
+    `_derive_max_docs()` below.
+
+    Buffers are sized to absorb worst-realistic-case filter+dedup
+    attrition. Over-buffering wastes disk; under-buffering causes mix
+    skew (deficit routes to OVERFLOW_SINK). Erring high is correct.
+
 Blend stage:
     - Pass 1 (parallel): stream each source to a staging file, recording
                          chars written vs target.
@@ -136,6 +148,68 @@ FILTERED_DIR = DATA_DIR / "filtered"
 CURATED_DIR  = DATA_DIR / "curated"
 
 
+# ── Per-source download cap derivation ─────────────────────────────────────────
+#
+# Translating a char target into a doc cap requires knowing the avg chars/doc
+# for each source. Numbers below are estimates — verify against real data
+# (sample data/raw/<source>/*.jsonl) and adjust if reality differs by >2×.
+# The inflation factor absorbs filter losses (~40% typical), dedup losses
+# (~20% typical), and headroom against the avg-chars-per-doc estimate.
+#
+# Buffer sizing rationale:
+#   FineWeb       — also OVERFLOW_SINK; needs extra to absorb other deficits
+#   Wikipedia     — very clean upstream, lower attrition expected
+#   pg19          — small absolute count, want safety margin
+#   pes2o         — academic structure quirks, harsher attrition
+#   open_web_math — math notation challenges, harsher attrition
+#   stackexchange — mostly well-formed, moderate attrition
+#
+# Code sub-sources (stack_v1, codesearchnet, etc.) are not capped here —
+# they're size-bounded by their upstream datasets and currently use cap=None
+# for non-mini runs, which streams the full corpus.
+
+_AVG_CHARS_PER_DOC: dict[str, int] = {
+    "fineweb":       3_000,
+    "wikipedia":     3_000,
+    "pg19":          500_000,
+    "pes2o":         10_000,
+    "open_web_math": 5_000,
+    "stackexchange": 1_500,
+}
+
+_DOWNLOAD_INFLATION: dict[str, float] = {
+    "fineweb":       5.0,
+    "wikipedia":     3.0,
+    "pg19":          5.0,
+    "pes2o":         5.0,
+    "open_web_math": 5.0,
+    "stackexchange": 5.0,
+}
+
+
+def _derive_max_docs(name: str, target: str) -> int | None:
+    """
+    Derive a per-source max_docs cap from the target token budget.
+
+    Returns None for sources we don't cap (code sub-sources; common_crawl,
+    which has its own segment-based budgeting via compute_cc_segments).
+
+    Formula:
+        target_chars = total_tokens × source_share × CHARS_PER_TOKEN
+        max_docs = (target_chars / avg_chars_per_doc) × inflation
+    """
+    if name not in _AVG_CHARS_PER_DOC or name not in _TOP_LEVEL_SHARE:
+        return None
+
+    target_tokens = TARGET_CONFIGS[target]["total_tokens"]
+    share         = _TOP_LEVEL_SHARE[name]
+    avg_chars     = _AVG_CHARS_PER_DOC[name]
+    inflation     = _DOWNLOAD_INFLATION[name]
+
+    target_chars = target_tokens * share * CHARS_PER_TOKEN
+    return int((target_chars / avg_chars) * inflation)
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def compute_cc_segments(total_tokens: int) -> int:
@@ -202,13 +276,29 @@ def _build_source(
 ) -> object:
     """Construct a source instance with mini caps applied when mini=True."""
     raw_dir = RAW_DIR / name
-    cap = MINI_OVERRIDES.get(name) if mini else None
 
-    # CC has a different 'cap' semantics: max_segments, and needs crawls + workers.
+    # Resolve the doc cap:
+    #   - mini: from MINI_OVERRIDES (per-source small caps for pipeline testing)
+    #   - non-mini: derived from target token budget × share × inflation
+    #               (None for sources not in the derivation table — currently
+    #                code sub-sources, which stream their full upstream corpus)
+    if mini:
+        cap = MINI_OVERRIDES.get(name)
+    else:
+        cap = _derive_max_docs(name, target)
+        if cap is not None:
+            log.info(
+                f"{name} cap derived from {target}: {cap:,} docs "
+                f"(share {_TOP_LEVEL_SHARE.get(name, 0):.1%}, "
+                f"avg {_AVG_CHARS_PER_DOC.get(name, 0):,} chars/doc, "
+                f"{_DOWNLOAD_INFLATION.get(name, 0)}× inflation)"
+            )
+
+    # CC has different 'cap' semantics: max_segments, and needs crawls + workers.
     if name == "common_crawl":
         cfg = TARGET_CONFIGS[target]
         if mini:
-            max_segments = cap
+            max_segments = MINI_OVERRIDES.get(name)
         else:
             max_segments = compute_cc_segments(cfg["total_tokens"])
         return CommonCrawlSource(
@@ -220,26 +310,7 @@ def _build_source(
         )
 
     if name == "fineweb":
-        if mini:
-            return FineWebSource(output_dir=raw_dir, max_docs=cap)
-        # Non-mini: derive cap from target tokens to prevent unbounded streaming.
-        # FineWeb is OVERFLOW_SINK — small sources (pg19, wikipedia, etc.) may
-        # come up short and route their deficit here, so size for that on top
-        # of FineWeb's nominal share.
-        target_tokens = TARGET_CONFIGS[target]["total_tokens"]
-        fineweb_share = _TOP_LEVEL_SHARE["fineweb"]
-        # 5× over-download absorbs filter losses (~50%), dedup losses (~30%),
-        # and leaves headroom for overflow absorption.
-        target_chars = target_tokens * fineweb_share * CHARS_PER_TOKEN
-        # FineWeb averages ~3000 chars/doc post-extraction.
-        max_docs_derived = int((target_chars / 3000) * 5)
-        log.info(
-            f"FineWeb cap derived from {target}: "
-            f"{max_docs_derived:,} docs "
-            f"(target tokens {target_tokens:,} × {fineweb_share:.1%} × "
-            f"5× inflation)"
-        )
-        return FineWebSource(output_dir=raw_dir, max_docs=max_docs_derived)
+        return FineWebSource(output_dir=raw_dir, max_docs=cap)
     if name == "wikipedia":
         return WikipediaSource(output_dir=raw_dir, max_docs=cap)
     if name == "pg19":
