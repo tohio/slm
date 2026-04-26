@@ -118,6 +118,28 @@ def write_jsonl(records: list[dict], path: Path) -> None:
     log.info(f"Wrote {len(records):,} records to {path}")
 
 
+def _chat_template_token_ids(tokenizer, messages: list[dict]) -> list[int]:
+    """
+    Call apply_chat_template and normalize to a flat list[int].
+
+    transformers' apply_chat_template(tokenize=True, return_tensors=None) is
+    documented to return list[int] but newer versions return BatchEncoding
+    instead. Both contain the same correct token IDs; only the wrapper
+    differs. Normalize here so callers (the length filter) get a flat list
+    that supports len() and indexing reliably.
+    """
+    encoded = tokenizer.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+    )
+    if hasattr(encoded, "input_ids"):
+        return list(encoded.input_ids)
+    if hasattr(encoded, "ids"):
+        return list(encoded.ids)
+    return list(encoded)
+
+
 # ── Length filter ──────────────────────────────────────────────────────────────
 
 def load_tokenizer_for_filter():
@@ -158,12 +180,10 @@ def apply_length_filter(
     for rec in records:
         total_by_source[rec["source"]] += 1
 
-        # Tokenize prompt once (shared by chosen/rejected)
-        prompt_ids = tokenizer.apply_chat_template(
-            rec["prompt"],
-            tokenize=True,
-            add_generation_prompt=True,
-        )
+        # Tokenize prompt once (shared by chosen/rejected). Use the helper
+        # so we get a flat list[int] regardless of transformers version.
+        prompt_ids = _chat_template_token_ids(tokenizer, rec["prompt"])
+
         # For responses, we tokenize only the assistant content — not through
         # apply_chat_template, since that would re-add system/user. This slightly
         # underestimates vs. trl's internal tokenization (which may add special
