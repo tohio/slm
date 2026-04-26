@@ -65,6 +65,15 @@ log = logging.getLogger(__name__)
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _WHITESPACE_RE = re.compile(r"\n{3,}")
+# Block-level closing tags carry paragraph-break semantics. Replace them
+# with \n\n before the generic strip so structure survives even when the
+# source HTML doesn't have blank lines between blocks. <br> and <br/>
+# become a single newline.
+_BLOCK_CLOSE_RE = re.compile(
+    r"</(?:p|div|li|ul|ol|h[1-6]|blockquote|tr|table|pre)>",
+    re.IGNORECASE,
+)
+_BR_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
 
 
 def _strip_html(s: str) -> str:
@@ -87,12 +96,17 @@ def _strip_html(s: str) -> str:
     """
     if not s:
         return ""
-    # Remove tags first, then decode entities — order matters because some
-    # tags contain attributes with entities that should not be decoded
-    # before tag removal.
-    no_tags = _HTML_TAG_RE.sub("", s)
+    # Convert block-level closing tags to paragraph breaks before the
+    # generic strip — this preserves paragraph structure even when the
+    # source HTML has no whitespace between adjacent block tags.
+    with_breaks = _BLOCK_CLOSE_RE.sub("\n\n", s)
+    with_breaks = _BR_RE.sub("\n", with_breaks)
+    # Remove remaining tags, then decode entities. Order matters: tag
+    # attributes can contain entity-like sequences that shouldn't be
+    # decoded before tags are gone.
+    no_tags = _HTML_TAG_RE.sub("", with_breaks)
     decoded = html.unescape(no_tags)
-    # Stripped <p> tags often leave behind 3+ blank lines; collapse to 2.
+    # Collapse runs of 3+ newlines (e.g. "</p>\n<p>" became "\n\n\n\n").
     return _WHITESPACE_RE.sub("\n\n", decoded).strip()
 
 
