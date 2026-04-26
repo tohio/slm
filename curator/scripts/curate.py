@@ -607,52 +607,154 @@ def _append_overflow(args: tuple) -> tuple[int, int]:
     return docs_appended, chars_appended
 
 
-def _shuffle_in_memory(
+def _shuffle_chunked_from_sources(
     staging_paths: dict[str, Path],
     train_path: Path,
     val_path: Path,
     val_fraction: float,
     rng: random.Random,
+    total_lines: int,
+    chunk_lines: int = 500_000,
 ) -> tuple[int, int]:
     """
-    Fast-path shuffle: read everything into RAM, shuffle once, split, write twice.
+    Chunked shuffle for train + reservoir sampling for val.
 
-    After shuffle the order is uniformly random, so taking the first N lines
-    as train and the last M lines as val gives an unbiased val sample from
-    the same distribution as train.
+    Why two strategies:
+        Train uses a two-pass chunked shuffle that fits in bounded RAM.
+        Val needs to be a uniformly-random sample across all sources, but
+        a tail slice from the chunked shuffle would inherit chunk-order
+        bias — staging files are read source-by-source, so early chunks
+        skew toward early-finishing sources and late chunks skew toward
+        fineweb. Even shuffling chunk order doesn't homogenize chunks
+        whose contents are already source-skewed.
 
-    Used when the total staging size (scaled by Python object overhead)
-    fits in SHUFFLE_RAM_BUDGET_GB.
+        Reservoir sampling solves this: as lines stream in from staging,
+        each line has equal probability of ending up in the val reservoir
+        regardless of which source it came from or where in the stream
+        it appeared.
+
+    Pass 1 — read sequentially from all staging files. For each line:
+             - With probability targeting `n_val` total slots, hold it
+               in the reservoir for val (replacing an existing slot).
+             - Otherwise add to the train chunk buffer; flush chunk when
+               full (shuffled, written to disk).
+    Pass 2 — shuffle chunk order, concatenate sequentially → train.jsonl.
+             Reservoir contents → val.jsonl directly.
+
+    Peak RAM = chunk_lines × avg_line_size + n_val × avg_line_size.
+
+    Args:
+        total_lines: Pre-computed total line count across all staging
+                     files. Used to size the val reservoir exactly.
+                     Must equal the sum of lines actually written to
+                     staging by pass 1 + pass 2 — otherwise val sampling
+                     drifts from the requested fraction.
 
     Returns:
         (n_train_lines, n_val_lines)
     """
-    log.info("Shuffle: reading all staging data into memory...")
-    lines: list[bytes] = []
+    n_val = max(1, int(total_lines * val_fraction))
+    n_train_expected = total_lines - n_val
+
+    chunk_dir = train_path.parent / "shuffle_chunks"
+    chunk_dir.mkdir(exist_ok=True)
+    chunk_paths: list[Path] = []
+
+    log.info(
+        f"Shuffle pass 1/2: streaming staging files — "
+        f"reservoir-sampling {n_val:,} val lines, "
+        f"chunking {n_train_expected:,} train lines..."
+    )
+
+    # Reservoir for val (capacity n_val), train chunk buffer for the rest.
+    val_reservoir: list[bytes] = []
+    train_buf: list[bytes] = []
+    chunk_idx = 0
+    seen = 0  # 1-based index of the next line we'll process
+
+    def _flush_chunk():
+        nonlocal chunk_idx
+        if not train_buf:
+            return
+        rng.shuffle(train_buf)
+        p = chunk_dir / f"chunk_{chunk_idx:06d}.jsonl"
+        with open(p, "wb", buffering=8 * 1024 * 1024) as fout:
+            fout.writelines(train_buf)
+        chunk_paths.append(p)
+        train_buf.clear()
+        chunk_idx += 1
+
     for source, staging in staging_paths.items():
-        with open(staging, "rb") as f:
-            for line in f:
-                lines.append(line)
+        with open(staging, "rb", buffering=8 * 1024 * 1024) as fin:
+            for line in fin:
+                seen += 1
+                # Reservoir sampling (Algorithm R, Vitter 1985):
+                #   - For the first n_val lines, fill the reservoir.
+                #   - For each subsequent line at index i (1-based), pick
+                #     a random j in [1, i]. If j <= n_val, that line
+                #     replaces reservoir[j-1] and the displaced line is
+                #     emitted to train. Otherwise the line goes to train.
+                #
+                # This guarantees uniform sampling probability n_val/total
+                # for every line regardless of arrival order.
+                if seen <= n_val:
+                    val_reservoir.append(line)
+                else:
+                    j = rng.randint(1, seen)  # inclusive
+                    if j <= n_val:
+                        displaced = val_reservoir[j - 1]
+                        val_reservoir[j - 1] = line
+                        train_buf.append(displaced)
+                    else:
+                        train_buf.append(line)
+
+                if len(train_buf) >= chunk_lines:
+                    _flush_chunk()
         staging.unlink()
 
-    total = len(lines)
-    log.info(f"  Loaded {total:,} lines — shuffling...")
-    rng.shuffle(lines)
+    _flush_chunk()
 
-    n_val = max(1, int(total * val_fraction))
-    n_train = total - n_val
-    train_lines = lines[:n_train]
-    val_lines = lines[n_train:]
+    # Sanity: did we see the expected number of lines?
+    if seen != total_lines:
+        log.warning(
+            f"Reservoir saw {seen:,} lines but expected {total_lines:,} — "
+            f"val sampling fraction will drift from {val_fraction:.4f}"
+        )
 
-    log.info(f"  Writing {n_train:,} lines to {train_path}...")
-    with open(train_path, "wb") as fout:
-        fout.writelines(train_lines)
+    log.info(
+        f"  Wrote {len(chunk_paths)} train chunks, "
+        f"reservoir holds {len(val_reservoir):,} val lines"
+    )
 
-    log.info(f"  Writing {n_val:,} lines to {val_path}...")
-    with open(val_path, "wb") as fout:
-        fout.writelines(val_lines)
+    # Shuffle val reservoir so its order isn't biased toward later sources
+    # (later-arriving lines were more likely to land in the reservoir
+    # toward the end of the array — same uniform sampling, but order
+    # within the array carries arrival-order signal).
+    rng.shuffle(val_reservoir)
 
-    return n_train, n_val
+    log.info(f"Shuffle pass 2/2: writing {n_val:,} val lines + concatenating train chunks...")
+
+    with open(val_path, "wb", buffering=8 * 1024 * 1024) as fout:
+        fout.writelines(val_reservoir)
+    n_val_actual = len(val_reservoir)
+    val_reservoir.clear()  # free RAM before train write
+
+    rng.shuffle(chunk_paths)
+    n_train_actual = 0
+    with open(train_path, "wb") as train_out:
+        for cp in chunk_paths:
+            with open(cp, "rb") as fin:
+                for line in fin:
+                    train_out.write(line)
+                    n_train_actual += 1
+            cp.unlink()
+
+    try:
+        chunk_dir.rmdir()
+    except OSError:
+        pass
+
+    return n_train_actual, n_val_actual
 
 
 def _shuffle_chunked_from_sources(
@@ -889,8 +991,18 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
         )
     else:
         log.info("  Effective RAM exceeds budget — using chunked disk shuffle")
+        # Reservoir sampling needs total_lines up front to size the val
+        # reservoir. Sum doc counts from source_stats (already updated
+        # post-overflow in pass 2). Sources with no staging file are
+        # skipped here too.
+        total_lines = sum(
+            source_stats[s]["docs"]
+            for s in staging_paths.keys()
+            if s in source_stats
+        )
         n_train, n_val = _shuffle_chunked_from_sources(
             staging_paths, train_path, val_path, val_fraction, rng,
+            total_lines=total_lines,
         )
 
     total_lines = n_train + n_val
@@ -903,6 +1015,19 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
     )
 
     # ── Write blend stats ──────────────────────────────────────────────────────
+    # Per-source val breakdown — tag the reservoir lines as we wrote them
+    # would be cheaper, but a one-pass scan of val.jsonl is simple and
+    # the file is small (n_val × ~1 KB ≈ tens of MB at 125m).
+    val_source_counts: dict[str, int] = {}
+    with open(val_path, "rb") as f:
+        for line in f:
+            try:
+                rec = orjson.loads(line)
+            except Exception:
+                continue
+            src = rec.get("source") or rec.get("dataset") or "unknown"
+            val_source_counts[src] = val_source_counts.get(src, 0) + 1
+
     stats_path = CURATED_DIR / "blend_stats.json"
     with open(stats_path, "w") as f:
         json.dump({
@@ -920,6 +1045,7 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
                     "chars": v["chars"],
                     "target_chars": v["target_chars"],
                     "deficit": v["deficit"],
+                    "val_docs": val_source_counts.get(s, 0),
                     **(
                         {
                             "overflow_docs": v["overflow_docs"],
