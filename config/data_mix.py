@@ -193,11 +193,18 @@ TARGET_CONFIGS: dict[str, dict] = {
 # scripts/curate.py. Centralising means a retokenizer run (which could shift
 # CHARS_PER_TOKEN) is a single-file change instead of chasing every reference.
 
-# Average characters per BPE token from the trained tokenizer. Locked at 5.0
-# based on the 32k-vocab tokenizer trained on the pretraining corpus. If the
-# tokenizer is retrained on a different corpus, rerun the chars-per-token
-# measurement (see tokenizer/README.md) before updating.
-CHARS_PER_TOKEN: int = 5
+# Average characters per BPE token from the trained tokenizer. Measured at
+# 4.284 chars/token on the 32k-vocab tokenizer trained on the 125m
+# pretraining corpus (10k docs sampled from data/validated/train.jsonl,
+# excluding code sources). Rounded to 4.3 for budget math.
+#
+# Previous value of 5 was a planning estimate that overshot tokens by ~17%
+# at all scales (a 5B-token target produced ~5.84B actual tokens). All
+# 16 consumers use this constant in arithmetic only — int → float is safe.
+#
+# If the tokenizer is retrained on a substantially different mix, rerun
+# the chars-per-token measurement (see tokenizer/README.md) and update.
+CHARS_PER_TOKEN: float = 4.3
 
 # Empirical characters of English prose produced per Common Crawl WARC segment
 # after trafilatura extraction + language filtering. Derived from the 125m
