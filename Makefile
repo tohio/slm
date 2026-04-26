@@ -67,14 +67,19 @@ all: curate validate tokenizer tokenize pretrain prepare-sft sft sft-code prepar
 	@echo "Pipeline complete for slm-$(SIZE) on $(GPUS) GPU(s)"
 
 # ── Stage 1: Data curation ────────────────────────────────────────────────────
+# ulimit -n 65536 raised on every target that can trigger MinHash dedup.
+# The 125m run hit the default 1024 limit on stack_v1 (2,103 shards);
+# 1b will have proportionally more. ulimit must be chained with `&&` on
+# a single logical line because Make runs each recipe line in its own
+# shell — a separate `ulimit` line would not propagate.
 
 curate:
 	@echo "==> Stage 1: Curation (target=$(SIZE))"
-	$(PYTHON) curator/scripts/curate.py --target $(SIZE) $(WORKERS_FLAG)
+	ulimit -n 65536 && $(PYTHON) curator/scripts/curate.py --target $(SIZE) $(WORKERS_FLAG)
 
 curate-mini:
 	@echo "==> Stage 1: Mini curation run (pipeline validation)"
-	$(PYTHON) curator/scripts/curate.py --target mini --mini $(WORKERS_FLAG)
+	ulimit -n 65536 && $(PYTHON) curator/scripts/curate.py --target mini --mini $(WORKERS_FLAG)
 
 curate-download:
 	$(PYTHON) curator/scripts/curate.py --target $(SIZE) --stage download
@@ -83,7 +88,7 @@ curate-filter:
 	$(PYTHON) curator/scripts/curate.py --target $(SIZE) --stage filter $(WORKERS_FLAG)
 
 curate-dedup:
-	$(PYTHON) curator/scripts/curate.py --target $(SIZE) --stage dedup $(WORKERS_FLAG)
+	ulimit -n 65536 && $(PYTHON) curator/scripts/curate.py --target $(SIZE) --stage dedup $(WORKERS_FLAG)
 
 curate-blend:
 	$(PYTHON) curator/scripts/curate.py --target $(SIZE) --stage blend $(WORKERS_FLAG)
