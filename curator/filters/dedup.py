@@ -24,6 +24,7 @@ import hashlib
 import logging
 import os
 import re
+import shutil
 from pathlib import Path
 
 import orjson
@@ -55,6 +56,21 @@ JACCARD_THRESHOLD = 0.8
 def _default_workers() -> int:
     cpu = os.cpu_count() or 4
     return max(1, cpu - 2)
+
+
+def _dir_size_gb(path: Path) -> float:
+    """Sum file sizes under a directory tree, in GB. Best-effort — broken
+    symlinks and unreadable files are silently skipped."""
+    if not path.exists():
+        return 0.0
+    total = 0
+    for f in path.rglob("*"):
+        try:
+            if f.is_file():
+                total += f.stat().st_size
+        except OSError:
+            continue
+    return total / (1024 ** 3)
 
 
 # Pre-compiled for normalize() — previously compiled on every call, which at
@@ -326,13 +342,44 @@ class Deduplicator:
     def deduplicate_source(
         self, src_dir: Path, dst_dir: Path, source_name: str
     ) -> None:
-        """Full two-stage dedup for a single source: exact then fuzzy."""
-        exact_dir = self.working_dir / source_name / "exact_deduped"
+        """
+        Full two-stage dedup for a single source: exact then fuzzy.
+
+        On success, removes the per-source scratch directory
+        (working_dir/<source_name>/) which contains exact-dedup intermediate
+        output plus all MinHash stage scratch (signatures, buckets, clusters,
+        removed, logs). The deduplicated output in dst_dir is preserved —
+        dst_dir lives outside working_dir.
+
+        Without this cleanup the 125m run accumulated 135 GB of scratch
+        across all sources; at 1b that scales to ~780 GB and would not fit
+        on a 2 TB disk alongside raw + filtered + curated.
+
+        Cleanup is deliberately NOT in a finally block — if MinHash crashes
+        mid-pipeline we want the scratch preserved for debugging.
+        """
+        scratch_dir = self.working_dir / source_name
+        exact_dir = scratch_dir / "exact_deduped"
         log.info(f"=== Deduplicating {source_name} ===")
         self.exact_dedup_source(src_dir=src_dir, dst_dir=exact_dir)
         self.minhash_dedup_source(
             src_dir=exact_dir, dst_dir=dst_dir, source_name=source_name
         )
+
+        # Verify dst_dir actually has output before removing scratch — cheap
+        # insurance against a silent MinHash failure that produces no shards.
+        if dst_dir.exists() and any(dst_dir.glob("*.jsonl")):
+            scratch_size_gb = _dir_size_gb(scratch_dir)
+            log.info(
+                f"  {source_name}: removing scratch "
+                f"({scratch_dir}, {scratch_size_gb:.2f} GB)..."
+            )
+            shutil.rmtree(scratch_dir, ignore_errors=True)
+        else:
+            log.warning(
+                f"  {source_name}: dst_dir {dst_dir} has no JSONL output — "
+                f"keeping scratch at {scratch_dir} for inspection"
+            )
         log.info(f"Deduplication complete for {source_name} → {dst_dir}")
 
     def report(self) -> str:
