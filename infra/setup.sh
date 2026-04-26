@@ -114,13 +114,15 @@ echo "==> Downloading spaCy English model..."
 python -m spacy download en_core_web_sm
 
 # ── 6. Data directory structure ───────────────────────────────────────────────
+# Source classes create their own data/raw/<source_name>/ subdirectories
+# at first use — we just create the parent. The source-name list lives in
+# config/data_mix.py and shouldn't be duplicated here. The other directories
+# below are referenced by tooling that expects them to exist up front.
 
 echo ""
 echo "==> Creating data directory structure at $DATA_DIR..."
 mkdir -p \
-    "${DATA_DIR}/raw/wikipedia" \
-    "${DATA_DIR}/raw/code" \
-    "${DATA_DIR}/raw/common_crawl" \
+    "${DATA_DIR}/raw" \
     "${DATA_DIR}/filtered" \
     "${DATA_DIR}/curated" \
     "${DATA_DIR}/dedup_scratch" \
