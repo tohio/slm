@@ -61,6 +61,27 @@ def load_hf_tokenizer(tokenizer_dir: Path):
     return PreTrainedTokenizerFast.from_pretrained(str(tokenizer_dir))
 
 
+def _normalize_token_ids(encoded) -> list[int]:
+    """
+    apply_chat_template(tokenize=True, return_tensors=None) returns one of:
+      - list[int]       (older transformers — flat token ids)
+      - BatchEncoding   (newer — dict-like with 'input_ids' key)
+      - Encoding        (rare; has .ids attribute)
+
+    Normalize all three to a flat list[int] so callers don't have to care.
+    The token IDs themselves are correct in every case; only the wrapper
+    differs across versions. See pytest suite test_first_tokenized_id_is_bos
+    in tests/data_pipeline/test_pipeline_tokenizer.py for the same pattern.
+    """
+    # BatchEncoding: dict-like, indexed by field name
+    if hasattr(encoded, "input_ids"):
+        return list(encoded.input_ids)
+    if hasattr(encoded, "ids"):
+        return list(encoded.ids)
+    # Plain list of ints
+    return list(encoded)
+
+
 def test_special_tokens(tokenizer) -> bool:
     """Verify all special tokens exist with correct IDs."""
     log.info("=== Special Token Verification ===")
@@ -181,6 +202,7 @@ def test_chat_template(hf_tokenizer) -> bool:
         - Output contains the expected special tokens in order
         - BOS appears exactly once at the start
         - Generation prompt ends with <|assistant|>
+        - Tokenized output starts with BOS_ID
     """
     log.info("=== Chat Template (apply_chat_template) ===")
 
@@ -243,16 +265,20 @@ def test_chat_template(hf_tokenizer) -> bool:
         print(f"    Last 50 chars: {repr(chat_with_prompt[-50:])}")
         all_passed = False
 
-    # Tokenize and check token IDs
+    # Tokenize and check token IDs. The transformers contract for
+    # apply_chat_template(tokenize=True, return_tensors=None) is "list[int]"
+    # but newer versions return BatchEncoding instead — both contain the
+    # same correct token IDs. Normalize to list[int] before asserting.
     encoded = hf_tokenizer.apply_chat_template(
         messages,
         tokenize=True,
         add_generation_prompt=True,
         return_tensors=None,
     )
-    print(f"\n  Token count: {len(encoded)}")
-    print(f"  First token ID: {encoded[0]} (expected BOS={BOS_ID})")
-    if encoded[0] != BOS_ID:
+    token_ids = _normalize_token_ids(encoded)
+    print(f"\n  Token count: {len(token_ids)}")
+    print(f"  First token ID: {token_ids[0]} (expected BOS={BOS_ID})")
+    if token_ids[0] != BOS_ID:
         print(f"  ✗ First token is not BOS")
         all_passed = False
     else:
@@ -305,7 +331,7 @@ def main():
     no_auto_bos_eos_ok = test_no_auto_bos_eos(tokenizer)
 
     # Load sample texts for fertility — natural language only. Validated
-    # records are tagged with their source (one of the 10 sources defined
+    # records are tagged with their source (one of the 12 sources defined
     # in config/data_mix.py); filter out code sources so fertility reflects
     # English rather than Python/notebooks.
     sample_texts = []
