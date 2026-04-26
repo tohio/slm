@@ -151,30 +151,42 @@ CURATED_DIR  = DATA_DIR / "curated"
 # ── Per-source download cap derivation ─────────────────────────────────────────
 #
 # Translating a char target into a doc cap requires knowing the avg chars/doc
-# for each source. Numbers below are estimates — verify against real data
-# (sample data/raw/<source>/*.jsonl) and adjust if reality differs by >2×.
+# for each source. Values below are measured from a 125m run (sample
+# data/raw/<source>/*.jsonl) — adjust if reality drifts by >2× from these.
 # The inflation factor absorbs filter losses (~40% typical), dedup losses
 # (~20% typical), and headroom against the avg-chars-per-doc estimate.
 #
 # Buffer sizing rationale:
-#   FineWeb       — also OVERFLOW_SINK; needs extra to absorb other deficits
-#   Wikipedia     — very clean upstream, lower attrition expected
+#   fineweb       — also OVERFLOW_SINK; needs extra to absorb other deficits
+#   wikipedia     — very clean upstream, lower attrition expected
 #   pg19          — small absolute count, want safety margin
-#   pes2o         — academic structure quirks, harsher attrition
+#   pes2o         — abstracts only (~1.4K chars), supply-bound at 350m+
 #   open_web_math — math notation challenges, harsher attrition
 #   stackexchange — mostly well-formed, moderate attrition
+#   stack_v1      — large files, MinHash dedup is heavy → 5× inflation
+#   stack_smol    — small curated subset, lower attrition
+#   jupyter       — notebook structure, moderate attrition
 #
-# Code sub-sources (stack_v1, codesearchnet, etc.) are not capped here —
-# they're size-bounded by their upstream datasets and currently use cap=None
-# for non-mini runs, which streams the full corpus.
+# Code sub-sources codesearchnet and conala are NOT in the tables below —
+# both are supply-bound at 350m+ (codesearchnet ~2M docs upstream, conala
+# ~600K). A derived cap would exceed upstream and be a no-op. They stream
+# their full corpus; deficit routes to OVERFLOW_SINK like any other shortfall.
+#
+# Several other sources also become supply-bound at 1b (wikipedia, pg19,
+# open_web_math, stack_smol). The cap is still set so that downloads at
+# smaller scales remain bounded; at 1b the upstream supply binds first
+# and the deficit routes to OVERFLOW_SINK by design.
 
 _AVG_CHARS_PER_DOC: dict[str, int] = {
     "fineweb":       3_000,
-    "wikipedia":     3_000,
-    "pg19":          500_000,
-    "pes2o":         10_000,
-    "open_web_math": 5_000,
-    "stackexchange": 1_500,
+    "wikipedia":     5_000,
+    "pg19":          400_000,
+    "pes2o":         1_400,
+    "open_web_math": 8_000,
+    "stackexchange": 1_700,
+    "stack_v1":      5_500,
+    "stack_smol":    10_000,
+    "jupyter":       11_000,
 }
 
 _DOWNLOAD_INFLATION: dict[str, float] = {
@@ -184,6 +196,9 @@ _DOWNLOAD_INFLATION: dict[str, float] = {
     "pes2o":         5.0,
     "open_web_math": 5.0,
     "stackexchange": 5.0,
+    "stack_v1":      5.0,
+    "stack_smol":    5.0,
+    "jupyter":       5.0,
 }
 
 
@@ -191,20 +206,39 @@ def _derive_max_docs(name: str, target: str) -> int | None:
     """
     Derive a per-source max_docs cap from the target token budget.
 
-    Returns None for sources we don't cap (code sub-sources; common_crawl,
-    which has its own segment-based budgeting via compute_cc_segments).
+    Returns None for sources we don't cap:
+      - common_crawl: has its own segment-based budgeting via compute_cc_segments
+      - codesearchnet, conala: supply-bound — upstream has fewer docs than
+        even the 1b target needs, so a derived cap would exceed upstream
+        and be a no-op.
 
-    Formula:
-        target_chars = total_tokens × source_share × CHARS_PER_TOKEN
+    Formula for a top-level source (name in DATA_MIX):
+        target_chars = total_tokens × _TOP_LEVEL_SHARE[name] × CHARS_PER_TOKEN
+
+    Formula for a code sub-source (name in CODE_SUBMIX):
+        target_chars = total_tokens
+                     × _TOP_LEVEL_SHARE["code"]
+                     × _CODE_SUB_SHARE[name]
+                     × CHARS_PER_TOKEN
+
+    Then in both cases:
         max_docs = (target_chars / avg_chars_per_doc) × inflation
     """
-    if name not in _AVG_CHARS_PER_DOC or name not in _TOP_LEVEL_SHARE:
+    if name not in _AVG_CHARS_PER_DOC:
         return None
 
     target_tokens = TARGET_CONFIGS[target]["total_tokens"]
-    share         = _TOP_LEVEL_SHARE[name]
     avg_chars     = _AVG_CHARS_PER_DOC[name]
     inflation     = _DOWNLOAD_INFLATION[name]
+
+    if name in _TOP_LEVEL_SHARE:
+        share = _TOP_LEVEL_SHARE[name]
+    elif name in _CODE_SUB_SHARE:
+        share = _TOP_LEVEL_SHARE["code"] * _CODE_SUB_SHARE[name]
+    else:
+        # Source has chars/doc data but no share — shouldn't happen for
+        # well-formed config. Conservative: don't cap.
+        return None
 
     target_chars = target_tokens * share * CHARS_PER_TOKEN
     return int((target_chars / avg_chars) * inflation)
@@ -281,7 +315,7 @@ def _build_source(
     #   - mini: from MINI_OVERRIDES (per-source small caps for pipeline testing)
     #   - non-mini: derived from target token budget × share × inflation
     #               (None for sources not in the derivation table — currently
-    #                code sub-sources, which stream their full upstream corpus)
+    #                codesearchnet and conala, both supply-bound at 350m+)
     if mini:
         cap = MINI_OVERRIDES.get(name)
     else:
@@ -289,8 +323,7 @@ def _build_source(
         if cap is not None:
             log.info(
                 f"{name} cap derived from {target}: {cap:,} docs "
-                f"(share {_TOP_LEVEL_SHARE.get(name, 0):.1%}, "
-                f"avg {_AVG_CHARS_PER_DOC.get(name, 0):,} chars/doc, "
+                f"(avg {_AVG_CHARS_PER_DOC.get(name, 0):,} chars/doc, "
                 f"{_DOWNLOAD_INFLATION.get(name, 0)}× inflation)"
             )
 
