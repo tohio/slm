@@ -20,7 +20,12 @@ Three variants are exported per model size:
     chat        results/slm-{size}-dpo/final                  <user>/slm-{size}-chat
 
 Data mix and token targets are imported from config/data_mix.py — the
-single source of truth shared with curator, notebooks, and tests.
+single source of truth for design intent. The model card additionally
+loads data/curated/blend_stats.json (if present and matching --size) to
+render the realized per-source breakdown alongside the design targets,
+so the published card reflects what actually shipped — not just what
+was planned. Falls back to design-only with a caveat note if blend_stats
+is missing or scale-mismatched.
 
 Eval results come from the most recent JSON written by eval/eval.py for
 the matching checkpoint. Each variant is evaluated against its own
@@ -54,7 +59,9 @@ load_dotenv()
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from eval.eval import metric_score                                 # noqa: E402
-from config import DATA_MIX, dataset_link, token_target_display    # noqa: E402
+from config import (                                                # noqa: E402
+    DATA_MIX, CODE_SUBMIX, dataset_link, token_target_display,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -66,6 +73,12 @@ log = logging.getLogger(__name__)
 HF_USERNAME = os.environ.get("HF_USERNAME")
 HF_TOKEN    = os.environ.get("HF_TOKEN", "")
 RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", "results"))
+DATA_DIR    = Path(os.environ.get("DATA_DIR", "data"))
+
+# blend_stats.json is written by curator/scripts/curate.py at the end of the
+# blend stage. Reading from data/curated/ matches the curator's output
+# location regardless of how DATA_DIR is set.
+BLEND_STATS_PATH = DATA_DIR / "curated" / "blend_stats.json"
 
 REPO_ROOT   = Path(__file__).resolve().parents[1]
 MODEL_PKG_DIR = REPO_ROOT / "model"
@@ -175,10 +188,139 @@ def _format_eval_table(scores: dict[str, float]) -> str:
     return "\n".join(lines)
 
 
-def _format_data_mix_table() -> str:
-    """Render DATA_MIX from config/data_mix.py as a markdown table."""
+def _load_blend_stats(size: str) -> dict | None:
+    """
+    Load data/curated/blend_stats.json if present and matching this size.
+
+    Returns the parsed dict, or None if:
+      - file doesn't exist (curator hasn't run, or blend output not on this host)
+      - file is unreadable / malformed
+      - file's `target` field doesn't match the size we're exporting
+        (avoids shipping wrong numbers when blend_stats is from a different scale)
+    """
+    if not BLEND_STATS_PATH.exists():
+        log.info(
+            f"blend_stats.json not found at {BLEND_STATS_PATH} — "
+            f"model card will use design targets only."
+        )
+        return None
+
+    try:
+        with open(BLEND_STATS_PATH) as f:
+            stats = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        log.warning(f"Failed to read {BLEND_STATS_PATH}: {e}")
+        return None
+
+    blend_target = stats.get("target")
+    if blend_target != size:
+        log.warning(
+            f"blend_stats.json target={blend_target!r} does not match "
+            f"--size {size!r}. Falling back to design targets only — "
+            f"re-curate at the matching scale to publish realized numbers."
+        )
+        return None
+
+    return stats
+
+
+def _format_data_mix_table(size: str) -> str:
+    """
+    Render the pretraining data mix as a markdown table.
+
+    If data/curated/blend_stats.json exists and matches `size`, the table
+    shows both target % and realized % per source, so the model card
+    reflects what actually shipped in the published corpus. Otherwise it
+    falls back to a design-target-only view with a caveat note that the
+    realized mix may differ.
+
+    Top-level vs code sub-sources:
+        DATA_MIX has a logical "code" bucket at 10% — the actual code
+        sources live in CODE_SUBMIX. blend_stats.json's source_mix dict
+        contains the 5 expanded code sub-sources (no "code" entry). To
+        render correctly we expand "code" into its sub-sources here when
+        rendering, with realized% pulled from blend_stats per-source.
+    """
+    stats = _load_blend_stats(size)
+
+    if stats is None:
+        # Design-only fallback: render DATA_MIX percentages without
+        # realized numbers, plus a caveat that reality may have drifted.
+        lines = [
+            "| Source | Target Share | Link |",
+            "|---|---|---|",
+        ]
+        for name, entry in DATA_MIX.items():
+            lines.append(f"| `{name}` | {entry['pct']:.1f}% | {dataset_link(entry)} |")
+        lines.append("")
+        lines.append(
+            "> _Realized mix may differ from target — supply-bound sources "
+            "(pes2o, jupyter at this scale) route their deficit to FineWeb_."
+        )
+        return "\n".join(lines)
+
+    # Realized + target view. Compute per-source realized share from
+    # the char totals in blend_stats.source_mix.
+    source_mix = stats.get("source_mix", {})
+    total_chars = sum(v.get("chars", 0) for v in source_mix.values())
+    if total_chars == 0:
+        # Defensive: shouldn't happen for a valid blend, but if chars sum
+        # to zero we can't compute percentages — fall back to design-only
+        # rather than print all zeros.
+        log.warning("blend_stats.source_mix has zero total chars — using design targets only")
+        return _format_data_mix_table_design_only()
+
     lines = [
-        "| Source | Share | Link |",
+        "| Source | Target Share | Realized Share | Link |",
+        "|---|---|---|---|",
+    ]
+
+    # Top-level non-code sources from DATA_MIX, in declaration order.
+    for name, entry in DATA_MIX.items():
+        if name == "code":
+            # Expand code into its sub-sources below, not as a single line.
+            continue
+        realized_chars = source_mix.get(name, {}).get("chars", 0)
+        realized_pct = (realized_chars / total_chars) * 100
+        lines.append(
+            f"| `{name}` | {entry['pct']:.1f}% | {realized_pct:.2f}% | "
+            f"{dataset_link(entry)} |"
+        )
+
+    # Code sub-sources, each as its own row. Their target % is
+    # CODE_SUBMIX[name].pct of the 10% code share.
+    code_top_pct = DATA_MIX["code"]["pct"]
+    for name, entry in CODE_SUBMIX.items():
+        target_pct_of_total = (entry["pct"] / 100.0) * code_top_pct
+        realized_chars = source_mix.get(name, {}).get("chars", 0)
+        realized_pct = (realized_chars / total_chars) * 100
+        lines.append(
+            f"| `{name}` | {target_pct_of_total:.2f}% | {realized_pct:.2f}% | "
+            f"{dataset_link(entry)} |"
+        )
+
+    # Footer line summarising the realized totals so readers don't have
+    # to add the column themselves.
+    estimated_tokens = stats.get("estimated_tokens", 0)
+    train_docs = stats.get("train_documents", 0)
+    val_docs = stats.get("val_documents", 0)
+    lines.append("")
+    lines.append(
+        f"_Realized: ~{estimated_tokens / 1e9:.2f}B tokens "
+        f"({train_docs:,} train + {val_docs:,} val docs). "
+        f"Supply-bound sources route their deficit to FineWeb._"
+    )
+
+    return "\n".join(lines)
+
+
+def _format_data_mix_table_design_only() -> str:
+    """
+    Render DATA_MIX as a design-only table. Used as a defensive fallback
+    inside _format_data_mix_table when blend_stats has zero chars.
+    """
+    lines = [
+        "| Source | Target Share | Link |",
         "|---|---|---|",
     ]
     for name, entry in DATA_MIX.items():
@@ -223,7 +365,7 @@ Use [`{HF_USERNAME}/slm-{size}`](https://huggingface.co/{HF_USERNAME}/slm-{size}
 """,
     }[variant]
 
-    pretrain_table = _format_data_mix_table()
+    pretrain_table = _format_data_mix_table(size)
 
     training_section = {
         "base": f"""\
