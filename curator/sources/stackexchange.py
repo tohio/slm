@@ -9,10 +9,10 @@ and dozens of other SE sites. Each record is formatted as a single Q+A
 document using the highest-scored answer, following the convention used
 by RedPajama and StarCoder's training data.
 
-Format: each document is a Q+A pair formatted as:
-    Q: <question body>
+Format: each document is a Q+A pair formatted as plain text:
+    Q: <question body, HTML stripped>
 
-    A: <top-voted answer>
+    A: <top-voted answer, HTML stripped>
 
 Only answers with score >= min_answer_score (default 1) are kept, so
 downvoted/wrong answers are excluded.
@@ -24,8 +24,14 @@ older versions of this file assumed — with the wrong key, every answer
 came back as "" and every record was silently dropped. pm_score is
 stored as a string (e.g. "2"), so we cast it to int defensively.
 
-Note: answer bodies are raw HTML (they start with <p> etc.). Downstream
-quality filtering strips markup; we leave it alone here.
+HTML stripping: question and answer bodies in the source dataset are
+raw HTML (they start with <p> etc.). We strip tags before writing
+because the downstream quality filter (curator/filters/quality.py)
+treats angle brackets as symbols, which inflates the symbol-to-word
+ratio past the rejection threshold and drops 99%+ of records. Earlier
+versions of this file deferred stripping to the filter, but the filter
+doesn't transform — it only accepts/rejects. Stripping here keeps the
+filter's heuristics meaningful.
 
 Output: JSONL with one Q+A per line:
     {
@@ -41,7 +47,9 @@ Usage:
     source.download()
 """
 
+import html
 import logging
+import re
 from pathlib import Path
 
 import orjson
@@ -51,6 +59,41 @@ from tqdm import tqdm
 from curator.constants import CHARS_PER_TOKEN
 
 log = logging.getLogger(__name__)
+
+
+# ── HTML stripping ────────────────────────────────────────────────────────────
+
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_WHITESPACE_RE = re.compile(r"\n{3,}")
+
+
+def _strip_html(s: str) -> str:
+    """
+    Strip HTML tags and decode entities from a string.
+
+    Designed for short Q+A bodies (typically <5KB), not full web pages.
+    Uses stdlib only — no trafilatura/BeautifulSoup overhead.
+
+    Steps:
+        1. Remove HTML tags with a non-greedy regex
+        2. Decode HTML entities (&amp; → &, &lt; → <, &nbsp; → space, etc.)
+        3. Collapse runs of 3+ newlines (created by stripped <p>...</p>)
+
+    Code blocks (<pre><code>...</code></pre>) lose their tags but keep
+    their content with original whitespace. This matches what training
+    data for code-aware models typically wants.
+
+    Returns empty string for None or empty input.
+    """
+    if not s:
+        return ""
+    # Remove tags first, then decode entities — order matters because some
+    # tags contain attributes with entities that should not be decoded
+    # before tag removal.
+    no_tags = _HTML_TAG_RE.sub("", s)
+    decoded = html.unescape(no_tags)
+    # Stripped <p> tags often leave behind 3+ blank lines; collapse to 2.
+    return _WHITESPACE_RE.sub("\n\n", decoded).strip()
 
 
 class StackExchangeSource:
@@ -191,11 +234,14 @@ class StackExchangeSource:
                                            selected, text}
             metadata: list    — [question_url, ...]
 
-        We pick the highest-scoring answer above min_answer_score and
-        concatenate with the question. pm_score is stored as a string;
-        cast defensively.
+        We pick the highest-scoring answer above min_answer_score, strip
+        HTML from both question and answer bodies, and concatenate.
+        pm_score is stored as a string; cast defensively.
         """
-        question = (sample.get("question") or "").strip()
+        # Strip HTML at extraction time. The raw bodies start with <p>...
+        # — leaving them in causes the downstream quality filter to
+        # reject 99%+ of records via symbol-to-word ratio.
+        question = _strip_html(sample.get("question") or "")
         if not question:
             return None
 
@@ -221,7 +267,7 @@ class StackExchangeSource:
         # The HF dataset stores the answer body in `text`. Older versions
         # of this file read `answer_body`, which returned "" for every
         # answer and silently dropped every record.
-        answer_body = (best.get("text") or "").strip()
+        answer_body = _strip_html(best.get("text") or "")
         if not answer_body:
             return None
 
