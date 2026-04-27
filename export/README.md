@@ -71,16 +71,22 @@ Generated automatically at export time. Every variant gets:
 
 - **Architecture table** — component choices and rationale
 - **Training section**
-  - Pretraining corpus table: all 10 sources with their percentage share, sourced from `model/data_mix.py` (single source of truth shared with the curator and notebooks)
+  - Pretraining corpus table: all 12 sources (7 non-code top-level + 5 code sub-sources) with target percentages from `config/data_mix.py` and realized percentages from `data/curated/blend_stats.json` if available. Realized columns appear when blend_stats.json is present and matches the export size; otherwise the table falls back to design-target-only with a caveat noting that the realized mix may differ. Both views are sourced from `config/data_mix.py` as the single source of truth shared with the curator and notebooks
   - Fine-tuning tables for the `instruct` and `chat` variants, listing SFT and (for chat) DPO datasets
 - **Parameter count** — actual value from the loaded checkpoint
-- **Token targets** — sourced from `model/data_mix.py` (5B/15B/30B for 125m/350m/1b)
+- **Token targets** — sourced from `config/data_mix.py` (5B/15B/30B for 125m/350m/1b)
 - **Benchmark results** — populated from the most recent `eval.py` run for **this variant's checkpoint**. `base` shows base-model scores, `instruct` shows SFT scores, `chat` shows post-DPO scores
 - **Hardware** — training hardware used
 - **Limitations** — scale, hallucination, safety, language, and code coverage
 - **Usage example** — copy-paste ready code using `apply_chat_template`
 
 If a variant has no eval results yet, its benchmark table is rendered with a placeholder ("_Benchmark results will be added after evaluation._") rather than a stale table. A warning is logged during export.
+
+### Realized vs target mix
+
+When `data/curated/blend_stats.json` is present and its `target` field matches the `--size` being exported, the model card includes a "Realized" column showing what actually shipped. Supply-bound sources (peS2o, jupyter at all scales; Wikipedia/pg19/open_web_math/stack_smol at 1b) under-fill their target; the deficit routes to FineWeb, lifting its realized share above target. Showing both columns gives readers an honest view of what was trained on.
+
+When blend_stats.json is missing (e.g., exporting from a training instance that doesn't have the curated data on local disk), the table falls back to design-target-only with a caveat. To get realized numbers in the model card, ensure blend_stats.json is downloaded from S3 alongside the validated/tokenized data, or run export from the curate instance.
 
 ---
 

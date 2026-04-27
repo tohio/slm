@@ -78,7 +78,7 @@ The model is a dense decoder-only transformer with a modern architecture:
 ```
 slm/
 ├── config/
-│   └── data_mix.py              
+│   └── data_mix.py
 │
 ├── model/
 │   ├── config.py
@@ -89,7 +89,7 @@ slm/
 │   └── model.py
 │
 ├── curator/
-│   ├── constants.py             
+│   ├── constants.py
 │   ├── sources/
 │   │   ├── common_crawl.py
 │   │   ├── fineweb.py
@@ -158,7 +158,7 @@ slm/
 │   └── serve.sh
 │
 ├── scripts/
-│   └── sanity_train.py          
+│   └── sanity_train.py
 │
 ├── tests/
 │   ├── conftest.py
@@ -634,3 +634,4 @@ This project is scoped as a complete end-to-end training pipeline and demonstrat
 ## License
 
 MIT
+![alt text](image.png)

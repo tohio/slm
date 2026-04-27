@@ -11,7 +11,7 @@ tests/
 ├── conftest.py                         Shared fixtures, DATA_DIR resolution, fasttext mock
 │
 ├── data_pipeline/                      CPU curation instance — run after each data stage
-│   ├── test_pipeline_curator.py        Validates make curate-mini outputs (all 10 sources)
+│   ├── test_pipeline_curator.py        Validates make curate-mini outputs (all 12 sources)
 │   ├── test_pipeline_validate.py       Validates make validate outputs
 │   └── test_pipeline_tokenizer.py      Validates make tokenizer outputs
 │
@@ -20,9 +20,9 @@ tests/
 │   └── test_cache_and_mask.py          KV cache and attention mask correctness
 │
 └── gpu_pipeline/                       GPU training instance — run after each training stage
-    ├── test_pipeline_training.py       Validates make pretrain-mini outputs
-    ├── test_pipeline_sft.py            Validates make sft-mini and sft-code-mini outputs
-    └── test_pipeline_dpo.py            Validates make dpo-mini outputs
+├── test_pipeline_training.py       Validates make pretrain-mini outputs
+├── test_pipeline_sft.py            Validates make sft-mini and sft-code-mini outputs
+└── test_pipeline_dpo.py            Validates make dpo-mini outputs
 ```
 
 ---
@@ -66,30 +66,31 @@ make test-model
 
 ### `test-curator` — after `make curate-mini`
 
-The mini curation run exercises all 10 data sources with small per-source budgets (a few hundred to a few thousand docs each). This validates that every source loader works, that the filter and dedup stages handle the full source set, and that the cap-and-redistribute blend logic covers any supply shortfall via FineWeb overflow.
+The mini curation run exercises all 12 data sources (7 non-code top-level + 5 code sub-sources) with small per-source budgets (a few hundred to a few thousand docs each). This validates that every source loader works, that the filter and dedup stages handle the full source set, and that the cap-and-redistribute blend logic covers any supply shortfall via FineWeb overflow.
 
 | Check | What it catches |
 |---|---|
-| Raw shards exist for all 10 sources | A source loader is broken or didn't run |
+| Raw shards exist for all 12 sources | A source loader is broken or didn't run |
 | Source tag in each shard matches its directory | Source wrote to wrong directory or used wrong SOURCE_TAG |
 | `quality.py` `CODE_SOURCES` matches `config.CODE_SOURCES` | Drift between the filter-routing set and the data-mix source of truth |
 | Filtered docs pass quality checks | Filter stage did not run or has a bug |
 | Non-code filtered docs meet min length (500 chars) | Min length filter not applied |
-| Deduped dirs exist and are non-empty for all 10 sources | Dedup stage failed for one or more sources |
+| Deduped dirs exist and are non-empty for all 12 sources | Dedup stage failed for one or more sources |
 | No exact duplicates across all deduped output | Exact dedup not working |
 | `train.jsonl` exists and is non-empty | Blend stage failed |
-| `train.jsonl` contains at least 8 of 9 required sources | Blend missing a source |
+| `train.jsonl` contains all 12 sources | Blend missing a source |
 | `train.jsonl` has no unknown source tags | Corruption or wrong source tag introduced |
 | No short non-code docs in `train.jsonl` | Filtered data not used as blend input |
 | No exact duplicates in `train.jsonl` | Deduped data not used as blend input |
 | `blend_stats.json` exists with required schema | Stats not written or incomplete |
-| `blend_stats.json` per-source includes docs/chars/target_chars/deficit | Cap-and-redistribute accounting missing |
+| `blend_stats.json` per-source includes docs/chars/target_chars/deficit/val_docs | Cap-and-redistribute or val-tracking accounting missing |
 | `blend_stats.json` doc count matches `train.jsonl` | Stats don't match actual output |
 | `blend_stats.json` chars_per_token matches `config.CHARS_PER_TOKEN` | Drift from `config` |
 | Total chars within tolerance of target | Cap-and-redistribute not running or broken |
 | FineWeb has overflow when other sources have deficit | Overflow sink not triggered |
+| Per-source val_docs sum matches val.jsonl line count | Reservoir sample tracking broken |
 
-**All 10 sources must appear in `train.jsonl`.** Unlike the previous stack_v2 setup (which depended on SWH and could legitimately produce zero docs during rate-limit windows), stack_v1 has file content inline in the parquet shards and will always produce output if the mini cap is reached. A missing source now indicates a real failure — gated-dataset license not accepted, `HF_TOKEN` misconfigured, or a loader regression — and the test should fail in that case, not skip.
+**All 12 sources must appear in `train.jsonl`.** Unlike the previous stack_v2 setup (which depended on SWH and could legitimately produce zero docs during rate-limit windows), stack_v1 has file content inline in the parquet shards and will always produce output if the mini cap is reached. A missing source now indicates a real failure — gated-dataset license not accepted, `HF_TOKEN` misconfigured, or a loader regression — and the test should fail in that case, not skip.
 
 ### `test-validate` — after `make validate`
 
@@ -99,6 +100,7 @@ The mini curation run exercises all 10 data sources with small per-source budget
 | Validated output is a subset of curated | Validation adding docs (wrong) |
 | All validated docs pass quality filters | Validator accepting bad docs |
 | Retention rate ≥ 70% | KenLM threshold too aggressive |
+| Train and val keep rates within ~5pp | Blend produced biased val sample |
 | `validation_stats.json` is consistent | Stats not written or wrong |
 
 ### `test-tokenizer` — after `make tokenizer`
@@ -114,6 +116,7 @@ The mini curation run exercises all 10 data sources with small per-source budget
 | Chat template works via `apply_chat_template` | Template not baked in |
 | BOS appears exactly once at start | Template formatting wrong |
 | Generation prompt ends with `<\|assistant\|>` | Template generation prompt wrong |
+| First tokenized ID is BOS | Chat template tokenize-path returns wrong shape |
 
 ### `test-training` — after `make pretrain-mini`
 

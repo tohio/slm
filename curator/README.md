@@ -1,6 +1,6 @@
 # curator
 
-Data curation pipeline for SLM pretraining. Downloads raw data from ten sources, applies quality filters, deduplicates, blends to target token ratios with cap-and-redistribute overflow handling, and uploads to S3.
+Data curation pipeline for SLM pretraining. Downloads raw data from twelve sources (7 non-code top-level + 5 code sub-sources), applies quality filters, deduplicates, blends to target token ratios with cap-and-redistribute overflow handling, and uploads to S3.
 
 ---
 
@@ -11,7 +11,7 @@ common_crawl   ─┐
 fineweb        ─┤
 wikipedia      ─┤
 pg19           ─┤
-pes2o          ─┼─► quality filter ─► dedup ─► blend ─► train.jsonl ─► S3
+pes2o          ─┼─► quality filter ─► dedup ─► blend ─► train.jsonl + val.jsonl ─► S3
 open_web_math  ─┤
 stackexchange  ─┤
 code × 5       ─┘
@@ -23,13 +23,15 @@ Each source runs independently through filtering and deduplication. The blend st
 
 ## Data Sources
 
-| Source | Share | Supply | Notes |
+7 top-level non-code sources plus 5 code sub-sources sharing the 10% code budget = 12 source loaders total.
+
+| Source | Target Share | Supply | Notes |
 |---|---|---|---|
 | Common Crawl | 10% | unlimited (time-bound) | direct WARC download via HTTPS |
 | FineWeb | 47.5% | 15T tokens | `HuggingFaceFW/fineweb` (`sample-100BT` subset), overflow sink |
 | Wikipedia | 10% | ~3.7B tokens | `wikimedia/wikipedia` 20231101.en |
 | pg19 | 2.5% | ~2.9B tokens | `pg19` — public-domain books pre-1919 |
-| peS2o | 5% | ~42B tokens | `allenai/peS2o` v2 — academic papers |
+| peS2o | 5% | ~0.8B tokens (abstracts only) | `allenai/peS2o` v2 — supply-bound at 350m+ |
 | open-web-math | 10% | ~14.7B tokens | `open-web-math/open-web-math` |
 | StackExchange | 5% | ~15B tokens | `HuggingFaceH4/stack-exchange-preferences` Q+A |
 | **Code total** | **10%** | | split across 5 sub-sources |
@@ -39,10 +41,10 @@ Each source runs independently through filtering and deduplication. The blend st
 | Code source | Sub-share | Languages | Notes |
 |---|---|---|---|
 | the-stack-dedup (v1) | 50% | python, go, rust, shell | `bigcode/the-stack-dedup` — bulk raw code, content inline in parquet shards |
-| CodeSearchNet | 35% | Python, Java, JavaScript, PHP, Ruby, Go | `code_search_net` — curated function-level with docstrings |
+| CodeSearchNet | 35% | Python, Java, JavaScript, PHP, Ruby, Go | `code_search_net` — supply-bound at 350m+ (~2M docs upstream) |
 | the-stack-smol | 10% | 30 languages | `bigcode/the-stack-smol` — diverse small sample |
-| Jupyter notebooks | 4% | mostly Python | `codeparrot/github-jupyter-code-to-text` — code+prose |
-| CoNaLa | 1% | Python | `neulab/conala` mined — NL→code pairs |
+| Jupyter notebooks | 4% | mostly Python | `bigcode/jupyter-parsed` — code+prose, supply-bound at 125m+ |
+| CoNaLa | 1% | Python | `neulab/conala` mined — supply-bound at 350m+ (~600K docs upstream) |
 
 ### Scale-invariant percentages
 
@@ -50,9 +52,30 @@ Percentages are the same at every size. Scaling up changes `target_tokens`, not 
 
 ### Cap-and-redistribute
 
-Finite sources (Wikipedia, pg19, etc.) may supply less than their character budget at larger scales. Each source writes up to its budget or until its supply is exhausted, whichever is smaller. The total shortfall is added to FineWeb's budget at the end of staging. FineWeb has effectively unlimited supply (15T tokens) so this always closes the gap.
+Several sources are supply-bound at large scales: peS2o (abstracts only) and jupyter run out at 350m+; Wikipedia, pg19, open_web_math, and stack_smol all become supply-bound at 1b; codesearchnet and conala upstream is small enough to bind even sooner. Each source writes up to its budget or until its supply is exhausted, whichever is smaller. The total shortfall is added to FineWeb's budget at the end of staging. FineWeb has effectively unlimited supply (15T tokens) so this always closes the gap.
 
-This behavior is load-bearing at 1b scale, where pg19 is supply-constrained; less visible at 125m and 350m where most sources have comfortable headroom.
+This behavior is load-bearing at 1b scale; partially load-bearing at 125m/350m for the always-supply-bound sources (peS2o, jupyter).
+
+### Realized mix at 125m
+
+The 125m run produces a corpus matching this design intent except where supply binds: peS2o fills only ~64% of its target (abstract-only upstream), jupyter ~72% (small upstream). Combined ~0.47B chars of deficit routes to FineWeb, lifting its realized share from 47.5% target to 49.39% realized.
+
+| Source | Target Share | Realized Share |
+|---|---|---|
+| `common_crawl` | 10.00% | 10.00% |
+| `fineweb` | 47.50% | 49.39% |
+| `wikipedia` | 10.00% | 10.00% |
+| `pg19` | 2.50% | 2.50% |
+| `pes2o` | 5.00% | 3.22% ⚠ |
+| `open_web_math` | 10.00% | 10.00% |
+| `stackexchange` | 5.00% | 5.00% |
+| `stack_v1` | 5.00% | 5.00% |
+| `codesearchnet` | 3.50% | 3.50% |
+| `stack_smol` | 1.00% | 1.00% |
+| `jupyter` | 0.40% | 0.29% ⚠ |
+| `conala` | 0.10% | 0.10% |
+
+Realized total: ~5.00B tokens, 8.36M docs (8.31M train + 41.8K val). The `data/curated/blend_stats.json` written at the end of the blend stage records these realized numbers per source; `export.py` reads from it to populate the model card.
 
 ---
 
@@ -61,9 +84,9 @@ This behavior is load-bearing at 1b scale, where pg19 is supply-constrained; les
 | Model | Total tokens | Epochs | Supply situation |
 |---|---|---|---|
 | `mini` | 1M | 1 | all sources comfortable |
-| `slm-125m` | 5B | 2 | all sources comfortable |
-| `slm-350m` | 15B | 2 | all sources comfortable |
-| `slm-1b` | 30B | 1 | pg19 near supply limit; FineWeb overflow covers |
+| `slm-125m` | 5B | 2 | peS2o + jupyter supply-bound |
+| `slm-350m` | 15B | 2 | + codesearchnet, conala supply-bound |
+| `slm-1b` | 30B | 1 | + Wikipedia, pg19, open_web_math, stack_smol supply-bound; FineWeb absorbs all deficits |
 
 Why 1b uses 1 epoch: at 30B tokens with a single epoch, every source is below its supply ceiling, so no repetition. Modern small-model training (Llama, Phi) follows the same pattern — more fresh data outperforms fewer tokens seen multiple times. 125m and 350m retain 2 epochs because their smaller token budgets leave plenty of headroom.
 
@@ -73,7 +96,7 @@ Why 1b uses 1 epoch: at 30B tokens with a single epoch, every source is below it
 
 ```
 curator/
-├── constants.py             Shared constants (CHARS_PER_TOKEN, CC_CHARS_PER_SEGMENT)
+├── constants.py             Re-exports CHARS_PER_TOKEN etc. from config/data_mix.py
 ├── sources/
 │   ├── common_crawl.py        Common Crawl WARCs via HTTPS + trafilatura
 │   ├── fineweb.py             HuggingFaceFW/fineweb (streaming, overflow sink)
@@ -86,14 +109,14 @@ curator/
 │   ├── stack_smol.py          bigcode/the-stack-smol — 30 languages
 │   ├── stack_v1.py            bigcode/the-stack-dedup (inline content)
 │   ├── stack_v2.py            DISABLED — see file header
-│   ├── jupyter.py             codeparrot jupyter-code-to-text
+│   ├── jupyter.py             bigcode/jupyter-parsed
 │   └── conala.py              neulab/conala-mined
 ├── filters/
 │   ├── quality.py             Heuristic quality filters (FineWeb/Gopher-style)
 │   └── dedup.py               Exact + datatrove disk-based MinHash deduplication
 └── scripts/
-    ├── curate.py              Main pipeline entry point, mix layer, cap-and-redistribute
-    └── upload_s3.py           S3 upload/download utilities
+├── curate.py              Main pipeline entry point, mix layer, cap-and-redistribute
+└── upload_s3.py           S3 upload/download utilities
 ```
 
 ---
@@ -120,7 +143,7 @@ One environment variable is required beyond the existing ones:
 python curator/scripts/curate.py --target mini --mini
 ```
 
-Mini exercises every source at small scale (~100 docs to a few thousand per source) to validate end-to-end that all 10 source loaders, filter logic, dedup, and the mix layer work correctly. Total runtime 30–60 min.
+Mini exercises every source at small scale (~100 docs to a few thousand per source) to validate end-to-end that all 12 source loaders, filter logic, dedup, and the mix layer work correctly. Total runtime 30–60 min.
 
 Run each stage individually to inspect output between steps:
 
@@ -134,7 +157,7 @@ python curator/scripts/curate.py --target mini --mini --stage blend
 **Full pipeline**
 
 ```bash
-# 125m dataset (~5B tokens)
+# 125m dataset (~5B tokens) — measured ~16h end-to-end
 python curator/scripts/curate.py --target 125m
 
 # 350m dataset (~15B tokens)
@@ -193,13 +216,14 @@ data/
 │   └── conala/                     CoNaLa pair shards
 ├── filtered/
 │   ├── <source>/                   quality-filtered shards
-│   └── <source>_deduped/           + deduplicated
-├── dedup_scratch/                  datatrove intermediate state
+│   └── <source>deduped/           + deduplicated
+├── dedup_scratch/                  datatrove intermediate state (cleaned per-source after success)
 │   └── <source>/                   per-source exact + minhash state
 └── curated/
-    ├── blend_<source>.jsonl        per-source staging (cleaned up after shuffle)
-    ├── train.jsonl                 final blended dataset
-    └── blend_stats.json            per-source docs/chars/deficit breakdown
+├── blend<source>.jsonl        per-source staging (cleaned up after shuffle)
+├── train.jsonl                 final blended train split
+├── val.jsonl                   final blended val split (uniform sample)
+└── blend_stats.json            per-source docs/chars/deficit/val_docs breakdown
 ```
 
 ---
@@ -211,20 +235,18 @@ Each upload is versioned by target and date, so multiple runs never overwrite ea
 ```
 s3://your-bucket/slm/data/
 ├── 125m/
-│   ├── 2026-04-02/
-│   │   └── curated/
-│   │       ├── train.jsonl
-│   │       └── blend_stats.json
-│   └── 2026-04-15/
+│   └── YYYY-MM-DD/
 │       └── curated/
 │           ├── train.jsonl
+│           ├── val.jsonl
 │           └── blend_stats.json
 ├── 350m/
-│   └── 2026-04-20/curated/
+│   └── YYYY-MM-DD/curated/
 ├── 1b/
-│   └── 2026-05-05/curated/
+│   └── YYYY-MM-DD/curated/
 └── mini/
-    └── 2026-04-01/curated/
+    └── YYYY-MM-DD/curated/
+
 ```
 
 Re-uploading on the same day overwrites that day's run. Runs on different days are preserved independently.
@@ -233,7 +255,7 @@ Re-uploading on the same day overwrites that day's run. Runs on different days a
 
 ## Quality Filters
 
-Heuristics adapted from FineWeb and Gopher. Filters marked ✗ are skipped for code-adjacent sources (`codesearchnet`, `stack_smol`, `stack_v2`, `jupyter`, `conala`) — symbol-heavy syntax, long identifiers, and absence of stop words are normal properties of code, not quality signals.
+Heuristics adapted from FineWeb and Gopher. Filters marked ✗ are skipped for code-adjacent sources (`codesearchnet`, `stack_smol`, `stack_v1`, `jupyter`, `conala`) — symbol-heavy syntax, long identifiers, and absence of stop words are normal properties of code, not quality signals.
 
 The set of code-adjacent source tags lives in `curator/filters/quality.py` as `CODE_SOURCES`. Adding a new code-adjacent source is a single-line change.
 
@@ -253,6 +275,8 @@ The set of code-adjacent source tags lives in `curator/filters/quality.py` as `C
 
 **Mixed-content sources (jupyter, conala) are included in `CODE_SOURCES`.** Their prose components bypass English-prose filters as a result. This is an accepted trade-off: per-chunk filter dispatch isn't feasible at the source level, and skipping prose filters on these is safer than rejecting valid code.
 
+**StackExchange HTML stripping.** The HF `HuggingFaceH4/stack-exchange-preferences` dataset stores Q+A bodies as raw HTML (`<p>...</p>` etc.). Tags are stripped at extraction time in `curator/sources/stackexchange.py` — without this, the symbol-ratio filter would reject 99.93% of records. Block-level closing tags (`</p>`, `</div>`, etc.) are converted to paragraph breaks before stripping so structure survives.
+
 ---
 
 ## Deduplication
@@ -263,7 +287,7 @@ Two-stage deduplication applied after quality filtering, per source:
 
 **Stage 2 — Fuzzy dedup (datatrove).** 4-stage disk-based MinHash LSH pipeline: signatures → buckets → cluster → filter. Catches near-duplicates (Jaccard similarity > 0.8). Peak RAM is bounded by shard size, not corpus size — 125m, 350m, and 1b run with the same memory footprint.
 
-Intermediate state written to `data/dedup_scratch/` and safe to delete after the dedup stage completes.
+Per-source scratch (`data/dedup_scratch/<source>/`) is deleted automatically after each source's MinHash filter writes its output successfully. Without this, the 125m run accumulated 135 GB of scratch across 12 sources; at 1b it would scale to ~780 GB and not fit on a 2 TB disk alongside raw + filtered + curated.
 
 ---
 
@@ -275,17 +299,19 @@ Three passes:
 
 **Pass 2 (sequential).** If total deficit > 0, FineWeb appends additional content to its staging file to cover the shortfall. FineWeb is the overflow sink because its supply (15T tokens) exceeds any deficit we could realistically produce.
 
-**Pass 3 (shuffle).** Two shuffle strategies based on size:
-- **In-memory** — when total staging (scaled by ~5× for Python object overhead) fits in `SHUFFLE_RAM_BUDGET_GB` (default 12 GB). One pass: read everything, shuffle once, write.
-- **Chunked disk** — read staging files into shuffled chunks, then shuffle chunk order and concatenate. Peak RAM bounded by `chunk_lines × avg_line_size`.
+**Pass 3 (shuffle + split).** Two shuffle strategies based on size, both producing globally-mixed train and a uniform-sample val:
+- **In-memory** — when total staging (scaled by ~5× for Python object overhead) fits in `SHUFFLE_RAM_BUDGET_GB` (default 12 GB). Read everything, shuffle once, write split.
+- **Weighted-interleave + reservoir sample** — when staging exceeds the RAM budget. Open all staging files at once; at each step pick a source weighted by remaining lines and read one line. Each line either enters a reservoir (val sample, uniform across the corpus by Vitter's Algorithm R) or a chunk buffer (train, written to disk in shuffled chunks). Train chunks are then concatenated in shuffled order. The earlier "tail-slice the chunk concat for val" approach was replaced because it produced source-pure regions in train (first 100k lines all FineWeb) and a non-uniform val sample.
 
-Characters-to-tokens conversion uses `CHARS_PER_TOKEN = 5` from `curator/constants.py`. Recalibrate there if the empirical ratio shifts by more than ~10% after a 125m tokenized run.
+Characters-to-tokens conversion uses `CHARS_PER_TOKEN = 4.3` from `config/data_mix.py` — measured from the 32k-vocab tokenizer trained on the 125m corpus. Recalibrate there if the tokenizer is retrained on a substantially different corpus.
+
+Per-source val doc counts are written to `blend_stats.json`'s `val_docs` field so the realized val mix can be inspected post-blend; at 125m val matches train within ±0.25pp per source.
 
 ---
 
 ## Output Format
 
-Each record in the final `train.jsonl`:
+Each record in the final `train.jsonl` and `val.jsonl`:
 
 ```json
 {
@@ -306,14 +332,14 @@ Per-source metadata varies (e.g. Wikipedia has `title` and `url`; CodeSearchNet 
 
 These are recommendations, not floors. The pipeline streams everywhere, so RAM isn't strictly load-bearing — a reader with less RAM can run 1b, it just takes longer. vCPU count matters more than RAM for throughput (CC download + MinHash dedup are CPU-bound).
 
-| Target | vCPUs | RAM | Est. curation runtime |
+| Target | vCPUs | RAM | Curation runtime |
 |---|---|---|---|
 | `mini` | 4+ | 8 GB | 30–60 min |
-| `slm-125m` | 16+ | 32 GB | _TBD — pending 125m rerun_ |
+| `slm-125m` | 16+ | 32 GB | ~16 hrs (measured: 11h25m download + 16m filter + 3h6m dedup + 3m blend) |
 | `slm-350m` | 32+ | 64 GB | _TBD — pending 350m run_ |
 | `slm-1b` | 64+ | 128 GB | _TBD — pending 1b run_ |
 
-Runtimes are CPU-bound on MinHash dedup and I/O-bound on Common Crawl download.
+Runtimes are CPU-bound on MinHash dedup and I/O-bound on Common Crawl download. Download dominates wall time at 125m (~72%) and is unlikely to scale linearly to 350m/1b — supply-bound sources converge regardless of target size, while CC segments and FineWeb stream length grow with the budget.
 
 Run close to `us-east-1` (AWS) or `us-east1` (GCP) to minimise Common Crawl egress latency. Attach a persistent disk (500GB+) for `DATA_DIR` — the pipeline is fully resumable at every stage.
 
@@ -333,11 +359,15 @@ make curate SIZE=125m WORKERS=62
 # Ctrl+B, D to detach — tmux attach -t curate to reattach
 ```
 
+### Open-file-descriptor limit
+
+MinHash dedup of large sources (stack_v1 has ~2,103 shards at 125m) opens many files concurrently in stage 2 (LSH bucketing). The default `ulimit -n 1024` is insufficient — the curate Make targets prepend `ulimit -n 65536 && ` to lift the limit before invoking the pipeline.
+
 ---
 
 ## Key Design Decisions
 
-**Why 10 sources?** Distribution coverage. A model pretrained only on web scrape (even filtered) has characteristic weaknesses: poor factual recall on niche topics (→ Wikipedia), no long-range coherence over book-length spans (→ pg19), weak technical/academic prose (→ peS2o), weak math reasoning (→ open-web-math), weak Q+A structure (→ StackExchange), weak code (→ 5 code sources). Each source covers a specific gap.
+**Why 12 sources?** Distribution coverage. A model pretrained only on web scrape (even filtered) has characteristic weaknesses: poor factual recall on niche topics (→ Wikipedia), no long-range coherence over book-length spans (→ pg19), weak technical/academic prose (→ peS2o), weak math reasoning (→ open-web-math), weak Q+A structure (→ StackExchange), weak code (→ 5 code sources covering raw bulk, curated functions, multi-language samples, notebook prose+code, and NL→code intent). Each source covers a specific gap.
 
 **Why scale-invariant percentages?** A reader scaling from 125m to 1b should change one number (`target_tokens`) and get proportionally more of everything. Per-scale mix tuning is an axis of complexity that serves no one; the supply-constrained case is handled by cap-and-redistribute, not per-scale knobs.
 
@@ -361,13 +391,15 @@ make curate SIZE=125m WORKERS=62
 
 **Why per-stage resumability?** Curation runs take hours to days on spot instances that can be interrupted with 2 minutes notice. Each stage checks for existing output before processing — safe to interrupt and restart without reprocessing completed work.
 
+**Why blend-time train/val split via reservoir sampling?** Splitting at training time silently drifts out of sync with the underlying tokenization. Splitting via tail-slice of the blend's chunked shuffle produces a non-uniform val sample (the tail inherits source-bias from whichever chunks land last). Reservoir sampling during the blend gives a uniform sample across the entire corpus by construction; the realized val mix matches train within ±0.25pp per source.
+
 ---
 
 ## Scaling Beyond 1b
 
 The pipeline is designed to scale. Scale-invariant mix percentages, streaming-first code, and cap-and-redistribute all generalise to larger targets. To run at 3b or beyond:
 
-1. Add an entry to `TARGET_CONFIGS` in `curate.py` with the new `total_tokens` and `cc_crawls` list.
+1. Add an entry to `TARGET_CONFIGS` in `config/data_mix.py` with the new `total_tokens` and `cc_crawls` list.
 2. Review Wikipedia and pg19 supply: at token budgets approaching 40B × 1 epoch (equivalent to 1b × 2 epochs), Wikipedia repetition approaches 1.6×. Either drop Wikipedia's share to ~7% at that scale, or accept the repetition.
 3. At 5B+ code tokens, consider adding a second bulk-code source to avoid stack-v1 over-epoching.
 4. Consider upgrading FineWeb from `sample-100BT` to a larger sample or the full dataset, depending on how much of FineWeb's headroom the new target consumes.
@@ -397,6 +429,6 @@ One source worth flagging: peS2o overlaps with academic papers. If future evals 
 
 **Jupyter and CoNaLa prose components are not language-filtered.** Labeling them as code-adjacent skips English-prose filters, which means non-English prose in these sources passes through. The prose volume is small and largely English-coded on GitHub/StackOverflow, so this is not a meaningful corpus contamination, but the model will see the occasional non-English notebook comment or SO intent.
 
-**Char-to-token ratio is approximate.** `CHARS_PER_TOKEN = 5` is a fleet-wide default in `curator/constants.py`. Real ratios vary by domain: English prose ~4.5, code ~3.5, math ~3. The approximation is fine for target sizing but will produce slightly under-target tokens if the corpus skews code-heavy. Recalibrate from a tokenized 125m run if needed.
+**Char-to-token ratio is approximate.** `CHARS_PER_TOKEN = 4.3` in `config/data_mix.py` is the measured average for the trained tokenizer on the 125m corpus (excluding code sources). Real ratios vary by domain: English prose ~4.5, code ~3.5, math ~3. The approximation is fine for target sizing; the 125m run produced ~5.36B actual tokens against a 5.0B target (7% over). Recalibrate if the tokenizer is retrained on a different mix.
 
 **wikipedia cold-cache overhead.** wikipedia's `wikimedia/wikipedia` 20231101.en config loads the full ~19GB dataset (~6.4M articles) before iteration starts, even though mini only uses 5000 articles and 125m/1b only use a fraction. Cold-cache runs spend 10–15 minutes on wikipedia alone; once cached, subsequent runs are instant. Could be migrated to streaming like pg19 was, if this overhead becomes disruptive.
