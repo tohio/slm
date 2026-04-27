@@ -2,7 +2,7 @@
 
 A decoder-only language model trained from scratch — raw web data through to an aligned, serving-ready model. Covers the full lifecycle: data curation, validation, tokenizer training, pretraining, supervised fine-tuning, preference alignment, evaluation, and production serving.
 
-> **Status:** This project is under active development. The pipeline is operational at 125m; 350m and 1b runs are pending. Items marked _TBD_ will be filled in as empirical data becomes available. Screenshots reference the previous (3-source) data mix and will be regenerated after the next 125m run.
+> **Status:** This project is under active development. The pipeline is operational at 125m; 350m and 1b runs are pending. Items marked _TBD_ will be filled in as empirical data becomes available.
 
 ---
 
@@ -24,9 +24,9 @@ All three sizes run through the same code path — the only differences are conf
 
 | Size | Curation time | Training time | Rough cost | Suits |
 |---|---|---|---|---|
-| `slm-125m` | _TBD_ | _TBD_ | _TBD_ | learning the pipeline, single-GPU runs |
-| `slm-350m` | _TBD_ | _TBD_ | _TBD_ | serious research budget, multi-GPU |
-| `slm-1b` | _TBD_ | _TBD_ | _TBD_ | production-useful small model, GPU cluster |
+| `slm-125m` | ~16 hrs (measured) | _TBD_ | _TBD_ | learning the pipeline, single-GPU runs |
+| `slm-350m` | _TBD — pending 350m run_ | _TBD_ | _TBD_ | serious research budget, multi-GPU |
+| `slm-1b` | _TBD — pending 1b run_ | _TBD_ | _TBD_ | production-useful small model, GPU cluster |
 
 Most readers will find `125m` fits their budget. The `1b` path is here for readers with the compute — it uses the same commands and same config structure, and produces a more capable model. The pipeline is designed for all three to work reliably; the choice is about what you can afford, not what you can trust.
 
@@ -278,7 +278,7 @@ make download-fasttext-model DATA_DIR=/data/slm/data   # language ID model (~1MB
 make download-kenlm-model    DATA_DIR=/data/slm/data   # perplexity model (~4GB)
 
 # ── Step 2: Validate curation pipeline ───────────────────────────────────────
-# Exercises every curation stage end-to-end on tiny data — all 10 sources.
+# Exercises every curation stage end-to-end on tiny data — all 12 sources.
 # All tests run here — catch issues before spending hours on the full run.
 make curate-mini && make test-curator
 make validate    && make test-validate
@@ -343,7 +343,7 @@ Tests validate real pipeline outputs at each stage. Each test target is paired w
 **CPU curation instance:**
 
 ```bash
-make curate-mini   && make test-curator      # validate curation outputs (all 10 sources)
+make curate-mini   && make test-curator      # validate curation outputs (all 12 sources)
 make validate      && make test-validate     # validate validation outputs
 make tokenizer     && make test-tokenizer    # validate tokenizer outputs
 
@@ -369,7 +369,7 @@ make test-model
 
 | Target | Stage | Validates |
 |---|---|---|
-| `test-curator` | `curate-mini` | Raw shards exist for all 10 sources, filter quality, dedup correctness, blend output, stats |
+| `test-curator` | `curate-mini` | Raw shards exist for all 12 sources, filter quality, dedup correctness, blend output, stats |
 | `test-validate` | `validate` | Retention rate, subset correctness, quality of retained docs |
 | `test-tokenizer` | `tokenizer` | Special token IDs, roundtrip, fertility, chat template |
 | `test-data-pipeline` | all three above | Runs curator + validate + tokenizer tests |
@@ -421,9 +421,9 @@ make pretrain CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
 
 ### Source Mix
 
-Scale-invariant percentages — the same mix applies at every size. Defined in `config/data_mix.py` and referenced by the curator, export, and notebooks — do not duplicate these numbers elsewhere.
+12 sources total — 7 non-code top-level sources plus 5 code sub-sources that share the 10% code budget. Scale-invariant percentages — the same mix applies at every size. Defined in `config/data_mix.py` and referenced by the curator, export, and notebooks — do not duplicate these numbers elsewhere.
 
-| Source | Share | Notes |
+| Source | Target Share | Notes |
 |---|---|---|
 | Common Crawl | 10% | direct WARC via trafilatura |
 | FineWeb | 47.5% | `HuggingFaceFW/fineweb` sample-100BT, overflow sink |
@@ -434,7 +434,28 @@ Scale-invariant percentages — the same mix applies at every size. Defined in `
 | StackExchange | 5% | Q+A across dozens of sites |
 | Code (total) | 10% | split across 5 code sub-sources (see curator/README.md) |
 
-When supply-constrained sources (Wikipedia, pg19) fall short of their character budget at large scales, the deficit is automatically routed to FineWeb as an overflow sink. The mix shape is preserved; the token target is hit.
+When supply-constrained sources (peS2o, jupyter, and at 1b also Wikipedia / pg19 / open_web_math / stack_smol) fall short of their character budget, the deficit is automatically routed to FineWeb as an overflow sink. The mix shape is preserved; the token target is hit.
+
+### Realized mix at 125m
+
+The 125m run produces a corpus with the following actual breakdown. Supply-bound sources (peS2o, jupyter) under-fill their char target; the deficit routes to FineWeb, inflating its realized share above the 47.5% target. All other sources land on target.
+
+| Source | Target Share | Realized Share |
+|---|---|---|
+| `common_crawl` | 10.00% | 10.00% |
+| `fineweb` | 47.50% | 49.39% |
+| `wikipedia` | 10.00% | 10.00% |
+| `pg19` | 2.50% | 2.50% |
+| `pes2o` | 5.00% | 3.22% ⚠ |
+| `open_web_math` | 10.00% | 10.00% |
+| `stackexchange` | 5.00% | 5.00% |
+| `stack_v1` | 5.00% | 5.00% |
+| `codesearchnet` | 3.50% | 3.50% |
+| `stack_smol` | 1.00% | 1.00% |
+| `jupyter` | 0.40% | 0.29% ⚠ |
+| `conala` | 0.10% | 0.10% |
+
+Realized total: ~5.00B tokens (8.31M train + 41.8K val docs). The `blend_stats.json` written by the curator records these realized numbers; `export.py` reads from it to produce the per-model card.
 
 ### Token Targets
 
@@ -448,7 +469,7 @@ Why 1b uses 1 epoch: at 30B tokens / 1 epoch, every source stays below its suppl
 
 ### Train / val split
 
-The train and val splits are produced by the curator's blend stage, not at training time. After the blend stage shuffles all staging sources, it writes the last 0.5% of documents to `val.jsonl` and the rest to `train.jsonl`. Because the shuffle makes order uniformly random, val is an unbiased sample from the same distribution as train. Validation (KenLM perplexity filtering) and tokenization both process each split independently, so `val.bin` receives the same quality treatment as `train.bin`.
+The train and val splits are produced by the curator's blend stage, not at training time. After the blend stage shuffles the corpus, val is sampled uniformly across all sources via reservoir sampling and the rest goes to `train.jsonl`. Validation (KenLM perplexity filtering) and tokenization both process each split independently, so `val.bin` receives the same quality treatment as `train.bin`. At 125m the realized val mix matches train within ±0.25pp per source — see `blend_stats.json`'s `val_docs` field.
 
 Splitting at blend time (rather than at training time) avoids two correctness bugs: runtime splitting silently drifts out of sync with the underlying tokenization, and the tail-of-stream slice isn't a uniform sample when the shuffle is disk-chunked at 1b scale. Splitting right after the blend shuffle — where order is provably random — gives a clean uniform sample and eliminates the staleness concern by construction.
 
@@ -462,12 +483,12 @@ See `curator/README.md` for full details on the mix, sub-source breakdowns, cap-
 
 Runs on CPU instances. No GPU required. Hardware recommendations below, not floors — the pipeline streams everywhere and runs on less RAM with longer wall time.
 
-| Target | vCPUs | RAM | Est. curation runtime |
+| Target | vCPUs | RAM | Curation runtime |
 |---|---|---|---|
 | `mini` | 4+ | 8 GB | 30–60 min |
-| `slm-125m` | 16+ | 32 GB | _TBD — pending 125m rerun_ |
-| `slm-350m` | 32+ | 64 GB | _TBD — pending 350m run_ |
-| `slm-1b` | 64+ | 128 GB | _TBD — pending 1b run_ |
+| `slm-125m` | 64 | 256 GB | ~16 hrs (measured: 11h25m download + 16m filter + 3h6m dedup + 3m blend) |
+| `slm-350m` | 64 | 256 GB | _TBD — pending 350m run_ |
+| `slm-1b` | 64 | 256 GB | _TBD — pending 1b run_ |
 
 > **Measure your own throughput before committing.** Many variables dominate:
 > network peering between your cloud and Common Crawl's AWS `us-east-1` origin,
@@ -508,8 +529,6 @@ SFT and DPO runtimes are roughly 20–30% of pretraining time at the same model 
 ---
 
 ## Screenshots
-
-_Screenshots below reflect the previous 3-source (55/25/20 CC/Wiki/Code) mix and will be regenerated after the next 125m run. Commands and output structure are unchanged; only per-source numbers differ._
 
 | Screenshot | Stage | Description |
 |---|---|---|
@@ -555,7 +574,7 @@ Models are evaluated on standard benchmarks via `lm-evaluation-harness`:
 
 **Why sequential SFT (chat → code)?** Sequential fine-tuning produces independently evaluable checkpoints at each stage, making regressions immediately visible. The code SFT uses a lower learning rate to reduce catastrophic forgetting of chat capability.
 
-**Why 10 data sources?** Distribution coverage. A model pretrained only on web scrape (even filtered) has characteristic weaknesses: poor factual recall on niche topics, no long-range coherence over book-length spans, weak technical/academic prose, weak math reasoning, weak Q+A structure, weak code. Each of the 10 sources covers a specific gap. See [curator/README.md](curator/README.md) for the full mix and sub-source rationale.
+**Why 12 data sources?** Distribution coverage. A model pretrained only on web scrape (even filtered) has characteristic weaknesses: poor factual recall on niche topics, no long-range coherence over book-length spans, weak technical/academic prose, weak math reasoning, weak Q+A structure, weak code. Each of the 12 sources covers a specific gap — 7 non-code top-level sources for prose breadth, plus 5 code sub-sources for code coverage from raw files (stack-v1) through curated function/notebook/intent corpora (CodeSearchNet, stack-smol, jupyter, CoNaLa). See [curator/README.md](curator/README.md) for the full mix and sub-source rationale.
 
 **Why scale-invariant mix percentages?** A reader scaling from 125m to 1b changes one number (`target_tokens`) and gets proportionally more of everything — no per-scale mix tuning. Supply variance is handled by cap-and-redistribute, not by per-scale knobs.
 
@@ -565,9 +584,9 @@ Models are evaluated on standard benchmarks via `lm-evaluation-harness`:
 
 **Why streaming-first curation?** At 1b with 30B+ tokens, materializing sources in memory is infeasible on reasonable hardware. FineWeb and stack-v1 require streaming; the other sources use it for consistency. RAM is not the load-bearing scaling axis — vCPU count and network throughput are. This means readers on modest hardware (32 GB RAM) can still run 1b, just slower.
 
-**Why cap-and-redistribute?** Wikipedia and pg19 have finite supply. At large scales they can't fill their character budget without repetition. Rather than add per-scale knobs or accept repetition, the overflow routes to FineWeb — which has 15T tokens of headroom — preserving mix shape and hitting the token target.
+**Why cap-and-redistribute?** Several sources have finite supply at large scales — peS2o (abstracts only) and jupyter are supply-bound at 350m+; Wikipedia, pg19, open_web_math, and stack_smol become supply-bound at 1b. Rather than add per-scale knobs or accept repetition, the deficit routes to FineWeb — which has 15T tokens of headroom — preserving mix shape and hitting the token target.
 
-**Why a single `config/` package for locked values?** The data mix, token targets, CHARS_PER_TOKEN, CC_CHARS_PER_SEGMENT, PRETRAIN_VAL_FRACTION, and a few other constants are each read by multiple stages (curator, export, pretrain, notebooks, tests). Previously they were duplicated — and the duplicates drifted, most visibly in an export pipeline that was writing stale 3-source pretraining tables to the Hub while the curator was actually running the 10-source mix. Centralising into `config/data_mix.py` with an import-time `validate()` makes drift impossible: every consumer sees the same values, and percentages sum-to-100 at the moment the module is loaded.
+**Why a single `config/` package for locked values?** The data mix, token targets, CHARS_PER_TOKEN, CC_CHARS_PER_SEGMENT, PRETRAIN_VAL_FRACTION, and a few other constants are each read by multiple stages (curator, export, pretrain, notebooks, tests). Previously they were duplicated — and the duplicates drifted, most visibly in an export pipeline that was writing stale 3-source pretraining tables to the Hub while the curator was actually running the 12-source mix. Centralising into `config/data_mix.py` with an import-time `validate()` makes drift impossible: every consumer sees the same values, and percentages sum-to-100 at the moment the module is loaded.
 
 **Why vLLM for serving?** PagedAttention enables continuous batching and efficient KV cache management. The OpenAI-compatible API means any client built against the OpenAI SDK works out of the box.
 
@@ -634,4 +653,3 @@ This project is scoped as a complete end-to-end training pipeline and demonstrat
 ## License
 
 MIT
-![alt text](image.png)
