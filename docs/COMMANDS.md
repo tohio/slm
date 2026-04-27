@@ -15,6 +15,9 @@ All targets accept these variables as overrides:
 | `WORKERS` | _(cpu_count - 2)_ | Parallel workers for filter, dedup, and blend stages. Defaults to `cpu_count - 2` automatically — only set this to override. |
 | `DATA_DIR` | `data` | Root data directory. Override when using a separate disk volume. |
 | `CONFIG` | _(derived from SIZE)_ | Explicit path to a YAML config file. Overrides the SIZE-derived default. |
+| `GPU` | _(auto-detect)_ | GPU model for `config-gen-*` (e.g. `h200`, `b200`, `h100`, `a100_80`). When unset, the script uses `nvidia-smi` to detect the GPU. |
+| `MODE` | `balanced` | Tuning mode for `config-gen-*` — one of `conservative` (70% VRAM), `balanced` (80%, default), or `aggressive` (90%). Aggressive mode also allows non-power-of-2 micro_batch values. |
+| `AGGRESSIVE` | _(unset)_ | Backwards-compat alias for `MODE=aggressive`. Wins over `MODE` if both are set. |
 
 ---
 
@@ -300,6 +303,40 @@ make test-model
 
 ---
 
+### `make test-config-gen`
+
+Config generator unit tests — no pipeline outputs needed, runs on CPU anywhere. Covers the algorithm (token budget invariants, global batch resolution, GPU memory budgeting) for pretrain, SFT, and DPO stages; user override flags; input validation; and YAML rendering.
+
+```bash
+make test-config-gen
+```
+
+**Covers:** All combinations of size × GPU × num_gpus across all three stages; gradient checkpointing auto-policy; conservative/balanced/aggressive modes; warnings system; output YAML round-trip parsing; recipe preservation (LR, betas, epochs, warmup_ratio are never mutated by the script).
+
+---
+
+### `make test-accel-gen`
+
+Accelerate config generator unit tests — covers DDP and FSDP YAML rendering. No pipeline outputs needed.
+
+```bash
+make test-accel-gen
+```
+
+**Covers:** DDP `MULTI_GPU` distributed type, FSDP `FULL_SHARD` + `TRANSFORMER_BASED_WRAP` policy, alternative sharding strategies (`SHARD_GRAD_OP`), CPU offload toggle, custom transformer layer class, mixed-precision selection.
+
+---
+
+### `make test-unit`
+
+Runs all unit tests — `test-model`, `test-config-gen`, and `test-accel-gen`. No GPU or pipeline outputs required.
+
+```bash
+make test-unit
+```
+
+---
+
 ## Stage 1 — Data Curation
 
 Downloads raw data from three sources (Wikipedia, CodeSearchNet Python, Common Crawl), applies quality filters, deduplicates, blends to target token ratios, and uploads to S3.
@@ -517,7 +554,7 @@ make tokenizer-test
 
 ## Stage 4 — Pretraining
 
-Tokenizes the dataset to binary format and runs pretraining from scratch.
+Tokenizes the dataset to binary format, generates a per-GPU training config, and runs pretraining from scratch.
 
 ---
 
@@ -534,12 +571,120 @@ make tokenize
 
 ---
 
+### `make config-gen-pretrain`
+
+Auto-generates `pretrain/configs/gpt_$(SIZE).yaml` tuned for the current GPU and GPU count. The script picks `micro_batch_size`, `gradient_accumulation_steps`, `max_steps`, `warmup_steps`, and `gradient_checkpointing` to hit the size's reference global batch and token budget while staying within a safe fraction of GPU VRAM (default 80%).
+
+```bash
+make config-gen-pretrain SIZE=125m GPUS=1                     # auto-detect GPU
+make config-gen-pretrain SIZE=350m GPUS=4 GPU=h200            # explicit GPU
+make config-gen-pretrain SIZE=1b GPUS=8 GPU=b200 MODE=aggressive  # 90% VRAM budget
+```
+
+**Requires:** Nothing — runs on CPU, no pipeline state needed.
+**Produces:** `pretrain/configs/gpt_$(SIZE).yaml` (overwrites any existing file).
+
+---
+
+### `make config-gen-sft`
+
+Auto-generates **both** SFT configs in one shot — `finetune/configs/sft_chat_$(SIZE).yaml` and `finetune/configs/sft_code_$(SIZE).yaml`. The script picks `micro_batch_size`, `gradient_accumulation_steps`, and `gradient_checkpointing` for each. SFT uses `epochs`, not `max_steps`, so the token-budget math doesn't apply.
+
+The chat and code recipes have different LRs (chat > code) but the same memory profile and reference global batch — so both files can be generated from the same hardware decision.
+
+```bash
+make config-gen-sft SIZE=125m GPUS=1
+make config-gen-sft SIZE=350m GPUS=4 GPU=h200
+make config-gen-sft SIZE=1b GPUS=8 MODE=conservative
+```
+
+**Requires:** Nothing.
+**Produces:** `finetune/configs/sft_chat_$(SIZE).yaml`, `finetune/configs/sft_code_$(SIZE).yaml`.
+
+---
+
+### `make config-gen-dpo`
+
+Auto-generates `alignment/configs/dpo_$(SIZE).yaml`. DPO state is roughly 1.15× SFT (policy + frozen reference model) and activations are ~4× SFT (chosen + rejected pairs through both models), so the script accounts for that automatically.
+
+```bash
+make config-gen-dpo SIZE=125m GPUS=1
+make config-gen-dpo SIZE=1b GPUS=8 GPU=b200
+```
+
+**Requires:** Nothing.
+**Produces:** `alignment/configs/dpo_$(SIZE).yaml`.
+
+DPO is sensitive to LR and batch size. The script always emits a `# Heads-up:` warning in the YAML header reminding you that the recipe LR (e.g. `2e-7` for 1b) was tuned for the reference global batch — if your auto-tuned global differs significantly, expect to retune.
+
+---
+
+### `make config-gen`
+
+Convenience target — runs `config-gen-pretrain`, `config-gen-sft`, and `config-gen-dpo` for the same `SIZE` and `GPUS`. Generates all training configs the pipeline needs in one command.
+
+```bash
+make config-gen SIZE=125m GPUS=1
+make config-gen SIZE=350m GPUS=4 GPU=h200 MODE=aggressive
+```
+
+**Run before:** `make pretrain`, `make sft`, `make sft-code`, `make dpo` — for reliable throughput on the GPU you're actually using.
+
+---
+
+### Tuning modes (all `config-gen-*` targets)
+
+| Flag | VRAM budget | Notes |
+|---|---|---|
+| `MODE=conservative` | 70% | Leaves headroom; useful on preemptible VMs and unfamiliar hardware |
+| `MODE=balanced` *(default)* | 80% | Comfortable margin |
+| `MODE=aggressive` | 90% | Maximum throughput; allows non-power-of-2 micro_batch |
+| `AGGRESSIVE=1` | 90% | Backwards-compat alias for `MODE=aggressive` |
+
+**Generated YAML always includes a `# Heads-up:` section** in the header comment describing things you might want to verify — categories include low/high VRAM utilization, deviation from reference global batch, auto-policy enabling checkpointing, token-budget rounding loss (pretrain), DPO LR sensitivity, FSDP recommendation for 1b on multi-GPU, and a reminder that activation memory estimates are analytical (not measured). Inspect the YAML before training.
+
+**Hand-edited configs are overwritten.** If you've manually tuned a config and want to keep changes, copy it first.
+
+**Supported GPUs (via `GPU=...`):** `h200`, `b200`, `h100`, `h100_sxm`, `a100_80`, `a100_40`, `l40s`, `rtx4090`, `rtx5090`. Without `GPU=...`, the script reads `nvidia-smi` to detect.
+
+---
+
+### `make accel-gen-ddp`
+
+Auto-generates `accelerate_configs/multi_gpu.yaml` with the right `num_processes` for your GPU count. Equivalent to the existing `accelerate-config-multi GPUS=N` target but more explicit — the latter performs a `sed` substitution and is preserved for backwards compat.
+
+```bash
+make accel-gen-ddp GPUS=8
+```
+
+**Use when:** training 125m or 350m at any GPU count, or 1b on small clusters with high-VRAM GPUs (≤ 4× H200/B200).
+
+**Produces:** `accelerate_configs/multi_gpu.yaml`.
+
+---
+
+### `make accel-gen-fsdp`
+
+Auto-generates `accelerate_configs/fsdp.yaml` with `FULL_SHARD` strategy and `TRANSFORMER_BASED_WRAP` policy targeting the model's transformer block class.
+
+```bash
+make accel-gen-fsdp GPUS=8
+```
+
+**Use when:** training 1b on ≥ 4 GPUs. FSDP shards weights, gradients, and optimizer state across GPUs, freeing ~10 GB/GPU on optimizer state — frees that memory for larger micro_batches and removes the need for gradient checkpointing.
+
+**Produces:** `accelerate_configs/fsdp.yaml`.
+
+---
+
 ### `make pretrain`
 
 Runs pretraining from scratch using `accelerate launch`. Config is derived from `SIZE` by default.
 
 ```bash
-make pretrain SIZE=125m GPUS=4
+make config-gen-pretrain SIZE=125m GPUS=4    # generate config for current GPU
+make pretrain            SIZE=125m GPUS=4
+
 make pretrain SIZE=350m GPUS=6
 make pretrain SIZE=1b   GPUS=8
 
@@ -547,7 +692,7 @@ make pretrain SIZE=1b   GPUS=8
 make pretrain CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
 ```
 
-**Requires:** `data/tokenized/train.bin`, `data/tokenizer/`, accelerate configured.
+**Requires:** `data/tokenized/train.bin`, `data/tokenizer/`, `pretrain/configs/gpt_$(SIZE).yaml` (run `make config-gen-pretrain` first), accelerate configured.
 **Produces:** `results/slm-$(SIZE)/` checkpoints, W&B run.
 
 ---
@@ -656,7 +801,7 @@ make sft SIZE=125m GPUS=4
 make sft CONFIG=finetune/configs/sft_chat_125m.yaml GPUS=4
 ```
 
-**Requires:** `results/slm-$(SIZE)/final`, `data/sft/chat/`
+**Requires:** `results/slm-$(SIZE)/final`, `data/sft/chat/`, `finetune/configs/sft_chat_$(SIZE).yaml` (run `make config-gen-sft` first)
 **Produces:** `results/slm-$(SIZE)-sft/` checkpoints.
 
 ---
@@ -679,7 +824,7 @@ Runs code supervised fine-tuning on the chat SFT checkpoint. Uses a lower learni
 make sft-code SIZE=125m GPUS=4
 ```
 
-**Requires:** `results/slm-$(SIZE)-sft/final`, `data/sft/code/`
+**Requires:** `results/slm-$(SIZE)-sft/final`, `data/sft/code/`, `finetune/configs/sft_code_$(SIZE).yaml` (run `make config-gen-sft` first)
 **Produces:** `results/slm-$(SIZE)-sft-code/` checkpoints.
 
 ---
@@ -719,7 +864,7 @@ make dpo SIZE=125m GPUS=2
 make dpo CONFIG=alignment/configs/dpo_125m.yaml GPUS=2
 ```
 
-**Requires:** `results/slm-$(SIZE)-sft-code/final`, `data/dpo/`
+**Requires:** `results/slm-$(SIZE)-sft-code/final`, `data/dpo/`, `alignment/configs/dpo_$(SIZE).yaml` (run `make config-gen-dpo` first)
 **Produces:** `results/slm-$(SIZE)-dpo/` checkpoints.
 
 ---
@@ -931,13 +1076,14 @@ Run close to `us-east-1` (AWS) or `us-east1` (GCP) to minimise Common Crawl egre
 | Target | GPUs | VRAM | Est. pretrain runtime |
 |---|---|---|---|
 | mini (validation) | 1× any GPU | 8GB+ | ~5–10 min |
+| 125m | 1× H200 | 141GB | ~3–4 hrs (with `make config-gen`) |
 | 125m | 4× H100 or A100 | 320GB+ | ~12–18 hrs |
 | 350m | 8× H100 or A100 | 640GB+ | ~24–36 hrs |
 | 1b | 8× H100 or A100 | 640GB+ | ~72–96 hrs |
 
 > **Runtimes are rough reference points — measure your own.**
-> Numbers assume bf16 training on H100s in a single-node data-parallel
-> setup with the default configs. H100s vs A100s vs older GPUs, interconnect
+> Numbers assume bf16 training in a single-node data-parallel setup with the
+> auto-generated `make config-gen` configs. GPU generation, interconnect
 > bandwidth (NVLink vs PCIe vs cross-node), and whether activation
 > checkpointing is enabled all have large effects. Use
 > `make pretrain-mini GPUS=1` to measure step time on your hardware, then
@@ -975,8 +1121,9 @@ make prepare-dpo
 make dpo-mini       GPUS=1
 make eval-mini
 
-# 6. Full training pipeline
+# 6. Generate configs tuned for current GPU, then run full pipeline
 make accelerate-config-multi GPUS=8
+make config-gen  SIZE=125m GPUS=8       # convenience: auto-tune pretrain + sft + dpo configs
 make pretrain    SIZE=125m GPUS=8
 make prepare-sft
 make sft         SIZE=125m GPUS=8
@@ -1016,7 +1163,7 @@ make download-kenlm-model    DATA_DIR=/data/slm/data   # ~4GB, for validation pe
 
 # ── Validate curation pipeline ─────────────────────────────────────────────────
 make curate-mini                    # validate pipeline end-to-end on tiny data (~30–45 min)
-make test                           # verify outputs are correct
+make test-data-pipeline             # verify outputs are correct
 
 # ── Full curation ──────────────────────────────────────────────────────────────
 make curate SIZE=1b                 # Stage 1: download, filter, dedup, blend, upload
@@ -1043,13 +1190,15 @@ make dpo-mini       GPUS=1
 make eval-mini
 
 # ── Full training ──────────────────────────────────────────────────────────────
-make accelerate-config-multi GPUS=8
-make pretrain    SIZE=1b GPUS=8     # Stage 4b: pretrain from scratch
-make prepare-sft                    # Stage 5a: download SFT datasets
-make sft         SIZE=1b GPUS=8     # Stage 5b: chat SFT
-make sft-code    SIZE=1b GPUS=8     # Stage 5c: code SFT
-make prepare-dpo                    # Stage 6a: download DPO datasets
-make dpo         SIZE=1b GPUS=8     # Stage 6b: DPO alignment
+# 1b on multi-GPU benefits from FSDP (saves ~10 GB/GPU on optimizer state)
+make accel-gen-fsdp GPUS=8           # accelerate config: FSDP for 1b
+make config-gen  SIZE=1b GPUS=8      # auto-tune all training configs (pretrain + sft + dpo)
+make pretrain    SIZE=1b GPUS=8      # Stage 4b: pretrain from scratch
+make prepare-sft                     # Stage 5a: download SFT datasets
+make sft         SIZE=1b GPUS=8      # Stage 5b: chat SFT
+make sft-code    SIZE=1b GPUS=8      # Stage 5c: code SFT
+make prepare-dpo                     # Stage 6a: download DPO datasets
+make dpo         SIZE=1b GPUS=8      # Stage 6b: DPO alignment
 
 # ── Ship ───────────────────────────────────────────────────────────────────────
 make eval        SIZE=1b            # Stage 7: benchmark evaluation

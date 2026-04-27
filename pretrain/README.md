@@ -12,6 +12,10 @@ data/validated/train.jsonl  ─┐
 data/validated/val.jsonl    ─┘                                         data/tokenized/val.bin    (+ val.json)
                                                                                 │
                                                                                 ▼
+                                                                  slm/config_gen.py
+                                                                  (auto-tunes config for current GPU)
+                                                                                │
+                                                                                ▼
                                                                   pretrain/train.py
                                                                                 │
                                                                                 ▼
@@ -52,7 +56,20 @@ make tokenizer-download
 make tokenize-download SIZE=125m DATE=YYYY-MM-DD
 ```
 
-**Step 3 — Pretrain**
+**Step 3 — Generate per-GPU config**
+
+```bash
+# Auto-detect the GPU and write pretrain/configs/gpt_125m.yaml
+make config-gen-pretrain SIZE=125m GPUS=1
+
+# Or with an explicit GPU
+make config-gen-pretrain SIZE=350m GPUS=4 GPU=h200
+make config-gen-pretrain SIZE=1b   GPUS=8 GPU=b200 MODE=aggressive
+```
+
+The generated YAML has a header comment listing the inputs used and predicted peak VRAM. Inspect the file before training if you want to verify the decisions. Re-running `config-gen` overwrites the file — copy it first if you've hand-edited.
+
+**Step 4 — Pretrain**
 
 ```bash
 # Mini validation run — confirm the training loop works before committing
@@ -63,7 +80,8 @@ make pretrain SIZE=125m GPUS=1
 
 # Multi-GPU
 make accelerate-config-multi GPUS=4
-make pretrain SIZE=125m GPUS=4
+make config-gen-pretrain SIZE=125m GPUS=4    # re-tune for the GPU count
+make pretrain            SIZE=125m GPUS=4
 
 # Resume from last checkpoint
 make pretrain-resume SIZE=125m GPUS=4
@@ -73,16 +91,22 @@ make pretrain-resume SIZE=125m GPUS=4
 
 ## Multi-GPU Config Scaling
 
-> **Important:** The configs in `pretrain/configs/` are written assuming **1 GPU**. Before running multi-GPU training, update `gradient_accumulation_steps` and `max_steps` to keep the global batch size and token budget constant.
+The configs in `pretrain/configs/` are written assuming **1 GPU**. For multi-GPU training, scale `gradient_accumulation_steps` and `max_steps` to keep the global batch size and token budget constant:
 
-The invariant to preserve:
 ```
 global_batch_tokens = micro_batch_size × gradient_accumulation_steps × num_gpus × seq_len
 ```
 
-Each config includes a scaling comment with the exact values for 1, 4, and 8 GPUs.
+When you change `num_gpus`, scale `gradient_accumulation_steps` inversely:
 
-Example for 125m:
+```
+gradient_accumulation_steps_new = gradient_accumulation_steps_old × old_gpus / new_gpus
+max_steps_new                   = max_steps_old × old_gpus / new_gpus
+```
+
+Per-size reference tables:
+
+**125m** — global batch 32 sequences, 10B tokens:
 
 | GPUs | gradient_accumulation_steps | max_steps |
 |---|---|---|
@@ -90,7 +114,15 @@ Example for 125m:
 | 4 | 2 | 38,000 |
 | 8 | 1 | 19,000 |
 
-Example for 1b:
+**350m** — global batch 128 sequences, 30B tokens:
+
+| GPUs | gradient_accumulation_steps | max_steps |
+|---|---|---|
+| 1 | 16 | 230,000 |
+| 4 | 4 | 57,500 |
+| 8 | 2 | 28,750 |
+
+**1b** — global batch 128 sequences, 30B tokens:
 
 | GPUs | gradient_accumulation_steps | max_steps |
 |---|---|---|
@@ -98,20 +130,79 @@ Example for 1b:
 | 4 | 16 | 14,250 |
 | 8 | 8 | 7,125 |
 
+### Auto-generate the config (recommended)
+
+`make config-gen-pretrain` does the math above automatically and also picks `micro_batch_size` and `gradient_checkpointing` based on the GPU model and count. The script reads the GPU model (auto-detected via `nvidia-smi`, or override with `GPU=...`), computes everything, and writes `pretrain/configs/gpt_$(SIZE).yaml`.
+
+```bash
+make config-gen-pretrain SIZE=125m GPUS=1                     # auto-detect GPU
+make config-gen-pretrain SIZE=350m GPUS=4 GPU=h200            # explicit GPU
+make config-gen-pretrain SIZE=1b   GPUS=8 GPU=b200 MODE=aggressive  # 90% VRAM budget
+
+make pretrain SIZE=125m GPUS=1
+```
+
+The generated YAML has a header comment listing the inputs used and predicted peak VRAM. Inspect the file before training if you want to verify the decisions. Re-running overwrites the file — copy it first if you've hand-edited.
+
+What `config-gen-pretrain` decides automatically across the matrix:
+
+| Run | micro × accum × gpus | global | ckpt | max_steps |
+|---|---|---|---|---|
+| 125m on H200 × 1 | 32 × 1 × 1 | 32 | off | 152,587 |
+| 125m on H200 × 8 | 4 × 1 × 8 | 32 | off | 152,587 |
+| 350m on H200 × 1 | 128 × 1 × 1 | 128 | off | 114,440 |
+| 350m on H200 × 4 | 32 × 1 × 4 | 128 | off | 114,440 |
+| 1b on H200 × 1 | 128 × 1 × 1 | 128 | on | 57,220 |
+| 1b on H200 × 8 | 16 × 1 × 8 | 128 | off | 57,220 |
+| 1b on B200 × 1 | 32 × 4 × 1 | 128 | off | 57,220 |
+
+### Tuning modes
+
+Three modes control how aggressively the script packs the GPU:
+
+| Mode | VRAM budget | Notes |
+|---|---|---|
+| `conservative` | 70% | Leaves headroom; safer on preemptible VMs and unfamiliar hardware |
+| `balanced` *(default)* | 80% | Comfortable margin |
+| `aggressive` | 90% | Maximum throughput; tolerates non-power-of-2 micro_batch |
+
+```bash
+make config-gen-pretrain SIZE=1b GPUS=1 MODE=aggressive
+make config-gen-pretrain SIZE=1b GPUS=1 MODE=conservative
+```
+
+### Override knobs
+
+```bash
+# Force gradient checkpointing on or off
+.venv/bin/python -m slm.config_gen --stage pretrain --gpu h200 --size 1b --gpus 1 \
+    --no-ckpt -o pretrain/configs/gpt_1b.yaml
+
+# Override target global batch
+.venv/bin/python -m slm.config_gen --stage pretrain --gpu h200 --size 350m --gpus 4 \
+    --target-global-batch 256 -o pretrain/configs/gpt_350m.yaml
+```
+
+Supported GPUs: `h200`, `b200`, `h100`, `h100_sxm`, `a100_80`, `a100_40`, `l40s`, `rtx4090`, `rtx5090`. To add a new one, edit `GPU_SPECS` in `slm/config_gen.py` and re-run.
+
+To extend to a new model size: add a `SIZE_PROFILES` entry in `slm/config_gen.py` with the architecture, target tokens, reference global batch, and measured per-sequence activation memory.
+
 ---
 
 ## Configs
 
-Token targets match `TARGET_CONFIGS` in `curator/scripts/curate.py`.
+Token targets match `TARGET_CONFIGS` in `curator/scripts/curate.py`. Pretrain config values shown below are auto-generated by `make config-gen`.
 
-| Config | Model | Layers | Hidden | Steps (1 GPU) | Global batch | Target tokens |
-|---|---|---|---|---|---|---|
-| `gpt_mini.yaml` | `slm-mini` | 6 | 384 | 5k | 8 | validation only |
-| `gpt_125m.yaml` | `slm-125m` | 12 | 768 | 152k | 32 | 5B (2 epochs) |
-| `gpt_350m.yaml` | `slm-350m` | 24 | 1024 | 230k | 64 | 15B (2 epochs) |
-| `gpt_1b.yaml` | `slm-1b` | 32 | 2048 | 57k | 128 | 30B (1 epoch) |
+| Config | Model | Layers | Hidden | Reference global | Target tokens |
+|---|---|---|---|---|---|
+| `gpt_mini.yaml` | `slm-mini` | 6 | 384 | 8 | validation only |
+| `gpt_125m.yaml` | `slm-125m` | 12 | 768 | 32 | 10B (≈ 5B × 2 epochs) |
+| `gpt_350m.yaml` | `slm-350m` | 24 | 1024 | 128 | 30B (≈ 15B × 2 epochs) |
+| `gpt_1b.yaml` | `slm-1b` | 32 | 2048 | 128 | 30B (1 epoch) |
 
-Global batch size = `micro_batch_size × gradient_accumulation_steps × num_gpus`.
+Reference global = global batch in sequences. Multiplied by `seq_len` it gives tokens-per-step.
+
+`gpt_mini.yaml` is hand-written and not regenerated — the mini run is fixed by definition (it's the smoke test for the training loop). All other configs are intended to be regenerated by `make config-gen` whenever you change GPU.
 
 ---
 
@@ -120,16 +211,40 @@ Global batch size = `micro_batch_size × gradient_accumulation_steps × num_gpus
 ```
 pretrain/
 ├── configs/
-│   ├── gpt_mini.yaml        training config for mini validation run
-│   ├── gpt_125m.yaml        training config for 125M
-│   ├── gpt_350m.yaml        training config for 350M
-│   └── gpt_1b.yaml          training config for 1B
+│   ├── gpt_mini.yaml        training config for mini validation run (hand-written)
+│   ├── gpt_125m.yaml        training config for 125M (auto-generated)
+│   ├── gpt_350m.yaml        training config for 350M (auto-generated)
+│   └── gpt_1b.yaml          training config for 1B (auto-generated)
 ├── data/
 │   ├── tokenize_data.py     JSONL → memory-mapped uint16 binary (train + val)
 │   ├── upload_tokenized.py  S3 upload/download for tokenized binaries
 │   └── dataset.py           PyTorch Dataset wrapping each .bin file
 └── train.py                 HF Trainer pretraining entry point
 ```
+
+---
+
+## Throughput Optimizations
+
+`train.py` enables several PyTorch performance flags at startup. These run unconditionally on GPU (no-op on CPU) and are not exposed as config options because they are pure wins on H100/H200/B200 with no quality downside:
+
+- **TF32** for `cuda.matmul` and `cudnn` — large speedup on Hopper/Ampere/Blackwell over FP32 fallback at no measurable quality cost.
+- **FlashAttention SDPA** and **memory-efficient SDPA** — explicitly enabled. The model's GQA module dispatches attention through `F.scaled_dot_product_attention`, which routes to FlashAttention when shapes and dtypes allow.
+- **Math SDPA** — explicitly disabled. The math fallback is dramatically slower; turning it off forces an error on the rare path where neither fast kernel can be used, instead of silently degrading.
+
+`build_training_args` also opts into:
+
+- **`adamw_torch_fused`** — fused CUDA AdamW kernel; ~5-10% step-time win on Hopper+ for free. Falls back to plain `adamw_torch` on CPU.
+- **`torch.compile`** (default on, opt-out via `torch_compile: false`) — graph-compiles the forward pass on the first step. Adds ~1-2 minutes to step 1, then runs ~1.3-1.5x faster every step after. Static shapes (fixed `seq_len`, fixed `micro_batch`) make this safe; if you hit a kernel issue while debugging, set `torch_compile: false` in the YAML.
+
+A startup log line prints the active settings:
+
+```
+Throughput knobs: micro_batch=32, grad_accum=1, bf16=True,
+                  optim=adamw_torch_fused, compile=True, grad_ckpt=False
+```
+
+Use this to confirm the settings reached `TrainingArguments` without trawling W&B.
 
 ---
 
@@ -214,6 +329,14 @@ Training metrics are logged to Weights & Biases automatically. Key metrics to wa
 
 Expected validation loss at convergence: **2.5–3.5** for `slm-125m` at 5B tokens.
 
+In a separate shell during the first ~200 steps of a fresh run, watch GPU utilization to confirm the auto-generated config is actually saturating the device:
+
+```bash
+nvidia-smi dmon -s pucm -d 2
+```
+
+Healthy signs: GPU-Util ≥ 95% sustained, memory usage near the estimate in the YAML header comment, power close to TDP. If util is dipping or memory is far below the estimate, see the troubleshooting notes in `slm/config_gen.py`.
+
 ---
 
 ## Multi-GPU Training
@@ -227,14 +350,23 @@ make accelerate-config-single
 # Configure accelerate for multi-GPU (full training)
 make accelerate-config-multi GPUS=4
 
-# Launch training
-make pretrain SIZE=125m GPUS=4
-make pretrain SIZE=350m GPUS=8
-make pretrain SIZE=1b   GPUS=8
+# Re-tune config for the GPU count, then launch
+make config-gen-pretrain SIZE=125m GPUS=4
+make pretrain            SIZE=125m GPUS=4
 
-# Override config directly
+make config-gen-pretrain SIZE=350m GPUS=8
+make pretrain            SIZE=350m GPUS=8
+
+# 1b on multi-GPU benefits from FSDP — frees ~10 GB/GPU on optimizer state
+make accel-gen-fsdp GPUS=8
+make config-gen-pretrain SIZE=1b GPUS=8
+make pretrain            SIZE=1b GPUS=8
+
+# Override config directly (skips config-gen — use only if hand-tuning)
 make pretrain CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
 ```
+
+`config-gen-pretrain` keeps the global batch (and token budget) constant across GPU counts, so the model and recipe are identical at 1× H200 vs 8× H200 — only wall clock changes. No need to manually rescale `gradient_accumulation_steps` and `max_steps`.
 
 ---
 
@@ -242,9 +374,9 @@ make pretrain CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
 
 | Model | GPU | Precision | Global batch | Est. tokens/sec | Est. time |
 |---|---|---|---|---|---|
-| `slm-125m` | 1× H200 | bf16 | 32 | _TBD — pending 125m run_ | _TBD_ |
+| `slm-125m` | 1× H200 | bf16 | 32 | ~1M (target) | ~3-4 hrs (target, with `make config-gen`) |
 | `slm-125m` | 8× H200 | bf16 | 32 | _TBD_ | _TBD_ |
-| `slm-350m` | 8× H200 | bf16 | 64 | _TBD — pending 350m run_ | _TBD_ |
+| `slm-350m` | 8× H200 | bf16 | 128 | _TBD — pending 350m run_ | _TBD_ |
 | `slm-1b` | 8× H200 | bf16 | 128 | _TBD — pending 1b run_ | _TBD_ |
 
 Actual throughput depends on GPU generation, network topology (multi-node), CPU/GPU data-loading balance, and the specific cloud region. Measure your own throughput with `make pretrain-mini` before committing to a full run.
@@ -263,7 +395,9 @@ Actual throughput depends on GPU generation, network topology (multi-node), CPU/
 
 **Why 2 epochs at 125m and 350m, but 1 epoch at 1b?** It's about how the token budget compares to the supply of each source. At 125m (5B tokens) and 350m (15B tokens) the total budget is small enough that 2 epochs fits comfortably within every source's supply — repeating the data improves downstream performance with negligible overfitting risk at this scale. At 1b (30B tokens / 1 epoch) every source is already close to its supply ceiling, so no repetition is needed; adding a second epoch would force either per-source overflow or a lower-quality over-epoching loop. Modern small-model training (Llama, Phi, Qwen) follows the same pattern at scale — fresh tokens outperform repeated ones once the budget is big enough.
 
-**Why gradient checkpointing for 1B only?** At 125M and 350M, activations fit comfortably in H200 memory. At 1B with sequence length 4096, activation memory becomes the bottleneck. Gradient checkpointing trades ~30% compute for ~60% memory reduction.
+**Why auto-generate pretrain configs instead of committing them?** A single hand-written `gpt_125m.yaml` cannot be right for both 1× H200 and 8× A100 at the same time — `micro_batch_size` that fits in 141GB underuses 8× larger memory pools, and `gradient_accumulation_steps` written for 1 GPU need to scale with GPU count to preserve the global batch. The previous approach was a comment in the YAML listing 1/4/8-GPU values that the user had to manually swap before running. That works exactly until someone forgets, at which point the run silently trains on the wrong number of tokens. `slm/config_gen.py` makes the math automatic and keyed off the actual hardware. The recipe (LR, schedule, betas) is intentionally NOT in the script's scope — those are model-size decisions, not hardware decisions, and stay constant across GPUs.
+
+**Why does `config-gen` sometimes enable gradient checkpointing on H200?** The auto-policy turns checkpointing on when activations don't fit without it (forced) OR when checkpointing unlocks ≥ 4× larger micro-batch and the no-ckpt config can't reach the target global batch in a single optimizer step. The second case shows up at 1b on H200 × 1: without ckpt, max micro is ~31, forcing 4-step accumulation; with ckpt, all 128 sequences fit in one step. Eliminating the accumulation overhead can outweigh the recompute cost. If you want to A/B it for your specific GPU and batch size, run `make config-gen ... AGGRESSIVE=1` or call `slm/config_gen.py --no-ckpt` directly.
 
 **Why baseline eval before training?** So the W&B eval curve starts at step 0 with random-init loss. Without this, the first eval point is `eval_steps` steps in and you can't see how much the model has actually learned. The baseline is skipped on `--resume` since the original run already has one.
 

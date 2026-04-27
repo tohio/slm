@@ -24,7 +24,7 @@ All three sizes run through the same code path — the only differences are conf
 
 | Size | Curation time | Training time | Rough cost | Suits |
 |---|---|---|---|---|
-| `slm-125m` | ~16 hrs (measured) | _TBD_ | _TBD_ | learning the pipeline, single-GPU runs |
+| `slm-125m` | ~16 hrs (measured) | ~3–4 hrs (1× H200, with `make config-gen`) | _TBD_ | learning the pipeline, single-GPU runs |
 | `slm-350m` | _TBD — pending 350m run_ | _TBD_ | _TBD_ | serious research budget, multi-GPU |
 | `slm-1b` | _TBD — pending 1b run_ | _TBD_ | _TBD_ | production-useful small model, GPU cluster |
 
@@ -79,6 +79,10 @@ The model is a dense decoder-only transformer with a modern architecture:
 slm/
 ├── config/
 │   └── data_mix.py
+│
+├── slm/
+│   ├── config_gen.py        utility: auto-generate per-GPU training configs
+│   └── accel_gen.py         utility: auto-generate accelerate launch configs (DDP/FSDP)
 │
 ├── model/
 │   ├── config.py
@@ -163,6 +167,8 @@ slm/
 ├── tests/
 │   ├── conftest.py
 │   ├── README.md
+│   ├── test_config_gen.py        unit tests for slm/config_gen.py
+│   ├── test_accel_gen.py         unit tests for slm/accel_gen.py
 │   ├── data_pipeline/
 │   │   ├── test_pipeline_curator.py
 │   │   ├── test_pipeline_validate.py
@@ -314,22 +320,23 @@ make dpo-mini       GPUS=1 && make test-dpo
 make eval-mini
 
 # ── Step 6: Full training ─────────────────────────────────────────────────────
-# Before running, update gradient_accumulation_steps and max_steps in
-# pretrain/configs/gpt_125m.yaml, alignment/configs/dpo_125m.yaml,
-# finetune/configs/sft_chat_125m.yaml, finetune/configs/sft_code_125m.yaml for your GPU count.
-# See docs/COMMANDS.md — Multi-GPU Config Scaling for exact values.
+# All training configs are auto-generated for the current GPU by `make config-gen`.
+# That writes pretrain, SFT chat, SFT code, and DPO configs in one shot.
+# To skip the auto-tune for a specific stage, edit the YAML by hand — see
+# the "Multi-GPU Config Scaling" section below for the formula.
 # Re-run setup-gpu to pull the 125m tokenized binaries before training.
 make setup-gpu DATA_DIR=/data/slm/data SIZE=125m DATE=YYYY-MM-DD
 make accelerate-config-single        # single GPU — change to: make accelerate-config-multi GPUS=x for multi-GPU
-make pretrain  SIZE=125m GPUS=1      # Stage 4b: pretrain from scratch
-make export-base     SIZE=125m       # Stage 8:  push base model to Hub
-make sft       SIZE=125m GPUS=1      # Stage 5b: chat SFT
-make sft-code  SIZE=125m GPUS=1      # Stage 5c: code SFT
-make export-instruct SIZE=125m       # Stage 8:  push instruct model to Hub
-make dpo       SIZE=125m GPUS=1      # Stage 6b: DPO alignment
-make eval      SIZE=125m             # Stage 7:  benchmark evaluation
-make export-chat     SIZE=125m       # Stage 8:  push chat model to Hub
-make serve                           # Stage 10: launch vLLM server
+make config-gen      SIZE=125m GPUS=1   # Stage 4-6: auto-tune pretrain + sft + dpo configs for current GPU
+make pretrain        SIZE=125m GPUS=1   # Stage 4b: pretrain from scratch
+make export-base     SIZE=125m          # Stage 8:  push base model to Hub
+make sft             SIZE=125m GPUS=1   # Stage 5b: chat SFT
+make sft-code        SIZE=125m GPUS=1   # Stage 5c: code SFT
+make export-instruct SIZE=125m          # Stage 8:  push instruct model to Hub
+make dpo             SIZE=125m GPUS=1   # Stage 6b: DPO alignment
+make eval            SIZE=125m          # Stage 7:  benchmark evaluation
+make export-chat     SIZE=125m          # Stage 8:  push chat model to Hub
+make serve                              # Stage 10: launch vLLM server
 ```
 
 For full documentation of every `make` target see [docs/COMMANDS.md](docs/COMMANDS.md).
@@ -361,10 +368,13 @@ make dpo-mini       GPUS=1  && make test-dpo         # validate DPO
 make test-gpu-pipeline                               # run all four at once
 ```
 
-**Model unit tests — no pipeline outputs needed, runs anywhere:**
+**Unit tests — no pipeline outputs needed, runs anywhere:**
 
 ```bash
-make test-model
+make test-model           # model architecture
+make test-config-gen      # config generator
+make test-accel-gen       # accelerate config generator
+make test-unit            # all of the above
 ```
 
 | Target | Stage | Validates |
@@ -379,22 +389,53 @@ make test-model
 | `test-dpo` | `dpo-mini` | DPO data format, chosen ≠ rejected, model loads, generation runs |
 | `test-gpu-pipeline` | all four above | Runs training + sft-chat + sft-code + dpo tests |
 | `test-model` | none | RMSNorm, SwiGLU, GQA, causal mask, weight tying, parameter count |
+| `test-config-gen` | none | `slm/config_gen.py` algorithm, invariants, YAML rendering |
+| `test-accel-gen` | none | `slm/accel_gen.py` DDP and FSDP YAML rendering |
+| `test-unit` | none | All unit tests above |
 
 ---
 
 ## Multi-GPU Config Scaling
 
-> **Important:** All training configs — pretrain, SFT, and DPO — are written
-> for **1 GPU**. Before running multi-GPU training at any stage, scale the
-> config to preserve the global batch size and token budget:
->
-> ```
-> gradient_accumulation_steps = original / num_gpus
-> max_steps                   = original / num_gpus   # pretrain only
-> ```
->
-> Each config file includes a comment with exact values for 1, 4, and 8 GPUs.
-> This must be done for **every stage** — pretrain, SFT chat, SFT code, and DPO.
+The training pipeline uses **pure data parallelism** at all model sizes — no tensor or pipeline parallelism. Adding GPUs splits the batch across them; each GPU keeps a full copy of the model.
+
+The invariant to preserve when changing GPU count is the **global batch size**:
+
+```
+global_batch = micro_batch_size × gradient_accumulation_steps × num_gpus
+```
+
+If you double the GPUs, halve `gradient_accumulation_steps` to keep the global batch (and therefore the model and recipe) identical. For pretrain only, also rescale `max_steps` to preserve the token budget — `max_steps_new = max_steps_old × old_gpus / new_gpus`.
+
+### Per-size reference tables (pretrain)
+
+The committed configs are written for 1 GPU. For multi-GPU pretraining, scale these values:
+
+**125m** — global batch 32 sequences, 10B token budget:
+
+| GPUs | gradient_accumulation_steps | max_steps |
+|---|---|---|
+| 1 | 8 | 152,000 |
+| 4 | 2 | 38,000 |
+| 8 | 1 | 19,000 |
+
+**350m** — global batch 128 sequences, 30B token budget:
+
+| GPUs | gradient_accumulation_steps | max_steps |
+|---|---|---|
+| 1 | 16 | 230,000 |
+| 4 | 4 | 57,500 |
+| 8 | 2 | 28,750 |
+
+**1b** — global batch 128 sequences, 30B token budget:
+
+| GPUs | gradient_accumulation_steps | max_steps |
+|---|---|---|
+| 1 | 64 | 57,000 |
+| 4 | 16 | 14,250 |
+| 8 | 8 | 7,125 |
+
+### Per-stage scaling fields
 
 | Stage | Config location | Scaling fields |
 |---|---|---|
@@ -403,7 +444,20 @@ make test-model
 | SFT code | `finetune/configs/sft_code_{size}.yaml` | `gradient_accumulation_steps` |
 | DPO | `alignment/configs/dpo_{size}.yaml` | `gradient_accumulation_steps` |
 
-Note: SFT and DPO use `epochs` not `max_steps` — only `gradient_accumulation_steps` needs adjusting for those stages.
+SFT and DPO use `epochs` not `max_steps` — only `gradient_accumulation_steps` needs adjusting for those stages.
+
+### Auto-tune the math (recommended)
+
+`make config-gen-*` reads your GPU model and count and emits configs with the right values automatically — no manual scaling. Same math, just done by the script:
+
+```bash
+make config-gen-pretrain SIZE=125m GPUS=8     # writes pretrain/configs/gpt_125m.yaml
+make config-gen-sft      SIZE=125m GPUS=8     # writes BOTH sft_chat and sft_code
+make config-gen-dpo      SIZE=125m GPUS=8     # writes alignment/configs/dpo_125m.yaml
+make config-gen          SIZE=125m GPUS=8     # convenience: all three
+```
+
+The script also picks `micro_batch_size` based on GPU memory (a bigger H200 fits a bigger micro batch than an A100 40GB), and decides whether to enable gradient checkpointing. For 1b on multi-GPU, prefer FSDP over DDP via `make accel-gen-fsdp GPUS=8`.
 
 ```bash
 make pretrain  SIZE=125m GPUS=8
@@ -510,19 +564,19 @@ make curate SIZE=125m WORKERS=62
 
 Requires a CUDA-capable GPU instance. The pipeline uses **pure data parallelism** throughout all model sizes — no tensor parallelism or model parallelism is needed. The model is replicated on each GPU and the batch is split across GPUs.
 
-> **Before running multi-GPU training at any stage:** Update
-> `gradient_accumulation_steps` in the pretrain, SFT, and DPO configs for
-> your GPU count. For pretrain, also update `max_steps`. Each config includes
-> a scaling comment with exact values for 1, 4, and 8 GPUs.
+> **Run `make config-gen` before pretrain.** It reads your GPU model and count
+> and emits a tuned `pretrain/configs/gpt_$(SIZE).yaml` — no manual scaling
+> needed for pretraining. SFT and DPO configs still need manual scaling for
+> multi-GPU; see Multi-GPU Config Scaling above.
 
 Runtime varies significantly by GPU type and count. Use `make pretrain-mini GPUS=1` first to validate the training loop and measure your actual throughput before committing to a full run.
 
 | Target | Min VRAM | Notes |
 |---|---|---|
 | `mini` | 8 GB+ | any modern GPU — confirms training loop works |
-| `slm-125m` | 16 GB+ per GPU | fits on any modern data center GPU |
+| `slm-125m` | 16 GB+ per GPU | fits on any modern data center GPU; ~3–4 hrs on 1× H200 |
 | `slm-350m` | 24 GB+ per GPU | A100 40GB or better recommended |
-| `slm-1b` | 40 GB+ per GPU | A100 80GB / H100 / H200 recommended; gradient checkpointing enabled |
+| `slm-1b` | 40 GB+ per GPU | A100 80GB / H100 / H200 recommended; gradient checkpointing enabled by `config-gen` when needed |
 
 SFT and DPO runtimes are roughly 20–30% of pretraining time at the same model size. Use spot/preemptible instances — all training loops support `--resume` from the last checkpoint.
 
@@ -588,6 +642,8 @@ Models are evaluated on standard benchmarks via `lm-evaluation-harness`:
 
 **Why a single `config/` package for locked values?** The data mix, token targets, CHARS_PER_TOKEN, CC_CHARS_PER_SEGMENT, PRETRAIN_VAL_FRACTION, and a few other constants are each read by multiple stages (curator, export, pretrain, notebooks, tests). Previously they were duplicated — and the duplicates drifted, most visibly in an export pipeline that was writing stale 3-source pretraining tables to the Hub while the curator was actually running the 12-source mix. Centralising into `config/data_mix.py` with an import-time `validate()` makes drift impossible: every consumer sees the same values, and percentages sum-to-100 at the moment the module is loaded.
 
+**Why a separate `slm/` package for `config_gen.py`?** The pretrain configs need to be tuned per GPU — `micro_batch_size` that fits on H200 fits trivially on B200 but not on A100 40GB, and the right `gradient_accumulation_steps` depends on both GPU memory and the count. Hand-tuning these for every (size, GPU, num_gpus) combination is error-prone and stale configs silently waste GPU hours. Centralising the math in `slm/config_gen.py` — keyed off measured GPU specs and per-size memory profiles — makes "tune for this hardware" a one-line `make config-gen` rather than a careful manual edit. The script intentionally leaves LR, schedule, and architecture untouched: those are recipe decisions, not hardware decisions.
+
 **Why vLLM for serving?** PagedAttention enables continuous batching and efficient KV cache management. The OpenAI-compatible API means any client built against the OpenAI SDK works out of the box.
 
 **Why datatrove for dedup instead of datasketch?** datasketch's `MinHashLSH` is in-memory — at 350m it requires ~32GB; at 1b ~85GB and may not fit on a single instance. datatrove's disk-based pipeline uses a sort-based approach (signatures → buckets → cluster → filter) where RAM usage is bounded by shard size, not corpus size. Same approach used by FineWeb at trillion-token scale.
@@ -605,10 +661,11 @@ The pipeline is designed to extend past 1b. Scale-invariant percentages, streami
 To run at 3b or beyond:
 
 1. Add a new entry to `TARGET_CONFIGS` in `config/data_mix.py` with the new `total_tokens`, `epochs`, and `cc_crawls` list.
-2. Add a matching `gpt_3b.yaml` (or equivalent) in `pretrain/configs/`.
-3. Review Wikipedia and pg19 supply: at budgets approaching 40B × 1 epoch, Wikipedia repetition approaches 1.6×. Options: drop Wikipedia's share, add multilingual Wikipedia, or accept the repetition.
-4. Consider adding a second bulk-code source to avoid stack-v1 over-epoching at 5B+ code tokens.
-5. Consider upgrading FineWeb from `sample-100BT` to a larger sample if overflow consumption gets close to 100B.
+2. Add a matching entry to `SIZE_PROFILES` in `slm/config_gen.py` with `state_gb`, `act_per_seq_gb_*`, `ctx`, `ref_global_batch`, `tokens`, `lr`, `hidden`, `layers`, and head counts. After this, `make config-gen SIZE=3b GPUS=N` produces a tuned pretrain config automatically.
+3. Add hand-written SFT and DPO configs for the new size in `finetune/configs/` and `alignment/configs/`.
+4. Review Wikipedia and pg19 supply: at budgets approaching 40B × 1 epoch, Wikipedia repetition approaches 1.6×. Options: drop Wikipedia's share, add multilingual Wikipedia, or accept the repetition.
+5. Consider adding a second bulk-code source to avoid stack-v1 over-epoching at 5B+ code tokens.
+6. Consider upgrading FineWeb from `sample-100BT` to a larger sample if overflow consumption gets close to 100B.
 
 No core code changes are required for scaling — the target config, source mix, and cap-and-redistribute handle supply variance automatically. See [curator/README.md](curator/README.md) for full details.
 

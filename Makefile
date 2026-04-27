@@ -6,6 +6,8 @@
 #   make <target> GPUS=4                                 # multi-GPU
 #   make <target> WORKERS=16                             # parallel workers for filter, dedup, blend
 #   make <target> CONFIG=pretrain/configs/gpt_125m.yaml  # explicit config override
+#   make config-gen-* GPU=h200                           # override GPU auto-detection
+#   make config-gen-* MODE=aggressive                    # 90% VRAM budget (or conservative=70%)
 #
 # Full pipeline:
 #   make all SIZE=125m GPUS=4
@@ -18,38 +20,56 @@ WORKERS ?=
 DATE     ?= $(shell date +%Y-%m-%d)
 
 # DATA_DIR — read from .env if not set in environment.
-# This ensures make targets use the correct path without requiring
-# the user to export DATA_DIR manually after each login.
 DATA_DIR ?= $(shell grep -v '^\#' .env 2>/dev/null | grep '^DATA_DIR=' | head -1 | cut -d= -f2 | tr -d ' ')
 DATA_DIR ?= data
 
-# Use the venv python and accelerate so make targets work without activating the venv.
-# Override with: make pretrain PYTHON=python3
 PYTHON     ?= .venv/bin/python
 _ACCELERATE = .venv/bin/accelerate
 
-# Config defaults — overridable with CONFIG=path/to/config.yaml
 PRETRAIN_CONFIG ?= pretrain/configs/gpt_$(SIZE).yaml
 SFT_CHAT_CONFIG ?= finetune/configs/sft_chat_$(SIZE).yaml
 SFT_CODE_CONFIG ?= finetune/configs/sft_code_$(SIZE).yaml
 DPO_CONFIG      ?= alignment/configs/dpo_$(SIZE).yaml
 
-# accelerate launch with GPU count
 ACCELERATE = $(_ACCELERATE) launch --num_processes $(GPUS)
 
-# Optional workers flag — passed to filter, dedup, and blend stages
 ifdef WORKERS
   WORKERS_FLAG = --workers $(WORKERS)
 else
   WORKERS_FLAG =
 endif
 
-# Sanity-train size selector (separate from SIZE to avoid clashing with pretrain SIZE).
 SANITY_SIZE ?= 125m
+
+# config-gen flags
+#   GPU=h200|b200|...        force a specific GPU (otherwise auto-detect via nvidia-smi)
+#   MODE=conservative|balanced|aggressive   (default: balanced)
+#   AGGRESSIVE=1             alias for MODE=aggressive (backwards compat)
+GPU         ?=
+MODE        ?=
+AGGRESSIVE  ?=
+
+# Build flag fragments used by all four config-gen-* targets.
+ifeq ($(GPU),)
+  _GPU_FLAG = --detect
+else
+  _GPU_FLAG = --gpu $(GPU)
+endif
+
+# AGGRESSIVE=1 wins over MODE if both are set; matches old behaviour.
+ifdef AGGRESSIVE
+  _MODE_FLAG = --mode aggressive
+else ifneq ($(MODE),)
+  _MODE_FLAG = --mode $(MODE)
+else
+  _MODE_FLAG =
+endif
 
 .PHONY: all curate curate-mini curate-download curate-filter curate-dedup \
         curate-blend curate-upload validate validate-upload validate-datatrove \
         tokenizer tokenizer-test tokenize tokenize-upload tokenize-download tokenizer-upload tokenizer-download \
+        config-gen config-gen-pretrain config-gen-sft config-gen-dpo \
+        accel-gen-ddp accel-gen-fsdp \
         pretrain pretrain-mini pretrain-resume prepare-sft sft sft-mini sft-resume sft-code sft-code-mini sft-code-resume \
         prepare-dpo dpo dpo-resume eval export serve serve-local \
         export export-base export-instruct export-chat \
@@ -57,21 +77,18 @@ SANITY_SIZE ?= 125m
         download-kenlm-model download-fasttext-model accelerate-config accelerate-config-single accelerate-config-multi \
         s3-upload s3-download s3-list \
         test-curator test-validate test-tokenizer test-data-pipeline \
-        test-training test-sft-chat test-sft-code test-dpo test-gpu-pipeline test-model \
+        test-training test-sft-chat test-sft-code test-dpo test-gpu-pipeline test-model test-config-gen test-accel-gen test-unit \
         sanity-train sanity-train-small sanity-train-tiny sanity-train-save \
         clean clean-data clean-results clean-logs help
 
 # ── Full pipeline ──────────────────────────────────────────────────────────────
+# Note: assumes configs exist at $(PRETRAIN_CONFIG), $(SFT_CHAT_CONFIG), etc.
+# Run `make config-gen` first to auto-generate them tuned for the current GPU.
 
 all: curate validate tokenizer tokenize pretrain prepare-sft sft sft-code prepare-dpo dpo
 	@echo "Pipeline complete for slm-$(SIZE) on $(GPUS) GPU(s)"
 
 # ── Stage 1: Data curation ────────────────────────────────────────────────────
-# ulimit -n 65536 raised on every target that can trigger MinHash dedup.
-# The 125m run hit the default 1024 limit on stack_v1 (2,103 shards);
-# 1b will have proportionally more. ulimit must be chained with `&&` on
-# a single logical line because Make runs each recipe line in its own
-# shell — a separate `ulimit` line would not propagate.
 
 curate:
 	@echo "==> Stage 1: Curation (target=$(SIZE))"
@@ -144,6 +161,65 @@ tokenizer-download:
 	$(PYTHON) curator/scripts/upload_s3.py download --src tokenizer --dst $(DATA_DIR)/tokenizer
 	@echo "  Tokenizer downloaded to $(DATA_DIR)/tokenizer/"
 
+# ── Config generation ─────────────────────────────────────────────────────────
+# Auto-generates training configs tuned for the current GPU and GPU count.
+# `config-gen` (no suffix) is a convenience target that runs all three stages.
+#
+#   make config-gen-pretrain SIZE=125m GPUS=1                  # auto-detect GPU
+#   make config-gen-sft      SIZE=350m GPUS=4 GPU=h200         # explicit GPU
+#   make config-gen-dpo      SIZE=1b   GPUS=8 GPU=b200 MODE=aggressive
+#   make config-gen          SIZE=125m GPUS=1                  # generates all three
+
+config-gen-pretrain:
+	@echo "==> Generating pretrain config for SIZE=$(SIZE) GPUS=$(GPUS)"
+	$(PYTHON) -m slm.config_gen \
+		--stage pretrain \
+		$(_GPU_FLAG) \
+		--size $(SIZE) \
+		--gpus $(GPUS) \
+		$(_MODE_FLAG) \
+		-o $(PRETRAIN_CONFIG)
+
+config-gen-sft:
+	@echo "==> Generating SFT chat + code configs for SIZE=$(SIZE) GPUS=$(GPUS)"
+	$(PYTHON) -m slm.config_gen \
+		--stage sft \
+		$(_GPU_FLAG) \
+		--size $(SIZE) \
+		--gpus $(GPUS) \
+		$(_MODE_FLAG) \
+		-o $(SFT_CHAT_CONFIG) \
+		--output-code $(SFT_CODE_CONFIG)
+
+config-gen-dpo:
+	@echo "==> Generating DPO config for SIZE=$(SIZE) GPUS=$(GPUS)"
+	$(PYTHON) -m slm.config_gen \
+		--stage dpo \
+		$(_GPU_FLAG) \
+		--size $(SIZE) \
+		--gpus $(GPUS) \
+		$(_MODE_FLAG) \
+		-o $(DPO_CONFIG)
+
+config-gen: config-gen-pretrain config-gen-sft config-gen-dpo
+	@echo "==> All training configs generated for SIZE=$(SIZE) GPUS=$(GPUS)"
+
+# ── Accelerate launch config generation ───────────────────────────────────────
+# Generates accelerate_configs/{multi_gpu,fsdp}.yaml from a small generator.
+# Replaces the old sed-based accelerate-config-multi flow.
+#
+#   make accel-gen-ddp  GPUS=8                  # plain DDP
+#   make accel-gen-fsdp GPUS=8                  # FullyShardedDataParallel for 1b runs
+
+accel-gen-ddp:
+	@echo "==> Generating accelerate DDP config for GPUS=$(GPUS)"
+	$(PYTHON) -m slm.accel_gen --strategy ddp --gpus $(GPUS)
+
+accel-gen-fsdp:
+	@echo "==> Generating accelerate FSDP config for GPUS=$(GPUS)"
+	$(PYTHON) -m slm.accel_gen --strategy fsdp --gpus $(GPUS)
+
+# Pretrain
 pretrain:
 	@echo "==> Stage 4b: Pretraining ($(SIZE), $(GPUS) GPU(s), config=$(PRETRAIN_CONFIG))"
 	$(ACCELERATE) pretrain/train.py \
@@ -338,8 +414,6 @@ accelerate-config-multi:
 	@echo "  Multi-GPU config active ($(GPUS) processes)"
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
-# Data pipeline tests — run on CPU curation instance after each stage.
-# GPU pipeline tests — run on GPU instance after each training stage.
 
 test-curator:
 	@echo "==> Validating curate-mini outputs..."
@@ -379,22 +453,18 @@ test-model:
 	@echo "==> Running model unit tests..."
 	.venv/bin/pytest tests/model/ -v --tb=short
 
+test-config-gen:
+	@echo "==> Running config_gen unit tests..."
+	.venv/bin/pytest tests/test_config_gen.py -v --tb=short
+
+test-accel-gen:
+	@echo "==> Running accel_gen unit tests..."
+	.venv/bin/pytest tests/test_accel_gen.py -v --tb=short
+
+test-unit: test-model test-config-gen test-accel-gen
+	@echo "==> Unit tests complete"
+
 # ── Sanity check ──────────────────────────────────────────────────────────────
-# Self-contained model + training-code diagnostic. Uses the Mistral tokenizer
-# and FineWeb-Edu data — bypasses the curator and SLM tokenizer entirely. Run
-# when you need to confirm the model architecture and training loop can learn
-# at scale, with data and tokenizer ruled out as variables.
-#
-# Sizes:
-#   sanity-train       — 125m arch, 2.5B tokens
-#   sanity-train-small — mini arch, 500M tokens
-#   sanity-train-tiny  — mini arch, 50M tokens
-#   sanity-train-save  — same as sanity-train but keeps the model;
-#                        override with SANITY_SIZE={small,tiny} for smaller runs.
-#
-# See scripts/README.md for timing estimates and GPU sizing notes.
-#
-# Delete scripts/sanity_train.py and these targets when no longer needed.
 
 sanity-train:
 	@echo "==> Sanity training: 125m arch on FineWeb-Edu (~2.5B tokens)"
@@ -441,16 +511,25 @@ help:
 	@echo "============"
 	@echo ""
 	@echo "Usage: make <target> [SIZE=125m|350m|1b] [GPUS=N] [WORKERS=N] [DATA_DIR=path]"
+	@echo "       make config-gen-* [GPU=h200|b200|...] [MODE=conservative|balanced|aggressive]"
 	@echo ""
 	@echo "For full target documentation see: docs/COMMANDS.md"
 	@echo ""
+	@echo "Config generation (run before pretrain/sft/dpo to tune for current GPU):"
+	@echo "  config-gen-pretrain  Auto-generate pretrain/configs/gpt_$(SIZE).yaml"
+	@echo "  config-gen-sft       Auto-generate sft_chat_$(SIZE).yaml + sft_code_$(SIZE).yaml"
+	@echo "  config-gen-dpo       Auto-generate alignment/configs/dpo_$(SIZE).yaml"
+	@echo "  config-gen           Convenience: runs all three above"
+	@echo "  accel-gen-ddp        Auto-generate accelerate_configs/multi_gpu.yaml"
+	@echo "  accel-gen-fsdp       Auto-generate accelerate_configs/fsdp.yaml (for 1b runs)"
+	@echo ""
 	@echo "One-time setup:"
 	@echo "  setup                    Bootstrap a fresh CPU curation instance"
-	@echo "  setup-gpu                Bootstrap a GPU training instance (run after each preemptible restart)"
+	@echo "  setup-gpu                Bootstrap a GPU training instance"
 	@echo "  setup-data-dir           Bootstrap with custom data dir"
 	@echo "  download-fasttext-model  Download fasttext language ID model (~1MB)"
 	@echo "  download-kenlm-model     Download KenLM English model (~4GB)"
-	@echo "  accelerate-config        Configure accelerate for multi-GPU"
+	@echo "  accelerate-config        Configure accelerate interactively"
 	@echo "  install                  Install dependencies (pip)"
 	@echo "  install-uv               Install dependencies (uv)"
 	@echo "  install-conda            Install dependencies (conda)"
@@ -458,55 +537,49 @@ help:
 	@echo "  install-orjson           Install orjson and fasttext-wheel"
 	@echo ""
 	@echo "Tests (CPU — data pipeline):"
-	@echo "  test-curator             Validate curate-mini outputs (run after make curate-mini)"
-	@echo "  test-validate            Validate validate outputs (run after make validate)"
-	@echo "  test-tokenizer           Validate tokenizer outputs (run after make tokenizer)"
+	@echo "  test-curator             Validate curate-mini outputs"
+	@echo "  test-validate            Validate validate outputs"
+	@echo "  test-tokenizer           Validate tokenizer outputs"
 	@echo "  test-data-pipeline       Run all data pipeline tests"
 	@echo ""
 	@echo "Tests (GPU — training pipeline):"
-	@echo "  test-training            Validate pretrain-mini outputs (run after make pretrain-mini)"
-	@echo "  test-sft-chat            Validate sft-mini outputs (run after make sft-mini)"
-	@echo "  test-sft-code            Validate sft-code-mini outputs (run after make sft-code-mini)"
-	@echo "  test-dpo                 Validate dpo-mini outputs (run after make dpo-mini)"
+	@echo "  test-training            Validate pretrain-mini outputs"
+	@echo "  test-sft-chat            Validate sft-mini outputs"
+	@echo "  test-sft-code            Validate sft-code-mini outputs"
+	@echo "  test-dpo                 Validate dpo-mini outputs"
 	@echo "  test-gpu-pipeline        Run all GPU pipeline tests"
 	@echo ""
 	@echo "Tests (unit — no pipeline outputs needed):"
 	@echo "  test-model               Model architecture unit tests"
+	@echo "  test-config-gen          Config generator unit tests"
+	@echo "  test-accel-gen           Accelerate config generator unit tests"
+	@echo "  test-unit                All unit tests above"
 	@echo ""
 	@echo "Sanity check (model + training code only):"
 	@echo "  sanity-train             125m arch, 2.5B tokens"
 	@echo "  sanity-train-small       mini arch, 500M tokens"
 	@echo "  sanity-train-tiny        mini arch, 50M tokens"
-	@echo "  sanity-train-save        same as sanity-train but saves model to results/sanity-<arch>/"
-	@echo "                           override with SANITY_SIZE=small or SANITY_SIZE=tiny"
+	@echo "  sanity-train-save        same as sanity-train but saves the model"
 	@echo ""
 	@echo "Pipeline:"
-	@echo "  curate             Stage 1  — download, curate, blend to train.jsonl + val.jsonl, upload"
-	@echo "  curate-mini        Stage 1  — mini run for pipeline validation (~30 min)"
+	@echo "  curate             Stage 1  — download, curate, blend, upload"
+	@echo "  curate-mini        Stage 1  — mini run for pipeline validation"
 	@echo "  validate           Stage 2  — perplexity filter on train + val splits"
 	@echo "  validate-upload    Stage 2  — upload validated data to S3"
 	@echo "  tokenizer          Stage 3  — train BPE tokenizer"
 	@echo "  tokenize           Stage 4a — tokenize train + val to binaries"
 	@echo "  tokenize-upload    Stage 4a — upload tokenized binaries to S3"
-	@echo "  tokenizer-upload   Stage 3  — upload tokenizer to S3"
-	@echo "  tokenizer-download Stage 3  — download tokenizer from S3"
-	@echo "  tokenize-download  Stage 4a — download tokenized binaries from S3"
 	@echo "  pretrain           Stage 4b — pretrain from scratch"
-	@echo "  pretrain-mini      Stage 4b — mini pretrain run for pipeline validation"
-	@echo "  sft-mini           Stage 5b — mini chat SFT for pipeline validation"
-	@echo "  sft-code-mini      Stage 5c — mini code SFT for pipeline validation"
-	@echo "  dpo-mini           Stage 6b — mini DPO for pipeline validation"
+	@echo "  pretrain-mini      Stage 4b — mini pretrain run"
+	@echo "  sft-mini           Stage 5b — mini chat SFT"
+	@echo "  sft-code-mini      Stage 5c — mini code SFT"
+	@echo "  dpo-mini           Stage 6b — mini DPO"
 	@echo "  prepare-sft        Stage 5a — download SFT datasets"
 	@echo "  sft                Stage 5b — chat supervised fine-tuning"
 	@echo "  sft-code           Stage 5c — code supervised fine-tuning"
 	@echo "  prepare-dpo        Stage 6a — download DPO datasets"
 	@echo "  dpo                Stage 6b — DPO alignment"
 	@echo "  eval               Stage 7  — benchmark evaluation"
-	@echo "  eval-mini          Stage 7  — quick eval validation (hellaswag, 50 examples)"
 	@echo "  export             Stage 8  — push all variants to HuggingFace Hub"
-	@echo "  export-base        Stage 8  — push base model only"
-	@echo "  export-instruct    Stage 8  — push instruct model only"
-	@echo "  export-chat        Stage 8  — push chat model only"
-	@echo "  serve              Stage 10 — launch vLLM server (Hub model)"
-	@echo "  serve-local        Stage 10 — launch vLLM server (local checkpoint)"
+	@echo "  serve              Stage 10 — launch vLLM server"
 	@echo ""
