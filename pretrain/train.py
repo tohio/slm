@@ -145,21 +145,42 @@ class SLMTrainer(Trainer):
     """
     Trainer subclass with an explicit compute_loss override.
 
-    SLMForCausalLM always returns CausalLMOutputWithPast with `.loss` as a
-    tensor when labels are present. The default Trainer.compute_loss in
-    transformers v5 has a code path that returns a non-tensor loss for our
-    model (manifests as 'dict' object has no attribute 'detach' inside
-    prediction_step at first scheduled eval). Bypass it by extracting
-    outputs.loss directly — the model knows how to compute its own loss.
+    SLMForCausalLM returns a plain dict when labels are present during
+    training/eval. This avoids a torch.compile / Accelerate Dynamo issue
+    where CausalLMOutputWithPast can be reconstructed incorrectly during
+    scheduled eval, causing `.loss` to become a dict instead of a tensor.
+
+    For generation or inference paths where labels are not present,
+    SLMForCausalLM can still return CausalLMOutputWithPast for Hugging Face
+    compatibility.
     """
-    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+
+    def compute_loss(
+        self,
+        model,
+        inputs,
+        return_outputs=False,
+        num_items_in_batch=None,
+    ):
         outputs = model(**inputs)
-        loss = outputs.loss
+
+        if isinstance(outputs, dict):
+            loss = outputs.get("loss")
+        else:
+            loss = outputs.loss
+
         if loss is None:
             raise ValueError(
                 "Model returned no loss. Check that 'labels' is present in inputs. "
-                f"Available keys: {list(inputs.keys())}"
+                f"Available keys: {list(inputs.keys())}. "
+                f"Output type: {type(outputs)}"
             )
+
+        if not torch.is_tensor(loss):
+            raise TypeError(
+                f"Expected loss to be a torch.Tensor, got {type(loss)}: {loss}"
+            )
+
         return (loss, outputs) if return_outputs else loss
 
 
@@ -174,11 +195,11 @@ def build_training_args(cfg: dict, output_dir: Path, resume: bool):
     use_bf16  = has_cuda and precision == "bf16"
     use_fp16  = has_cuda and precision == "fp16"
 
-    # torch.compile is OFF by default — interacted badly with HF Trainer eval
+    # torch.compile is ON by default — interacted badly with HF Trainer eval
     # (returned wrapped output that broke loss extraction). The SLMTrainer
     # subclass below also handles this, but keeping compile off until the
     # interaction is verified end-to-end on a full run.
-    torch_compile = bool(train_cfg.get("torch_compile", False)) and has_cuda
+    torch_compile = bool(train_cfg.get("torch_compile", True)) and has_cuda
 
     return TrainingArguments(
         output_dir=str(output_dir),
