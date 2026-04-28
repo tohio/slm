@@ -74,9 +74,44 @@ def _configure_cuda_for_performance() -> None:
 _configure_cuda_for_performance()
 
 
+# ── Config loading ────────────────────────────────────────────────────────────
+# YAML 1.1 (PyYAML's default) parses scientific notation as a float only
+# when the mantissa has a decimal point — '1.0e-8' is a float, '1e-8' is
+# a string. Coerce known numeric fields to float so a mis-formatted config
+# doesn't crash deep inside the optimizer or model __init__.
+#
+# This list covers every numeric scalar consumed downstream by the pretrain,
+# SFT, and DPO trainers. Including SFT/DPO keys here is harmless — pretrain
+# configs simply won't contain them — and lets us share this utility across
+# trainers without divergence.
+_NUMERIC_CONFIG_KEYS = {
+    # optimizer
+    "lr", "eps", "weight_decay", "beta1", "beta2",
+    # training / scheduler
+    "gradient_clip_val", "warmup_ratio",
+    # model
+    "rms_norm_eps", "rope_theta", "initializer_range",
+    # dpo
+    "dpo_beta", "beta",
+}
+
+
+def _coerce_numeric(node):
+    """Recursively convert string-valued numeric fields to float."""
+    if isinstance(node, dict):
+        return {
+            k: (float(v) if k in _NUMERIC_CONFIG_KEYS and isinstance(v, str) else _coerce_numeric(v))
+            for k, v in node.items()
+        }
+    if isinstance(node, list):
+        return [_coerce_numeric(x) for x in node]
+    return node
+
+
 def load_config(config_path: Path) -> dict:
     with open(config_path) as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+    return _coerce_numeric(cfg)
 
 
 def validate_tokenizer(tokenizer_dir: Path) -> None:
@@ -206,12 +241,15 @@ def build_training_args(cfg: dict, output_dir: Path, resume: bool):
 
         # Optimizer — fused AdamW is a free 5-10% on modern GPUs (H100+).
         # Falls back to the non-fused implementation automatically on CPU.
-        learning_rate=optim_cfg["lr"],
-        weight_decay=optim_cfg.get("weight_decay", 0.1),
-        adam_beta1=optim_cfg.get("beta1", 0.9),
-        adam_beta2=optim_cfg.get("beta2", 0.95),
-        adam_epsilon=optim_cfg.get("eps", 1e-8),
-        max_grad_norm=train_cfg.get("gradient_clip_val", 1.0),
+        # float() coercion is belt-and-suspenders: load_config already
+        # normalizes scientific-notation strings, but explicit casts here
+        # make the trainer robust to configs constructed in-memory.
+        learning_rate=float(optim_cfg["lr"]),
+        weight_decay=float(optim_cfg.get("weight_decay", 0.1)),
+        adam_beta1=float(optim_cfg.get("beta1", 0.9)),
+        adam_beta2=float(optim_cfg.get("beta2", 0.95)),
+        adam_epsilon=float(optim_cfg.get("eps", 1e-8)),
+        max_grad_norm=float(train_cfg.get("gradient_clip_val", 1.0)),
         optim="adamw_torch_fused" if has_cuda else "adamw_torch",
 
         # LR schedule
