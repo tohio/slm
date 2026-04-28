@@ -71,7 +71,7 @@ endif
         config-gen config-gen-pretrain config-gen-sft config-gen-dpo \
         accel-gen-ddp accel-gen-fsdp \
         pretrain pretrain-mini pretrain-resume prepare-sft sft sft-mini sft-resume sft-code sft-code-mini sft-code-resume \
-        prepare-dpo dpo dpo-resume eval export serve serve-local \
+        prepare-dpo dpo dpo-mini dpo-resume eval eval-base eval-instruct eval-chat eval-mini serve serve-local \
         export export-base export-instruct export-chat \
         setup setup-data-dir setup-gpu install install-gpu install-uv install-conda install-kenlm install-orjson \
         download-kenlm-model download-fasttext-model accelerate-config accelerate-config-single accelerate-config-multi \
@@ -294,8 +294,19 @@ dpo-mini:
 
 # ── Stage 7: Evaluation ───────────────────────────────────────────────────────
 
-eval:
-	@echo "==> Stage 7: Evaluation ($(SIZE))"
+# Default eval target — alias for eval-chat (the final aligned variant).
+eval: eval-chat
+
+eval-base:
+	@echo "==> Stage 7: Evaluation (base, $(SIZE))"
+	$(PYTHON) eval/eval.py --model results/slm-$(SIZE)/final
+
+eval-instruct:
+	@echo "==> Stage 7: Evaluation (instruct, $(SIZE))"
+	$(PYTHON) eval/eval.py --model results/slm-$(SIZE)-chat-code/final
+
+eval-chat:
+	@echo "==> Stage 7: Evaluation (chat, $(SIZE))"
 	$(PYTHON) eval/eval.py --model results/slm-$(SIZE)-dpo/final
 
 eval-mini:
@@ -430,6 +441,10 @@ test-tokenizer:
 test-data-pipeline: test-curator test-validate test-tokenizer
 	@echo "==> Data pipeline tests complete"
 
+# GPU pipeline tests respect SIZE — defaults to mini for the tests themselves
+# (not the Makefile-wide SIZE) so a fresh clone with no training outputs still
+# has something sensible to validate against. Pass SIZE=125m / 350m / 1b to
+# validate larger runs.
 test-training:
 	@echo "==> Validating pretrain outputs (SIZE=$(SIZE))..."
 	.venv/bin/pytest tests/gpu_pipeline/test_pipeline_training.py --size=$(SIZE) -v --tb=short
@@ -445,7 +460,7 @@ test-sft-code:
 test-dpo:
 	@echo "==> Validating DPO outputs (SIZE=$(SIZE))..."
 	.venv/bin/pytest tests/gpu_pipeline/test_pipeline_dpo.py --size=$(SIZE) -v --tb=short
-	
+
 test-gpu-pipeline: test-training test-sft-chat test-sft-code test-dpo
 	@echo "==> GPU pipeline tests complete"
 
@@ -542,11 +557,11 @@ help:
 	@echo "  test-tokenizer           Validate tokenizer outputs"
 	@echo "  test-data-pipeline       Run all data pipeline tests"
 	@echo ""
-	@echo "Tests (GPU — training pipeline):"
-	@echo "  test-training            Validate pretrain-mini outputs"
-	@echo "  test-sft-chat            Validate sft-mini outputs"
-	@echo "  test-sft-code            Validate sft-code-mini outputs"
-	@echo "  test-dpo                 Validate dpo-mini outputs"
+	@echo "Tests (GPU — training pipeline, use SIZE=<size>, default mini):"
+	@echo "  test-training            Validate pretrain outputs"
+	@echo "  test-sft-chat            Validate chat SFT outputs"
+	@echo "  test-sft-code            Validate code SFT outputs"
+	@echo "  test-dpo                 Validate DPO outputs"
 	@echo "  test-gpu-pipeline        Run all GPU pipeline tests"
 	@echo ""
 	@echo "Tests (unit — no pipeline outputs needed):"
@@ -571,15 +586,19 @@ help:
 	@echo "  tokenize-upload    Stage 4a — upload tokenized binaries to S3"
 	@echo "  pretrain           Stage 4b — pretrain from scratch"
 	@echo "  pretrain-mini      Stage 4b — mini pretrain run"
-	@echo "  sft-mini           Stage 5b — mini chat SFT"
-	@echo "  sft-code-mini      Stage 5c — mini code SFT"
-	@echo "  dpo-mini           Stage 6b — mini DPO"
 	@echo "  prepare-sft        Stage 5a — download SFT datasets"
 	@echo "  sft                Stage 5b — chat supervised fine-tuning"
+	@echo "  sft-mini           Stage 5b — mini chat SFT"
 	@echo "  sft-code           Stage 5c — code supervised fine-tuning"
+	@echo "  sft-code-mini      Stage 5c — mini code SFT"
 	@echo "  prepare-dpo        Stage 6a — download DPO datasets"
 	@echo "  dpo                Stage 6b — DPO alignment"
-	@echo "  eval               Stage 7  — benchmark evaluation"
+	@echo "  dpo-mini           Stage 6b — mini DPO"
+	@echo "  eval-base          Stage 7  — evaluate base (pretrained) variant"
+	@echo "  eval-instruct      Stage 7  — evaluate instruct (SFT) variant"
+	@echo "  eval-chat          Stage 7  — evaluate chat (DPO) variant"
+	@echo "  eval               Stage 7  — alias for eval-chat"
+	@echo "  eval-mini          Stage 7  — mini eval (pipeline validation)"
 	@echo "  export             Stage 8  — push all variants to HuggingFace Hub"
 	@echo "  serve              Stage 10 — launch vLLM server"
 	@echo ""
