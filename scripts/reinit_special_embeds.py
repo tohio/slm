@@ -36,6 +36,10 @@ Usage:
     running it after SFT has started or you'll erase learned weights.
 """
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import torch
 from model import SLMForCausalLM
 from transformers import PreTrainedTokenizerFast
