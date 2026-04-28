@@ -29,59 +29,85 @@ Why:
 
 Usage:
     Run once, after pretraining and before SFT:
-        python scripts/reinit_special_embeds.py
+        make reinit-embeds SIZE=125m
+        # or directly:
+        python scripts/reinit_special_embeds.py --size 125m
 
-    Overwrites results/slm-125m/final/ in place. Idempotent in effect
+    Overwrites results/slm-<size>/final/ in place. Idempotent in effect
     (running twice just sets them to the same mean again), but avoid
     running it after SFT has started or you'll erase learned weights.
 """
-
+import argparse
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import torch
 from model import SLMForCausalLM
 from transformers import PreTrainedTokenizerFast
 
-ckpt = "results/slm-125m/final"
 
-# Load the pretrained checkpoint and its tokenizer. We don't need
-# optimizer state — this script only touches the embedding matrix.
-model = SLMForCausalLM.from_pretrained(ckpt)
-tok = PreTrainedTokenizerFast.from_pretrained(ckpt + "/tokenizer")
+def parse_args():
+    p = argparse.ArgumentParser(description=__doc__.split("\n")[2])
+    p.add_argument(
+        "--size",
+        default="125m",
+        help="Model size, matching results/slm-<size>/final (default: 125m)",
+    )
+    return p.parse_args()
 
-# Tokens that exist in the vocab but were absent from the pretraining
-# corpus, so their embedding rows are effectively random. EOS is omitted
-# because it *was* seen (used as document separator).
-specials = ["<BOS>", "<|system|>", "<|user|>", "<|assistant|>", "<|endofturn|>"]
-ids = [tok.convert_tokens_to_ids(s) for s in specials]
-print("IDs:", dict(zip(specials, ids)))
 
-# Sanity check: convert_tokens_to_ids returns None or unk_token_id for
-# unknown tokens. Either case means the tokenizer doesn't actually have
-# this special — fail loudly rather than silently overwrite a normal
-# vocab row with the mean.
-assert all(i is not None and i != tok.unk_token_id for i in ids), \
-    "Special token lookup failed — tokenizer doesn't contain one of these strings"
+def main():
+    args = parse_args()
+    ckpt = Path(f"results/slm-{args.size}/final")
 
-# Compute the mean of all *other* embeddings, i.e. tokens that did get
-# trained during pretraining. This is the "average token" in embedding
-# space and serves as a neutral prior for the unseen specials.
-emb = model.get_input_embeddings().weight.data
-mask = torch.ones(emb.size(0), dtype=torch.bool)
-mask[ids] = False  # exclude the specials themselves from the mean
-mean_emb = emb[mask].mean(dim=0)
+    if not ckpt.exists():
+        sys.exit(
+            f"Checkpoint not found: {ckpt}\n"
+            f"Run 'make pretrain SIZE={args.size}' first."
+        )
 
-# Overwrite each unseen special with the mean. lm_head.weight is tied
-# to embed_tokens.weight (see SLMForCausalLM.tie_weights), so this also
-# updates the output projection automatically — no separate edit needed.
-with torch.no_grad():
-    for i in ids:
-        emb[i] = mean_emb
+    # Load the pretrained checkpoint and its tokenizer. We don't need
+    # optimizer state — this script only touches the embedding matrix.
+    model = SLMForCausalLM.from_pretrained(str(ckpt))
+    tok = PreTrainedTokenizerFast.from_pretrained(str(ckpt / "tokenizer"))
 
-# Persist back to the same checkpoint dir. SLMForCausalLM.save_pretrained
-# handles the tied-weight serialization correctly (it temporarily breaks
-# the tie, saves, then restores).
-model.save_pretrained(ckpt)
-print(f"Re-initialized {len(ids)} special token embeddings in {ckpt}")
+    # Tokens that exist in the vocab but were absent from the pretraining
+    # corpus, so their embedding rows are effectively random. EOS is omitted
+    # because it *was* seen (used as document separator).
+    specials = ["<BOS>", "<|system|>", "<|user|>", "<|assistant|>", "<|endofturn|>"]
+    ids = [tok.convert_tokens_to_ids(s) for s in specials]
+    print("IDs:", dict(zip(specials, ids)))
+
+    # Sanity check: convert_tokens_to_ids returns None or unk_token_id for
+    # unknown tokens. Either case means the tokenizer doesn't actually have
+    # this special — fail loudly rather than silently overwrite a normal
+    # vocab row with the mean.
+    assert all(i is not None and i != tok.unk_token_id for i in ids), \
+        "Special token lookup failed — tokenizer doesn't contain one of these strings"
+
+    # Compute the mean of all *other* embeddings, i.e. tokens that did get
+    # trained during pretraining. This is the "average token" in embedding
+    # space and serves as a neutral prior for the unseen specials.
+    emb = model.get_input_embeddings().weight.data
+    mask = torch.ones(emb.size(0), dtype=torch.bool)
+    mask[ids] = False  # exclude the specials themselves from the mean
+    mean_emb = emb[mask].mean(dim=0)
+
+    # Overwrite each unseen special with the mean. lm_head.weight is tied
+    # to embed_tokens.weight (see SLMForCausalLM.tie_weights), so this also
+    # updates the output projection automatically — no separate edit needed.
+    with torch.no_grad():
+        for i in ids:
+            emb[i] = mean_emb
+
+    # Persist back to the same checkpoint dir. SLMForCausalLM.save_pretrained
+    # handles the tied-weight serialization correctly (it temporarily breaks
+    # the tie, saves, then restores).
+    model.save_pretrained(str(ckpt))
+    print(f"Re-initialized {len(ids)} special token embeddings in {ckpt}")
+
+
+if __name__ == "__main__":
+    main()

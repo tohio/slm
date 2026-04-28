@@ -280,40 +280,13 @@ Before first run, visit and accept terms on these HuggingFace dataset pages (req
 **Run the full pipeline**
 
 ```bash
-# ── Step 1: Curation instance (CPU) ──────────────────────────────────────────
-make download-fasttext-model DATA_DIR=/data/slm/data   # language ID model (~1MB)
-make download-kenlm-model    DATA_DIR=/data/slm/data   # perplexity model (~4GB)
-
-# ── Step 2: Validate curation pipeline ───────────────────────────────────────
-# Exercises every curation stage end-to-end on tiny data — all 12 sources.
-# All tests run here — catch issues before spending hours on the full run.
-make curate-mini && make test-curator
-make validate    && make test-validate
-make tokenizer   && make test-tokenizer
-make tokenize                     # produces train.bin + val.bin
-make tokenize-upload SIZE=mini    # push mini tokenized binaries to S3 for GPU instance
-make tokenizer-upload             # push tokenizer to S3 (shared across all sizes)
-
-# ── Step 3: Full curation ─────────────────────────────────────────────────────
-make curate SIZE=125m WORKERS=62    # Stage 1: download, filter, dedup, blend (→ train.jsonl + val.jsonl), upload
-make validate                       # Stage 2: perplexity filter (applied to both splits)
-make validate-upload SIZE=125m      # Stage 2: push validated data to S3
-make tokenizer                      # Stage 3: train BPE tokenizer
-make tokenizer-upload               # Stage 3: push tokenizer to S3
-make tokenize                       # Stage 4a: tokenize both splits to binary
-make tokenize-upload SIZE=125m      # Stage 4a: push tokenized binaries to S3
-
-# ── Step 4: GPU instance setup ───────────────────────────────────────────────
-# For mini validation — pulls mini tokenized binaries and tokenizer from S3
-make setup-gpu DATA_DIR=/data/slm/data SIZE=mini DATE=YYYY-MM-DD
-source ~/.bashrc
-
 # ── Step 5: Validate training pipeline ───────────────────────────────────────
 # Exercises every training stage end-to-end on a single GPU.
 # All tests run here — catch issues before spending hours on the full run.
 # GPU pipeline test targets default to SIZE=mini, so no flag needed here.
 make accelerate-config-single       # single GPU for mini validation
 make pretrain-mini  GPUS=1 && make test-training  SIZE=mini
+make reinit-embeds  SIZE=mini       # Stage 4c: re-init chat special-token embeds before SFT
 make prepare-sft
 make sft-mini       GPUS=1 && make test-sft-chat  SIZE=mini
 make sft-code-mini  GPUS=1 && make test-sft-code  SIZE=mini
@@ -331,6 +304,7 @@ make setup-gpu DATA_DIR=/data/slm/data SIZE=125m DATE=YYYY-MM-DD
 make accelerate-config-single        # single GPU — change to: make accelerate-config-multi GPUS=x for multi-GPU
 make config-gen      SIZE=125m GPUS=1   # Stage 4-6: auto-tune pretrain + sft + dpo configs for current GPU
 make pretrain        SIZE=125m GPUS=1   # Stage 4b: pretrain from scratch
+make reinit-embeds   SIZE=125m          # Stage 4c: re-init chat special-token embeds before SFT
 make eval-base       SIZE=125m          # Stage 7:  evaluate base variant
 make export-base     SIZE=125m          # Stage 8:  push base model to Hub
 make prepare-sft

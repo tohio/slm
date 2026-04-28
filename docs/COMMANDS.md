@@ -775,6 +775,24 @@ make pretrain-resume SIZE=125m GPUS=4
 
 ---
 
+### `make reinit-embeds`
+
+Re-initializes the chat-template special token embeddings (`<BOS>`, `<|system|>`, `<|user|>`, `<|assistant|>`, `<|endofturn|>`) to the mean of all trained token embeddings. These tokens exist in the tokenizer vocabulary but are absent from the pretraining corpus, so their embedding rows received essentially no gradient signal during pretraining and remain near random initialization. Replacing them with the mean of trained embeddings gives them a sensible prior at the centroid of the learned embedding manifold, so SFT loss starts near the pretraining baseline (~3) instead of ~11.
+
+EOS is not touched — it was used as a document separator during pretraining and is already trained.
+
+```bash
+make reinit-embeds SIZE=125m
+make reinit-embeds SIZE=mini
+```
+
+**Requires:** `results/slm-$(SIZE)/final` produced by `make pretrain`.
+**Produces:** Overwrites `results/slm-$(SIZE)/final/` in place with the modified embeddings. Tied `lm_head` weights are updated automatically.
+**Run before:** `make eval-base` and `make export-base` — so the published base model carries the prepared embeddings, and anyone fine-tuning from your Hub release gets the same head start you do.
+**Idempotent in effect:** Running twice sets the same mean again. Do not run after SFT has started — it will erase learned weights for the chat tokens.
+
+---
+
 ## Stage 5 — Supervised Fine-Tuning
 
 ---
@@ -1174,6 +1192,7 @@ make eval-mini
 make accelerate-config-multi GPUS=8
 make config-gen      SIZE=125m GPUS=8       # convenience: auto-tune pretrain + sft + dpo configs
 make pretrain        SIZE=125m GPUS=8
+make reinit-embeds   SIZE=125m              # Stage 4c: re-init chat special-token embeds before SFT
 make eval-base       SIZE=125m
 make export-base     SIZE=125m
 make prepare-sft
@@ -1236,6 +1255,7 @@ make setup-gpu DATA_DIR=/data/slm/data SIZE=1b DATE=2026-04-15
 # GPU pipeline test targets default to SIZE=mini, no flag needed.
 make accelerate-config-single
 make pretrain-mini  GPUS=1 && make test-training
+make reinit-embeds  SIZE=mini       # Stage 4c: re-init chat special-token embeds before SFT
 make prepare-sft
 make sft-mini       GPUS=1 && make test-sft-chat
 make sft-code-mini  GPUS=1 && make test-sft-code
@@ -1248,6 +1268,7 @@ make eval-mini
 make accel-gen-fsdp GPUS=8           # accelerate config: FSDP for 1b
 make config-gen      SIZE=1b GPUS=8   # auto-tune all training configs (pretrain + sft + dpo)
 make pretrain        SIZE=1b GPUS=8   # Stage 4b: pretrain from scratch
+make reinit-embeds   SIZE=1b          # Stage 4c: re-init chat special-token embeds before SFT
 make eval-base       SIZE=1b          # Stage 7:  evaluate base
 make export-base     SIZE=1b          # Stage 8:  push base to Hub
 make prepare-sft                      # Stage 5a: download SFT datasets

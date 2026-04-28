@@ -70,7 +70,7 @@ endif
         tokenizer tokenizer-test tokenize tokenize-upload tokenize-download tokenizer-upload tokenizer-download \
         config-gen config-gen-pretrain config-gen-sft config-gen-dpo \
         accel-gen-ddp accel-gen-fsdp \
-        pretrain pretrain-mini pretrain-resume prepare-sft sft sft-mini sft-resume sft-code sft-code-mini sft-code-resume \
+        pretrain pretrain-mini pretrain-resume reinit-embeds prepare-sft sft sft-mini sft-resume sft-code sft-code-mini sft-code-resume \
         prepare-dpo dpo dpo-mini dpo-resume eval eval-base eval-instruct eval-chat eval-mini serve serve-local \
         export export-base export-instruct export-chat \
         setup setup-data-dir setup-gpu install install-gpu install-uv install-conda install-kenlm install-orjson \
@@ -234,6 +234,10 @@ pretrain-mini:
 	@echo "==> Stage 4b: Mini pretraining run (pipeline validation)"
 	$(ACCELERATE) pretrain/train.py \
 		--config pretrain/configs/gpt_mini.yaml
+
+reinit-embeds:
+	@echo "==> Stage 4c: Re-init chat special-token embeddings ($(SIZE))"
+	$(PYTHON) scripts/reinit_special_embeds.py --size $(SIZE)
 
 # ── Stage 5: SFT ──────────────────────────────────────────────────────────────
 
@@ -586,6 +590,7 @@ help:
 	@echo "  tokenize-upload    Stage 4a — upload tokenized binaries to S3"
 	@echo "  pretrain           Stage 4b — pretrain from scratch"
 	@echo "  pretrain-mini      Stage 4b — mini pretrain run"
+	@echo "  reinit-embeds      Stage 4c — re-init chat special-token embeds before SFT"
 	@echo "  prepare-sft        Stage 5a — download SFT datasets"
 	@echo "  sft                Stage 5b — chat supervised fine-tuning"
 	@echo "  sft-mini           Stage 5b — mini chat SFT"
