@@ -375,14 +375,8 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
                 shift_labels.view(-1),
             )
 
-        # Trainer / torch.compile-safe path
-        if labels is not None:
-            return {
-                "loss": loss,
-                "logits": logits,
-            }
-
-        # Generation / Hugging Face ecosystem path
+    
+        # Return Hugging Face-compatible ModelOutput for Trainer, TRL, generation, and eval.
         return CausalLMOutputWithPast(
             loss=loss,
             logits=logits,

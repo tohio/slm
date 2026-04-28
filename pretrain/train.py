@@ -143,16 +143,14 @@ class VRAMProbe(TrainerCallback):
 
 class SLMTrainer(Trainer):
     """
-    Trainer subclass with an explicit compute_loss override.
+    Trainer subclass for pretraining.
 
-    SLMForCausalLM returns a plain dict when labels are present during
-    training/eval. This avoids a torch.compile / Accelerate Dynamo issue
-    where CausalLMOutputWithPast can be reconstructed incorrectly during
-    scheduled eval, causing `.loss` to become a dict instead of a tensor.
+    The model always returns CausalLMOutputWithPast for compatibility with
+    Hugging Face, TRL SFTTrainer, DPOTrainer, generation, and eval tooling.
 
-    For generation or inference paths where labels are not present,
-    SLMForCausalLM can still return CausalLMOutputWithPast for Hugging Face
-    compatibility.
+    This trainer avoids the torch.compile / Accelerate Dynamo eval issue by
+    explicitly reading outputs.loss during prediction_step instead of relying
+    on the default Trainer output-unpacking path.
     """
 
     def compute_loss(
@@ -163,17 +161,12 @@ class SLMTrainer(Trainer):
         num_items_in_batch=None,
     ):
         outputs = model(**inputs)
-
-        if isinstance(outputs, dict):
-            loss = outputs.get("loss")
-        else:
-            loss = outputs.loss
+        loss = outputs.loss
 
         if loss is None:
             raise ValueError(
                 "Model returned no loss. Check that 'labels' is present in inputs. "
-                f"Available keys: {list(inputs.keys())}. "
-                f"Output type: {type(outputs)}"
+                f"Available keys: {list(inputs.keys())}"
             )
 
         if not torch.is_tensor(loss):
@@ -182,6 +175,44 @@ class SLMTrainer(Trainer):
             )
 
         return (loss, outputs) if return_outputs else loss
+
+    def prediction_step(
+        self,
+        model,
+        inputs,
+        prediction_loss_only,
+        ignore_keys=None,
+    ):
+        """
+        Custom eval step for pretraining.
+
+        Avoids default Trainer.prediction_step output unpacking, which can
+        mis-handle compiled ModelOutput objects during scheduled eval.
+        """
+        inputs = self._prepare_inputs(inputs)
+
+        with torch.no_grad():
+            outputs = model(**inputs)
+            loss = outputs.loss
+
+        if loss is None:
+            raise ValueError("Model returned no eval loss.")
+
+        if not torch.is_tensor(loss):
+            raise TypeError(
+                f"Expected eval loss to be a torch.Tensor, got {type(loss)}: {loss}"
+            )
+
+        loss = loss.detach().mean()
+
+        if prediction_loss_only:
+            return loss, None, None
+
+        logits = outputs.logits.detach() if outputs.logits is not None else None
+        labels = inputs.get("labels")
+        labels = labels.detach() if labels is not None else None
+
+        return loss, logits, labels
 
 
 def build_training_args(cfg: dict, output_dir: Path, resume: bool):
