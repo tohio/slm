@@ -10,7 +10,7 @@ All targets accept these variables as overrides:
 
 | Variable | Default | Description |
 |---|---|---|
-| `SIZE` | `125m` | Model size target — controls data volume and config selection. One of `125m`, `350m`, `1b`. |
+| `SIZE` | `125m` | Model size target — controls data volume and config selection. One of `mini`, `125m`, `350m`, `1b`. |
 | `GPUS` | `1` | Number of GPUs for `accelerate launch`. Used by `pretrain`, `sft`, `sft-code`, `dpo`. |
 | `WORKERS` | _(cpu_count - 2)_ | Parallel workers for filter, dedup, and blend stages. Defaults to `cpu_count - 2` automatically — only set this to override. |
 | `DATA_DIR` | `data` | Root data directory. Override when using a separate disk volume. |
@@ -235,58 +235,65 @@ make test-data-pipeline
 
 ### `make test-training`
 
-Validates `make pretrain-mini` outputs — model loads, config matches `gpt_mini.yaml`, loss is finite and below random init threshold, dataset indexing correct.
+Validates pretrain outputs — model loads, config matches the size's YAML, loss is finite and below random-init threshold, dataset indexing correct.
+
+Defaults to `SIZE=mini` so the standard pipeline-validation flow (`pretrain-mini` → `test-training`) works with no flag. Pass `SIZE=<size>` to validate a full run.
 
 ```bash
-make pretrain-mini GPUS=1 && make test-training
+make pretrain-mini  GPUS=1 && make test-training            # validates results/slm-mini/final
+make test-training  SIZE=125m                                # validates results/slm-125m/final
 ```
 
-**Requires:** GPU instance, `make pretrain-mini` completed.
+**Requires:** GPU instance, the matching pretrain run completed.
 
 ---
 
 ### `make test-sft-chat`
 
-Validates `make sft-mini` outputs — SFT data format, chat model loads, tokenizer has chat template, forward pass finite, generation runs.
+Validates chat SFT outputs — SFT data format, chat model loads, tokenizer has chat template, forward pass finite, generation runs.
 
 ```bash
-make sft-mini GPUS=1 && make test-sft-chat
+make sft-mini GPUS=1 && make test-sft-chat                  # validates results/slm-mini-chat/final
+make test-sft-chat SIZE=125m                                # validates results/slm-125m-chat/final
 ```
 
-**Requires:** `make test-training` passing, `make sft-mini` completed.
+**Requires:** `make test-training` passing, the matching SFT run completed.
 
 ---
 
 ### `make test-sft-code`
 
-Validates `make sft-code-mini` outputs — code model loads, forward pass finite, code special tokens present.
+Validates code SFT outputs — code model loads, forward pass finite, code special tokens present.
 
 ```bash
-make sft-code-mini GPUS=1 && make test-sft-code
+make sft-code-mini GPUS=1 && make test-sft-code             # validates results/slm-mini-chat-code/final
+make test-sft-code SIZE=125m                                # validates results/slm-125m-chat-code/final
 ```
 
-**Requires:** `make test-sft-chat` passing, `make sft-code-mini` completed.
+**Requires:** `make test-sft-chat` passing, the matching code SFT run completed.
 
 ---
 
 ### `make test-dpo`
 
-Validates `make dpo-mini` outputs — DPO data format (prompt/chosen/rejected), chosen ≠ rejected, model loads, forward pass finite, generation runs.
+Validates DPO outputs — DPO data format (prompt/chosen/rejected), chosen ≠ rejected, model loads, forward pass finite, generation runs.
 
 ```bash
-make dpo-mini GPUS=1 && make test-dpo
+make dpo-mini GPUS=1 && make test-dpo                       # validates results/slm-mini-dpo/final
+make test-dpo SIZE=125m                                     # validates results/slm-125m-dpo/final
 ```
 
-**Requires:** `make test-sft-code` passing, `make dpo-mini` completed.
+**Requires:** `make test-sft-code` passing, the matching DPO run completed.
 
 ---
 
 ### `make test-gpu-pipeline`
 
-Runs all four GPU pipeline tests in sequence.
+Runs all four GPU pipeline tests in sequence. Respects `SIZE`.
 
 ```bash
-make test-gpu-pipeline
+make test-gpu-pipeline                # all four against mini (default)
+make test-gpu-pipeline SIZE=125m      # all four against 125m
 ```
 
 ---
@@ -339,15 +346,7 @@ make test-unit
 
 ## Stage 1 — Data Curation
 
-Downloads raw data from three sources (Wikipedia, CodeSearchNet Python, Common Crawl), applies quality filters, deduplicates, blends to target token ratios, and uploads to S3.
-
-### Source mix
-
-| Source | Mix | Tokens (1b target) | Notes |
-|---|---|---|---|
-| Common Crawl | 55% | 16.5B | Broad web coverage, aggressive filtering |
-| Wikipedia EN | 25% | 7.5B | High quality, factual, structured |
-| CodeSearchNet | 20% | 6B | Python only |
+Downloads raw data from 12 sources (7 non-code top-level + 5 code sub-sources), applies quality filters, deduplicates, blends to target token ratios, and uploads to S3. The mix is defined in `config/data_mix.py` — see [README.md](../README.md#source-mix) for the full per-source breakdown.
 
 ### Token targets
 
@@ -390,14 +389,14 @@ make curate-mini
 
 ### `make curate-download`
 
-Runs the download stage only — fetches Wikipedia, CodeSearchNet (Python), and Common Crawl raw data.
+Runs the download stage only — fetches raw data for all 12 sources.
 
 ```bash
 make curate-download SIZE=125m
 ```
 
-**Produces:** `data/raw/wikipedia/`, `data/raw/code/`, `data/raw/common_crawl/`
-**Resume behaviour:** Wikipedia and code skip shards already on disk. Common Crawl resumes from `data/raw/common_crawl/cc_progress.json` — delete that file to force a full re-download.
+**Produces:** `data/raw/<source>/` for each source.
+**Resume behaviour:** Most sources skip shards already on disk. Common Crawl resumes from `data/raw/common_crawl/cc_progress.json` — delete that file to force a full re-download.
 
 ---
 
@@ -411,7 +410,7 @@ make curate-filter SIZE=125m WORKERS=62   # override worker count
 ```
 
 **Requires:** `data/raw/` populated by `make curate-download`, fasttext model at `data/models/lid.176.ftz`.
-**Produces:** `data/filtered/wikipedia/`, `data/filtered/code/`, `data/filtered/common_crawl/`
+**Produces:** `data/filtered/<source>/` for each source.
 **Resume behaviour:** Skips shards already present in the filtered output directory.
 
 **Filters applied:**
@@ -442,14 +441,14 @@ make curate-dedup SIZE=125m WORKERS=62
 ```
 
 **Requires:** `data/filtered/` populated by `make curate-filter`.
-**Produces:** `data/filtered/wikipedia_deduped/`, `data/filtered/code_deduped/`, `data/filtered/common_crawl_deduped/`
+**Produces:** `data/filtered/<source>_deduped/` for each source.
 **Resume behaviour:** Skips sources where the deduped output directory already exists.
 
 ---
 
 ### `make curate-blend`
 
-Blends deduped sources to the target token ratio (55% CC / 25% Wikipedia / 20% code) and writes the final `train.jsonl`. Parallel staging writes one intermediate file per source, then a single-pass shuffle produces the final output. For corpora that fit in RAM (controlled by the `SHUFFLE_RAM_BUDGET_GB` env var, default 64GB), the shuffle is done in memory; for larger corpora the pipeline falls back to a two-pass chunked disk shuffle with purely sequential I/O.
+Blends deduped sources to the target token ratio defined in `config/data_mix.py` and writes the final `train.jsonl` and `val.jsonl`. Parallel staging writes one intermediate file per source, then a single-pass shuffle produces the final output. For corpora that fit in RAM (controlled by the `SHUFFLE_RAM_BUDGET_GB` env var, default 64GB), the shuffle is done in memory; for larger corpora the pipeline falls back to a two-pass chunked disk shuffle with purely sequential I/O.
 
 ```bash
 make curate-blend SIZE=125m
@@ -460,7 +459,7 @@ SHUFFLE_RAM_BUDGET_GB=0 make curate-blend SIZE=1b
 ```
 
 **Requires:** All `*_deduped/` directories populated by `make curate-dedup`.
-**Produces:** `data/curated/train.jsonl`, `data/curated/blend_stats.json`
+**Produces:** `data/curated/train.jsonl`, `data/curated/val.jsonl`, `data/curated/blend_stats.json`
 **Resume behaviour:** Skips if `train.jsonl` already exists — delete it to re-blend. Per-source staging files (`blend_{source}.jsonl`) are reused on restart if present.
 
 ---
@@ -487,14 +486,14 @@ Applies a second round of quality filtering and perplexity filtering to the blen
 
 ### `make validate`
 
-Runs the validation pipeline on `data/curated/train.jsonl`. Applies terminal punctuation check (C4), repeated n-gram check (Gopher), language detection (fasttext via datatrove), and perplexity filtering (KenLM, auto-threshold at 90th percentile). Skips perplexity filter for code documents.
+Runs the validation pipeline on `data/curated/train.jsonl` and `val.jsonl`. Applies terminal punctuation check (C4), repeated n-gram check (Gopher), language detection (fasttext via datatrove), and perplexity filtering (KenLM, auto-threshold at 90th percentile). Skips perplexity filter for code documents.
 
 ```bash
 make validate
 ```
 
 **Requires:** `data/curated/train.jsonl`, KenLM model at `data/models/en.arpa.bin`.
-**Produces:** `data/validated/train.jsonl`, `data/validated/validation_stats.json`
+**Produces:** `data/validated/train.jsonl`, `data/validated/val.jsonl`, `data/validated/validation_stats.json`
 
 ---
 
@@ -507,7 +506,7 @@ make validate-upload SIZE=125m
 ```
 
 **Requires:** `data/validated/train.jsonl` produced by `make validate`.
-**Produces:** `s3://your-bucket/slm/data/125m/YYYY-MM-DD/validated/train.jsonl`
+**Produces:** `s3://your-bucket/slm/data/125m/YYYY-MM-DD/validated/`
 
 ---
 
@@ -560,14 +559,14 @@ Tokenizes the dataset to binary format, generates a per-GPU training config, and
 
 ### `make tokenize`
 
-Tokenizes `data/validated/train.jsonl` to a memory-mapped uint16 binary file. Worker count defaults to `cpu_count - 2` automatically. Verifies the output after writing.
+Tokenizes `data/validated/train.jsonl` and `val.jsonl` to memory-mapped uint16 binary files. Worker count defaults to `cpu_count - 2` automatically. Verifies the output after writing.
 
 ```bash
 make tokenize
 ```
 
 **Requires:** `data/validated/train.jsonl`, `data/tokenizer/`
-**Produces:** `data/tokenized/train.bin`
+**Produces:** `data/tokenized/train.bin`, `data/tokenized/val.bin`
 
 ---
 
@@ -719,7 +718,7 @@ make tokenize-download SIZE=125m DATE=2026-04-12
 ```
 
 **Requires:** A prior `make tokenize-upload` run, AWS credentials in `.env`.
-**Produces:** `data/tokenized/train.bin`
+**Produces:** `data/tokenized/train.bin`, `data/tokenized/val.bin`
 
 ---
 
@@ -802,7 +801,7 @@ make sft CONFIG=finetune/configs/sft_chat_125m.yaml GPUS=4
 ```
 
 **Requires:** `results/slm-$(SIZE)/final`, `data/sft/chat/`, `finetune/configs/sft_chat_$(SIZE).yaml` (run `make config-gen-sft` first)
-**Produces:** `results/slm-$(SIZE)-sft/` checkpoints.
+**Produces:** `results/slm-$(SIZE)-chat/` checkpoints.
 
 ---
 
@@ -824,8 +823,8 @@ Runs code supervised fine-tuning on the chat SFT checkpoint. Uses a lower learni
 make sft-code SIZE=125m GPUS=4
 ```
 
-**Requires:** `results/slm-$(SIZE)-sft/final`, `data/sft/code/`, `finetune/configs/sft_code_$(SIZE).yaml` (run `make config-gen-sft` first)
-**Produces:** `results/slm-$(SIZE)-sft-code/` checkpoints.
+**Requires:** `results/slm-$(SIZE)-chat/final`, `data/sft/code/`, `finetune/configs/sft_code_$(SIZE).yaml` (run `make config-gen-sft` first)
+**Produces:** `results/slm-$(SIZE)-chat-code/` checkpoints.
 
 ---
 
@@ -864,7 +863,7 @@ make dpo SIZE=125m GPUS=2
 make dpo CONFIG=alignment/configs/dpo_125m.yaml GPUS=2
 ```
 
-**Requires:** `results/slm-$(SIZE)-sft-code/final`, `data/dpo/`, `alignment/configs/dpo_$(SIZE).yaml` (run `make config-gen-dpo` first)
+**Requires:** `results/slm-$(SIZE)-chat-code/final`, `data/dpo/`, `alignment/configs/dpo_$(SIZE).yaml` (run `make config-gen-dpo` first)
 **Produces:** `results/slm-$(SIZE)-dpo/` checkpoints.
 
 ---
@@ -881,18 +880,68 @@ make dpo-resume SIZE=125m GPUS=2
 
 ## Stage 7 — Evaluation
 
+Each variant has its own eval target so per-variant model cards (written by `make export-*`) carry real benchmark scores. Eval results land under `results/eval/<checkpoint-name>/` — that's where `export.py` reads them from.
+
+---
+
+### `make eval-base`
+
+Evaluates the base pretrained checkpoint on standard benchmarks via `lm-evaluation-harness`: HellaSwag, ARC-Easy, ARC-Challenge, MMLU, TruthfulQA, HumanEval.
+
+```bash
+make eval-base SIZE=125m
+```
+
+**Requires:** `results/slm-$(SIZE)/final`
+**Produces:** `results/eval/slm-$(SIZE)/eval_<timestamp>.json`
+
+---
+
+### `make eval-instruct`
+
+Evaluates the SFT-tuned (chat + code) checkpoint.
+
+```bash
+make eval-instruct SIZE=125m
+```
+
+**Requires:** `results/slm-$(SIZE)-chat-code/final`
+**Produces:** `results/eval/slm-$(SIZE)-chat-code/eval_<timestamp>.json`
+
+---
+
+### `make eval-chat`
+
+Evaluates the DPO-aligned checkpoint.
+
+```bash
+make eval-chat SIZE=125m
+```
+
+**Requires:** `results/slm-$(SIZE)-dpo/final`
+**Produces:** `results/eval/slm-$(SIZE)-dpo/eval_<timestamp>.json`
+
 ---
 
 ### `make eval`
 
-Evaluates the final DPO checkpoint on standard benchmarks via `lm-evaluation-harness`: HellaSwag, ARC-Easy, ARC-Challenge, MMLU, TruthfulQA, HumanEval.
+Alias for `make eval-chat` — evaluates the final aligned variant. The default for callers that want "the eval" without thinking about variants.
 
 ```bash
 make eval SIZE=125m
 ```
 
-**Requires:** `results/slm-$(SIZE)-dpo/final`
-**Produces:** Benchmark results printed to stdout and saved to `results/slm-$(SIZE)-dpo/eval/`.
+---
+
+### `make eval-mini`
+
+Quick smoke test — runs HellaSwag with a 50-example limit on the mini DPO checkpoint. ~2 minutes. Use after `dpo-mini` during pipeline validation.
+
+```bash
+make eval-mini
+```
+
+**Requires:** `results/slm-mini-dpo/final`.
 
 ---
 
@@ -902,20 +951,20 @@ make eval SIZE=125m
 
 ### `make export`
 
-Exports all three model variants to HuggingFace Hub.
+Exports all three model variants to HuggingFace Hub. Each variant's model card includes whatever eval results are present in `results/eval/<checkpoint-name>/` at the time of export — run `make eval-base`, `eval-instruct`, `eval-chat` beforehand to populate them.
 
 ```bash
 make export SIZE=125m
 ```
 
-**Requires:** All three checkpoints present, `HF_TOKEN` in `.env`.
-**Produces:** `tohio/slm-$(SIZE)`, `tohio/slm-$(SIZE)-instruct`, `tohio/slm-$(SIZE)-chat` on Hub.
+**Requires:** All three checkpoints present, `HF_TOKEN` and `HF_USERNAME` in `.env`.
+**Produces:** `<HF_USERNAME>/slm-$(SIZE)`, `<HF_USERNAME>/slm-$(SIZE)-instruct`, `<HF_USERNAME>/slm-$(SIZE)-chat` on Hub.
 
 ---
 
 ### `make export-base`
 
-Exports the base pretrained checkpoint to `tohio/slm-{size}`.
+Exports the base pretrained checkpoint to `<HF_USERNAME>/slm-{size}`. Reads `results/eval/slm-{size}/eval_<latest>.json` for the model card if present.
 
 ```bash
 make export-base SIZE=125m
@@ -925,7 +974,7 @@ make export-base SIZE=125m
 
 ### `make export-instruct`
 
-Exports the instruction-tuned checkpoint to `tohio/slm-{size}-instruct`.
+Exports the instruction-tuned checkpoint to `<HF_USERNAME>/slm-{size}-instruct`.
 
 ```bash
 make export-instruct SIZE=125m
@@ -935,7 +984,7 @@ make export-instruct SIZE=125m
 
 ### `make export-chat`
 
-Exports the DPO-aligned checkpoint to `tohio/slm-{size}-chat`.
+Exports the DPO-aligned checkpoint to `<HF_USERNAME>/slm-{size}-chat`.
 
 ```bash
 make export-chat SIZE=125m
@@ -1106,7 +1155,7 @@ sudo apt install -y make
 
 # 3. Fill in credentials
 cp .env.sample .env
-vi .env    # WANDB_API_KEY, HF_TOKEN, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, S3_BUCKET
+vi .env    # WANDB_API_KEY, HF_TOKEN, HF_USERNAME, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, S3_BUCKET
 
 # 4. Run GPU setup
 make setup-gpu DATA_DIR=/data/slm/data SIZE=125m DATE=2026-04-12
@@ -1123,15 +1172,19 @@ make eval-mini
 
 # 6. Generate configs tuned for current GPU, then run full pipeline
 make accelerate-config-multi GPUS=8
-make config-gen  SIZE=125m GPUS=8       # convenience: auto-tune pretrain + sft + dpo configs
-make pretrain    SIZE=125m GPUS=8
+make config-gen      SIZE=125m GPUS=8       # convenience: auto-tune pretrain + sft + dpo configs
+make pretrain        SIZE=125m GPUS=8
+make eval-base       SIZE=125m
+make export-base     SIZE=125m
 make prepare-sft
-make sft         SIZE=125m GPUS=8
-make sft-code    SIZE=125m GPUS=8
+make sft             SIZE=125m GPUS=8
+make sft-code        SIZE=125m GPUS=8
+make eval-instruct   SIZE=125m
+make export-instruct SIZE=125m
 make prepare-dpo
-make dpo         SIZE=125m GPUS=8
-make eval        SIZE=125m
-make export      SIZE=125m
+make dpo             SIZE=125m GPUS=8
+make eval-chat       SIZE=125m              # also: make eval
+make export-chat     SIZE=125m
 ```
 
 ### After a preemptible restart
@@ -1180,28 +1233,33 @@ make tokenize-upload SIZE=1b        # Stage 4a: push tokenized binary to S3
 make setup-gpu DATA_DIR=/data/slm/data SIZE=1b DATE=2026-04-15
 
 # ── Validate training pipeline ─────────────────────────────────────────────────
+# GPU pipeline test targets default to SIZE=mini, no flag needed.
 make accelerate-config-single
-make pretrain-mini  GPUS=1          # validate training loop (~5–10 min)
+make pretrain-mini  GPUS=1 && make test-training
 make prepare-sft
-make sft-mini       GPUS=1
-make sft-code-mini  GPUS=1
+make sft-mini       GPUS=1 && make test-sft-chat
+make sft-code-mini  GPUS=1 && make test-sft-code
 make prepare-dpo
-make dpo-mini       GPUS=1
+make dpo-mini       GPUS=1 && make test-dpo
 make eval-mini
 
 # ── Full training ──────────────────────────────────────────────────────────────
 # 1b on multi-GPU benefits from FSDP (saves ~10 GB/GPU on optimizer state)
 make accel-gen-fsdp GPUS=8           # accelerate config: FSDP for 1b
-make config-gen  SIZE=1b GPUS=8      # auto-tune all training configs (pretrain + sft + dpo)
-make pretrain    SIZE=1b GPUS=8      # Stage 4b: pretrain from scratch
-make prepare-sft                     # Stage 5a: download SFT datasets
-make sft         SIZE=1b GPUS=8      # Stage 5b: chat SFT
-make sft-code    SIZE=1b GPUS=8      # Stage 5c: code SFT
-make prepare-dpo                     # Stage 6a: download DPO datasets
-make dpo         SIZE=1b GPUS=8      # Stage 6b: DPO alignment
+make config-gen      SIZE=1b GPUS=8   # auto-tune all training configs (pretrain + sft + dpo)
+make pretrain        SIZE=1b GPUS=8   # Stage 4b: pretrain from scratch
+make eval-base       SIZE=1b          # Stage 7:  evaluate base
+make export-base     SIZE=1b          # Stage 8:  push base to Hub
+make prepare-sft                      # Stage 5a: download SFT datasets
+make sft             SIZE=1b GPUS=8   # Stage 5b: chat SFT
+make sft-code        SIZE=1b GPUS=8   # Stage 5c: code SFT
+make eval-instruct   SIZE=1b          # Stage 7:  evaluate instruct
+make export-instruct SIZE=1b          # Stage 8:  push instruct to Hub
+make prepare-dpo                      # Stage 6a: download DPO datasets
+make dpo             SIZE=1b GPUS=8   # Stage 6b: DPO alignment
+make eval-chat       SIZE=1b          # Stage 7:  evaluate chat (also: make eval)
+make export-chat     SIZE=1b          # Stage 8:  push chat to Hub
 
 # ── Ship ───────────────────────────────────────────────────────────────────────
-make eval        SIZE=1b            # Stage 7: benchmark evaluation
-make export      SIZE=1b            # Stage 8: push to HuggingFace Hub
-make serve       SIZE=1b            # Stage 10: launch vLLM server
+make serve           SIZE=1b          # Stage 10: launch vLLM server
 ```

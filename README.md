@@ -176,6 +176,7 @@ slm/
 │   ├── model/
 │   │   └── test_model.py
 │   └── gpu_pipeline/
+│       ├── conftest.py            adds --size pytest option for GPU pipeline tests
 │       ├── test_pipeline_training.py
 │       ├── test_pipeline_sft.py
 │       └── test_pipeline_dpo.py
@@ -310,13 +311,14 @@ source ~/.bashrc
 # ── Step 5: Validate training pipeline ───────────────────────────────────────
 # Exercises every training stage end-to-end on a single GPU.
 # All tests run here — catch issues before spending hours on the full run.
+# GPU pipeline test targets default to SIZE=mini, so no flag needed here.
 make accelerate-config-single       # single GPU for mini validation
-make pretrain-mini  GPUS=1 && make test-training
+make pretrain-mini  GPUS=1 && make test-training  SIZE=mini
 make prepare-sft
-make sft-mini       GPUS=1 && make test-sft-chat
-make sft-code-mini  GPUS=1 && make test-sft-code
+make sft-mini       GPUS=1 && make test-sft-chat  SIZE=mini
+make sft-code-mini  GPUS=1 && make test-sft-code  SIZE=mini
 make prepare-dpo
-make dpo-mini       GPUS=1 && make test-dpo
+make dpo-mini       GPUS=1 && make test-dpo       SIZE=mini
 make eval-mini
 
 # ── Step 6: Full training ─────────────────────────────────────────────────────
@@ -329,12 +331,16 @@ make setup-gpu DATA_DIR=/data/slm/data SIZE=125m DATE=YYYY-MM-DD
 make accelerate-config-single        # single GPU — change to: make accelerate-config-multi GPUS=x for multi-GPU
 make config-gen      SIZE=125m GPUS=1   # Stage 4-6: auto-tune pretrain + sft + dpo configs for current GPU
 make pretrain        SIZE=125m GPUS=1   # Stage 4b: pretrain from scratch
+make eval-base       SIZE=125m          # Stage 7:  evaluate base variant
 make export-base     SIZE=125m          # Stage 8:  push base model to Hub
+make prepare-sft
 make sft             SIZE=125m GPUS=1   # Stage 5b: chat SFT
 make sft-code        SIZE=125m GPUS=1   # Stage 5c: code SFT
+make eval-instruct   SIZE=125m          # Stage 7:  evaluate instruct variant
 make export-instruct SIZE=125m          # Stage 8:  push instruct model to Hub
+make prepare-dpo
 make dpo             SIZE=125m GPUS=1   # Stage 6b: DPO alignment
-make eval            SIZE=125m          # Stage 7:  benchmark evaluation
+make eval-chat       SIZE=125m          # Stage 7:  evaluate chat variant (also: make eval)
 make export-chat     SIZE=125m          # Stage 8:  push chat model to Hub
 make serve                              # Stage 10: launch vLLM server
 ```
@@ -359,13 +365,22 @@ make test-data-pipeline                      # run all three at once
 
 **GPU training instance:**
 
-```bash
-make pretrain-mini  GPUS=1  && make test-training    # validate pretraining
-make sft-mini       GPUS=1  && make test-sft-chat    # validate chat SFT
-make sft-code-mini  GPUS=1  && make test-sft-code    # validate code SFT
-make dpo-mini       GPUS=1  && make test-dpo         # validate DPO
+GPU pipeline test targets accept `SIZE=<size>` to validate any model size. Default is `mini` (matches the pipeline-validation flow). Pass `SIZE=125m` (or `350m`, `1b`) after a full run.
 
-make test-gpu-pipeline                               # run all four at once
+```bash
+# After mini runs (default SIZE=mini)
+make pretrain-mini  GPUS=1  && make test-training
+make sft-mini       GPUS=1  && make test-sft-chat
+make sft-code-mini  GPUS=1  && make test-sft-code
+make dpo-mini       GPUS=1  && make test-dpo
+
+# After full runs
+make test-training  SIZE=125m
+make test-sft-chat  SIZE=125m
+make test-sft-code  SIZE=125m
+make test-dpo       SIZE=125m
+
+make test-gpu-pipeline                               # run all four at once (mini)
 ```
 
 **Unit tests — no pipeline outputs needed, runs anywhere:**
@@ -383,10 +398,10 @@ make test-unit            # all of the above
 | `test-validate` | `validate` | Retention rate, subset correctness, quality of retained docs |
 | `test-tokenizer` | `tokenizer` | Special token IDs, roundtrip, fertility, chat template |
 | `test-data-pipeline` | all three above | Runs curator + validate + tokenizer tests |
-| `test-training` | `pretrain-mini` | Model loads, loss finite and below random init, dataset indexing |
-| `test-sft-chat` | `sft-mini` | SFT data format, model loads, chat template preserved, generation runs |
-| `test-sft-code` | `sft-code-mini` | Code model loads, loss finite, code special tokens present |
-| `test-dpo` | `dpo-mini` | DPO data format, chosen ≠ rejected, model loads, generation runs |
+| `test-training` | `pretrain` (any size) | Model loads, loss finite and below random init, dataset indexing |
+| `test-sft-chat` | `sft` (any size) | SFT data format, model loads, chat template preserved, generation runs |
+| `test-sft-code` | `sft-code` (any size) | Code model loads, loss finite, code special tokens present |
+| `test-dpo` | `dpo` (any size) | DPO data format, chosen ≠ rejected, model loads, generation runs |
 | `test-gpu-pipeline` | all four above | Runs training + sft-chat + sft-code + dpo tests |
 | `test-model` | none | RMSNorm, SwiGLU, GQA, causal mask, weight tying, parameter count |
 | `test-config-gen` | none | `config_gen/config_gen.py` algorithm, invariants, YAML rendering |
@@ -601,7 +616,13 @@ SFT and DPO runtimes are roughly 20–30% of pretraining time at the same model 
 
 ## Evaluation
 
-Models are evaluated on standard benchmarks via `lm-evaluation-harness`:
+Models are evaluated on standard benchmarks via `lm-evaluation-harness`. Each variant — base, instruct, chat — has its own eval target so the per-variant model cards can carry real benchmark scores:
+
+```bash
+make eval-base     SIZE=125m   # after pretrain
+make eval-instruct SIZE=125m   # after SFT (chat + code)
+make eval-chat     SIZE=125m   # after DPO (also: make eval)
+```
 
 | Benchmark | Measures |
 |---|---|
@@ -628,6 +649,8 @@ Models are evaluated on standard benchmarks via `lm-evaluation-harness`:
 
 **Why sequential SFT (chat → code)?** Sequential fine-tuning produces independently evaluable checkpoints at each stage, making regressions immediately visible. The code SFT uses a lower learning rate to reduce catastrophic forgetting of chat capability.
 
+**Why per-variant eval targets?** `eval-base`, `eval-instruct`, and `eval-chat` evaluate the three checkpoints written by the pipeline (`results/slm-{size}/final`, `results/slm-{size}-chat-code/final`, `results/slm-{size}-dpo/final`). Running each one writes its own JSON output, which `export.py` then reads when building per-variant model cards on the Hub. A single combined `eval` target would either skip the base and instruct cards or require running them all in series at the end — splitting them out lets eval run inline with each pipeline stage.
+
 **Why 12 data sources?** Distribution coverage. A model pretrained only on web scrape (even filtered) has characteristic weaknesses: poor factual recall on niche topics, no long-range coherence over book-length spans, weak technical/academic prose, weak math reasoning, weak Q+A structure, weak code. Each of the 12 sources covers a specific gap — 7 non-code top-level sources for prose breadth, plus 5 code sub-sources for code coverage from raw files (stack-v1) through curated function/notebook/intent corpora (CodeSearchNet, stack-smol, jupyter, CoNaLa). See [curator/README.md](curator/README.md) for the full mix and sub-source rationale.
 
 **Why scale-invariant mix percentages?** A reader scaling from 125m to 1b changes one number (`target_tokens`) and gets proportionally more of everything — no per-scale mix tuning. Supply variance is handled by cap-and-redistribute, not by per-scale knobs.
@@ -643,6 +666,8 @@ Models are evaluated on standard benchmarks via `lm-evaluation-harness`:
 **Why a single `config/` package for locked values?** The data mix, token targets, CHARS_PER_TOKEN, CC_CHARS_PER_SEGMENT, PRETRAIN_VAL_FRACTION, and a few other constants are each read by multiple stages (curator, export, pretrain, notebooks, tests). Previously they were duplicated — and the duplicates drifted, most visibly in an export pipeline that was writing stale 3-source pretraining tables to the Hub while the curator was actually running the 12-source mix. Centralising into `config/data_mix.py` with an import-time `validate()` makes drift impossible: every consumer sees the same values, and percentages sum-to-100 at the moment the module is loaded.
 
 **Why a separate `config_gen/` package for `config_gen.py`?** The pretrain configs need to be tuned per GPU — `micro_batch_size` that fits on H200 fits trivially on B200 but not on A100 40GB, and the right `gradient_accumulation_steps` depends on both GPU memory and the count. Hand-tuning these for every (size, GPU, num_gpus) combination is error-prone and stale configs silently waste GPU hours. Centralising the math in `config_gen/config_gen.py` — keyed off measured GPU specs and per-size memory profiles — makes "tune for this hardware" a one-line `make config-gen` rather than a careful manual edit. The script intentionally leaves LR, schedule, and architecture untouched: those are recipe decisions, not hardware decisions.
+
+**Why parametrize GPU pipeline tests by `--size`?** A test pinned to `results/slm-mini/final` skips on any larger checkpoint — defeating the purpose after a real run. The four GPU pipeline test targets (`test-training`, `test-sft-chat`, `test-sft-code`, `test-dpo`) accept `SIZE=<size>` and pass `--size=<size>` to pytest, where a fixture in `tests/gpu_pipeline/conftest.py` derives the model directory. Same tests, same Makefile pattern as everything else, no new targets per size.
 
 **Why vLLM for serving?** PagedAttention enables continuous batching and efficient KV cache management. The OpenAI-compatible API means any client built against the OpenAI SDK works out of the box.
 
@@ -710,8 +735,3 @@ This project is scoped as a complete end-to-end training pipeline and demonstrat
 ## License
 
 MIT
-
-
-![alt text](image.png)
-
-![alt text](image.png)

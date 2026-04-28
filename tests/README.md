@@ -20,16 +20,17 @@ tests/
 │   └── test_cache_and_mask.py          KV cache and attention mask correctness
 │
 └── gpu_pipeline/                       GPU training instance — run after each training stage
-├── test_pipeline_training.py       Validates make pretrain-mini outputs
-├── test_pipeline_sft.py            Validates make sft-mini and sft-code-mini outputs
-└── test_pipeline_dpo.py            Validates make dpo-mini outputs
+    ├── conftest.py                     Adds --size pytest option, derives model dirs
+    ├── test_pipeline_training.py       Validates pretrain outputs (any size)
+    ├── test_pipeline_sft.py            Validates SFT chat + code outputs (any size)
+    └── test_pipeline_dpo.py            Validates DPO outputs (any size)
 ```
 
 ---
 
 ## Workflow
 
-Tests are run immediately after the stage they validate. Each test target is paired with its make stage:
+Tests are run immediately after the stage they validate. Each test target is paired with its make stage.
 
 **CPU curation instance:**
 
@@ -44,14 +45,24 @@ make test-data-pipeline
 
 **GPU training instance:**
 
+The four GPU pipeline test targets (`test-training`, `test-sft-chat`, `test-sft-code`, `test-dpo`) accept `SIZE=<size>` and pass `--size=<size>` through to pytest. A fixture in `tests/gpu_pipeline/conftest.py` derives the checkpoint directory from `--size`. The Makefile default for these targets is `SIZE=mini`, so the standard pipeline-validation flow works with no flag:
+
 ```bash
+# After mini runs (SIZE=mini is the default for these test targets)
 make pretrain-mini  GPUS=1  && make test-training
 make sft-mini       GPUS=1  && make test-sft-chat
 make sft-code-mini  GPUS=1  && make test-sft-code
 make dpo-mini       GPUS=1  && make test-dpo
 
-# Or run all GPU pipeline tests at once
+# After full runs — pass SIZE explicitly
+make test-training  SIZE=125m
+make test-sft-chat  SIZE=125m
+make test-sft-code  SIZE=125m
+make test-dpo       SIZE=125m
+
+# Run all four at once (also respects SIZE)
 make test-gpu-pipeline
+make test-gpu-pipeline SIZE=125m
 ```
 
 **Model unit tests — no pipeline outputs needed:**
@@ -118,20 +129,24 @@ The mini curation run exercises all 12 data sources (7 non-code top-level + 5 co
 | Generation prompt ends with `<\|assistant\|>` | Template generation prompt wrong |
 | First tokenized ID is BOS | Chat template tokenize-path returns wrong shape |
 
-### `test-training` — after `make pretrain-mini`
+### `test-training` — after a pretrain run
+
+Defaults to validating `results/slm-mini/final`. Pass `SIZE=<size>` to validate any other size's pretrain checkpoint, e.g. `make test-training SIZE=125m` validates `results/slm-125m/final`.
 
 | Check | What it catches |
 |---|---|
-| `results/slm-mini/final/` exists | Training didn't complete |
+| `results/slm-<size>/final/` exists | Training didn't complete |
 | Model files present | Checkpoint not saved |
 | Tokenizer saved alongside model | `shutil.copytree` failed |
-| Config matches `gpt_mini.yaml` | Wrong config used |
+| Config matches `gpt_<size>.yaml` | Wrong config used |
 | Forward pass loss is finite | NaN/Inf during training |
 | Loss < 6.0 on training data | Model not learning (collapse) |
 | Dataset indexing correct | `PretrainingDataset` bug |
 | Labels = input_ids shifted left | Dataset shift bug |
 
-### `test-sft-chat` — after `make sft-mini`
+### `test-sft-chat` — after a chat SFT run
+
+Defaults to `results/slm-mini-chat/final`. Pass `SIZE=<size>` to validate other sizes.
 
 | Check | What it catches |
 |---|---|
@@ -142,7 +157,9 @@ The mini curation run exercises all 12 data sources (7 non-code top-level + 5 co
 | Forward pass loss finite | Training instability |
 | Generation doesn't crash | `prepare_inputs_for_generation` broken |
 
-### `test-sft-code` — after `make sft-code-mini`
+### `test-sft-code` — after a code SFT run
+
+Defaults to `results/slm-mini-chat-code/final`. Pass `SIZE=<size>` to validate other sizes.
 
 | Check | What it catches |
 |---|---|
@@ -150,7 +167,9 @@ The mini curation run exercises all 12 data sources (7 non-code top-level + 5 co
 | Forward pass loss finite | Training instability |
 | Code special tokens in vocab | Tokenizer not copied correctly |
 
-### `test-dpo` — after `make dpo-mini`
+### `test-dpo` — after a DPO run
+
+Defaults to `results/slm-mini-dpo/final`. Pass `SIZE=<size>` to validate other sizes.
 
 | Check | What it catches |
 |---|---|
@@ -195,7 +214,7 @@ Two files cover the model layer, run together by `make test-model`:
 
 ## Requirements
 
-**No downloads required for any tests.** The fasttext model (`lid.176.ftz`) is mocked in `conftest.py`. KenLM is not used directly in tests. GPU pipeline tests require CUDA but only run if the relevant checkpoint exists — they skip automatically if the model isn't there.
+**No downloads required for any tests.** The fasttext model (`lid.176.ftz`) is mocked in `conftest.py`. KenLM is not used directly in tests. GPU pipeline tests require CUDA but only run if the relevant checkpoint exists — they skip automatically if the model directory for the requested `SIZE` isn't there.
 
 **`DATA_DIR` must be set** for data pipeline tests. It is set automatically by `setup.sh` and written to `~/.bashrc`. If tests are skipping unexpectedly, check:
 
