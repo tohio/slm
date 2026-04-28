@@ -12,7 +12,7 @@ data/validated/train.jsonl  ─┐
 data/validated/val.jsonl    ─┘                                         data/tokenized/val.bin    (+ val.json)
                                                                                 │
                                                                                 ▼
-                                                                  slm/config_gen.py
+                                                                  config_gen/config_gen.py
                                                                   (auto-tunes config for current GPU)
                                                                                 │
                                                                                 ▼
@@ -175,17 +175,17 @@ make config-gen-pretrain SIZE=1b GPUS=1 MODE=conservative
 
 ```bash
 # Force gradient checkpointing on or off
-.venv/bin/python -m slm.config_gen --stage pretrain --gpu h200 --size 1b --gpus 1 \
+.venv/bin/python -m config_gen.config_gen --stage pretrain --gpu h200 --size 1b --gpus 1 \
     --no-ckpt -o pretrain/configs/gpt_1b.yaml
 
 # Override target global batch
-.venv/bin/python -m slm.config_gen --stage pretrain --gpu h200 --size 350m --gpus 4 \
+.venv/bin/python -m config_gen.config_gen --stage pretrain --gpu h200 --size 350m --gpus 4 \
     --target-global-batch 256 -o pretrain/configs/gpt_350m.yaml
 ```
 
-Supported GPUs: `h200`, `b200`, `h100`, `h100_sxm`, `a100_80`, `a100_40`, `l40s`, `rtx4090`, `rtx5090`. To add a new one, edit `GPU_SPECS` in `slm/config_gen.py` and re-run.
+Supported GPUs: `h200`, `b200`, `h100`, `h100_sxm`, `a100_80`, `a100_40`, `l40s`, `rtx4090`, `rtx5090`. To add a new one, edit `GPU_SPECS` in `config_gen/config_gen.py` and re-run.
 
-To extend to a new model size: add a `SIZE_PROFILES` entry in `slm/config_gen.py` with the architecture, target tokens, reference global batch, and measured per-sequence activation memory.
+To extend to a new model size: add a `SIZE_PROFILES` entry in `config_gen/config_gen.py` with the architecture, target tokens, reference global batch, and measured per-sequence activation memory.
 
 ---
 
@@ -335,7 +335,7 @@ In a separate shell during the first ~200 steps of a fresh run, watch GPU utiliz
 nvidia-smi dmon -s pucm -d 2
 ```
 
-Healthy signs: GPU-Util ≥ 95% sustained, memory usage near the estimate in the YAML header comment, power close to TDP. If util is dipping or memory is far below the estimate, see the troubleshooting notes in `slm/config_gen.py`.
+Healthy signs: GPU-Util ≥ 95% sustained, memory usage near the estimate in the YAML header comment, power close to TDP. If util is dipping or memory is far below the estimate, see the troubleshooting notes in `config_gen/config_gen.py`.
 
 ---
 
@@ -395,9 +395,9 @@ Actual throughput depends on GPU generation, network topology (multi-node), CPU/
 
 **Why 2 epochs at 125m and 350m, but 1 epoch at 1b?** It's about how the token budget compares to the supply of each source. At 125m (5B tokens) and 350m (15B tokens) the total budget is small enough that 2 epochs fits comfortably within every source's supply — repeating the data improves downstream performance with negligible overfitting risk at this scale. At 1b (30B tokens / 1 epoch) every source is already close to its supply ceiling, so no repetition is needed; adding a second epoch would force either per-source overflow or a lower-quality over-epoching loop. Modern small-model training (Llama, Phi, Qwen) follows the same pattern at scale — fresh tokens outperform repeated ones once the budget is big enough.
 
-**Why auto-generate pretrain configs instead of committing them?** A single hand-written `gpt_125m.yaml` cannot be right for both 1× H200 and 8× A100 at the same time — `micro_batch_size` that fits in 141GB underuses 8× larger memory pools, and `gradient_accumulation_steps` written for 1 GPU need to scale with GPU count to preserve the global batch. The previous approach was a comment in the YAML listing 1/4/8-GPU values that the user had to manually swap before running. That works exactly until someone forgets, at which point the run silently trains on the wrong number of tokens. `slm/config_gen.py` makes the math automatic and keyed off the actual hardware. The recipe (LR, schedule, betas) is intentionally NOT in the script's scope — those are model-size decisions, not hardware decisions, and stay constant across GPUs.
+**Why auto-generate pretrain configs instead of committing them?** A single hand-written `gpt_125m.yaml` cannot be right for both 1× H200 and 8× A100 at the same time — `micro_batch_size` that fits in 141GB underuses 8× larger memory pools, and `gradient_accumulation_steps` written for 1 GPU need to scale with GPU count to preserve the global batch. The previous approach was a comment in the YAML listing 1/4/8-GPU values that the user had to manually swap before running. That works exactly until someone forgets, at which point the run silently trains on the wrong number of tokens. `config_gen/config_gen.py` makes the math automatic and keyed off the actual hardware. The recipe (LR, schedule, betas) is intentionally NOT in the script's scope — those are model-size decisions, not hardware decisions, and stay constant across GPUs.
 
-**Why does `config-gen` sometimes enable gradient checkpointing on H200?** The auto-policy turns checkpointing on when activations don't fit without it (forced) OR when checkpointing unlocks ≥ 4× larger micro-batch and the no-ckpt config can't reach the target global batch in a single optimizer step. The second case shows up at 1b on H200 × 1: without ckpt, max micro is ~31, forcing 4-step accumulation; with ckpt, all 128 sequences fit in one step. Eliminating the accumulation overhead can outweigh the recompute cost. If you want to A/B it for your specific GPU and batch size, run `make config-gen ... AGGRESSIVE=1` or call `slm/config_gen.py --no-ckpt` directly.
+**Why does `config-gen` sometimes enable gradient checkpointing on H200?** The auto-policy turns checkpointing on when activations don't fit without it (forced) OR when checkpointing unlocks ≥ 4× larger micro-batch and the no-ckpt config can't reach the target global batch in a single optimizer step. The second case shows up at 1b on H200 × 1: without ckpt, max micro is ~31, forcing 4-step accumulation; with ckpt, all 128 sequences fit in one step. Eliminating the accumulation overhead can outweigh the recompute cost. If you want to A/B it for your specific GPU and batch size, run `make config-gen ... AGGRESSIVE=1` or call `config_gen/config_gen.py --no-ckpt` directly.
 
 **Why baseline eval before training?** So the W&B eval curve starts at step 0 with random-init loss. Without this, the first eval point is `eval_steps` steps in and you can't see how much the model has actually learned. The baseline is skipped on `--resume` since the original run already has one.
 

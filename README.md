@@ -167,8 +167,8 @@ slm/
 ├── tests/
 │   ├── conftest.py
 │   ├── README.md
-│   ├── test_config_gen.py        unit tests for slm/config_gen.py
-│   ├── test_accel_gen.py         unit tests for slm/accel_gen.py
+│   ├── test_config_gen.py        unit tests for config_gen/config_gen.py
+│   ├── test_accel_gen.py         unit tests for config_gen/accel_gen.py
 │   ├── data_pipeline/
 │   │   ├── test_pipeline_curator.py
 │   │   ├── test_pipeline_validate.py
@@ -389,8 +389,8 @@ make test-unit            # all of the above
 | `test-dpo` | `dpo-mini` | DPO data format, chosen ≠ rejected, model loads, generation runs |
 | `test-gpu-pipeline` | all four above | Runs training + sft-chat + sft-code + dpo tests |
 | `test-model` | none | RMSNorm, SwiGLU, GQA, causal mask, weight tying, parameter count |
-| `test-config-gen` | none | `slm/config_gen.py` algorithm, invariants, YAML rendering |
-| `test-accel-gen` | none | `slm/accel_gen.py` DDP and FSDP YAML rendering |
+| `test-config-gen` | none | `config_gen/config_gen.py` algorithm, invariants, YAML rendering |
+| `test-accel-gen` | none | `config_gen/accel_gen.py` DDP and FSDP YAML rendering |
 | `test-unit` | none | All unit tests above |
 
 ---
@@ -642,7 +642,7 @@ Models are evaluated on standard benchmarks via `lm-evaluation-harness`:
 
 **Why a single `config/` package for locked values?** The data mix, token targets, CHARS_PER_TOKEN, CC_CHARS_PER_SEGMENT, PRETRAIN_VAL_FRACTION, and a few other constants are each read by multiple stages (curator, export, pretrain, notebooks, tests). Previously they were duplicated — and the duplicates drifted, most visibly in an export pipeline that was writing stale 3-source pretraining tables to the Hub while the curator was actually running the 12-source mix. Centralising into `config/data_mix.py` with an import-time `validate()` makes drift impossible: every consumer sees the same values, and percentages sum-to-100 at the moment the module is loaded.
 
-**Why a separate `slm/` package for `config_gen.py`?** The pretrain configs need to be tuned per GPU — `micro_batch_size` that fits on H200 fits trivially on B200 but not on A100 40GB, and the right `gradient_accumulation_steps` depends on both GPU memory and the count. Hand-tuning these for every (size, GPU, num_gpus) combination is error-prone and stale configs silently waste GPU hours. Centralising the math in `slm/config_gen.py` — keyed off measured GPU specs and per-size memory profiles — makes "tune for this hardware" a one-line `make config-gen` rather than a careful manual edit. The script intentionally leaves LR, schedule, and architecture untouched: those are recipe decisions, not hardware decisions.
+**Why a separate `config_gen/` package for `config_gen.py`?** The pretrain configs need to be tuned per GPU — `micro_batch_size` that fits on H200 fits trivially on B200 but not on A100 40GB, and the right `gradient_accumulation_steps` depends on both GPU memory and the count. Hand-tuning these for every (size, GPU, num_gpus) combination is error-prone and stale configs silently waste GPU hours. Centralising the math in `config_gen/config_gen.py` — keyed off measured GPU specs and per-size memory profiles — makes "tune for this hardware" a one-line `make config-gen` rather than a careful manual edit. The script intentionally leaves LR, schedule, and architecture untouched: those are recipe decisions, not hardware decisions.
 
 **Why vLLM for serving?** PagedAttention enables continuous batching and efficient KV cache management. The OpenAI-compatible API means any client built against the OpenAI SDK works out of the box.
 
@@ -661,7 +661,7 @@ The pipeline is designed to extend past 1b. Scale-invariant percentages, streami
 To run at 3b or beyond:
 
 1. Add a new entry to `TARGET_CONFIGS` in `config/data_mix.py` with the new `total_tokens`, `epochs`, and `cc_crawls` list.
-2. Add a matching entry to `SIZE_PROFILES` in `slm/config_gen.py` with `state_gb`, `act_per_seq_gb_*`, `ctx`, `ref_global_batch`, `tokens`, `lr`, `hidden`, `layers`, and head counts. After this, `make config-gen SIZE=3b GPUS=N` produces a tuned pretrain config automatically.
+2. Add a matching entry to `SIZE_PROFILES` in `config_gen/config_gen.py` with `state_gb`, `act_per_seq_gb_*`, `ctx`, `ref_global_batch`, `tokens`, `lr`, `hidden`, `layers`, and head counts. After this, `make config-gen SIZE=3b GPUS=N` produces a tuned pretrain config automatically.
 3. Add hand-written SFT and DPO configs for the new size in `finetune/configs/` and `alignment/configs/`.
 4. Review Wikipedia and pg19 supply: at budgets approaching 40B × 1 epoch, Wikipedia repetition approaches 1.6×. Options: drop Wikipedia's share, add multilingual Wikipedia, or accept the repetition.
 5. Consider adding a second bulk-code source to avoid stack-v1 over-epoching at 5B+ code tokens.

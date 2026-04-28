@@ -1,7 +1,7 @@
 """
 tests/test_accel_gen.py
 -----------------------
-Unit tests for slm.accel_gen — accelerate launch config generator.
+Unit tests for config_gen.accel_gen — accelerate launch config generator.
 
 Run with:
     pytest tests/test_accel_gen.py -v
@@ -10,7 +10,7 @@ Run with:
 import pytest
 import yaml
 
-from slm.accel_gen import render_ddp, render_fsdp, DEFAULT_FSDP_TRANSFORMER_LAYER
+from config_gen.accel_gen import render_ddp, render_fsdp, DEFAULT_FSDP_TRANSFORMER_LAYER
 
 
 # ── DDP ──────────────────────────────────────────────────────────────────────

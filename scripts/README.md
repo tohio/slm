@@ -5,7 +5,7 @@ Unlike the staged pipeline in `curator/`, `pretrain/`, `finetune/`, and
 `alignment/`, scripts here are independent — they don't feed into or
 depend on pipeline state, and can be run at any time.
 
-> **Note:** `slm/config_gen.py` and `slm/accel_gen.py` are also standalone
+> **Note:** `config_gen/config_gen.py` and `config_gen/accel_gen.py` are also standalone
 > utilities but live alongside the model code rather than here, because
 > they produce artifacts the pipeline consumes (training configs and
 > accelerate launch configs). Scripts in this directory don't produce
@@ -90,7 +90,7 @@ batch size 16 fits comfortably for both architectures. For smaller GPUs:
 - **A100 (40GB):** drop to 4 for 125m, 8 for mini
 - **Smaller:** pass `--batch-size` explicitly to the script
 
-Note that `sanity_train.py` does **not** use `slm/config_gen.py`. The
+Note that `sanity_train.py` does **not** use `config_gen/config_gen.py`. The
 sanity script ships its own minimal config tuned for a fixed reference
 setup — the whole point is to be a known-good baseline, so its config
 is held constant rather than auto-tuned per GPU. For real pretraining

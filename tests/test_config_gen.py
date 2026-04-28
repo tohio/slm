@@ -1,7 +1,7 @@
 """
 tests/test_config_gen.py
 ------------------------
-Unit tests for slm.config_gen — pure utility tests, no GPU or pipeline
+Unit tests for config_gen.config_gen — pure utility tests, no GPU or pipeline
 outputs required.
 
 Run with:
@@ -11,7 +11,7 @@ Run with:
 import pytest
 import yaml
 
-from slm.config_gen import (
+from config_gen.config_gen import (
     DPO_PROFILES,
     GPU_SPECS,
     MODES,

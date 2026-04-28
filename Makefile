@@ -172,7 +172,7 @@ tokenizer-download:
 
 config-gen-pretrain:
 	@echo "==> Generating pretrain config for SIZE=$(SIZE) GPUS=$(GPUS)"
-	$(PYTHON) -m slm.config_gen \
+	$(PYTHON) -m config_gen.config_gen \
 		--stage pretrain \
 		$(_GPU_FLAG) \
 		--size $(SIZE) \
@@ -182,7 +182,7 @@ config-gen-pretrain:
 
 config-gen-sft:
 	@echo "==> Generating SFT chat + code configs for SIZE=$(SIZE) GPUS=$(GPUS)"
-	$(PYTHON) -m slm.config_gen \
+	$(PYTHON) -m config_gen.config_gen \
 		--stage sft \
 		$(_GPU_FLAG) \
 		--size $(SIZE) \
@@ -193,7 +193,7 @@ config-gen-sft:
 
 config-gen-dpo:
 	@echo "==> Generating DPO config for SIZE=$(SIZE) GPUS=$(GPUS)"
-	$(PYTHON) -m slm.config_gen \
+	$(PYTHON) -m config_gen.config_gen \
 		--stage dpo \
 		$(_GPU_FLAG) \
 		--size $(SIZE) \
@@ -213,11 +213,11 @@ config-gen: config-gen-pretrain config-gen-sft config-gen-dpo
 
 accel-gen-ddp:
 	@echo "==> Generating accelerate DDP config for GPUS=$(GPUS)"
-	$(PYTHON) -m slm.accel_gen --strategy ddp --gpus $(GPUS)
+	$(PYTHON) -m config_gen.accel_gen --strategy ddp --gpus $(GPUS)
 
 accel-gen-fsdp:
 	@echo "==> Generating accelerate FSDP config for GPUS=$(GPUS)"
-	$(PYTHON) -m slm.accel_gen --strategy fsdp --gpus $(GPUS)
+	$(PYTHON) -m config_gen.accel_gen --strategy fsdp --gpus $(GPUS)
 
 # Pretrain
 pretrain:
