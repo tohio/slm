@@ -80,7 +80,7 @@ slm/
 ├── config/
 │   └── data_mix.py
 │
-├── slm/
+├── config_gen/
 │   ├── config_gen.py        utility: auto-generate per-GPU training configs
 │   └── accel_gen.py         utility: auto-generate accelerate launch configs (DDP/FSDP)
 │
