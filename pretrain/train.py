@@ -24,6 +24,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
+from transformers import TrainerCallback
 
 import torch
 import yaml
@@ -202,6 +203,15 @@ def _find_latest_checkpoint(output_dir: Path) -> Path | None:
         return None
     numbered.sort()
     return numbered[-1][1]
+
+class VRAMProbe(TrainerCallback):
+    """Log peak VRAM at step 200 so the analytical profile can be calibrated."""
+    def on_step_end(self, args, state, control, **kwargs):
+        if state.global_step == 200 and torch.cuda.is_available():
+            alloc = torch.cuda.max_memory_allocated() / 1e9
+            reserved = torch.cuda.max_memory_reserved() / 1e9
+            log.info(f"[VRAMProbe step 200] allocated peak: {alloc:.2f} GB, "
+                     f"reserved peak: {reserved:.2f} GB")
 
 
 def build_training_args(cfg: dict, output_dir: Path, resume: bool):
@@ -432,6 +442,7 @@ def main():
         args=training_args,
         train_dataset=train_ds,
         eval_dataset=val_ds,
+        callbacks=[VRAMProbe()],
     )
 
     # ── Baseline eval ─────────────────────────────────────────────────────────
@@ -447,6 +458,11 @@ def main():
 
     # ── Train ─────────────────────────────────────────────────────────────────
     log.info("Starting training...")
+    
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+    log.info("Starting training...")
+
     trainer.train(resume_from_checkpoint=resume_checkpoint if args.resume else None)
 
     # ── Save ──────────────────────────────────────────────────────────────────

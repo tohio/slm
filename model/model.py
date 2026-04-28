@@ -349,10 +349,9 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
     ) -> CausalLMOutputWithPast:
-        return_dict = return_dict if return_dict is not None else getattr(
-            self.config, 'return_dict', getattr(self.config, 'use_return_dict', True)
-        )
-
+        # Always return ModelOutput. The legacy tuple path interacts badly
+        # with HF Trainer's prediction_step (loss extraction breaks when
+        # outputs[1:] indexes into a ModelOutput).
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -360,13 +359,12 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
             output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
+            return_dict=True,
             cache_position=cache_position,
         )
 
-        hidden_states = outputs[0]
-        logits = self.lm_head(hidden_states)
-        logits = logits.float()  # upcast to float32 for loss stability
+        hidden_states = outputs.last_hidden_state
+        logits = self.lm_head(hidden_states).float()  # float32 for loss stability
 
         loss = None
         if labels is not None:
@@ -376,10 +374,6 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
                 shift_logits.view(-1, self.config.vocab_size),
                 shift_labels.view(-1),
             )
-
-        if not return_dict:
-            output = (logits,) + outputs[1:]
-            return (loss,) + output if loss is not None else output
 
         return CausalLMOutputWithPast(
             loss=loss,
