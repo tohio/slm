@@ -1,10 +1,10 @@
 """
 tests/gpu_pipeline/test_pipeline_sft.py
 ----------------------------------------
-Validates real outputs from 'make sft-mini' and 'make sft-code-mini'.
+Validates real outputs from chat SFT and code SFT runs.
 
-Run after: make sft-mini && make sft-code-mini
-Command:   make test-sft-chat && make test-sft-code
+Run after: make sft SIZE=<size> && make sft-code SIZE=<size>
+Command:   make test-sft-chat SIZE=<size> && make test-sft-code SIZE=<size>
 
 Checks for each SFT stage:
     - Checkpoint directory exists with final/
@@ -16,32 +16,12 @@ Checks for each SFT stage:
 """
 
 import json
-import os
 from pathlib import Path
 
 import pytest
 import torch
 
-from tests.conftest import DATA_DIR, requires_stage, pipeline_path
-
-
-RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", "results"))
-CHAT_MODEL_DIR = RESULTS_DIR / "slm-mini-chat" / "final"
-CODE_MODEL_DIR = RESULTS_DIR / "slm-mini-chat-code" / "final"
-
-
-def skip_if_no_chat_model():
-    return pytest.mark.skipif(
-        not CHAT_MODEL_DIR.exists(),
-        reason=f"Chat SFT model not found at {CHAT_MODEL_DIR} — run 'make sft-mini' first",
-    )
-
-
-def skip_if_no_code_model():
-    return pytest.mark.skipif(
-        not CODE_MODEL_DIR.exists(),
-        reason=f"Code SFT model not found at {CODE_MODEL_DIR} — run 'make sft-code-mini' first",
-    )
+from tests.conftest import requires_stage, pipeline_path
 
 
 def load_model_and_tokenizer(model_dir: Path):
@@ -117,25 +97,29 @@ class TestSFTData:
 # ── Chat SFT model ─────────────────────────────────────────────────────────────
 
 class TestChatSFTModel:
-    @skip_if_no_chat_model()
-    def test_chat_model_dir_exists(self):
-        assert CHAT_MODEL_DIR.exists()
+    @pytest.fixture(autouse=True)
+    def _skip_if_no_model(self, chat_sft_model_dir):
+        if not chat_sft_model_dir.exists():
+            pytest.skip(
+                f"Chat SFT model not found at {chat_sft_model_dir} — "
+                f"run 'make sft SIZE=<size>' first"
+            )
 
-    @skip_if_no_chat_model()
-    def test_chat_model_loads(self):
-        model, tokenizer = load_model_and_tokenizer(CHAT_MODEL_DIR)
+    def test_chat_model_dir_exists(self, chat_sft_model_dir):
+        assert chat_sft_model_dir.exists()
+
+    def test_chat_model_loads(self, chat_sft_model_dir):
+        model, tokenizer = load_model_and_tokenizer(chat_sft_model_dir)
         assert model is not None
 
-    @skip_if_no_chat_model()
-    def test_chat_tokenizer_has_chat_template(self):
-        _, tokenizer = load_model_and_tokenizer(CHAT_MODEL_DIR)
+    def test_chat_tokenizer_has_chat_template(self, chat_sft_model_dir):
+        _, tokenizer = load_model_and_tokenizer(chat_sft_model_dir)
         assert getattr(tokenizer, "chat_template", None), (
             "Tokenizer saved with chat model has no chat_template"
         )
 
-    @skip_if_no_chat_model()
-    def test_chat_model_forward_pass_finite_loss(self):
-        model, tokenizer = load_model_and_tokenizer(CHAT_MODEL_DIR)
+    def test_chat_model_forward_pass_finite_loss(self, chat_sft_model_dir):
+        model, tokenizer = load_model_and_tokenizer(chat_sft_model_dir)
         model.eval()
 
         messages = [
@@ -151,9 +135,8 @@ class TestChatSFTModel:
             out = model(input_ids, labels=labels)
         assert torch.isfinite(out.loss), f"Chat SFT loss not finite: {out.loss}"
 
-    @skip_if_no_chat_model()
-    def test_chat_model_generation_does_not_crash(self):
-        model, tokenizer = load_model_and_tokenizer(CHAT_MODEL_DIR)
+    def test_chat_model_generation_does_not_crash(self, chat_sft_model_dir):
+        model, tokenizer = load_model_and_tokenizer(chat_sft_model_dir)
         model.eval()
 
         messages = [{"role": "user", "content": "Say hello."}]
@@ -173,18 +156,23 @@ class TestChatSFTModel:
 # ── Code SFT model ─────────────────────────────────────────────────────────────
 
 class TestCodeSFTModel:
-    @skip_if_no_code_model()
-    def test_code_model_dir_exists(self):
-        assert CODE_MODEL_DIR.exists()
+    @pytest.fixture(autouse=True)
+    def _skip_if_no_model(self, code_sft_model_dir):
+        if not code_sft_model_dir.exists():
+            pytest.skip(
+                f"Code SFT model not found at {code_sft_model_dir} — "
+                f"run 'make sft-code SIZE=<size>' first"
+            )
 
-    @skip_if_no_code_model()
-    def test_code_model_loads(self):
-        model, tokenizer = load_model_and_tokenizer(CODE_MODEL_DIR)
+    def test_code_model_dir_exists(self, code_sft_model_dir):
+        assert code_sft_model_dir.exists()
+
+    def test_code_model_loads(self, code_sft_model_dir):
+        model, tokenizer = load_model_and_tokenizer(code_sft_model_dir)
         assert model is not None
 
-    @skip_if_no_code_model()
-    def test_code_model_forward_pass_finite_loss(self):
-        model, tokenizer = load_model_and_tokenizer(CODE_MODEL_DIR)
+    def test_code_model_forward_pass_finite_loss(self, code_sft_model_dir):
+        model, tokenizer = load_model_and_tokenizer(code_sft_model_dir)
         model.eval()
 
         messages = [
@@ -201,8 +189,7 @@ class TestCodeSFTModel:
             out = model(input_ids, labels=labels)
         assert torch.isfinite(out.loss), f"Code SFT loss not finite: {out.loss}"
 
-    @skip_if_no_code_model()
-    def test_code_special_tokens_in_vocab(self):
-        _, tokenizer = load_model_and_tokenizer(CODE_MODEL_DIR)
+    def test_code_special_tokens_in_vocab(self, code_sft_model_dir):
+        _, tokenizer = load_model_and_tokenizer(code_sft_model_dir)
         assert tokenizer.convert_tokens_to_ids("<|code|>") != tokenizer.unk_token_id
         assert tokenizer.convert_tokens_to_ids("<|endofcode|>") != tokenizer.unk_token_id

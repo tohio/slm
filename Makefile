@@ -431,21 +431,21 @@ test-data-pipeline: test-curator test-validate test-tokenizer
 	@echo "==> Data pipeline tests complete"
 
 test-training:
-	@echo "==> Validating pretrain-mini outputs..."
-	.venv/bin/pytest tests/gpu_pipeline/test_pipeline_training.py -v --tb=short
+	@echo "==> Validating pretrain outputs (SIZE=$(SIZE))..."
+	.venv/bin/pytest tests/gpu_pipeline/test_pipeline_training.py --size=$(SIZE) -v --tb=short
 
 test-sft-chat:
-	@echo "==> Validating sft-mini outputs..."
-	.venv/bin/pytest tests/gpu_pipeline/test_pipeline_sft.py::TestChatSFTModel tests/gpu_pipeline/test_pipeline_sft.py::TestSFTData -v --tb=short
+	@echo "==> Validating chat SFT outputs (SIZE=$(SIZE))..."
+	.venv/bin/pytest tests/gpu_pipeline/test_pipeline_sft.py::TestChatSFTModel tests/gpu_pipeline/test_pipeline_sft.py::TestSFTData --size=$(SIZE) -v --tb=short
 
 test-sft-code:
-	@echo "==> Validating sft-code-mini outputs..."
-	.venv/bin/pytest tests/gpu_pipeline/test_pipeline_sft.py::TestCodeSFTModel -v --tb=short
+	@echo "==> Validating code SFT outputs (SIZE=$(SIZE))..."
+	.venv/bin/pytest tests/gpu_pipeline/test_pipeline_sft.py::TestCodeSFTModel --size=$(SIZE) -v --tb=short
 
 test-dpo:
-	@echo "==> Validating dpo-mini outputs..."
-	.venv/bin/pytest tests/gpu_pipeline/test_pipeline_dpo.py -v --tb=short
-
+	@echo "==> Validating DPO outputs (SIZE=$(SIZE))..."
+	.venv/bin/pytest tests/gpu_pipeline/test_pipeline_dpo.py --size=$(SIZE) -v --tb=short
+	
 test-gpu-pipeline: test-training test-sft-chat test-sft-code test-dpo
 	@echo "==> GPU pipeline tests complete"
 

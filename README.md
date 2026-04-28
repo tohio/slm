@@ -264,7 +264,7 @@ make install-conda    # alternative: conda
 
 GPU training instance only:
 ```bash
-make install-gpu      # skips kenlm and other curation-only dependencies
+make install-gpu     # training/eval/serving deps only (no curation deps)
 ```
 
 **Accept dataset Terms of Use**
@@ -710,3 +710,8 @@ This project is scoped as a complete end-to-end training pipeline and demonstrat
 ## License
 
 MIT
+
+
+![alt text](image.png)
+
+![alt text](image.png)
