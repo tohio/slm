@@ -2,19 +2,6 @@
 pretrain/train.py
 -----------------
 Pretraining entry point using HuggingFace Trainer.
-
-Trains SLMForCausalLM from scratch on the tokenized memory-mapped
-datasets. Supports single-GPU and multi-GPU training via accelerate.
-
-Usage:
-    # Single GPU
-    python pretrain/train.py --config pretrain/configs/gpt_125m.yaml
-
-    # Multi-GPU (accelerate)
-    accelerate launch pretrain/train.py --config pretrain/configs/gpt_125m.yaml
-
-    # Resume from checkpoint
-    python pretrain/train.py --config pretrain/configs/gpt_125m.yaml --resume
 """
 
 import argparse
@@ -24,7 +11,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
-from transformers import TrainerCallback
+from transformers import Trainer, TrainerCallback
 
 import torch
 import yaml
@@ -45,60 +32,31 @@ DATA_DIR    = Path(os.environ.get("DATA_DIR", "data"))
 RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", "results"))
 
 
-# ── GPU performance setup ─────────────────────────────────────────────────────
-# Apply GPU-friendly defaults at import time so they take effect before any
-# tensors or modules are created. These are no-ops on CPU.
-#
-# - TF32: H100/H200/B200 lose nothing in quality from TF32 matmul; the FP32
-#   fallback is roughly 8× slower for no benefit.
-# - SDPA backends: explicitly prefer FlashAttention and memory-efficient
-#   kernels over the math fallback. The model's GQA module uses
-#   F.scaled_dot_product_attention, so this is the right place to bias
-#   PyTorch's kernel selector.
 def _configure_cuda_for_performance() -> None:
     if not torch.cuda.is_available():
         return
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
-    # SDPA backend hints — guard with hasattr because these moved between
-    # PyTorch minor versions and we don't want a crash on older builds.
     if hasattr(torch.backends.cuda, "enable_flash_sdp"):
         torch.backends.cuda.enable_flash_sdp(True)
     if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
         torch.backends.cuda.enable_mem_efficient_sdp(True)
     if hasattr(torch.backends.cuda, "enable_math_sdp"):
-        # Disable the slow math fallback so we notice (via a kernel error)
-        # if the fast paths can't be used, instead of silently degrading.
         torch.backends.cuda.enable_math_sdp(False)
 
 
 _configure_cuda_for_performance()
 
 
-# ── Config loading ────────────────────────────────────────────────────────────
-# YAML 1.1 (PyYAML's default) parses scientific notation as a float only
-# when the mantissa has a decimal point — '1.0e-8' is a float, '1e-8' is
-# a string. Coerce known numeric fields to float so a mis-formatted config
-# doesn't crash deep inside the optimizer or model __init__.
-#
-# This list covers every numeric scalar consumed downstream by the pretrain,
-# SFT, and DPO trainers. Including SFT/DPO keys here is harmless — pretrain
-# configs simply won't contain them — and lets us share this utility across
-# trainers without divergence.
 _NUMERIC_CONFIG_KEYS = {
-    # optimizer
     "lr", "eps", "weight_decay", "beta1", "beta2",
-    # training / scheduler
     "gradient_clip_val", "warmup_ratio",
-    # model
     "rms_norm_eps", "rope_theta", "initializer_range",
-    # dpo
     "dpo_beta", "beta",
 }
 
 
 def _coerce_numeric(node):
-    """Recursively convert string-valued numeric fields to float."""
     if isinstance(node, dict):
         return {
             k: (float(v) if k in _NUMERIC_CONFIG_KEYS and isinstance(v, str) else _coerce_numeric(v))
@@ -116,25 +74,6 @@ def load_config(config_path: Path) -> dict:
 
 
 def validate_tokenizer(tokenizer_dir: Path) -> None:
-    """
-    Verify the tokenizer directory is complete AND parseable before training.
-
-    Fails hard rather than silently continuing — a missing or corrupt
-    tokenizer at this point means the saved checkpoint will be unusable
-    by train_sft.py, which requires tokenizer_config.json to load the
-    chat_template via PreTrainedTokenizerFast.from_pretrained().
-
-    Checks:
-        - tokenizer_dir exists and is non-empty
-        - tokenizer_config.json is present and parses as valid JSON
-        - slm_tokenizer.json is present and parses as valid JSON
-
-    Args:
-        tokenizer_dir: Path to the tokenizer directory.
-
-    Raises:
-        RuntimeError: If any required file is missing or unparseable.
-    """
     if not tokenizer_dir.exists() or not any(tokenizer_dir.iterdir()):
         raise RuntimeError(
             f"Tokenizer directory missing or empty: {tokenizer_dir}\n"
@@ -156,12 +95,7 @@ def validate_tokenizer(tokenizer_dir: Path) -> None:
     for filename, hint in required_files.items():
         path = tokenizer_dir / filename
         if not path.exists():
-            raise RuntimeError(
-                f"Missing tokenizer file: {path}\n{hint}"
-            )
-        # Parse each JSON to catch truncated or otherwise-corrupt files.
-        # A zero-byte or truncated tokenizer_config.json would pass a naive
-        # existence check and then crash much later in training.
+            raise RuntimeError(f"Missing tokenizer file: {path}\n{hint}")
         try:
             with open(path) as f:
                 json.load(f)
@@ -176,12 +110,6 @@ def validate_tokenizer(tokenizer_dir: Path) -> None:
 
 
 def _find_latest_checkpoint(output_dir: Path) -> Path | None:
-    """
-    Return the latest checkpoint in output_dir, or None if none exist.
-
-    HF Trainer stores checkpoints as `checkpoint-<step>` subdirectories.
-    The latest is the one with the highest step number.
-    """
     if not output_dir.exists():
         return None
     candidates = [
@@ -190,8 +118,6 @@ def _find_latest_checkpoint(output_dir: Path) -> Path | None:
     ]
     if not candidates:
         return None
-    # Parse the step from the name. Skip any checkpoint-* dirs with a
-    # non-numeric suffix — they shouldn't exist but robust is cheap here.
     numbered = []
     for p in candidates:
         try:
@@ -204,6 +130,7 @@ def _find_latest_checkpoint(output_dir: Path) -> Path | None:
     numbered.sort()
     return numbered[-1][1]
 
+
 class VRAMProbe(TrainerCallback):
     """Log peak VRAM at step 200 so the analytical profile can be calibrated."""
     def on_step_end(self, args, state, control, **kwargs):
@@ -214,42 +141,53 @@ class VRAMProbe(TrainerCallback):
                      f"reserved peak: {reserved:.2f} GB")
 
 
+class SLMTrainer(Trainer):
+    """
+    Trainer subclass with an explicit compute_loss override.
+
+    SLMForCausalLM always returns CausalLMOutputWithPast with `.loss` as a
+    tensor when labels are present. The default Trainer.compute_loss in
+    transformers v5 has a code path that returns a non-tensor loss for our
+    model (manifests as 'dict' object has no attribute 'detach' inside
+    prediction_step at first scheduled eval). Bypass it by extracting
+    outputs.loss directly — the model knows how to compute its own loss.
+    """
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        outputs = model(**inputs)
+        loss = outputs.loss
+        if loss is None:
+            raise ValueError(
+                "Model returned no loss. Check that 'labels' is present in inputs. "
+                f"Available keys: {list(inputs.keys())}"
+            )
+        return (loss, outputs) if return_outputs else loss
+
+
 def build_training_args(cfg: dict, output_dir: Path, resume: bool):
     from transformers import TrainingArguments
 
     train_cfg = cfg["training"]
     optim_cfg = cfg["optimizer"]
 
-    # bf16/fp16 only when CUDA is available — avoids warnings on CPU runs
-    # (e.g. make pretrain-mini on a CPU curation instance)
     has_cuda = torch.cuda.is_available()
     precision = train_cfg.get("precision", "bf16")
     use_bf16  = has_cuda and precision == "bf16"
     use_fp16  = has_cuda and precision == "fp16"
 
-    # torch.compile is OFF by default — it interacts badly with HF Trainer's
-    # prediction_step during eval (returns wrapped output that breaks loss
-    # extraction with 'dict' has no attribute 'detach'). Re-enable per-config
-    # once the interaction is debugged.
+    # torch.compile is OFF by default — interacted badly with HF Trainer eval
+    # (returned wrapped output that broke loss extraction). The SLMTrainer
+    # subclass below also handles this, but keeping compile off until the
+    # interaction is verified end-to-end on a full run.
     torch_compile = bool(train_cfg.get("torch_compile", False)) and has_cuda
 
     return TrainingArguments(
         output_dir=str(output_dir),
-
-        # Steps
         max_steps=train_cfg["max_steps"],
         warmup_steps=train_cfg.get("warmup_steps", 2000),
-
-        # Batch size
         per_device_train_batch_size=train_cfg["micro_batch_size"],
         per_device_eval_batch_size=train_cfg["micro_batch_size"],
         gradient_accumulation_steps=train_cfg.get("gradient_accumulation_steps", 1),
 
-        # Optimizer — fused AdamW is a free 5-10% on modern GPUs (H100+).
-        # Falls back to the non-fused implementation automatically on CPU.
-        # float() coercion is belt-and-suspenders: load_config already
-        # normalizes scientific-notation strings, but explicit casts here
-        # make the trainer robust to configs constructed in-memory.
         learning_rate=float(optim_cfg["lr"]),
         weight_decay=float(optim_cfg.get("weight_decay", 0.1)),
         adam_beta1=float(optim_cfg.get("beta1", 0.9)),
@@ -258,19 +196,14 @@ def build_training_args(cfg: dict, output_dir: Path, resume: bool):
         max_grad_norm=float(train_cfg.get("gradient_clip_val", 1.0)),
         optim="adamw_torch_fused" if has_cuda else "adamw_torch",
 
-        # LR schedule
         lr_scheduler_type=train_cfg.get("lr_scheduler", "cosine"),
-
-        # Precision — only enable on GPU
         bf16=use_bf16,
         fp16=use_fp16,
 
-        # torch.compile — defaults on (see comment above)
         torch_compile=torch_compile,
         torch_compile_backend=train_cfg.get("torch_compile_backend", "inductor"),
         torch_compile_mode=train_cfg.get("torch_compile_mode", "default"),
 
-        # Evaluation — eval_strategy replaces evaluation_strategy in transformers v5
         eval_strategy="steps",
         eval_steps=train_cfg.get("eval_steps", 1000),
         save_strategy="steps",
@@ -278,52 +211,27 @@ def build_training_args(cfg: dict, output_dir: Path, resume: bool):
         save_total_limit=train_cfg.get("save_total_limit", 3),
         load_best_model_at_end=False,
 
-        # Logging
         logging_strategy="steps",
         logging_steps=train_cfg.get("log_steps", 10),
         report_to=train_cfg.get("report_to", ["wandb"]),
         run_name=cfg.get("name", "slm-pretrain"),
 
-        # Misc
         dataloader_num_workers=train_cfg.get("num_workers", 4),
         dataloader_pin_memory=has_cuda,
         remove_unused_columns=False,
         seed=train_cfg.get("seed", 42),
 
-        # Gradient checkpointing
         gradient_checkpointing=train_cfg.get("gradient_checkpointing", False),
-
-        # DDP — disable unused parameter scan, it adds overhead every step
-        # and is never needed for this architecture (no flow control / optional layers)
         ddp_find_unused_parameters=False,
     )
 
 
 def main():
     parser = argparse.ArgumentParser(description="SLM Pretraining")
-    parser.add_argument(
-        "--config",
-        type=Path,
-        required=True,
-        help="Path to training config YAML",
-    )
-    parser.add_argument(
-        "--resume",
-        action="store_true",
-        help="Resume from latest checkpoint",
-    )
-    parser.add_argument(
-        "--data-dir",
-        type=Path,
-        default=DATA_DIR,
-        help="Data directory override",
-    )
-    parser.add_argument(
-        "--results-dir",
-        type=Path,
-        default=RESULTS_DIR,
-        help="Results directory override",
-    )
+    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--data-dir", type=Path, default=DATA_DIR)
+    parser.add_argument("--results-dir", type=Path, default=RESULTS_DIR)
     args = parser.parse_args()
 
     cfg        = load_config(args.config)
@@ -339,10 +247,6 @@ def main():
         log.info(f"GPU:        {torch.cuda.get_device_name(0)} "
                  f"({torch.cuda.get_device_properties(0).total_memory / 1e9:.0f} GB)")
 
-    # ── Resume checkpoint discovery ───────────────────────────────────────────
-    # Log which checkpoint we're resuming from BEFORE the model is built, so
-    # if anything goes wrong the user can tell at a glance which state was
-    # loaded. HF Trainer does log this internally, but it's buried in noise.
     resume_checkpoint = None
     if args.resume:
         resume_checkpoint = _find_latest_checkpoint(output_dir)
@@ -354,14 +258,9 @@ def main():
         else:
             log.info(f"Resuming from checkpoint: {resume_checkpoint}")
 
-    # ── Validate tokenizer before starting ────────────────────────────────────
-    # Fail early — a missing or corrupt tokenizer discovered after hours of
-    # training produces an unusable checkpoint that can't be loaded by
-    # train_sft.py.
     tokenizer_dir = args.data_dir / "tokenizer"
     validate_tokenizer(tokenizer_dir)
 
-    # ── Model ─────────────────────────────────────────────────────────────────
     from model import SLMConfig, SLMForCausalLM
 
     model_cfg_dict = cfg["model"]
@@ -384,7 +283,6 @@ def main():
     n_params = sum(p.numel() for p in model.parameters())
     log.info(f"Parameters: {n_params:,} ({n_params / 1e6:.1f}M)")
 
-    # ── Dataset ───────────────────────────────────────────────────────────────
     from pretrain.data.dataset import load_train_val
 
     tokenized_dir = args.data_dir / "tokenized"
@@ -399,11 +297,8 @@ def main():
     budget = train_ds.token_budget()
     log.info(f"Training tokens: {budget['total_training_tokens'] / 1e9:.2f}B")
 
-    # ── Training args ─────────────────────────────────────────────────────────
     training_args = build_training_args(cfg, output_dir, resume=args.resume)
 
-    # Log throughput-relevant settings at INFO so they appear above the
-    # training noise. Useful for spot-checking auto-generated configs.
     log.info(
         f"Throughput knobs: "
         f"micro_batch={training_args.per_device_train_batch_size}, "
@@ -414,7 +309,6 @@ def main():
         f"grad_ckpt={training_args.gradient_checkpointing}"
     )
 
-    # ── W&B ───────────────────────────────────────────────────────────────────
     if "wandb" in training_args.report_to:
         import wandb
         wandb.init(
@@ -430,10 +324,7 @@ def main():
             },
         )
 
-    # ── Trainer ───────────────────────────────────────────────────────────────
-    from transformers import Trainer
-
-    trainer = Trainer(
+    trainer = SLMTrainer(
         model=model,
         args=training_args,
         train_dataset=train_ds,
@@ -441,35 +332,21 @@ def main():
         callbacks=[VRAMProbe()],
     )
 
-    # ── Baseline eval ─────────────────────────────────────────────────────────
-    # Run eval before training begins so the W&B eval curve starts from
-    # random-init loss. Without this, the first eval point is ~500-1000
-    # steps in — you lose the "loss at step 0 vs step N" comparison that
-    # confirms the model is actually learning. Skipped when resuming since
-    # the baseline already exists from the original run.
     if not args.resume:
         log.info("Running baseline eval before training (step 0)...")
         baseline = trainer.evaluate()
         log.info(f"Baseline eval: {baseline}")
 
-    # ── Train ─────────────────────────────────────────────────────────────────
-    log.info("Starting training...")
-    
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
     log.info("Starting training...")
-
     trainer.train(resume_from_checkpoint=resume_checkpoint if args.resume else None)
 
-    # ── Save ──────────────────────────────────────────────────────────────────
     log.info("Saving final model...")
     final_dir = output_dir / "final"
     trainer.save_model(str(final_dir))
     model_config.save_pretrained(str(final_dir))
 
-    # Copy tokenizer alongside model.
-    # tokenizer_dir was already validated above — if we reach this point it is
-    # complete, parseable, and contains tokenizer_config.json. No re-check.
     shutil.copytree(tokenizer_dir, final_dir / "tokenizer", dirs_exist_ok=True)
     log.info(f"Tokenizer copied to {final_dir / 'tokenizer'}")
 
