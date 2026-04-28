@@ -729,6 +729,10 @@ def _validate_model(model, tokenizer, config) -> None:
         return_tensors="pt",
         add_generation_prompt=True,
     )
+    # apply_chat_template can return either a Tensor or a BatchEncoding
+    # depending on transformers version / tokenizer config — normalize.
+    if hasattr(input_ids, "input_ids"):
+        input_ids = input_ids["input_ids"]
     attention_mask = torch.ones_like(input_ids)
     input_length   = input_ids.shape[1]
 
