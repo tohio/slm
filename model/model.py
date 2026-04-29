@@ -216,7 +216,7 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
     # Common HF tied-weight declaration.
     # If a future Transformers version requires the v5 dict form, test:
     #     {"lm_head.weight": "model.embed_tokens.weight"}
-    _tied_weights_keys = ["lm_head.weight"]
+    _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
 
     def __init__(self, config: SLMConfig):
         super().__init__(config)
@@ -346,11 +346,11 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         """
         Tie LM head weights to input embeddings when tie_word_embeddings=True.
 
-        Uses HF's helper instead of direct Parameter assignment so parameter
-        registration and tied-storage behavior follow PreTrainedModel rules.
+        Direct assignment is used because transformers==5.5.4 in this environment
+        does not expose _tie_or_clone_weights on PreTrainedModel.
         """
         if self.config.tie_word_embeddings:
-            self._tie_or_clone_weights(self.lm_head, self.model.embed_tokens)
+            self.lm_head.weight = self.model.embed_tokens.weight
 
     def get_input_embeddings(self) -> nn.Embedding:
         return self.model.embed_tokens
