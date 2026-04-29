@@ -10,12 +10,21 @@ Hardware-driven (script computes):
     micro_batch_size                — picked to fit the GPU's VRAM budget
     gradient_accumulation_steps     — derived to hit the recipe's reference global batch
     gradient_checkpointing          — auto-policy based on memory pressure
-    max_steps                       — pretrain only; derived from token budget
+    max_steps                       — pretrain only; derived from consumed-token target
     warmup_steps                    — pretrain only; derived from max_steps
 
 Recipe-driven (preserved verbatim from the profile):
     learning_rate, weight_decay, betas, epochs, warmup_ratio,
     max_seq_length, dpo.beta, dpo.max_prompt_length, paths, etc.
+
+Token vocabulary used in this file:
+    corpus_tokens     unique tokens in the curated dataset (the public-facing
+                      figure on model cards). Lives in config/data_mix.py.
+    consumed_tokens   corpus_tokens × epochs; the count of tokens the optimizer
+                      sees over the whole run. Used internally to compute
+                      max_steps. NOT a public-facing number. Sourced from
+                      config.data_mix.consumed_tokens(size) — no hard-coded
+                      duplicates here.
 
 Three tuning modes:
     conservative   70% VRAM budget, ckpt-friendly, leaves headroom
@@ -47,6 +56,11 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+# Single source of truth for corpus sizes and epoch counts. config_gen reads
+# from here so that consumed_tokens (= corpus × epochs) stays in lockstep
+# with what the curator and export pipeline see — no hard-coded duplicates.
+from config import data_mix
 
 
 # ── GPU specs ─────────────────────────────────────────────────────────────────
@@ -111,7 +125,11 @@ class PretrainProfile:
     act_per_seq_gb_ckpt: float
     ctx: int                          # max_position_embeddings
     ref_global_batch: int             # sequences per optimizer step
-    tokens: int                       # total training tokens (across epochs)
+
+    # Token target — used only to compute max_steps.
+    # consumed_tokens = corpus_tokens × epochs. NOT the public corpus figure.
+    # The unique-data number lives in config/data_mix.py TARGET_CONFIGS.
+    consumed_tokens: int
 
     # Recipe (preserved verbatim)
     lr: float
@@ -177,22 +195,33 @@ class DPOProfile:
     save_steps: int = 200
 
 
+# consumed_tokens (= corpus_tokens × epochs) is sourced from
+# config/data_mix.py — that's the single source of truth for both numbers.
+# The values here therefore evolve automatically when the curator's TARGET_CONFIGS
+# is edited; no manual sync required.
+#
+#   125m: 5B  × 2 = 10B
+#   350m: 15B × 2 = 30B
+#   1b:   30B × 1 = 30B
 SIZE_PROFILES: dict[str, PretrainProfile] = {
     "125m": PretrainProfile(
         state_gb=1.5, act_per_seq_gb_no_ckpt=0.04, act_per_seq_gb_ckpt=0.008,
-        ctx=2048, ref_global_batch=32, tokens=10_000_000_000,
+        ctx=2048, ref_global_batch=32,
+        consumed_tokens=data_mix.consumed_tokens("125m"),
         lr=3.0e-4, warmup_frac=0.01,
         hidden=768, layers=12, heads=12, kv_heads=4,
     ),
     "350m": PretrainProfile(
         state_gb=4.2, act_per_seq_gb_no_ckpt=0.6, act_per_seq_gb_ckpt=0.12,
-        ctx=2048, ref_global_batch=128, tokens=30_000_000_000,
+        ctx=2048, ref_global_batch=128,
+        consumed_tokens=data_mix.consumed_tokens("350m"),
         lr=2.0e-4, warmup_frac=0.01,
         hidden=1024, layers=24, heads=16, kv_heads=8,
     ),
     "1b": PretrainProfile(
         state_gb=12.0, act_per_seq_gb_no_ckpt=3.2, act_per_seq_gb_ckpt=0.6,
-        ctx=4096, ref_global_batch=128, tokens=30_000_000_000,
+        ctx=4096, ref_global_batch=128,
+        consumed_tokens=data_mix.consumed_tokens("1b"),
         lr=1.0e-4, warmup_frac=0.035,
         hidden=2048, layers=32, heads=32, kv_heads=8,
     ),
@@ -305,7 +334,7 @@ class GeneratedConfig:
     # Reporting
     actual_global_batch: int = 0
     tokens_per_step: int = 0
-    actual_total_tokens: int = 0            # pretrain only
+    actual_consumed_tokens: int = 0         # pretrain only — corpus × epochs
     estimated_vram_gb: float = 0.0
     vram_budget_gb: float = 0.0
 
@@ -418,9 +447,16 @@ def _decide_batch_and_ckpt(
 def compute_pretrain_config(
     gpu_key: str, size: str, num_gpus: int, mode_name: str = "balanced",
     target_global_batch: Optional[int] = None,
-    target_tokens: Optional[int] = None,
+    target_consumed_tokens: Optional[int] = None,
     force_ckpt: Optional[bool] = None,
 ) -> GeneratedConfig:
+    """
+    Compute a pretrain config for the given GPU and size.
+
+    target_consumed_tokens overrides the profile's consumed_tokens
+    (= corpus_tokens × epochs). Use this only if you intentionally want to
+    train for more or fewer steps than the standard recipe.
+    """
     if gpu_key not in GPU_SPECS:
         raise ValueError(f"Unknown GPU '{gpu_key}'. Choices: {sorted(GPU_SPECS)}")
     if size not in SIZE_PROFILES:
@@ -435,7 +471,7 @@ def compute_pretrain_config(
     mode = MODES[mode_name]
 
     ref_global = target_global_batch or profile.ref_global_batch
-    target_tok = target_tokens or profile.tokens
+    target_consumed = target_consumed_tokens or profile.consumed_tokens
 
     micro, accum, ckpt, est_vram, budget, warns = _decide_batch_and_ckpt(
         state_gb=profile.state_gb,
@@ -450,18 +486,19 @@ def compute_pretrain_config(
 
     actual_global = micro * accum * num_gpus
     tokens_per_step = actual_global * profile.ctx
-    max_steps = target_tok // tokens_per_step
-    actual_total = max_steps * tokens_per_step
+    max_steps = target_consumed // tokens_per_step
+    actual_consumed = max_steps * tokens_per_step
     warmup = max(100, int(max_steps * profile.warmup_frac))
 
     # Pretrain-specific warnings
-    rounding_loss = abs(actual_total - target_tok) / target_tok
+    rounding_loss = abs(actual_consumed - target_consumed) / target_consumed
     if rounding_loss > 0.02:
         warns.append(
-            f"Token-budget rounding loses {rounding_loss*100:.1f}% "
-            f"({(target_tok - actual_total) / 1e9:+.2f}B). max_steps={max_steps:,} × "
-            f"tokens/step={tokens_per_step:,} = {actual_total/1e9:.2f}B vs target "
-            f"{target_tok/1e9:.2f}B. Consider adjusting target_global_batch."
+            f"Consumed-token rounding loses {rounding_loss*100:.1f}% "
+            f"({(target_consumed - actual_consumed) / 1e9:+.2f}B). "
+            f"max_steps={max_steps:,} × tokens/step={tokens_per_step:,} = "
+            f"{actual_consumed/1e9:.2f}B vs target {target_consumed/1e9:.2f}B. "
+            f"Consider adjusting target_global_batch."
         )
     if size == "1b" and num_gpus >= 4:
         warns.append(
@@ -478,7 +515,7 @@ def compute_pretrain_config(
         warmup_steps=warmup,
         actual_global_batch=actual_global,
         tokens_per_step=tokens_per_step,
-        actual_total_tokens=actual_total,
+        actual_consumed_tokens=actual_consumed,
         estimated_vram_gb=est_vram,
         vram_budget_gb=budget,
         stage="pretrain",
@@ -683,8 +720,11 @@ def _yaml_header(cfg: GeneratedConfig) -> str:
         f"#   mode             = {cfg.mode}  (vram budget {cfg.vram_budget_gb:.0f} GB)",
         f"#   global_batch     = {cfg.actual_global_batch} sequences/step",
     ]
-    if cfg.actual_total_tokens:
-        lines.append(f"#   total_tokens     = {cfg.actual_total_tokens / 1e9:.2f}B")
+    if cfg.actual_consumed_tokens:
+        lines.append(
+            f"#   consumed_tokens  = {cfg.actual_consumed_tokens / 1e9:.2f}B  "
+            f"(corpus × epochs; sets max_steps)"
+        )
     lines.extend([
         "#",
         f"# Estimated peak VRAM: ~{cfg.estimated_vram_gb:.0f} GB / {spec['vram_gb']} GB ({used_pct:.0f}%)",
@@ -742,8 +782,9 @@ data:
 
 training:
   # micro × accum × gpus = {cfg.micro_batch_size} × {cfg.gradient_accumulation_steps} × {cfg.num_gpus} = {cfg.actual_global_batch} sequences/step
-  # tokens/step  = global × ctx = {cfg.tokens_per_step:,}
-  # token budget = max_steps × tokens/step = {cfg.actual_total_tokens / 1e9:.2f}B
+  # tokens/step     = global × ctx = {cfg.tokens_per_step:,}
+  # consumed_tokens = max_steps × tokens/step = {cfg.actual_consumed_tokens / 1e9:.2f}B
+  #                   (corpus_tokens × epochs — see config/data_mix.py)
   max_steps: {cfg.max_steps}
   warmup_steps: {cfg.warmup_steps}
   micro_batch_size: {cfg.micro_batch_size}
@@ -898,7 +939,10 @@ def render_plan(cfg: GeneratedConfig) -> str:
     if cfg.max_steps is not None:
         lines.append(f"  max_steps                   = {cfg.max_steps:,}")
         lines.append(f"  warmup_steps                = {cfg.warmup_steps:,}")
-        lines.append(f"  total tokens                = {cfg.actual_total_tokens / 1e9:.2f}B")
+        lines.append(
+            f"  consumed tokens             = {cfg.actual_consumed_tokens / 1e9:.2f}B  "
+            f"(corpus × epochs)"
+        )
     lines.extend([
         f"  gradient_checkpointing      = {cfg.gradient_checkpointing}",
         "",
@@ -966,8 +1010,14 @@ def main(argv: Optional[list[str]] = None) -> int:
                         help="Alias for --mode conservative")
 
     parser.add_argument("--target-global-batch", type=int, default=None)
+    parser.add_argument("--target-consumed-tokens", type=int, default=None,
+                        help="(pretrain only) Override consumed tokens "
+                             "(corpus_tokens × epochs). Used to compute "
+                             "max_steps. Not the public corpus figure.")
+    # Deprecated alias kept for backward compat.
     parser.add_argument("--target-tokens", type=int, default=None,
-                        help="(pretrain only)")
+                        dest="target_tokens_deprecated",
+                        help=argparse.SUPPRESS)
 
     ckpt_grp = parser.add_mutually_exclusive_group()
     ckpt_grp.add_argument("--ckpt", dest="force_ckpt", action="store_true",
@@ -988,13 +1038,24 @@ def main(argv: Optional[list[str]] = None) -> int:
     gpu_key = _resolve_gpu(args)
     mode_name = args.mode_alias or args.mode
 
+    # Resolve token target — new flag wins, fall back to deprecated alias.
+    consumed_override = args.target_consumed_tokens
+    if consumed_override is None and args.target_tokens_deprecated is not None:
+        if not args.quiet:
+            print(
+                "WARN: --target-tokens is deprecated; use "
+                "--target-consumed-tokens instead.",
+                file=sys.stderr,
+            )
+        consumed_override = args.target_tokens_deprecated
+
     try:
         if args.stage == "pretrain":
             cfg = compute_pretrain_config(
                 gpu_key=gpu_key, size=args.size, num_gpus=args.gpus,
                 mode_name=mode_name,
                 target_global_batch=args.target_global_batch,
-                target_tokens=args.target_tokens,
+                target_consumed_tokens=consumed_override,
                 force_ckpt=args.force_ckpt,
             )
             _write_or_print(render_pretrain_yaml(cfg), args.output, args.quiet)

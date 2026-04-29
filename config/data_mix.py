@@ -20,21 +20,41 @@ Organising principle:
     - Stage-specific tuning knobs (SFT LR, DPO beta, eval few-shot counts)
       stay in their stage's own config file.
 
+Token vocabulary:
+    corpus_tokens     unique tokens in the curated dataset for a given size.
+                      The public-facing figure on model cards and in the
+                      README "Token Targets" table. Stored on each
+                      TARGET_CONFIGS entry as `corpus_tokens`.
+    consumed_tokens   corpus_tokens × epochs. The number of tokens the
+                      optimiser sees over the whole pretraining run. Used
+                      by config_gen/config_gen.py to compute max_steps.
+                      Computed by the consumed_tokens() helper below; not
+                      a stored field. NOT a public-facing number.
+    total_tokens      DEPRECATED. Used to be the field name and helper for
+                      the corpus figure, but read ambiguously between
+                      "unique tokens" and "tokens the model is trained on".
+                      Replaced by corpus_tokens. Back-compat shims (the
+                      `total_tokens` key in each TARGET_CONFIGS entry, and
+                      the total_tokens() helper) are preserved so older
+                      consumers don't break, and emit DeprecationWarning.
+
 Section layout:
     1. DATA_MIX                 top-level source percentages + metadata
     2. CODE_SUBMIX              sub-mix of the 10% code share
     3. OVERFLOW_SINK            which source absorbs supply deficits
     4. Source name lists        NON_CODE_SOURCES, CODE_SOURCES, ALL_SOURCES
-    5. TARGET_CONFIGS           per-size token budgets, CC crawls, epochs
+    5. TARGET_CONFIGS           per-size corpus + epochs + CC crawls
     6. Curator constants        CHARS_PER_TOKEN, CC_CHARS_PER_SEGMENT,
                                 SHUFFLE_RAM_BUDGET_GB, PRETRAIN_VAL_FRACTION,
                                 MINI_OVERRIDES
-    7. Helpers                  dataset_link, total_tokens, epochs, validate
+    7. Helpers                  dataset_link, corpus_tokens, consumed_tokens,
+                                epochs, validate, plus deprecated total_tokens
 """
 
 from __future__ import annotations
 
 import os
+import warnings
 
 
 # ── 1. Top-level data mix ──────────────────────────────────────────────────────
@@ -150,38 +170,57 @@ ALL_SOURCES: list[str] = NON_CODE_SOURCES + CODE_SOURCES
 # ── 5. Target configurations ───────────────────────────────────────────────────
 #
 # Per-size training targets. Carries everything a size-specific run needs:
-#   total_tokens — the pretraining token budget
-#   epochs       — number of training epochs (documentation; pretrain/train.py
-#                  uses max_steps which is computed elsewhere from this)
-#   cc_crawls    — Common Crawl snapshots to draw from at this scale
-#   display_tokens — human-readable shorthand (5B / 15B / 30B)
+#   corpus_tokens    — unique tokens in the curated dataset (PUBLIC figure).
+#                      This is what shows up on model cards and the README
+#                      "Token Targets" table. Multiplying by `epochs` gives
+#                      consumed_tokens, which is what config_gen uses to
+#                      compute max_steps.
+#   epochs           — number of training epochs over the corpus.
+#   cc_crawls        — Common Crawl snapshots to draw from at this scale.
+#   display_corpus   — human-readable shorthand of corpus_tokens (5B / 15B /
+#                      30B). Used by export.py when rendering model cards.
 #
-# cc_segments is computed at runtime from total_tokens × cc_share ×
+#   total_tokens     — DEPRECATED back-compat alias for corpus_tokens. Kept
+#                      so older consumers don't break; new code should read
+#                      corpus_tokens. The validate() function will fail if
+#                      the two ever drift apart.
+#   display_tokens   — DEPRECATED back-compat alias for display_corpus.
+#
+# cc_segments is computed at runtime from corpus_tokens × cc_share ×
 # CHARS_PER_TOKEN ÷ CC_CHARS_PER_SEGMENT — see curator/scripts/curate.py.
 
 TARGET_CONFIGS: dict[str, dict] = {
     "mini": {
-        "total_tokens":   1_000_000,
+        "corpus_tokens":  1_000_000,
         "epochs":         1,
         "cc_crawls":      ["CC-MAIN-2024-10"],
+        "display_corpus": "1M",
+        # Deprecated aliases (kept for back-compat — see header).
+        "total_tokens":   1_000_000,
         "display_tokens": "1M",
     },
     "125m": {
-        "total_tokens":   5_000_000_000,
+        "corpus_tokens":  5_000_000_000,
         "epochs":         2,
         "cc_crawls":      ["CC-MAIN-2024-10"],
+        "display_corpus": "5B",
+        "total_tokens":   5_000_000_000,
         "display_tokens": "5B",
     },
     "350m": {
-        "total_tokens":   15_000_000_000,
+        "corpus_tokens":  15_000_000_000,
         "epochs":         2,
         "cc_crawls":      ["CC-MAIN-2024-10", "CC-MAIN-2023-50"],
+        "display_corpus": "15B",
+        "total_tokens":   15_000_000_000,
         "display_tokens": "15B",
     },
     "1b": {
-        "total_tokens":   30_000_000_000,
+        "corpus_tokens":  30_000_000_000,
         "epochs":         1,
         "cc_crawls":      ["CC-MAIN-2024-10", "CC-MAIN-2023-50", "CC-MAIN-2023-40"],
+        "display_corpus": "30B",
+        "total_tokens":   30_000_000_000,
         "display_tokens": "30B",
     },
 }
@@ -259,20 +298,90 @@ def dataset_link(entry: dict) -> str:
     return name
 
 
-def total_tokens(size: str) -> int:
-    """Return the integer token budget for a given model size."""
-    return TARGET_CONFIGS[size]["total_tokens"]
+def corpus_tokens(size: str) -> int:
+    """
+    Return the unique-token count of the curated corpus for a given size.
+
+    This is the public-facing figure: the number that appears on model
+    cards, in the README "Token Targets" table, and anywhere a reader
+    would ask "how much data did you train on?".
+
+    Multiply by epochs(size) to get consumed_tokens (the optimiser-step
+    quantity used by config_gen to compute max_steps).
+    """
+    return TARGET_CONFIGS[size]["corpus_tokens"]
 
 
-def token_target_display(size: str) -> str:
-    """Return the human-readable token budget (e.g. "5B") for a given size."""
-    return TARGET_CONFIGS[size]["display_tokens"]
+def consumed_tokens(size: str) -> int:
+    """
+    Return corpus_tokens × epochs for a given size.
+
+    This is the number of tokens the optimiser sees across the whole
+    pretraining run. Used by config_gen/config_gen.py to set max_steps.
+
+    Do NOT report this number on model cards or in public docs — it
+    conflates corpus size with epoch count, which is the exact ambiguity
+    that motivated the corpus_tokens / consumed_tokens vocabulary split.
+    Public docs should always report corpus_tokens and epochs separately.
+    """
+    cfg = TARGET_CONFIGS[size]
+    return cfg["corpus_tokens"] * cfg["epochs"]
+
+
+def corpus_tokens_display(size: str) -> str:
+    """Return the human-readable corpus size (e.g. "5B") for a given size."""
+    return TARGET_CONFIGS[size]["display_corpus"]
 
 
 def epochs(size: str) -> int:
     """Return the training epoch count for a given model size."""
     return TARGET_CONFIGS[size]["epochs"]
 
+
+# ── Deprecated helpers (kept for back-compat) ─────────────────────────────────
+
+def total_tokens(size: str) -> int:
+    """
+    DEPRECATED. Use corpus_tokens(size) instead.
+
+    Previously meant the corpus figure but read ambiguously as "tokens the
+    model is trained on" (which would be corpus_tokens × epochs, a different
+    number). The new helper names corpus_tokens() and consumed_tokens()
+    keep the two quantities visibly distinct.
+
+    This shim returns corpus_tokens(size) for back-compat with older
+    callers (curator scripts, notebooks). Will be removed in a future
+    cleanup; please migrate.
+    """
+    warnings.warn(
+        "config.data_mix.total_tokens() is deprecated and ambiguous. "
+        "Use corpus_tokens(size) for the public-facing unique-data figure, "
+        "or consumed_tokens(size) for the corpus × epochs scheduling "
+        "quantity used to compute max_steps.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return corpus_tokens(size)
+
+
+def token_target_display(size: str) -> str:
+    """
+    DEPRECATED. Use corpus_tokens_display(size) instead.
+
+    Renamed for the same reason as total_tokens — the word "token target"
+    didn't disambiguate corpus from consumed.
+    """
+    warnings.warn(
+        "config.data_mix.token_target_display() is deprecated. "
+        "Use corpus_tokens_display(size) instead — it makes clear that "
+        "the figure refers to the curated corpus, not consumed tokens.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return corpus_tokens_display(size)
+
+
+# ── Validation ────────────────────────────────────────────────────────────────
 
 def validate() -> None:
     """
@@ -285,6 +394,8 @@ def validate() -> None:
       - All CODE_SUBMIX source names are distinct from DATA_MIX source names
       - Curator constants are positive numbers
       - Every TARGET_CONFIGS entry has the required keys
+      - corpus_tokens and the deprecated total_tokens alias agree (drift check)
+      - display_corpus and the deprecated display_tokens alias agree
       - Every MINI_OVERRIDES key is a real source in ALL_SOURCES
     """
     top_total = sum(entry["pct"] for entry in DATA_MIX.values())
@@ -313,15 +424,32 @@ def validate() -> None:
         f"PRETRAIN_VAL_FRACTION must be in (0, 1), got {PRETRAIN_VAL_FRACTION}"
     )
 
-    required_keys = {"total_tokens", "epochs", "cc_crawls", "display_tokens"}
+    required_keys = {"corpus_tokens", "epochs", "cc_crawls", "display_corpus"}
     for size, cfg in TARGET_CONFIGS.items():
         missing = required_keys - set(cfg)
         assert not missing, (
             f"TARGET_CONFIGS[{size!r}] missing required keys: {missing}"
         )
-        assert cfg["total_tokens"] > 0
+        assert cfg["corpus_tokens"] > 0
         assert cfg["epochs"] >= 1
         assert len(cfg["cc_crawls"]) >= 1
+
+        # Drift check: deprecated aliases must match canonical fields. If
+        # someone edits one and forgets the other, fail at import time.
+        if "total_tokens" in cfg:
+            assert cfg["total_tokens"] == cfg["corpus_tokens"], (
+                f"TARGET_CONFIGS[{size!r}]: deprecated total_tokens "
+                f"({cfg['total_tokens']}) does not match corpus_tokens "
+                f"({cfg['corpus_tokens']}). Update both, or drop the "
+                f"deprecated key."
+            )
+        if "display_tokens" in cfg:
+            assert cfg["display_tokens"] == cfg["display_corpus"], (
+                f"TARGET_CONFIGS[{size!r}]: deprecated display_tokens "
+                f"({cfg['display_tokens']!r}) does not match display_corpus "
+                f"({cfg['display_corpus']!r}). Update both, or drop the "
+                f"deprecated key."
+            )
 
     unknown_mini = set(MINI_OVERRIDES) - set(ALL_SOURCES)
     assert not unknown_mini, (

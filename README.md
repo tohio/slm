@@ -394,13 +394,13 @@ The invariant to preserve when changing GPU count is the **global batch size**:
 global_batch = micro_batch_size × gradient_accumulation_steps × num_gpus
 ```
 
-If you double the GPUs, halve `gradient_accumulation_steps` to keep the global batch (and therefore the model and recipe) identical. For pretrain only, also rescale `max_steps` to preserve the token budget — `max_steps_new = max_steps_old × old_gpus / new_gpus`.
+If you double the GPUs, halve `gradient_accumulation_steps` to keep the global batch (and therefore the model and recipe) identical. For pretrain only, also rescale `max_steps` to preserve the number of training steps over the corpus — `max_steps_new = max_steps_old × old_gpus / new_gpus`.
 
 ### Per-size reference tables (pretrain)
 
 The committed configs are written for 1 GPU. For multi-GPU pretraining, scale these values:
 
-**125m** — global batch 32 sequences, 10B token budget:
+**125m** — global batch 32 sequences, 5B corpus × 2 epochs:
 
 | GPUs | gradient_accumulation_steps | max_steps |
 |---|---|---|
@@ -408,7 +408,7 @@ The committed configs are written for 1 GPU. For multi-GPU pretraining, scale th
 | 4 | 2 | 38,000 |
 | 8 | 1 | 19,000 |
 
-**350m** — global batch 128 sequences, 30B token budget:
+**350m** — global batch 128 sequences, 15B corpus × 2 epochs:
 
 | GPUs | gradient_accumulation_steps | max_steps |
 |---|---|---|
@@ -416,7 +416,7 @@ The committed configs are written for 1 GPU. For multi-GPU pretraining, scale th
 | 4 | 4 | 57,500 |
 | 8 | 2 | 28,750 |
 
-**1b** — global batch 128 sequences, 30B token budget:
+**1b** — global batch 128 sequences, 30B corpus × 1 epoch:
 
 | GPUs | gradient_accumulation_steps | max_steps |
 |---|---|---|
@@ -498,15 +498,19 @@ The 125m run produces a corpus with the following actual breakdown. Supply-bound
 | `jupyter` | 0.40% | 0.29% ⚠ |
 | `conala` | 0.10% | 0.10% |
 
-Realized total: ~5.00B tokens (8.31M train + 41.8K val docs). The `blend_stats.json` written by the curator records these realized numbers; `export.py` reads from it to produce the per-model card.
+Realized total: ~5.00B corpus tokens (8.31M train + 41.8K val docs). The `blend_stats.json` written by the curator records these realized numbers; `export.py` reads from it to produce the per-model card.
 
 ### Token Targets
 
-| Model | Total tokens | Epochs |
-|---|---|---|
+| Model | Corpus tokens | Epochs |
+|---|---:|---:|
 | `slm-125m` | 5B | 2 |
 | `slm-350m` | 15B | 2 |
 | `slm-1b` | 30B | 1 |
+
+Why 1b uses 1 epoch: at 30B corpus tokens, every source stays below its supply
+ceiling, so no repetition is needed. 125m and 350m use 2 epochs because their
+smaller corpora leave comfortable headroom on every source.
 
 Why 1b uses 1 epoch: at 30B tokens / 1 epoch, every source stays below its supply ceiling, so no repetition. Modern small-model training (Llama, Phi) follows the same pattern — fresh tokens outperform repeated ones. 125m and 350m retain 2 epochs because their smaller budgets leave comfortable headroom.
 
@@ -631,7 +635,7 @@ make eval-chat     SIZE=125m   # after DPO (also: make eval)
 
 **Why `rope_theta=500000` across all sizes?** RoPE's base period is the slow axis of the position encoding — larger values give the model room to extrapolate to longer contexts than it was trained on. Using 500000 uniformly across 125m, 350m, and 1b means any size can be length-extended later (via YaRN, dynamic scaling, or similar) without retraining from scratch. The tradeoff at 2048 context (125m, 350m) is negligible — large base values don't hurt in-context quality at short sequence lengths, and consistency across sizes is worth more than micro-optimising each tier. Llama 3 and Qwen follow this same pre-stretched-base pattern.
 
-**Why different epoch counts per scale?** Token budget versus supply. At 125m (5B tokens), 2 epochs is comfortable; at 1b (30B tokens), 1 epoch leaves every source below its supply ceiling, so no repetition. Modern small-model training (Llama, Phi, Qwen) follows the single-epoch pattern at scale — fresh tokens outperform repeated ones.
+**Why different epoch counts per scale?** Corpus size versus per-source supply. At 125m (5B corpus tokens), 2 epochs is comfortable; at 1b (30B corpus tokens), 1 epoch leaves every source below its supply ceiling, so no repetition. Modern small-model training (Llama, Phi, Qwen) follows the single-epoch pattern at scale — fresh tokens outperform repeated ones.
 
 **Why streaming-first curation?** At 1b with 30B+ tokens, materializing sources in memory is infeasible on reasonable hardware. FineWeb and stack-v1 require streaming; the other sources use it for consistency. RAM is not the load-bearing scaling axis — vCPU count and network throughput are. This means readers on modest hardware (32 GB RAM) can still run 1b, just slower.
 
