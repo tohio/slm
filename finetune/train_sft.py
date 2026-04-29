@@ -26,6 +26,14 @@ Best-checkpoint selection:
     SFTTrainer reloads the lowest-eval-loss checkpoint before save_model(),
     so results/<name>/final/ is the best checkpoint, not the last.
 
+Warmup:
+    The YAML stores `warmup_ratio_recipe` (e.g. 0.03 = 3% of total steps).
+    We compute the equivalent `warmup_steps` at runtime from the resolved
+    total step count and pass that to SFTConfig. We do NOT pass
+    warmup_ratio because TRL deprecated it in v5.2 in favour of
+    warmup_steps. Computing in code preserves the auto-rescaling property
+    when GPU count changes — `warmup_steps` baked into YAML would not.
+
 Usage:
     # Chat SFT
     python finetune/train_sft.py --config finetune/configs/sft_chat_125m.yaml
@@ -43,6 +51,7 @@ Usage:
 import argparse
 import json
 import logging
+import math
 import os
 import shutil
 import sys
@@ -114,7 +123,66 @@ def load_tokenizer(tokenizer_path: Path):
     return tokenizer
 
 
-def build_sft_args(cfg: dict, output_dir: Path):
+def resolve_warmup_steps(train_cfg: dict, num_train_examples: int) -> int:
+    """
+    Resolve warmup_steps from the recipe ratio and the actual training shape.
+
+    Reads `warmup_ratio_recipe` (the recipe value, written by config_gen)
+    and computes the equivalent step count. Honours an explicit
+    `warmup_steps` override if present (back-compat for hand-edited
+    configs). Refuses to silently accept the deprecated `warmup_ratio` key.
+
+    Returns 0 if no warmup is configured.
+    """
+    if "warmup_steps" in train_cfg and train_cfg["warmup_steps"]:
+        # Explicit override — trust it. Caveat: this won't auto-rescale
+        # across GPU counts the way the ratio does. Logged for visibility.
+        steps = int(train_cfg["warmup_steps"])
+        log.info(
+            f"Warmup: {steps} steps (explicit override; will not auto-rescale "
+            f"across GPU counts)"
+        )
+        return steps
+
+    if "warmup_ratio" in train_cfg:
+        # Old-style key. TRL deprecated it; we refuse to pass it through to
+        # avoid the deprecation warning, but we honour the value the user
+        # clearly intended.
+        log.warning(
+            "Config uses deprecated `warmup_ratio` key. Rename to "
+            "`warmup_ratio_recipe` (or regenerate the config with "
+            "`make config-gen-sft`). Honouring the value for this run."
+        )
+        ratio = float(train_cfg["warmup_ratio"])
+    elif "warmup_ratio_recipe" in train_cfg:
+        ratio = float(train_cfg["warmup_ratio_recipe"])
+    else:
+        return 0
+
+    if ratio <= 0.0:
+        return 0
+
+    # Resolve world size — accelerate/torchrun set this; fallback to 1.
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    micro_batch = int(train_cfg["micro_batch_size"])
+    grad_accum  = int(train_cfg.get("gradient_accumulation_steps", 1))
+    epochs      = int(train_cfg.get("epochs", 1))
+
+    global_batch = micro_batch * grad_accum * world_size
+    steps_per_epoch = math.ceil(num_train_examples / global_batch)
+    total_steps = steps_per_epoch * epochs
+    steps = max(1, round(total_steps * ratio))
+
+    log.info(
+        f"Warmup: {steps} steps "
+        f"({ratio:.1%} of {total_steps} total = "
+        f"{steps_per_epoch} steps/epoch × {epochs} epochs; "
+        f"global_batch={global_batch}, world_size={world_size})"
+    )
+    return steps
+
+
+def build_sft_args(cfg: dict, output_dir: Path, num_train_examples: int):
     """
     Build SFTConfig for trl 0.17+.
 
@@ -139,17 +207,7 @@ def build_sft_args(cfg: dict, output_dir: Path):
     use_bf16  = has_cuda and precision == "bf16"
     use_fp16  = has_cuda and precision == "fp16"
 
-    # Warmup: prefer warmup_ratio (scales with total steps under varying
-    # epochs/dataset sizes). warmup_steps is honoured if set for backward
-    # compatibility, but configs should use warmup_ratio.
-    warmup_ratio = train_cfg.get("warmup_ratio", 0.0)
-    warmup_steps = train_cfg.get("warmup_steps", 0)
-    if warmup_ratio and warmup_steps:
-        log.warning(
-            "Both warmup_ratio and warmup_steps set — HF Trainer uses "
-            "warmup_steps when non-zero and ignores warmup_ratio. "
-            "Drop warmup_steps from config to use the ratio."
-        )
+    warmup_steps = resolve_warmup_steps(train_cfg, num_train_examples)
 
     save_steps = train_cfg.get("save_steps", 200)
     eval_steps = train_cfg.get("eval_steps", 200)
@@ -163,7 +221,6 @@ def build_sft_args(cfg: dict, output_dir: Path):
         output_dir=str(output_dir),
         num_train_epochs=train_cfg.get("epochs", 2),
         max_steps=train_cfg.get("max_steps", -1),
-        warmup_ratio=warmup_ratio,
         warmup_steps=warmup_steps,
         per_device_train_batch_size=train_cfg["micro_batch_size"],
         per_device_eval_batch_size=train_cfg["micro_batch_size"],
@@ -280,7 +337,9 @@ def main():
     log.info(f"Val:   {len(val_dataset):,} examples")
 
     # ── SFT args ──────────────────────────────────────────────────────────────
-    sft_args = build_sft_args(cfg, output_dir)
+    # Pass num_train_examples so warmup_steps can be derived from the recipe
+    # ratio without adding another round-trip after the trainer is built.
+    sft_args = build_sft_args(cfg, output_dir, num_train_examples=len(train_dataset))
     log.info("Answer-only loss enabled (assistant_only_loss=True)")
     log.info("Best-checkpoint selection enabled (metric_for_best_model=eval_loss)")
 

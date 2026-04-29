@@ -28,6 +28,14 @@ Best-checkpoint selection:
     checkpoint is usually NOT the last. final/ contains the lowest-
     eval-loss checkpoint.
 
+Warmup:
+    The YAML stores `warmup_ratio_recipe` (e.g. 0.05 = 5% of total steps).
+    We compute the equivalent `warmup_steps` at runtime from the resolved
+    total step count and pass that to DPOConfig. We do NOT pass
+    warmup_ratio because TRL deprecated it in v5.2 in favour of
+    warmup_steps. Computing in code preserves the auto-rescaling property
+    when GPU count changes — `warmup_steps` baked into YAML would not.
+
 Target library versions: trl 0.28.x, transformers 5.5.x.
 See requirements.txt for the full compatible stack.
 
@@ -44,6 +52,7 @@ Usage:
 import argparse
 import json
 import logging
+import math
 import os
 import shutil
 import sys
@@ -111,7 +120,60 @@ def load_tokenizer(tokenizer_path: Path):
     return tokenizer
 
 
-def build_dpo_args(cfg: dict, output_dir: Path, beta: float):
+def resolve_warmup_steps(train_cfg: dict, num_train_examples: int) -> int:
+    """
+    Resolve warmup_steps from the recipe ratio and the actual training shape.
+
+    Reads `warmup_ratio_recipe` (the recipe value, written by config_gen)
+    and computes the equivalent step count. Honours an explicit
+    `warmup_steps` override if present (back-compat for hand-edited
+    configs). Refuses to silently accept the deprecated `warmup_ratio` key.
+
+    Returns 0 if no warmup is configured.
+    """
+    if "warmup_steps" in train_cfg and train_cfg["warmup_steps"]:
+        steps = int(train_cfg["warmup_steps"])
+        log.info(
+            f"Warmup: {steps} steps (explicit override; will not auto-rescale "
+            f"across GPU counts)"
+        )
+        return steps
+
+    if "warmup_ratio" in train_cfg:
+        log.warning(
+            "Config uses deprecated `warmup_ratio` key. Rename to "
+            "`warmup_ratio_recipe` (or regenerate the config with "
+            "`make config-gen-dpo`). Honouring the value for this run."
+        )
+        ratio = float(train_cfg["warmup_ratio"])
+    elif "warmup_ratio_recipe" in train_cfg:
+        ratio = float(train_cfg["warmup_ratio_recipe"])
+    else:
+        return 0
+
+    if ratio <= 0.0:
+        return 0
+
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    micro_batch = int(train_cfg["micro_batch_size"])
+    grad_accum  = int(train_cfg.get("gradient_accumulation_steps", 1))
+    epochs      = int(train_cfg.get("epochs", 1))
+
+    global_batch = micro_batch * grad_accum * world_size
+    steps_per_epoch = math.ceil(num_train_examples / global_batch)
+    total_steps = steps_per_epoch * epochs
+    steps = max(1, round(total_steps * ratio))
+
+    log.info(
+        f"Warmup: {steps} steps "
+        f"({ratio:.1%} of {total_steps} total = "
+        f"{steps_per_epoch} steps/epoch × {epochs} epochs; "
+        f"global_batch={global_batch}, world_size={world_size})"
+    )
+    return steps
+
+
+def build_dpo_args(cfg: dict, output_dir: Path, beta: float, num_train_examples: int):
     """
     Build DPOConfig for trl 0.29.x.
 
@@ -149,16 +211,7 @@ def build_dpo_args(cfg: dict, output_dir: Path, beta: float):
     use_bf16  = has_cuda and precision == "bf16"
     use_fp16  = has_cuda and precision == "fp16"
 
-    # Warmup: prefer warmup_ratio; warn if both set (HF Trainer ignores ratio
-    # when warmup_steps is non-zero).
-    warmup_ratio = train_cfg.get("warmup_ratio", 0.0)
-    warmup_steps = train_cfg.get("warmup_steps", 0)
-    if warmup_ratio and warmup_steps:
-        log.warning(
-            "Both warmup_ratio and warmup_steps set — HF Trainer uses "
-            "warmup_steps when non-zero and ignores warmup_ratio. "
-            "Drop warmup_steps from config to use the ratio."
-        )
+    warmup_steps = resolve_warmup_steps(train_cfg, num_train_examples)
 
     save_steps = train_cfg.get("save_steps", 200)
     eval_steps = train_cfg.get("eval_steps", 200)
@@ -172,7 +225,6 @@ def build_dpo_args(cfg: dict, output_dir: Path, beta: float):
         output_dir=str(output_dir),
         num_train_epochs=train_cfg.get("epochs", 1),
         max_steps=train_cfg.get("max_steps", -1),
-        warmup_ratio=warmup_ratio,
         warmup_steps=warmup_steps,
         per_device_train_batch_size=train_cfg["micro_batch_size"],
         per_device_eval_batch_size=train_cfg["micro_batch_size"],
@@ -294,7 +346,9 @@ def main():
     log.info(f"Train: {len(train_dataset):,} pairs | Val: {len(val_dataset):,} pairs")
 
     # ── DPO args ──────────────────────────────────────────────────────────────
-    dpo_args = build_dpo_args(cfg, output_dir, beta)
+    # Pass num_train_examples so warmup_steps can be derived from the recipe
+    # ratio without adding another round-trip after the trainer is built.
+    dpo_args = build_dpo_args(cfg, output_dir, beta, num_train_examples=len(train_dataset))
     log.info(
         f"DPOConfig: max_length={dpo_args.max_length}, beta={beta}"
     )

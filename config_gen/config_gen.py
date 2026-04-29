@@ -829,8 +829,13 @@ data:
 
 training:
   # micro × accum × gpus = {cfg.micro_batch_size} × {cfg.gradient_accumulation_steps} × {cfg.num_gpus} = {cfg.actual_global_batch} sequences/step
+  #
+  # Warmup recipe: {profile.warmup_ratio:.3f} of total steps. Computed at
+  # runtime by train_sft.py from the resolved total_steps and passed to
+  # TrainingArguments as warmup_steps. We don't set warmup_ratio in this
+  # YAML because TRL deprecated it in v5.2 in favor of warmup_steps.
+  warmup_ratio_recipe: {profile.warmup_ratio}
   epochs: {profile.epochs}
-  warmup_ratio: {profile.warmup_ratio}
   micro_batch_size: {cfg.micro_batch_size}
   gradient_accumulation_steps: {cfg.gradient_accumulation_steps}
   precision: bf16
@@ -896,8 +901,13 @@ data:
 
 training:
   # micro × accum × gpus = {cfg.micro_batch_size} × {cfg.gradient_accumulation_steps} × {cfg.num_gpus} = {cfg.actual_global_batch} sequences/step
+  #
+  # Warmup recipe: {profile.warmup_ratio:.3f} of total steps. Computed at
+  # runtime by train_dpo.py from the resolved total_steps and passed to
+  # TrainingArguments as warmup_steps. We don't set warmup_ratio in this
+  # YAML because TRL deprecated it in v5.2 in favor of warmup_steps.
+  warmup_ratio_recipe: {profile.warmup_ratio}
   epochs: {profile.epochs}
-  warmup_ratio: {profile.warmup_ratio}
   micro_batch_size: {cfg.micro_batch_size}
   gradient_accumulation_steps: {cfg.gradient_accumulation_steps}
   precision: bf16
