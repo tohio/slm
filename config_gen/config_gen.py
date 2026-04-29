@@ -792,6 +792,9 @@ training:
   precision: bf16
   gradient_clip_val: 1.0
   gradient_checkpointing: {str(cfg.gradient_checkpointing).lower()}
+  torch_compile: true
+  torch_compile_backend: inductor
+  torch_compile_mode: reduce-overhead
   eval_steps: {max(100, cfg.max_steps // 100)}
   save_steps: {max(100, cfg.max_steps // 100)}
   save_total_limit: 3
