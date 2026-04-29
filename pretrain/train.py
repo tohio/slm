@@ -145,12 +145,14 @@ class SLMTrainer(Trainer):
     """
     Trainer subclass for pretraining.
 
-    The model always returns CausalLMOutputWithPast for compatibility with
-    Hugging Face, TRL SFTTrainer, DPOTrainer, generation, and eval tooling.
+    Both compute_loss and prediction_step handle the torch.compile / Accelerate
+    eval issue where the compiled model returns a plain dict instead of
+    CausalLMOutputWithPast — they extract loss across dict / ModelOutput /
+    tuple return shapes.
 
-    This trainer avoids the torch.compile / Accelerate Dynamo eval issue by
-    explicitly reading outputs.loss during prediction_step instead of relying
-    on the default Trainer output-unpacking path.
+    prediction_step always returns loss only (logits dropped) to avoid eval
+    OOMs on the [B, T, vocab] logits tensor.
+
     """
 
     def compute_loss(
@@ -161,18 +163,23 @@ class SLMTrainer(Trainer):
         num_items_in_batch=None,
     ):
         outputs = model(**inputs)
-        loss = outputs.loss
+
+        if isinstance(outputs, dict):
+            loss = outputs.get("loss")
+        elif hasattr(outputs, "loss"):
+            loss = outputs.loss
+        elif isinstance(outputs, (tuple, list)):
+            loss = outputs[0]
+        else:
+            raise TypeError(f"Unsupported model output type during training: {type(outputs)}")
 
         if loss is None:
             raise ValueError(
                 "Model returned no loss. Check that 'labels' is present in inputs. "
                 f"Available keys: {list(inputs.keys())}"
             )
-
         if not torch.is_tensor(loss):
-            raise TypeError(
-                f"Expected loss to be a torch.Tensor, got {type(loss)}: {loss}"
-            )
+            raise TypeError(f"Expected loss to be a torch.Tensor, got {type(loss)}: {loss}")
 
         return (loss, outputs) if return_outputs else loss
 
@@ -184,36 +191,38 @@ class SLMTrainer(Trainer):
         ignore_keys=None,
     ):
         """
-        Custom eval step for pretraining.
+        Evaluation step for causal LM pretraining.
 
-        Avoids default Trainer.prediction_step output unpacking, which can
-        mis-handle compiled ModelOutput objects during scheduled eval.
+        Always returns loss only. Logits are intentionally dropped because:
+        1. Pretraining eval only needs loss/perplexity tracking.
+        2. Logits are [B, T, vocab]. At B=64, T=2048, vocab=32000,
+           that is enormous and can cause eval OOMs.
+
+        If logits are needed later for compute_metrics, do not return full
+        logits from this method. Instead compute the metric in chunks, move
+        reduced values to CPU, or compute the metric inside the model/trainer
+        and log only scalar summaries.
         """
         inputs = self._prepare_inputs(inputs)
 
         with torch.no_grad():
             outputs = model(**inputs)
+
+        if isinstance(outputs, dict):
+            loss = outputs.get("loss")
+        elif hasattr(outputs, "loss"):
             loss = outputs.loss
+        elif isinstance(outputs, (tuple, list)):
+            loss = outputs[0]
+        else:
+            raise TypeError(f"Unsupported model output type during eval: {type(outputs)}")
 
         if loss is None:
-            raise ValueError("Model returned no eval loss.")
-
+            raise TypeError(f"Eval output did not contain loss: {outputs}")
         if not torch.is_tensor(loss):
-            raise TypeError(
-                f"Expected eval loss to be a torch.Tensor, got {type(loss)}: {loss}"
-            )
+            raise TypeError(f"Expected eval loss to be a torch.Tensor, got {type(loss)}: {loss}")
 
-        loss = loss.detach().mean()
-
-        if prediction_loss_only:
-            return loss, None, None
-
-        logits = outputs.logits.detach() if outputs.logits is not None else None
-        labels = inputs.get("labels")
-        labels = labels.detach() if labels is not None else None
-
-        return loss, logits, labels
-
+        return (loss.detach().mean(), None, None)
 
 def build_training_args(cfg: dict, output_dir: Path, resume: bool):
     from transformers import TrainingArguments
