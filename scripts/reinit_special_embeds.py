@@ -34,8 +34,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import safetensors.torch
 import torch
-from model import SLMForCausalLM
+from model import SLMConfig, SLMForCausalLM
 from transformers import AutoConfig, PreTrainedTokenizerFast
+
+AutoConfig.register("slm", SLMConfig)
 
 
 SPECIALS_TO_REINIT = [
