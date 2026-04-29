@@ -26,7 +26,7 @@ Output:
     data/tokenized/val.json
 
 Inputs:
-    By default both curated/train.jsonl and curated/val.jsonl are tokenized.
+    By default both validated/train.jsonl and validated/val.jsonl are tokenized.
     The val split was produced upstream by the curator's blend stage as a
     uniform random sample of the shuffled documents, so val and train come
     from the same distribution.
@@ -54,6 +54,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import logging
 import multiprocessing as mp
@@ -89,6 +90,20 @@ UINT16_MAX_VOCAB = 65_536
 # original code.
 _worker_tokenizer = None
 _worker_eos_id    = None
+
+
+def tokenizer_fingerprint(tokenizer_path: Path) -> str:
+    """
+    Return SHA256 of the tokenizer's canonical serialized form.
+
+    Hashes the loaded tokenizer's behavior, not the on-disk bytes.
+    Two files that load to the same tokenizer (e.g., re-saved with
+    different whitespace) produce the same fingerprint; two files
+    that produce different IDs for the same input cannot collide.
+    """
+    from tokenizers import Tokenizer
+    tok = Tokenizer.from_file(str(tokenizer_path))
+    return hashlib.sha256(tok.to_str().encode("utf-8")).hexdigest()
 
 
 def _worker_init(tokenizer_path: str, eos_id: int) -> None:
@@ -177,10 +192,25 @@ def _tokenize_split(
     bin_path  = output_dir / f"{split}.bin"
     meta_path = output_dir / f"{split}.json"
 
+    current_tokenizer_sha256 = tokenizer_fingerprint(tokenizer_path)
+
     if bin_path.exists() and meta_path.exists():
-        log.info(f"[{split}] Already tokenized: {bin_path}")
         with open(meta_path) as f:
-            return json.load(f)
+            meta = json.load(f)
+
+        saved_tokenizer_sha256 = meta.get("tokenizer_sha256")
+
+        if saved_tokenizer_sha256 != current_tokenizer_sha256:
+            raise RuntimeError(
+                f"[{split}] Existing tokenized data was created with a different "
+                f"or unknown tokenizer.\n"
+                f"Existing tokenizer_sha256: {saved_tokenizer_sha256}\n"
+                f"Current tokenizer_sha256:  {current_tokenizer_sha256}\n"
+                f"Delete {bin_path} and {meta_path}, or run a clean tokenize target."
+            )
+
+        log.info(f"[{split}] Already tokenized and tokenizer hash matches: {bin_path}")
+        return meta
 
     log.info(f"[{split}] Counting documents in {input_path}...")
     n_docs_total = _count_docs(input_path)
@@ -228,6 +258,7 @@ def _tokenize_split(
         "split":     split,
         "input":     str(input_path),
         "tokenizer": str(tokenizer_path),
+        "tokenizer_sha256": current_tokenizer_sha256,
     }
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
