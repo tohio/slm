@@ -206,7 +206,7 @@ class DPOProfile:
 SIZE_PROFILES: dict[str, PretrainProfile] = {
     "125m": PretrainProfile(
         state_gb=1.5, act_per_seq_gb_no_ckpt=0.04, act_per_seq_gb_ckpt=0.008,
-        ctx=2048, ref_global_batch=32,
+        ctx=2048, ref_global_batch=128,
         consumed_tokens=data_mix.consumed_tokens("125m"),
         lr=3.0e-4, warmup_frac=0.01,
         hidden=768, layers=12, heads=12, kv_heads=4,
