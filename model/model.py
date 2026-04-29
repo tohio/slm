@@ -6,35 +6,24 @@ SLMModel and SLMForCausalLM — the full model registered with HuggingFace.
 SLMModel: the core transformer (embeddings + decoder stack + final norm).
 SLMForCausalLM: adds the language model head and loss computation.
 
-Registering with AutoModel/AutoModelForCausalLM means the model can be
-loaded, saved, and used with the full HuggingFace ecosystem:
-
-    from transformers import AutoModelForCausalLM
-    model = AutoModelForCausalLM.from_pretrained("tohio/slm-125m")
-
-Tied embeddings: the LM head weight is shared with the input embedding
-weight. This reduces parameters and has been shown to improve performance
-at small model scales.
-
 Design:
     - No bias anywhere
     - Pre-norm throughout
     - KV cache support for efficient autoregressive generation
     - Compatible with HuggingFace generate(), trl, lm-evaluation-harness, vLLM
 
-Compatibility (transformers v5):
-    - SLMForCausalLM inherits from GenerationMixin directly — PreTrainedModel
-      no longer inherits from GenerationMixin from v4.50 onwards.
-    - Weight tying: tie_weights() does the actual sharing; _tied_weights_keys
-      is set as a dict so save_pretrained correctly handles shared tensors.
-    - past_key_values supports both legacy list[tuple] format and v5
-      DynamicCache objects for full compatibility with trl and vLLM.
-    - transformers v5 DynamicCache uses a .layers attribute containing
-      DynamicLayer objects with .keys and .values tensors. Older versions
-      used .key_cache / .value_cache list attributes. Both are handled.
-    - prepare_inputs_for_generation consumes cache_position (v5) to slice
-      input_ids correctly for single-token and multi-token resume.
-    - use_cache is forced False when gradient checkpointing is enabled.
+Important implementation detail:
+    SLMModel is a plain nn.Module.
+    SLMForCausalLM is the only PreTrainedModel.
+
+This follows the standard HuggingFace architecture pattern used by Llama,
+Mistral, GPT-NeoX, Phi, etc.:
+
+    SLMForCausalLM(PreTrainedModel)
+        └── SLMModel(nn.Module)
+
+Only the outer class calls post_init(), so initialization and HF
+save/load behavior are controlled from one PreTrainedModel.
 """
 
 from typing import Optional, Union
@@ -43,7 +32,7 @@ import torch
 import torch.nn as nn
 from torch.nn import CrossEntropyLoss
 from transformers import PreTrainedModel
-from transformers.cache_utils import Cache, DynamicCache
+from transformers.cache_utils import Cache
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 
@@ -69,7 +58,6 @@ def _extract_kv_from_dynamic_cache(
     """
     result = []
 
-    # transformers v5 — DynamicLayer with .keys / .values
     cache_layers = getattr(cache, "layers", None)
     if cache_layers is not None:
         for i in range(n_layers):
@@ -79,7 +67,6 @@ def _extract_kv_from_dynamic_cache(
                 result.append(None)
         return result
 
-    # older DynamicCache — .key_cache / .value_cache lists
     key_cache = getattr(cache, "key_cache", None)
     value_cache = getattr(cache, "value_cache", None)
     if key_cache is not None:
@@ -90,26 +77,22 @@ def _extract_kv_from_dynamic_cache(
                 result.append(None)
         return result
 
-    # Unknown format — return empty cache
     return [None] * n_layers
 
 
-class SLMModel(PreTrainedModel):
+class SLMModel(nn.Module):
     """
     The core SLM transformer — embeddings, decoder stack, final norm.
 
     Does not include the LM head — use SLMForCausalLM for language modelling.
 
-    Args:
-        config (SLMConfig): Model configuration.
+    Important:
+        This is intentionally a plain nn.Module, not a PreTrainedModel.
+        The outer SLMForCausalLM owns HF initialization, saving, and loading.
     """
 
-    config_class = SLMConfig
-    base_model_prefix = "model"
-    supports_gradient_checkpointing = True
-
     def __init__(self, config: SLMConfig):
-        super().__init__(config)
+        super().__init__()
         self.config = config
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
@@ -118,23 +101,6 @@ class SLMModel(PreTrainedModel):
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.gradient_checkpointing = False
-
-        # Apply configured weight init. SLMModel has no LM head and no tied
-        # weights, so the dict-form _tied_weights_keys pathway in v5 is not
-        # exercised here — post_init() is safe to call.
-        self.post_init()
-
-    def _init_weights(self, module: nn.Module) -> None:
-        """Initialize weights with config.initializer_range."""
-        std = self.config.initializer_range
-        if isinstance(module, nn.Linear):
-            module.weight.data.normal_(mean=0.0, std=std)
-            if module.bias is not None:
-                module.bias.data.zero_()
-        elif isinstance(module, nn.Embedding):
-            module.weight.data.normal_(mean=0.0, std=std)
-            if module.padding_idx is not None:
-                module.weight.data[module.padding_idx].zero_()
 
     def get_input_embeddings(self) -> nn.Embedding:
         return self.embed_tokens
@@ -159,24 +125,23 @@ class SLMModel(PreTrainedModel):
     ) -> BaseModelOutputWithPast:
         use_cache = use_cache if use_cache is not None else self.config.use_cache
         return_dict = return_dict if return_dict is not None else getattr(
-            self.config, 'return_dict', getattr(self.config, 'use_return_dict', True)
+            self.config, "return_dict", getattr(self.config, "use_return_dict", True)
         )
 
-        # Gradient checkpointing and use_cache are mutually exclusive
         if self.gradient_checkpointing and self.training and use_cache:
             use_cache = False
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
+
         hidden_states = inputs_embeds
 
-        # Normalise past_key_values — accept both legacy list[tuple] and
-        # v5 DynamicCache. Convert to per-layer (k, v) tuples or None.
         if past_key_values is None:
             past_key_values = [None] * len(self.layers)
         elif isinstance(past_key_values, Cache):
             past_key_values = _extract_kv_from_dynamic_cache(
-                past_key_values, len(self.layers)
+                past_key_values,
+                len(self.layers),
             )
 
         next_cache: list | None = [] if use_cache else None
@@ -191,10 +156,9 @@ class SLMModel(PreTrainedModel):
                     layer.__call__,
                     hidden_states,
                     attention_mask,
-                    None,   # past_key_value
-                    False,  # use_cache
+                    None,
+                    False,
                 )
-                # Layer returns (hidden_states, kv) — unpack safely
                 hidden_states = layer_out[0]
                 layer_kv = layer_out[1] if len(layer_out) > 1 else None
             else:
@@ -227,42 +191,25 @@ class SLMModel(PreTrainedModel):
 
 class SLMForCausalLM(PreTrainedModel, GenerationMixin):
     """
-    SLM with a language modelling head for causal (autoregressive) generation.
+    SLM with a language modelling head for causal language modelling.
 
-    Adds a linear LM head on top of SLMModel. When tie_word_embeddings=True
-    (default), the LM head weight is tied to the input embedding weight.
-
-    Inherits from GenerationMixin directly — required from transformers v4.50+
-    where PreTrainedModel no longer inherits from GenerationMixin.
-
-    Compatible with:
-        - HuggingFace generate() — autoregressive text generation
-        - trl SFTTrainer / DPOTrainer — supervised fine-tuning and alignment
-        - lm-evaluation-harness — benchmark evaluation
-        - vLLM — production serving
-
-    Args:
-        config (SLMConfig): Model configuration.
-
-    Example::
-
-        from model.config import SLM_125M
-        from model.model import SLMForCausalLM
-
-        model = SLMForCausalLM(SLM_125M)
-        inputs = tokenizer("Hello world", return_tensors="pt")
-        output = model.generate(**inputs, max_new_tokens=50)
+    This is the only PreTrainedModel in the architecture. It owns:
+    - initialization via post_init()
+    - save_pretrained()
+    - from_pretrained()
+    - tied embedding behavior
+    - HF generation compatibility
     """
 
     config_class = SLMConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
 
-    # _tied_weights_keys must be a dict in transformers v5:
-    #   {target_weight_name: source_weight_name}
-    # This tells save_pretrained which weights are shared so it can
-    # correctly handle shared tensors during serialisation.
-    _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
+    # Use the common HF tied-weight declaration.
+    # If the sentinel test passes but storage is not shared after load,
+    # test the v5 dict form:
+    #     {"lm_head.weight": "model.embed_tokens.weight"}
+    _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config: SLMConfig):
         super().__init__(config)
@@ -271,12 +218,20 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         self.post_init()
 
     def _init_weights(self, module: nn.Module) -> None:
-        """Initialize weights with config.initializer_range."""
+        """
+        Initialize weights with config.initializer_range.
+
+        This runs on every submodule when post_init() recurses, including
+        modules inside SLMModel. SLMModel intentionally does not define its
+        own _init_weights; this is the single source of init policy.
+        """
         std = self.config.initializer_range
+
         if isinstance(module, nn.Linear):
             module.weight.data.normal_(mean=0.0, std=std)
             if module.bias is not None:
                 module.bias.data.zero_()
+
         elif isinstance(module, nn.Embedding):
             module.weight.data.normal_(mean=0.0, std=std)
             if module.padding_idx is not None:
@@ -286,15 +241,11 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         """
         Tie LM head weights to input embeddings when tie_word_embeddings=True.
 
-        Called in two places:
-        - post_init() during __init__, after weight initialization
-        - from_pretrained(), after loading weights from disk, to restore the
-          tie that save_pretrained() broke when serialising independent copies
-
-        Accepts **kwargs for forward compatibility (v5 passes recompute_mapping=False).
+        Uses HF's helper instead of direct Parameter assignment so parameter
+        registration and tied-storage behavior follow PreTrainedModel rules.
         """
         if self.config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
+            self._tie_or_clone_weights(self.lm_head, self.model.embed_tokens)
 
     def get_input_embeddings(self) -> nn.Embedding:
         return self.model.embed_tokens
@@ -314,29 +265,6 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
     def set_decoder(self, decoder: SLMModel) -> None:
         self.model = decoder
 
-    def save_pretrained(self, save_directory, **kwargs) -> None:
-        """
-        Override save_pretrained to handle tied weights correctly.
-
-        When tie_word_embeddings=True, lm_head.weight and model.embed_tokens.weight
-        share the same storage. safetensors does not allow tensor aliasing so
-        transformers removes lm_head.weight from the state dict before saving.
-        When loading, from_pretrained then can't find lm_head.weight and reports
-        it as MISSING — it will be re-tied after load, but only if the model
-        knows about the tying.
-
-        We temporarily untie the weights before saving by making lm_head.weight
-        an independent copy, then restore the tie after. try/finally guarantees
-        the tie is always restored even if save raises an exception.
-        """
-        if self.config.tie_word_embeddings:
-            self.lm_head.weight = nn.Parameter(self.model.embed_tokens.weight.data.clone())
-        try:
-            super().save_pretrained(save_directory, **kwargs)
-        finally:
-            if self.config.tie_word_embeddings:
-                self.lm_head.weight = self.model.embed_tokens.weight
-
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -349,9 +277,6 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
     ) -> CausalLMOutputWithPast:
-        # Always return ModelOutput. The legacy tuple path interacts badly
-        # with HF Trainer's prediction_step (loss extraction breaks when
-        # outputs[1:] indexes into a ModelOutput).
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -364,19 +289,18 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs.last_hidden_state
-        logits = self.lm_head(hidden_states).float()  # float32 for loss stability
+        logits = self.lm_head(hidden_states).float()
 
         loss = None
         if labels is not None:
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
+
             loss = CrossEntropyLoss()(
                 shift_logits.view(-1, self.config.vocab_size),
                 shift_labels.view(-1),
             )
 
-    
-        # Return Hugging Face-compatible ModelOutput for Trainer, TRL, generation, and eval.
         return CausalLMOutputWithPast(
             loss=loss,
             logits=logits,
@@ -396,17 +320,9 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         """
         Called by HuggingFace generate() at each decoding step.
 
-        Slices input_ids to only the positions that haven't been processed yet:
-        - If cache_position is provided (transformers v5), trim to len(cache_position)
-          tokens from the end. This correctly handles both single-token
-          generation (cache_position has length 1) and multi-token resume
-          used by assisted/speculative decoding (cache_position has length > 1).
-        - If cache_position is absent (older callers) and past_key_values is
-          set, fall back to trimming to the last token, which matches the
-          common autoregressive case.
+        Slices input_ids to only positions that have not yet been processed.
         """
         if cache_position is not None:
-            # v5 path: slice to exactly the new positions implied by cache_position.
             input_ids = input_ids[:, -cache_position.shape[0]:]
         elif past_key_values is not None:
             input_ids = input_ids[:, -1:]
@@ -422,6 +338,7 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
             "attention_mask": attention_mask,
             "cache_position": cache_position,
         })
+
         return model_inputs
 
     def _reorder_cache(
@@ -431,13 +348,11 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
     ) -> Union[Cache, list[tuple[torch.Tensor, torch.Tensor]]]:
         """
         Reorder KV cache for beam search.
-
-        Handles both v5 DynamicCache objects and legacy list[tuple] format.
-        Instance method (not static) as required by v5.
         """
         if isinstance(past_key_values, Cache):
             past_key_values.reorder_cache(beam_idx)
             return past_key_values
+
         return [
             (k.index_select(0, beam_idx), v.index_select(0, beam_idx))
             for k, v in past_key_values

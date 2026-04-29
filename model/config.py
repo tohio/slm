@@ -21,9 +21,16 @@ Remote-code loading:
         AutoModelForCausalLM.from_pretrained(
             "tohio/slm-125m", trust_remote_code=True,
         )
+
     For this to work, export/export.py bundles the model source into the
     Hub repo as a subpackage named `slm_arch` — the auto_map targets below
     reference that bundled copy, not the training-time `model` package.
+
+    Note:
+        This config intentionally exposes AutoConfig and AutoModelForCausalLM,
+        but not AutoModel. SLMModel is an internal nn.Module, not a
+        PreTrainedModel target. Use AutoModelForCausalLM for loading SLM
+        checkpoints.
 """
 
 from transformers import PretrainedConfig
@@ -89,7 +96,7 @@ class SLMConfig(PretrainedConfig):
             num_attention_heads=32,
             num_key_value_heads=8,
             max_position_embeddings=4096,
-            rope_theta=500000.0,  # extended base for longer context
+            rope_theta=500000.0,
         )
     """
 
@@ -103,9 +110,11 @@ class SLMConfig(PretrainedConfig):
     # bundles the model source into the Hub repo under that subpackage
     # name to avoid colliding with the generic name `model` on sys.path
     # where third-party `trust_remote_code` would load it.
+    #
+    # We intentionally do NOT expose AutoModel here. SLMModel is now an
+    # internal nn.Module, not a PreTrainedModel. Use AutoModelForCausalLM.
     auto_map = {
         "AutoConfig": "slm_arch.config.SLMConfig",
-        "AutoModel": "slm_arch.model.SLMModel",
         "AutoModelForCausalLM": "slm_arch.model.SLMForCausalLM",
     }
 
@@ -160,15 +169,18 @@ class SLMConfig(PretrainedConfig):
                 f"num_attention_heads ({self.num_attention_heads}) must be divisible by "
                 f"num_key_value_heads ({self.num_key_value_heads})"
             )
+
         if self.hidden_size % self.num_attention_heads != 0:
             raise ValueError(
                 f"hidden_size ({self.hidden_size}) must be divisible by "
                 f"num_attention_heads ({self.num_attention_heads})"
             )
+
         if self.max_position_embeddings <= 0:
             raise ValueError(
                 f"max_position_embeddings must be positive, got {self.max_position_embeddings}"
             )
+
         if self.rope_theta <= 0:
             raise ValueError(
                 f"rope_theta must be positive, got {self.rope_theta}"
@@ -181,7 +193,7 @@ class SLMConfig(PretrainedConfig):
 
     @property
     def num_query_groups(self) -> int:
-        """Number of query heads per KV head (GQA groups)."""
+        """Number of query heads per KV head."""
         return self.num_attention_heads // self.num_key_value_heads
 
 
