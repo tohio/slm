@@ -24,6 +24,14 @@ Mistral, GPT-NeoX, Phi, etc.:
 
 Only the outer class calls post_init(), so initialization and HF
 save/load behavior are controlled from one PreTrainedModel.
+
+Important loader note:
+    transformers==5.5.4 was observed to report successful loading for this
+    custom model while not actually applying checkpoint tensors. Therefore
+    SLMForCausalLM.from_pretrained() is overridden to use the verified-safe
+    path:
+
+        config -> model init -> safetensors/torch load -> load_state_dict
 """
 
 from typing import Optional, Union
@@ -205,9 +213,8 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
 
-    # Use the common HF tied-weight declaration.
-    # If the sentinel test passes but storage is not shared after load,
-    # test the v5 dict form:
+    # Common HF tied-weight declaration.
+    # If a future Transformers version requires the v5 dict form, test:
     #     {"lm_head.weight": "model.embed_tokens.weight"}
     _tied_weights_keys = ["lm_head.weight"]
 
@@ -216,6 +223,104 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         self.model = SLMModel(config)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.post_init()
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
+        """
+        Safe SLM loader.
+
+        transformers==5.5.4 was observed to report successful loading for this
+        custom model while not applying checkpoint tensors correctly. This
+        override preserves the public API while using the verified-safe route:
+
+            config -> cls(config) -> safetensors/torch load -> load_state_dict
+
+        Supports local checkpoint directories containing:
+            - model.safetensors, or
+            - pytorch_model.bin
+
+        Notes:
+            - `device_map="auto"` is handled minimally for local loading.
+            - `torch_dtype` and `dtype` are both accepted.
+            - `output_loading_info=True` returns (model, info), matching HF style.
+        """
+        import os
+        import safetensors.torch
+        from transformers import AutoConfig
+
+        config = kwargs.pop("config", None)
+        torch_dtype = kwargs.pop("torch_dtype", None)
+        dtype = kwargs.pop("dtype", None)
+        device_map = kwargs.pop("device_map", None)
+        output_loading_info = kwargs.pop("output_loading_info", False)
+
+        # Accepted by many HF call sites, but ignored by this safe local loader.
+        kwargs.pop("low_cpu_mem_usage", None)
+        kwargs.pop("trust_remote_code", None)
+
+        if dtype is not None and torch_dtype is None:
+            torch_dtype = dtype
+
+        path = str(pretrained_model_name_or_path)
+
+        if config is None:
+            config = AutoConfig.from_pretrained(path)
+
+        model = cls(config, *model_args)
+
+        safetensors_path = os.path.join(path, "model.safetensors")
+        bin_path = os.path.join(path, "pytorch_model.bin")
+
+        if os.path.exists(safetensors_path):
+            state_dict = safetensors.torch.load_file(safetensors_path, device="cpu")
+        elif os.path.exists(bin_path):
+            state_dict = torch.load(bin_path, map_location="cpu")
+        else:
+            raise FileNotFoundError(
+                f"No model.safetensors or pytorch_model.bin found in {path}"
+            )
+
+        result = model.load_state_dict(state_dict, strict=False)
+
+        allowed_missing = set()
+        if getattr(config, "tie_word_embeddings", False):
+            allowed_missing.add("lm_head.weight")
+
+        missing_keys = set(result.missing_keys)
+        unexpected_keys = set(result.unexpected_keys)
+        unexpected_missing = sorted(k for k in missing_keys if k not in allowed_missing)
+
+        if unexpected_missing:
+            raise RuntimeError(f"Missing keys while loading {path}: {unexpected_missing}")
+
+        if unexpected_keys:
+            raise RuntimeError(f"Unexpected keys while loading {path}: {sorted(unexpected_keys)}")
+
+        if getattr(config, "tie_word_embeddings", False):
+            model.tie_weights()
+
+        if torch_dtype is not None:
+            model = model.to(dtype=torch_dtype)
+
+        # Minimal local device_map support.
+        if device_map is not None:
+            if device_map == "auto" and torch.cuda.is_available():
+                model = model.to("cuda")
+            elif isinstance(device_map, str) and device_map != "auto":
+                model = model.to(device_map)
+
+        model.eval()
+
+        if output_loading_info:
+            info = {
+                "missing_keys": missing_keys,
+                "unexpected_keys": unexpected_keys,
+                "mismatched_keys": set(),
+                "error_msgs": [],
+            }
+            return model, info
+
+        return model
 
     def _init_weights(self, module: nn.Module) -> None:
         """
