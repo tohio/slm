@@ -394,7 +394,7 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs.last_hidden_state
-        logits = self.lm_head(hidden_states).float()
+        logits = self.lm_head(hidden_states)
 
         loss = None
         if labels is not None:

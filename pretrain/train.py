@@ -145,15 +145,53 @@ class SLMTrainer(Trainer):
     """
     Trainer subclass for pretraining.
 
-    Both compute_loss and prediction_step handle the torch.compile / Accelerate
-    eval issue where the compiled model returns a plain dict instead of
-    CausalLMOutputWithPast — they extract loss across dict / ModelOutput /
-    tuple return shapes.
-
-    prediction_step always returns loss only (logits dropped) to avoid eval
-    OOMs on the [B, T, vocab] logits tensor.
-
+    Handles dict / ModelOutput / tuple return types, including nested
+    compiled-output cases like ({'loss': ..., 'logits': ...},).
     """
+
+    @staticmethod
+    def _extract_loss(outputs, context: str):
+        """
+        Extract loss from common model output forms:
+
+        - {"loss": tensor, "logits": tensor}
+        - {"loss": {"loss": tensor, "logits": tensor}}
+        - ModelOutput with .loss
+        - tuple/list where first item is loss
+        - tuple/list where first item is dict/ModelOutput containing loss
+        """
+        if isinstance(outputs, dict):
+            loss = outputs.get("loss")
+            if isinstance(loss, (dict, tuple, list)):
+                return SLMTrainer._extract_loss(loss, context)
+
+        elif hasattr(outputs, "loss"):
+            loss = outputs.loss
+            if isinstance(loss, (dict, tuple, list)):
+                return SLMTrainer._extract_loss(loss, context)
+
+        elif isinstance(outputs, (tuple, list)):
+            if len(outputs) == 0:
+                raise TypeError(f"Empty output tuple/list during {context}")
+            return SLMTrainer._extract_loss(outputs[0], context)
+
+        else:
+            raise TypeError(
+                f"Unsupported model output type during {context}: {type(outputs)}"
+            )
+
+        if loss is None:
+            raise TypeError(
+                f"Output did not contain loss during {context}. "
+                f"Output type: {type(outputs)}"
+            )
+
+        if not torch.is_tensor(loss):
+            raise TypeError(
+                f"Expected {context} loss to be a torch.Tensor, got {type(loss)}"
+            )
+
+        return loss
 
     def compute_loss(
         self,
@@ -163,24 +201,7 @@ class SLMTrainer(Trainer):
         num_items_in_batch=None,
     ):
         outputs = model(**inputs)
-
-        if isinstance(outputs, dict):
-            loss = outputs.get("loss")
-        elif hasattr(outputs, "loss"):
-            loss = outputs.loss
-        elif isinstance(outputs, (tuple, list)):
-            loss = outputs[0]
-        else:
-            raise TypeError(f"Unsupported model output type during training: {type(outputs)}")
-
-        if loss is None:
-            raise ValueError(
-                "Model returned no loss. Check that 'labels' is present in inputs. "
-                f"Available keys: {list(inputs.keys())}"
-            )
-        if not torch.is_tensor(loss):
-            raise TypeError(f"Expected loss to be a torch.Tensor, got {type(loss)}: {loss}")
-
+        loss = self._extract_loss(outputs, context="training")
         return (loss, outputs) if return_outputs else loss
 
     def prediction_step(
@@ -208,21 +229,9 @@ class SLMTrainer(Trainer):
         with torch.no_grad():
             outputs = model(**inputs)
 
-        if isinstance(outputs, dict):
-            loss = outputs.get("loss")
-        elif hasattr(outputs, "loss"):
-            loss = outputs.loss
-        elif isinstance(outputs, (tuple, list)):
-            loss = outputs[0]
-        else:
-            raise TypeError(f"Unsupported model output type during eval: {type(outputs)}")
-
-        if loss is None:
-            raise TypeError(f"Eval output did not contain loss: {outputs}")
-        if not torch.is_tensor(loss):
-            raise TypeError(f"Expected eval loss to be a torch.Tensor, got {type(loss)}: {loss}")
-
+        loss = self._extract_loss(outputs, context="eval")
         return (loss.detach().mean(), None, None)
+    
 
 def build_training_args(cfg: dict, output_dir: Path, resume: bool):
     from transformers import TrainingArguments
