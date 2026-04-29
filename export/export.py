@@ -456,7 +456,7 @@ built entirely from scratch, from raw web data through to a production-ready ali
 
 {training_section}
 
-**Hardware:** NVIDIA H200 (pretraining on 8× H200, fine-tuning on 1× H200)
+**Hardware:** NVIDIA H200 (pretraining on 1× H200, fine-tuning on 1× H200)
 {eval_section}
 
 ## Usage
