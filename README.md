@@ -334,7 +334,7 @@ make eval-mini
 make setup-gpu DATA_DIR=/data/slm/data SIZE=125m DATE=YYYY-MM-DD
 make accelerate-config-single        # single GPU — change to: make accelerate-config-multi GPUS=x for multi-GPU
 make config-gen      SIZE=125m GPUS=1   # Stage 4-6: auto-tune pretrain + sft + dpo configs for current GPU
-make pretrain        SIZE=125m GPUS=1   # Stage 4b: pretrain from scratch
+make pretrain        SIZE=125m GPUS=1   # Stage 4b: pretrain from scratch; auto-runs smoke-gen at the end
 make reinit-embeds   SIZE=125m          # Stage 4c: re-init chat special-token embeds before SFT
 make eval-base       SIZE=125m          # Stage 7:  evaluate base variant
 make export-base     SIZE=125m          # Stage 8:  push base model to Hub
@@ -416,6 +416,12 @@ make test-unit            # all of the above
 ---
 
 ## Multi-GPU Config Scaling
+
+> **The tables below describe the manual scaling formula for reference.**
+> `make config-gen` runs this math automatically and additionally tunes
+> `micro_batch_size` and `gradient_checkpointing` for the actual GPU you're
+> on — its output may differ significantly from these reference values.
+> Use this section to understand the math; use `config-gen` in practice.
 
 The training pipeline uses **pure data parallelism** at all model sizes — no tensor or pipeline parallelism. Adding GPUs splits the batch across them; each GPU keeps a full copy of the model.
 
@@ -539,11 +545,7 @@ Realized total: ~5.00B corpus tokens (8.31M train + 41.8K val docs). The `blend_
 | `slm-350m` | 15B | 2 |
 | `slm-1b` | 30B | 1 |
 
-Why 1b uses 1 epoch: at 30B corpus tokens, every source stays below its supply
-ceiling, so no repetition is needed. 125m and 350m use 2 epochs because their
-smaller corpora leave comfortable headroom on every source.
-
-Why 1b uses 1 epoch: at 30B tokens / 1 epoch, every source stays below its supply ceiling, so no repetition. Modern small-model training (Llama, Phi) follows the same pattern — fresh tokens outperform repeated ones. 125m and 350m retain 2 epochs because their smaller budgets leave comfortable headroom.
+Why 1b uses 1 epoch: at 30B tokens / 1 epoch, every source stays below its supply ceiling, so no repetition. Modern small-model training (Llama, Phi) follows the same pattern — fresh tokens outperform repeated ones. 125m and 350m retain 2 epochs because their smaller budgets leave comfortable headroom. Modern small-model training (Llama, Phi) follows the same pattern — fresh tokens outperform repeated ones. 125m and 350m retain 2 epochs because their smaller budgets leave comfortable headroom.
 
 ### Train / val split
 

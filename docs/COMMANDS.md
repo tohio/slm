@@ -693,6 +693,54 @@ make pretrain CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
 
 **Requires:** `data/tokenized/train.bin`, `data/tokenizer/`, `pretrain/configs/gpt_$(SIZE).yaml` (run `make config-gen-pretrain` first), accelerate configured.
 **Produces:** `results/slm-$(SIZE)/` checkpoints, W&B run.
+**Auto-runs:** `make smoke-gen SIZE=$(SIZE)` after training completes — generates a few test prompts to spot-check that the model isn't producing pure-repetition gibberish (objective-bug check). See `make smoke-gen` for details.
+
+---
+
+### `make pretrain-mini`
+
+Runs a minimal pretraining pass using `pretrain/configs/gpt_mini.yaml` — a 6-layer, 384-hidden model (~25M parameters) trained for 5000 steps (~40M tokens). Trains long enough to confirm loss decreases and produce semi-coherent output — use `inference/chat.py` after to verify the model is learning before committing to a full run.
+
+```bash
+make pretrain-mini GPUS=1
+```
+
+**Requires:** `data/tokenized/train.bin`, `data/tokenizer/`, accelerate configured.
+**Produces:** `results/slm-mini/` checkpoint.
+**Runtime:** ~30–45 min on a single GPU.
+**Note:** Semi-coherent output expected — enough to confirm the model is learning before a full run.
+**Auto-runs:** `make smoke-gen SIZE=mini` after training. The mini config trains on ~40M tokens, so output won't be fluent — but it should be topical, not pure repetition.
+
+---
+
+### `make smoke-gen`
+
+Runs four short greedy generations (≤30 tokens each) from `results/slm-$(SIZE)/final` to spot-check that the pretrained model is producing topical text. Auto-invoked by `make pretrain` and `make pretrain-mini`; can also be run standalone.
+
+```bash
+make smoke-gen SIZE=125m
+make smoke-gen SIZE=mini
+```
+
+**Purpose: detect training-objective bugs early.** A correctly-trained 125m base produces locally-coherent (if shallow) continuations on these prompts — completions like "The capital of France is in," "Once upon a time, the the of," and so on. Pure single-token repetition ("of of of of of") or only-punctuation output ("., , . ,") indicates the training objective is broken — most commonly a label-shift mismatch between the dataset and the model's `forward()`. **Do not proceed to SFT** if smoke-gen output is degenerate; investigate first.
+
+**Requires:** `results/slm-$(SIZE)/final` produced by `make pretrain` or `make pretrain-mini`.
+**Produces:** Stdout only — no files written.
+**Runtime:** ~10 seconds.
+
+**Why this exists:** A bug where the dataset pre-shifted labels while the model also shifted internally produced a clean-looking eval loss curve while training a 2-token-ahead objective instead of next-token. Generation was gibberish but training metrics were misleadingly healthy. Smoke-gen is the cheapest possible check that catches this and similar objective-mismatch bugs.
+
+---
+
+### `make pretrain-resume`
+
+Resumes pretraining from the last checkpoint.
+
+```bash
+make pretrain-resume SIZE=125m GPUS=4
+```
+
+**Requires:** Existing checkpoint in `results/slm-$(SIZE)/`.
 
 ---
 
@@ -748,38 +796,11 @@ make tokenizer-download
 
 ---
 
-### `make pretrain-mini`
-
-Runs a minimal pretraining pass using `pretrain/configs/gpt_mini.yaml` — a 6-layer, 384-hidden model (~25M parameters) trained for 5000 steps (~40M tokens). Trains long enough to confirm loss decreases and produce semi-coherent output — use `inference/chat.py` after to verify the model is learning before committing to a full run.
-
-```bash
-make pretrain-mini GPUS=1
-```
-
-**Requires:** `data/tokenized/train.bin`, `data/tokenizer/`, accelerate configured.
-**Produces:** `results/slm-mini/` checkpoint.
-**Runtime:** ~30–45 min on a single GPU.
-**Note:** Semi-coherent output expected — enough to confirm the model is learning before a full run.
-
----
-
-### `make pretrain-resume`
-
-Resumes pretraining from the last checkpoint.
-
-```bash
-make pretrain-resume SIZE=125m GPUS=4
-```
-
-**Requires:** Existing checkpoint in `results/slm-$(SIZE)/`.
-
----
-
 ### `make reinit-embeds`
 
-Re-initializes the chat-template special token embeddings (`<BOS>`, `<|system|>`, `<|user|>`, `<|assistant|>`, `<|endofturn|>`) to the mean of all trained token embeddings. These tokens exist in the tokenizer vocabulary but are absent from the pretraining corpus, so their embedding rows received essentially no gradient signal during pretraining and remain near random initialization. Replacing them with the mean of trained embeddings gives them a sensible prior at the centroid of the learned embedding manifold, so SFT loss starts near the pretraining baseline (~3) instead of ~11.
+Re-initializes the chat-template special token embeddings (`<|system|>`, `<|user|>`, `<|assistant|>`, `<|endofturn|>`) to the mean of all trained token embeddings. These tokens exist in the tokenizer vocabulary but are absent from the pretraining corpus, so their embedding rows received essentially no gradient signal during pretraining and remain near random initialization. Replacing them with the mean of trained embeddings gives them a sensible prior at the centroid of the learned embedding manifold, so SFT loss starts near the pretraining baseline (~3) instead of ~11.
 
-EOS is not touched — it was used as a document separator during pretraining and is already trained.
+BOS and EOS are not touched — both are used in the pretraining binary (BOS at document start, EOS at document end) and have well-trained embeddings.
 
 ```bash
 make reinit-embeds SIZE=125m
@@ -1180,7 +1201,7 @@ make setup-gpu DATA_DIR=/data/slm/data SIZE=125m DATE=2026-04-12
 source ~/.bashrc
 
 # 5. Validate the full pipeline end to end (~15 min total)
-make pretrain-mini  GPUS=1
+make pretrain-mini  GPUS=1     # auto-runs smoke-gen at the end
 make prepare-sft
 make sft-mini       GPUS=1
 make sft-code-mini  GPUS=1
@@ -1191,7 +1212,7 @@ make eval-mini
 # 6. Generate configs tuned for current GPU, then run full pipeline
 make accelerate-config-multi GPUS=8
 make config-gen      SIZE=125m GPUS=8       # convenience: auto-tune pretrain + sft + dpo configs
-make pretrain        SIZE=125m GPUS=8
+make pretrain        SIZE=125m GPUS=8       # auto-runs smoke-gen at the end
 make reinit-embeds   SIZE=125m              # Stage 4c: re-init chat special-token embeds before SFT
 make eval-base       SIZE=125m
 make export-base     SIZE=125m
