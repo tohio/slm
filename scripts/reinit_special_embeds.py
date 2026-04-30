@@ -41,7 +41,6 @@ AutoConfig.register("slm", SLMConfig)
 
 
 SPECIALS_TO_REINIT = [
-    "<BOS>",
     "<|system|>",
     "<|user|>",
     "<|assistant|>",
