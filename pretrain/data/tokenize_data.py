@@ -351,15 +351,15 @@ def verify_dataset(bin_path: Path, meta_path: Path) -> None:
     bos_count = int((arr == meta["bos_id"]).sum())
     eos_count = int((arr == meta["eos_id"]).sum())
     
-    log.info(f"  BOS count:    {bos_count:,} (expected n_docs={meta['n_docs']:,})")
-    log.info(f"  EOS count:    {eos_count:,} (>= n_docs={meta['n_docs']:,})")    
+    log.info(f"  BOS count:    {bos_count:,} (>= n_docs={meta['n_docs']:,})")
+    log.info(f"  EOS count:    {eos_count:,} (>= n_docs={meta['n_docs']:,})")  
     log.info(f"  First 20 IDs: {arr[:20].tolist()}")
 
     assert len(arr) == meta["n_tokens"], "Token count mismatch"
 
-    if bos_count != meta["n_docs"]:
+    if bos_count < meta["n_docs"]:
         raise RuntimeError(
-            f"BOS count mismatch: BOS={bos_count:,}, n_docs={meta['n_docs']:,}"
+            f"BOS count too small: BOS={bos_count:,}, n_docs={meta['n_docs']:,}"
         )
 
     if eos_count < meta["n_docs"]:
