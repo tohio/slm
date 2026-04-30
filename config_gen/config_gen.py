@@ -205,23 +205,19 @@ class DPOProfile:
 #   1b:   30B × 1 = 30B
 SIZE_PROFILES: dict[str, PretrainProfile] = {
     "125m": PretrainProfile(
-        state_gb=1.5, act_per_seq_gb_no_ckpt=1.3, act_per_seq_gb_ckpt=0.45,
+        state_gb=2.0, act_per_seq_gb_no_ckpt=1.75, act_per_seq_gb_ckpt=0.60,
         ctx=2048, ref_global_batch=64, consumed_tokens=data_mix.consumed_tokens("125m"),
-        lr=3.0e-4, warmup_frac=0.01, hidden=768, layers=12, heads=12, kv_heads=4,
+        lr=3.0e-4, warmup_frac=0.01, hidden=768, layers=16, heads=12, kv_heads=4,
     ),
     "350m": PretrainProfile(
-        state_gb=4.2, act_per_seq_gb_no_ckpt=0.6, act_per_seq_gb_ckpt=0.12,
-        ctx=2048, ref_global_batch=128,
-        consumed_tokens=data_mix.consumed_tokens("350m"),
-        lr=2.0e-4, warmup_frac=0.01,
-        hidden=1024, layers=24, heads=16, kv_heads=8,
+        state_gb=5.0, act_per_seq_gb_no_ckpt=0.75, act_per_seq_gb_ckpt=0.16,
+        ctx=2048, ref_global_batch=128, consumed_tokens=data_mix.consumed_tokens("350m"),
+        lr=2.0e-4, warmup_frac=0.01, hidden=1024, layers=28, heads=16, kv_heads=8,
     ),
     "1b": PretrainProfile(
-        state_gb=12.0, act_per_seq_gb_no_ckpt=3.2, act_per_seq_gb_ckpt=0.6,
-        ctx=4096, ref_global_batch=128,
-        consumed_tokens=data_mix.consumed_tokens("1b"),
-        lr=1.0e-4, warmup_frac=0.035,
-        hidden=2048, layers=32, heads=32, kv_heads=8,
+        state_gb=14.5, act_per_seq_gb_no_ckpt=4.0, act_per_seq_gb_ckpt=0.80,
+        ctx=4096, ref_global_batch=128, consumed_tokens=data_mix.consumed_tokens("1b"),
+        lr=1.0e-4, warmup_frac=0.035, hidden=2048, layers=38, heads=32, kv_heads=8,
     ),
 }
 
@@ -231,17 +227,17 @@ SIZE_PROFILES: dict[str, PretrainProfile] = {
 # Activations sized for SFT seq_len, which differs from pretrain at 1b.
 SFT_CHAT_PROFILES: dict[str, SFTProfile] = {
     "125m": SFTProfile(
-        state_gb=1.5, act_per_seq_gb_no_ckpt=1.3, act_per_seq_gb_ckpt=0.45,
+        state_gb=2.0, act_per_seq_gb_no_ckpt=1.75, act_per_seq_gb_ckpt=0.60,
         max_seq_length=2048, ref_global_batch=64, lr=1.0e-5, epochs=2,
         warmup_ratio=0.03, eval_steps=500, save_steps=500,
     ),
     "350m": SFTProfile(
-        state_gb=4.2, act_per_seq_gb_no_ckpt=0.6, act_per_seq_gb_ckpt=0.12,
+        state_gb=5.0, act_per_seq_gb_no_ckpt=0.75, act_per_seq_gb_ckpt=0.16,
         max_seq_length=2048, ref_global_batch=128,
         lr=8.0e-6, epochs=2, warmup_ratio=0.03,
     ),
     "1b": SFTProfile(
-        state_gb=12.0, act_per_seq_gb_no_ckpt=3.2, act_per_seq_gb_ckpt=0.6,
+        state_gb=14.5, act_per_seq_gb_no_ckpt=4.0, act_per_seq_gb_ckpt=0.80,
         max_seq_length=4096, ref_global_batch=128,
         lr=5.0e-6, epochs=2, warmup_ratio=0.03,
     ),
@@ -251,17 +247,17 @@ SFT_CHAT_PROFILES: dict[str, SFTProfile] = {
 # Recipe differs: lower LR to reduce catastrophic forgetting of chat.
 SFT_CODE_PROFILES: dict[str, SFTProfile] = {
     "125m": SFTProfile(
-        state_gb=1.5, act_per_seq_gb_no_ckpt=1.3, act_per_seq_gb_ckpt=0.45,
+        state_gb=2.0, act_per_seq_gb_no_ckpt=1.75, act_per_seq_gb_ckpt=0.60,
         max_seq_length=2048, ref_global_batch=64, lr=5.0e-6,
         epochs=2, warmup_ratio=0.03, eval_steps=500, save_steps=500,
     ),
     "350m": SFTProfile(
-        state_gb=4.2, act_per_seq_gb_no_ckpt=0.6, act_per_seq_gb_ckpt=0.12,
+        state_gb=5.0, act_per_seq_gb_no_ckpt=0.75, act_per_seq_gb_ckpt=0.16,
         max_seq_length=2048, ref_global_batch=128,
         lr=4.0e-6, epochs=2, warmup_ratio=0.03,
     ),
     "1b": SFTProfile(
-        state_gb=12.0, act_per_seq_gb_no_ckpt=3.2, act_per_seq_gb_ckpt=0.6,
+        state_gb=14.5, act_per_seq_gb_no_ckpt=4.0, act_per_seq_gb_ckpt=0.80,
         max_seq_length=4096, ref_global_batch=128,
         lr=2.5e-6, epochs=2, warmup_ratio=0.03,
     ),
@@ -272,19 +268,19 @@ SFT_CODE_PROFILES: dict[str, SFTProfile] = {
 # Activations are roughly 4× SFT: chosen + rejected pairs through both policy and ref.
 DPO_PROFILES: dict[str, DPOProfile] = {
     "125m": DPOProfile(
-        state_gb=1.75, act_per_seq_gb_no_ckpt=0.16, act_per_seq_gb_ckpt=0.032,
+        state_gb=2.3, act_per_seq_gb_no_ckpt=0.22, act_per_seq_gb_ckpt=0.05,
         max_seq_length=2048, ref_global_batch=64,
         lr=5.0e-7, epochs=1, warmup_ratio=0.05,
         dpo_beta=0.1, max_prompt_length=1024,
     ),
     "350m": DPOProfile(
-        state_gb=4.9, act_per_seq_gb_no_ckpt=2.4, act_per_seq_gb_ckpt=0.48,
+        state_gb=5.8, act_per_seq_gb_no_ckpt=2.8, act_per_seq_gb_ckpt=0.56,
         max_seq_length=2048, ref_global_batch=64,
         lr=3.0e-7, epochs=1, warmup_ratio=0.05,
         dpo_beta=0.1, max_prompt_length=1024,
     ),
     "1b": DPOProfile(
-        state_gb=14.0, act_per_seq_gb_no_ckpt=12.8, act_per_seq_gb_ckpt=2.4,
+        state_gb=16.5, act_per_seq_gb_no_ckpt=15.2, act_per_seq_gb_ckpt=2.8,
         max_seq_length=4096, ref_global_batch=64,
         lr=2.0e-7, epochs=1, warmup_ratio=0.05,
         dpo_beta=0.1, max_prompt_length=2048,
