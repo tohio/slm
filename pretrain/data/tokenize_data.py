@@ -167,26 +167,27 @@ def _worker_init(tokenizer_path: str, bos_id: int, eos_id: int) -> None:
     _worker_eos_id    = eos_id
 
 
-def _tokenize_chunk(texts: list[str]) -> list[int]:
+def _tokenize_chunk(texts: list[str]) -> tuple[list[int], int]:
     """
-    Tokenize a chunk of documents in a single worker task.
+    Tokenize a chunk of documents.
 
-    Receives a list of texts, encodes them all using the process-local
-    tokenizer (loaded once via _worker_init), and returns a flat list
-    of token IDs with BOS prepended and EOS appended around each document.
+    Returns:
+        (tokens, n_docs)
 
-    Batching documents into chunks (rather than one doc per task) amortises
-    the multiprocessing IPC overhead across many documents per round-trip.
+    n_docs is counted from the input chunk length, not by scanning for EOS,
+    because document text may itself contain strings that tokenize to EOS.
     """
     global _worker_tokenizer, _worker_bos_id, _worker_eos_id
+
     tokens: list[int] = []
-    # encode_batch encodes all texts in one call — faster than a loop
-    encodings = _worker_tokenizer.encode_batch(texts)
+    encodings = _worker_tokenizer.encode_batch(texts, add_special_tokens=False)
+
     for enc in encodings:
         tokens.append(_worker_bos_id)
         tokens.extend(enc.ids)
         tokens.append(_worker_eos_id)
-    return tokens
+
+    return tokens, len(texts)
 
 
 def _count_docs(path: Path) -> int:
@@ -291,13 +292,10 @@ def _tokenize_split(
         # chunk. The token list for each chunk is written immediately and
         # discarded, so peak RAM is bounded by (pool size × chunk size).
         pbar = tqdm(total=n_docs_total, desc=f"Tokenizing {split}", unit="doc")
-        for tokens in pool.imap_unordered(_tokenize_chunk, chunks):
+        for tokens, docs_in_chunk in pool.imap_unordered(_tokenize_chunk, chunks):
             _write_tokens(tokens, bin_file)
-            n_tokens    += len(tokens)
-            # Each document produces exactly one EOS, so EOS count = doc count
-            # for this chunk. (BOS count would also work — they're equal.)
-            docs_in_chunk = sum(1 for t in tokens if t == eos_id)
-            n_processed  += docs_in_chunk
+            n_tokens += len(tokens)
+            n_processed += docs_in_chunk
             pbar.update(docs_in_chunk)
         pbar.close()
 
@@ -349,11 +347,25 @@ def verify_dataset(bin_path: Path, meta_path: Path) -> None:
     log.info(f"  N tokens:     {len(arr):,} (expected {meta['n_tokens']:,})")
     log.info(f"  Min token ID: {arr.min()}")
     log.info(f"  Max token ID: {arr.max()}")
-    log.info(f"  BOS count:    {(arr == meta['bos_id']).sum():,} (≈ n_docs)")
-    log.info(f"  EOS count:    {(arr == meta['eos_id']).sum():,} (≈ n_docs)")
+    
+    bos_count = int((arr == meta["bos_id"]).sum())
+    eos_count = int((arr == meta["eos_id"]).sum())
+    
+    log.info(f"  BOS count:    {bos_count:,} (expected n_docs={meta['n_docs']:,})")
+    log.info(f"  EOS count:    {eos_count:,} (>= n_docs={meta['n_docs']:,})")    
     log.info(f"  First 20 IDs: {arr[:20].tolist()}")
 
     assert len(arr) == meta["n_tokens"], "Token count mismatch"
+
+    if bos_count != meta["n_docs"]:
+        raise RuntimeError(
+            f"BOS count mismatch: BOS={bos_count:,}, n_docs={meta['n_docs']:,}"
+        )
+
+    if eos_count < meta["n_docs"]:
+        raise RuntimeError(
+            f"EOS count too small: EOS={eos_count:,}, n_docs={meta['n_docs']:,}"
+        )
 
     # Layout check: a bos_doc_eos_v1 binary must start with BOS.
     # Catches the case where BOS prepending is broken in a way that
