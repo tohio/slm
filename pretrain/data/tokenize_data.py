@@ -11,11 +11,11 @@ tokenizing on the fly.
 
 Format:
     Single flat binary file of uint16 token IDs per split.
-    Documents are concatenated with EOS token as separator.
+    Documents are bracketed by BOS at start and EOS at end.
     No padding — sequences are packed end-to-end.
 
-    [doc1_tok1, doc1_tok2, ..., doc1_tokN, EOS,
-     doc2_tok1, doc2_tok2, ..., doc2_tokM, EOS, ...]
+    [BOS, doc1_tok1, doc1_tok2, ..., doc1_tokN, EOS,
+     BOS, doc2_tok1, doc2_tok2, ..., doc2_tokM, EOS, ...]
 
     uint16 supports vocab sizes up to 65,535 — sufficient for 32k vocab.
 
@@ -85,10 +85,15 @@ TOKENIZED_DIR = DATA_DIR / "tokenized"
 # overflowing uint16 would corrupt every token ID above 65535.
 UINT16_MAX_VOCAB = 65_536
 
+# Bump this whenever the binary token stream format changes.
+# Used to prevent silently reusing stale tokenized files.
+TOKENIZED_FORMAT_VERSION = "bos_doc_eos_v1"
+
 # Global tokenizer instance — loaded once per worker process via initializer,
 # not once per document. Avoids one tokenizer load per document in the
 # original code.
 _worker_tokenizer = None
+_worker_bos_id    = None
 _worker_eos_id    = None
 
 
@@ -106,7 +111,45 @@ def tokenizer_fingerprint(tokenizer_path: Path) -> str:
     return hashlib.sha256(tok.to_str().encode("utf-8")).hexdigest()
 
 
-def _worker_init(tokenizer_path: str, eos_id: int) -> None:
+def _validate_tokenizer(tokenizer_path: Path) -> tuple[int, int, int]:
+    """
+    Load and validate the tokenizer in one pass.
+
+    Returns (vocab_size, bos_id, eos_id).
+
+    Raises:
+        RuntimeError: if vocab is too large for uint16, or if BOS/EOS
+            special tokens are missing from the tokenizer.
+
+    Combines what was previously two separate tokenizer loads
+    (vocab check + special-token lookup) into one. Negligible
+    perf benefit, but cleaner — both reads happen against the
+    same in-memory tokenizer instance.
+    """
+    from tokenizers import Tokenizer
+    tok = Tokenizer.from_file(str(tokenizer_path))
+
+    vocab_size = tok.get_vocab_size()
+    if vocab_size >= UINT16_MAX_VOCAB:
+        raise RuntimeError(
+            f"Tokenizer vocab_size={vocab_size:,} does not fit in uint16 "
+            f"(max {UINT16_MAX_VOCAB - 1:,}). Either reduce the vocab size "
+            f"or switch the binary format in tokenize_data.py and "
+            f"dataset.py to uint32."
+        )
+
+    bos_id = tok.token_to_id("<BOS>")
+    eos_id = tok.token_to_id("<EOS>")
+    if bos_id is None:
+        raise RuntimeError("Tokenizer does not contain required <BOS> token")
+    if eos_id is None:
+        raise RuntimeError("Tokenizer does not contain required <EOS> token")
+
+    log.info(f"Tokenizer vocab size: {vocab_size:,} (fits in uint16)")
+    return vocab_size, bos_id, eos_id
+
+
+def _worker_init(tokenizer_path: str, bos_id: int, eos_id: int) -> None:
     """
     Initialize the tokenizer once per worker process.
 
@@ -117,9 +160,10 @@ def _worker_init(tokenizer_path: str, eos_id: int) -> None:
     Uses the raw tokenizers.Tokenizer (not PreTrainedTokenizerFast) —
     the chat_template and tokenizer_config.json are not needed here.
     """
-    global _worker_tokenizer, _worker_eos_id
+    global _worker_tokenizer, _worker_bos_id, _worker_eos_id
     from tokenizers import Tokenizer
     _worker_tokenizer = Tokenizer.from_file(tokenizer_path)
+    _worker_bos_id    = bos_id
     _worker_eos_id    = eos_id
 
 
@@ -129,16 +173,17 @@ def _tokenize_chunk(texts: list[str]) -> list[int]:
 
     Receives a list of texts, encodes them all using the process-local
     tokenizer (loaded once via _worker_init), and returns a flat list
-    of token IDs with EOS appended after each document.
+    of token IDs with BOS prepended and EOS appended around each document.
 
     Batching documents into chunks (rather than one doc per task) amortises
     the multiprocessing IPC overhead across many documents per round-trip.
     """
-    global _worker_tokenizer, _worker_eos_id
+    global _worker_tokenizer, _worker_bos_id, _worker_eos_id
     tokens: list[int] = []
     # encode_batch encodes all texts in one call — faster than a loop
     encodings = _worker_tokenizer.encode_batch(texts)
     for enc in encodings:
+        tokens.append(_worker_bos_id)
         tokens.extend(enc.ids)
         tokens.append(_worker_eos_id)
     return tokens
@@ -173,6 +218,7 @@ def _tokenize_split(
     output_dir: Path,
     split: str,
     pool: mp.Pool,
+    bos_id: int,
     eos_id: int,
     tokenizer_path: Path,
     chunk_size: int,
@@ -199,6 +245,7 @@ def _tokenize_split(
             meta = json.load(f)
 
         saved_tokenizer_sha256 = meta.get("tokenizer_sha256")
+        saved_format_version = meta.get("format_version")
 
         if saved_tokenizer_sha256 != current_tokenizer_sha256:
             raise RuntimeError(
@@ -209,7 +256,17 @@ def _tokenize_split(
                 f"Delete {bin_path} and {meta_path}, or run a clean tokenize target."
             )
 
-        log.info(f"[{split}] Already tokenized and tokenizer hash matches: {bin_path}")
+        if saved_format_version != TOKENIZED_FORMAT_VERSION:
+            raise RuntimeError(
+                f"[{split}] Existing tokenized data uses an old or unknown format.\n"
+                f"Existing format_version: {saved_format_version}\n"
+                f"Current format_version:  {TOKENIZED_FORMAT_VERSION}\n"
+                f"Delete {bin_path} and {meta_path}, or run a clean tokenize target."
+            )
+
+        log.info(
+            f"[{split}] Already tokenized and tokenizer/format match: {bin_path}"
+        )
         return meta
 
     log.info(f"[{split}] Counting documents in {input_path}...")
@@ -237,9 +294,8 @@ def _tokenize_split(
         for tokens in pool.imap_unordered(_tokenize_chunk, chunks):
             _write_tokens(tokens, bin_file)
             n_tokens    += len(tokens)
-            # Can't know exactly how many docs produced this chunk (workers
-            # drop empty texts upstream), but we know each chunk holds at
-            # most chunk_size. EOS tokens produced = docs produced.
+            # Each document produces exactly one EOS, so EOS count = doc count
+            # for this chunk. (BOS count would also work — they're equal.)
             docs_in_chunk = sum(1 for t in tokens if t == eos_id)
             n_processed  += docs_in_chunk
             pbar.update(docs_in_chunk)
@@ -253,13 +309,16 @@ def _tokenize_split(
     meta = {
         "n_tokens":  n_tokens,
         "n_docs":    n_processed,
+        "bos_id":    bos_id,
         "eos_id":    eos_id,
         "dtype":     "uint16",
         "split":     split,
         "input":     str(input_path),
         "tokenizer": str(tokenizer_path),
         "tokenizer_sha256": current_tokenizer_sha256,
+        "format_version": TOKENIZED_FORMAT_VERSION,
     }
+
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
     log.info(f"[{split}] Metadata saved:   {meta_path}")
@@ -273,46 +332,39 @@ def _write_tokens(tokens: list[int], bin_file) -> None:
     bin_file.write(arr.tobytes())
 
 
-def _assert_vocab_fits_uint16(tokenizer_path: Path) -> int:
-    """
-    Verify the tokenizer's vocab size fits in uint16. Returns vocab size.
-
-    If vocab_size > 65535, uint16 silently overflows and every token ID
-    above 65535 gets written as (id mod 65536). Training on the resulting
-    garbage would not fail — the model would just see a corrupted vocab
-    distribution. This check makes the failure mode loud.
-    """
-    from tokenizers import Tokenizer
-    tok = Tokenizer.from_file(str(tokenizer_path))
-    vocab_size = tok.get_vocab_size()
-    if vocab_size >= UINT16_MAX_VOCAB:
-        raise RuntimeError(
-            f"Tokenizer vocab_size={vocab_size:,} does not fit in uint16 "
-            f"(max {UINT16_MAX_VOCAB - 1:,}). Either reduce the vocab size "
-            f"or switch the binary format in tokenize_data.py and "
-            f"dataset.py to uint32."
-        )
-    log.info(f"Tokenizer vocab size: {vocab_size:,} (fits in uint16)")
-    return vocab_size
-
-
 def verify_dataset(bin_path: Path, meta_path: Path) -> None:
     """Quick sanity check on the tokenized dataset."""
     with open(meta_path) as f:
         meta = json.load(f)
 
+    if "bos_id" not in meta:
+        raise RuntimeError(f"{meta_path} missing bos_id metadata")
+
     arr = np.memmap(str(bin_path), dtype=np.uint16, mode="r")
 
     log.info("=== Dataset Verification ===")
     log.info(f"  File:         {bin_path}")
+    log.info(f"  Format ver:   {meta.get('format_version', '<unknown>')}")
     log.info(f"  Shape:        {arr.shape}")
     log.info(f"  N tokens:     {len(arr):,} (expected {meta['n_tokens']:,})")
     log.info(f"  Min token ID: {arr.min()}")
     log.info(f"  Max token ID: {arr.max()}")
+    log.info(f"  BOS count:    {(arr == meta['bos_id']).sum():,} (≈ n_docs)")
     log.info(f"  EOS count:    {(arr == meta['eos_id']).sum():,} (≈ n_docs)")
     log.info(f"  First 20 IDs: {arr[:20].tolist()}")
 
     assert len(arr) == meta["n_tokens"], "Token count mismatch"
+
+    # Layout check: a bos_doc_eos_v1 binary must start with BOS.
+    # Catches the case where BOS prepending is broken in a way that
+    # still produces the right BOS count but wrong layout.
+    if int(arr[0]) != meta["bos_id"]:
+        raise RuntimeError(
+            f"First token is {int(arr[0])}, expected BOS={meta['bos_id']}. "
+            f"Binary layout is wrong — format_version={meta.get('format_version')!r} "
+            f"requires BOS at position 0."
+        )
+
     log.info("  ✓ Verification passed")
 
 
@@ -373,9 +425,10 @@ def main():
         log.error("Or:  make tokenizer-download")
         sys.exit(1)
 
-    # Verify vocab fits in uint16 BEFORE spawning workers — fail fast
-    eos_id = 3
-    _assert_vocab_fits_uint16(args.tokenizer)
+    # Single-pass tokenizer validation: vocab size + special token IDs.
+    # Fails fast if the tokenizer is unusable, before spawning workers.
+    _, bos_id, eos_id = _validate_tokenizer(args.tokenizer)
+    log.info(f"Special token IDs: BOS={bos_id}, EOS={eos_id}")
 
     val_available = args.val.exists()
     if not val_available:
@@ -398,13 +451,14 @@ def main():
     with mp.Pool(
         processes=args.workers,
         initializer=_worker_init,
-        initargs=(tokenizer_path_str, eos_id),
+        initargs=(tokenizer_path_str, bos_id, eos_id),
     ) as pool:
         _tokenize_split(
             input_path=args.train,
             output_dir=args.output,
             split="train",
             pool=pool,
+            bos_id=bos_id,
             eos_id=eos_id,
             tokenizer_path=args.tokenizer,
             chunk_size=args.chunk_size,
@@ -416,6 +470,7 @@ def main():
                 output_dir=args.output,
                 split="val",
                 pool=pool,
+                bos_id=bos_id,
                 eos_id=eos_id,
                 tokenizer_path=args.tokenizer,
                 chunk_size=args.chunk_size,
