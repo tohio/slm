@@ -231,9 +231,9 @@ SIZE_PROFILES: dict[str, PretrainProfile] = {
 # Activations sized for SFT seq_len, which differs from pretrain at 1b.
 SFT_CHAT_PROFILES: dict[str, SFTProfile] = {
     "125m": SFTProfile(
-        state_gb=1.5, act_per_seq_gb_no_ckpt=0.04, act_per_seq_gb_ckpt=0.008,
-        max_seq_length=2048, ref_global_batch=128,
-        lr=1.0e-5, epochs=2, warmup_ratio=0.03,
+        state_gb=1.5, act_per_seq_gb_no_ckpt=1.3, act_per_seq_gb_ckpt=0.45,
+        max_seq_length=2048, ref_global_batch=64, lr=1.0e-5, epochs=2,
+        warmup_ratio=0.03, eval_steps=500, save_steps=500,
     ),
     "350m": SFTProfile(
         state_gb=4.2, act_per_seq_gb_no_ckpt=0.6, act_per_seq_gb_ckpt=0.12,
@@ -251,9 +251,9 @@ SFT_CHAT_PROFILES: dict[str, SFTProfile] = {
 # Recipe differs: lower LR to reduce catastrophic forgetting of chat.
 SFT_CODE_PROFILES: dict[str, SFTProfile] = {
     "125m": SFTProfile(
-        state_gb=1.5, act_per_seq_gb_no_ckpt=0.04, act_per_seq_gb_ckpt=0.008,
-        max_seq_length=2048, ref_global_batch=128,
-        lr=5.0e-6, epochs=2, warmup_ratio=0.03,
+        state_gb=1.5, act_per_seq_gb_no_ckpt=1.3, act_per_seq_gb_ckpt=0.45,
+        max_seq_length=2048, ref_global_batch=64, lr=5.0e-6,
+        epochs=2, warmup_ratio=0.03, eval_steps=500, save_steps=500,
     ),
     "350m": SFTProfile(
         state_gb=4.2, act_per_seq_gb_no_ckpt=0.6, act_per_seq_gb_ckpt=0.12,
@@ -756,6 +756,16 @@ def _wrap_for_yaml(text: str, prefix: str, continuation: str, width: int = 76) -
         lines.append(current)
     return lines
 
+def _pretrain_eval_save_steps(max_steps: int) -> int:
+    """
+    Pick eval/save cadence for pretraining.
+
+    Short smoke runs keep frequent evals.
+    Long full runs avoid excessive eval/save overhead.
+    """
+    if max_steps >= 10_000:
+        return 5_000
+    return max(100, max_steps // 100)
 
 def render_pretrain_yaml(cfg: GeneratedConfig) -> str:
     profile = SIZE_PROFILES[cfg.size]
@@ -793,8 +803,8 @@ training:
   torch_compile: true
   torch_compile_backend: inductor
   torch_compile_mode: default
-  eval_steps: {max(100, cfg.max_steps // 100)}
-  save_steps: {max(100, cfg.max_steps // 100)}
+  eval_steps: {_pretrain_eval_save_steps(cfg.max_steps)}
+  save_steps: {_pretrain_eval_save_steps(cfg.max_steps)}
   save_total_limit: 3
   log_steps: 10
   num_workers: 8
