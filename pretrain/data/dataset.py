@@ -28,8 +28,8 @@ Sequence packing:
     end-to-end with documents separated by EOS tokens.
 
     Example with seq_len=4 and tokens [1,2,3,4,5,6,7,8,9]:
-        Example 0: input=[1,2,3,4], label=[2,3,4,5]
-        Example 1: input=[5,6,7,8], label=[6,7,8,9]   (with stride=seq_len)
+        Example 0: input=[1,2,3,4], labels=[1,2,3,4]
+        Example 1: input=[5,6,7,8], labels=[5,6,7,8]   (with stride=seq_len)
 
     The stride controls overlap between examples:
         stride = seq_len     → no overlap (standard)
@@ -38,9 +38,11 @@ Sequence packing:
     Default: stride = seq_len (no overlap, maximum efficiency).
 
 Labels:
-    Labels are input_ids shifted left by one position — each token
-    predicts the next. The loss is computed over all tokens equally
-    (standard language modelling objective).
+    Labels equal input_ids. The model's forward() performs the next-token
+    shift internally — logits[..., :-1, :] predicts labels[..., 1:] — so
+    the dataset MUST NOT pre-shift labels. Pre-shifting here causes the
+    model to be trained on a 2-token-ahead objective (silent disaster:
+    training loss looks fine, generation produces gibberish).
 """
 
 import json
@@ -63,7 +65,8 @@ class PretrainingDataset(Dataset):
     Memory-mapped pretraining dataset.
 
     Reads token IDs from a flat binary file using np.memmap.
-    Returns (input_ids, labels) pairs of fixed length seq_len.
+    Returns (input_ids, labels) pairs of fixed length seq_len, where
+    labels equal input_ids (the model handles the next-token shift).
 
     Args:
         bin_path: Path to tokenized .bin file (uint16 token IDs).
@@ -154,17 +157,16 @@ class PretrainingDataset(Dataset):
                 )
 
         # ── Example count ─────────────────────────────────────────────────────
-        # Need seq_len + 1 tokens per example (so labels can be shifted left
-        # by one from input_ids). If n_tokens < seq_len + 1 we can't form even
-        # one example.
-        if self.n_tokens < self.seq_len + 1:
+        # Need seq_len tokens per example. Labels equal input_ids; the model
+        # performs the next-token shift internally.
+        if self.n_tokens < self.seq_len:
             raise ValueError(
                 f"{self.bin_path}: only {self.n_tokens:,} tokens but "
-                f"seq_len={self.seq_len} needs at least {self.seq_len + 1}. "
+                f"seq_len={self.seq_len} needs at least {self.seq_len}. "
                 f"Dataset is too small for this seq_len."
             )
 
-        self.n_examples = (self.n_tokens - self.seq_len) // self.stride
+        self.n_examples = ((self.n_tokens - self.seq_len) // self.stride) + 1
 
         log.info(
             f"PretrainingDataset ({split}): "
@@ -180,20 +182,23 @@ class PretrainingDataset(Dataset):
         """
         Return a training example.
 
-        Args:
-            idx: Example index.
+        Standard Hugging Face causal-LM contract:
 
-        Returns:
-            Dict with:
-                input_ids: (seq_len,) long tensor
-                labels:    (seq_len,) long tensor — input_ids shifted left by 1
+            input_ids = [t0, t1, t2, ...]
+            labels    = [t0, t1, t2, ...]
+
+        The model shifts internally:
+
+            logits[..., :-1, :] predicts labels[..., 1:]
+
+        Do NOT pre-shift labels here, or the model learns to predict
+        token t+2 instead of token t+1.
         """
         start = idx * self.stride
-        # +1 to get labels (next token prediction)
-        chunk = self.data[start : start + self.seq_len + 1].astype(np.int64)
+        chunk = self.data[start : start + self.seq_len].astype(np.int64)
 
-        input_ids = torch.from_numpy(chunk[:-1])
-        labels = torch.from_numpy(chunk[1:])
+        input_ids = torch.from_numpy(chunk)
+        labels = input_ids.clone()
 
         return {
             "input_ids": input_ids,
