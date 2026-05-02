@@ -253,7 +253,7 @@ def build_sft_args(cfg: dict, output_dir: Path, num_train_examples: int):
     # samples; it only batches examples of similar tokenized length together to
     # reduce padding waste.
     group_by_length = train_cfg.get("group_by_length", True)
-    length_column_name = train_cfg.get("length_column_name", "length")
+    length_column_name = train_cfg.get("length_column_name")  # None if unset
 
     # torch_compile is controlled by YAML. It is disabled by default because it
     # has not been proven faster for SFT in this repo. Enable only after profiling.
@@ -389,7 +389,7 @@ def main():
     log.info(f"Packing: {sft_args.packing}")
     log.info(f"torch_compile: {sft_args.torch_compile}")
     log.info(f"group_by_length: {sft_args.group_by_length}")
-    log.info(f"length_column_name: {sft_args.length_column_name}")
+    log.info(f"length_column_name: {getattr(sft_args, 'length_column_name', None)}")
     log.info(
         f"Batch sizes: train={sft_args.per_device_train_batch_size}, "
         f"eval={sft_args.per_device_eval_batch_size}"

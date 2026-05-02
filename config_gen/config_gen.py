@@ -887,7 +887,6 @@ training:
   gradient_checkpointing: {str(cfg.gradient_checkpointing).lower()}
   torch_compile: {str(profile.torch_compile).lower()}
   group_by_length: {str(profile.group_by_length).lower()}
-  length_column_name: length
   eval_steps: {profile.eval_steps}
   save_steps: {profile.save_steps}
   save_total_limit: 3
