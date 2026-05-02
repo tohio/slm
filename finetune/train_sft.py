@@ -389,9 +389,42 @@ def main():
     log.info("Best-checkpoint selection enabled (metric_for_best_model=eval_loss)")
 
     # ── SFTTrainer ────────────────────────────────────────────────────────────
+    from transformers import Trainer
     from trl import SFTTrainer
 
-    trainer = SFTTrainer(
+
+    class FastSFTTrainer(SFTTrainer):
+        """
+        Use TRL SFTTrainer for dataset formatting/collation, but bypass TRL's
+        training-time token metrics.
+
+        Reason:
+            SLMForCausalLM uses chunked loss during training and returns only
+            last-token logits to avoid materializing full [B, T, vocab] logits.
+            TRL's SFTTrainer.compute_loss expects full-sequence logits for
+            mean_token_accuracy/entropy and will shape-mismatch.
+
+        Eval still runs with model.eval(), so model.py returns full logits and
+        eval_loss remains comparable.
+        """
+
+        def compute_loss(
+            self,
+            model,
+            inputs,
+            return_outputs=False,
+            num_items_in_batch=None,
+        ):
+            return Trainer.compute_loss(
+                self,
+                model,
+                inputs,
+                return_outputs=return_outputs,
+                num_items_in_batch=num_items_in_batch,
+            )
+
+
+    trainer = FastSFTTrainer(
         model=model,
         args=sft_args,
         train_dataset=train_dataset,
