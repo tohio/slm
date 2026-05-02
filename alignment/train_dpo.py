@@ -22,6 +22,13 @@ where:
 Base model: slm-{size}-chat-code (after both SFT stages)
 Dataset:    Blended hh-rlhf + orca_dpo_pairs + dpo-mix-7k
 
+Eval batching:
+    `training.eval_micro_batch_size` controls per-device eval batch size
+    independently of the training micro-batch. DPO eval forwards through
+    both policy and reference for each chosen/rejected pair, so the
+    activation footprint at eval can spike higher than train. Defaults
+    to half the training micro-batch.
+
 Best-checkpoint selection:
     load_best_model_at_end=True with metric_for_best_model="eval_loss".
     DPO reward margins typically peak early then degrade, so the best
@@ -189,6 +196,12 @@ def build_dpo_args(cfg: dict, output_dir: Path, beta: float, num_train_examples:
     DPO-specific fields read from cfg["model"]:
         max_seq_length      → DPOConfig.max_length (prompt + completion).
 
+    Eval micro-batch:
+        Defaults to half the training micro-batch. DPO eval forwards through
+        policy + reference for both chosen + rejected — the activation
+        footprint can be spikier than training, where we get away with
+        chunked loss in the SLM forward.
+
     NOTE: (max_prompt_length was removed in trl 0.29 — prompt-length capping
         is now entirely handled by the pre-filter in prepare_dpo.py, which
         uses the real SLM tokenizer so counts are exact.)
@@ -221,13 +234,25 @@ def build_dpo_args(cfg: dict, output_dir: Path, beta: float, num_train_examples:
             f"({eval_steps}) when load_best_model_at_end=True."
         )
 
+    micro_batch = train_cfg["micro_batch_size"]
+    eval_micro_batch = train_cfg.get(
+        "eval_micro_batch_size",
+        max(1, micro_batch // 2),
+    )
+
+    # torch_compile is controlled by YAML. config_gen emits torch_compile:
+    # true for production DPO configs. Hand-written smoke configs may omit
+    # the field and the trainer defaults to False, since the one-time
+    # compile pass (~30-90s) only pays off on full runs.
+    torch_compile = train_cfg.get("torch_compile", False)
+
     return DPOConfig(
         output_dir=str(output_dir),
         num_train_epochs=train_cfg.get("epochs", 1),
         max_steps=train_cfg.get("max_steps", -1),
         warmup_steps=warmup_steps,
-        per_device_train_batch_size=train_cfg["micro_batch_size"],
-        per_device_eval_batch_size=train_cfg["micro_batch_size"],
+        per_device_train_batch_size=micro_batch,
+        per_device_eval_batch_size=eval_micro_batch,
         gradient_accumulation_steps=train_cfg.get("gradient_accumulation_steps", 4),
         learning_rate=optim_cfg["lr"],
         weight_decay=optim_cfg.get("weight_decay", 0.01),
@@ -237,6 +262,7 @@ def build_dpo_args(cfg: dict, output_dir: Path, beta: float, num_train_examples:
         lr_scheduler_type=train_cfg.get("lr_scheduler", "cosine"),
         bf16=use_bf16,
         fp16=use_fp16,
+        torch_compile=torch_compile,
         eval_strategy="steps",
         eval_steps=eval_steps,
         save_strategy="steps",
@@ -351,6 +377,11 @@ def main():
     dpo_args = build_dpo_args(cfg, output_dir, beta, num_train_examples=len(train_dataset))
     log.info(
         f"DPOConfig: max_length={dpo_args.max_length}, beta={beta}"
+    )
+    log.info(f"torch_compile: {dpo_args.torch_compile}")
+    log.info(
+        f"Batch sizes: train={dpo_args.per_device_train_batch_size}, "
+        f"eval={dpo_args.per_device_eval_batch_size}"
     )
     log.info("Best-checkpoint selection enabled (metric_for_best_model=eval_loss)")
 

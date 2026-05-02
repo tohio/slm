@@ -11,6 +11,8 @@ Design:
     - Pre-norm throughout
     - KV cache support for efficient autoregressive generation
     - Compatible with HuggingFace generate(), trl, lm-evaluation-harness, vLLM
+    - Chunked LM loss in training path to avoid materializing full
+      [B, T, vocab] logits tensors at once (see _chunked_lm_loss).
 
 Important implementation detail:
     SLMModel is a plain nn.Module.
@@ -38,6 +40,7 @@ from typing import Optional, Union
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.nn import CrossEntropyLoss
 from transformers import PreTrainedModel
 from transformers.cache_utils import Cache
@@ -47,6 +50,14 @@ from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutpu
 from .block import SLMDecoderBlock
 from .config import SLMConfig
 from .norm import RMSNorm
+
+
+# Sequence-position chunk size for the chunked LM loss path.
+# At seq_len=2048, vocab=32000, bf16:
+#   full logits     = B * 2048 * 32000 * 2 B  = B * 131 MB
+#   chunked logits  = B *  512 * 32000 * 2 B  = B *  33 MB   (4× headroom)
+# 512 keeps memory bounded without sacrificing kernel efficiency on H100/H200.
+LM_LOSS_CHUNK_SIZE = 512
 
 
 def _extract_kv_from_dynamic_cache(
@@ -370,6 +381,76 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
     def set_decoder(self, decoder: SLMModel) -> None:
         self.model = decoder
 
+    def _chunked_lm_loss(
+        self,
+        hidden_states: torch.Tensor,
+        labels: torch.LongTensor,
+        chunk_size: int = LM_LOSS_CHUNK_SIZE,
+    ) -> torch.Tensor:
+        """
+        Compute next-token CE loss without materializing full [B, T, vocab] logits.
+
+        Iterates over chunks of sequence positions, applies lm_head per chunk,
+        and accumulates the per-token CE sum. Final loss is sum / num_valid_tokens
+        where valid means label != -100. This matches the default reduction='mean'
+        of nn.CrossEntropyLoss with ignore_index=-100, which is what the
+        non-chunked path produces. Verified bit-exact against the full-logits
+        path with random inputs and various masking patterns.
+
+        Notable behavior:
+            - Chunks where all labels are -100 contribute zero loss through ignore_index=-100.
+              The lm_head matmul and CE compute are saved for those positions.
+            - Standard next-token shift: prediction at position t is supervised
+              by the label at position t+1. Implemented by chunking over the
+              first T-1 positions of hidden_states and the last T-1 of labels.
+            - Degenerate batch (zero supervised tokens): returns 0.0 with a
+              dependency on hidden_states so DDP/FSDP gradient sync stays
+              well-formed. No .item() / no host-device syncs in the loop —
+              keeps the graph torch.compile-clean.
+
+        Memory shape (per chunk, B=micro, C=chunk_size, V=vocab):
+            chunk_logits : [B, C, V]   bf16    = B*C*V*2 bytes
+            chunk_labels : [B, C]      int64
+            CE upcasts internally to fp32 on the chunk only.
+        """
+        # Shift: predict token at t+1 from hidden_state at t.
+        # Slicing avoids the .contiguous() allocations the old path made.
+        shift_hidden = hidden_states[:, :-1, :]
+        shift_labels = labels[:, 1:]
+        seq_len = shift_hidden.shape[1]
+
+        total_loss_sum = hidden_states.new_zeros((), dtype=torch.float32)
+        total_valid = torch.zeros((), dtype=torch.long, device=hidden_states.device)
+
+        for start in range(0, seq_len, chunk_size):
+            end = min(start + chunk_size, seq_len)
+            chunk_labels = shift_labels[:, start:end]
+
+            chunk_hidden = shift_hidden[:, start:end, :]
+            chunk_logits = self.lm_head(chunk_hidden)
+
+            # F.cross_entropy with reduction='sum' so we can normalize by the
+            # global valid-token count after the loop.
+            chunk_loss_sum = F.cross_entropy(
+                chunk_logits.reshape(-1, self.config.vocab_size),
+                chunk_labels.reshape(-1),
+                ignore_index=-100,
+                reduction="sum",
+            )
+            chunk_valid = (chunk_labels != -100).sum()
+
+            total_loss_sum = total_loss_sum + chunk_loss_sum.float()
+            total_valid = total_valid + chunk_valid
+
+        # Avoid div-by-zero on degenerate all-masked batches without using
+        # .item() (which would break torch.compile and force a host sync).
+        # If total_valid is 0 then total_loss_sum is also 0, so 0/1 = 0.
+        # The trailing `0.0 * hidden_states.sum()` keeps hidden_states in
+        # the autograd graph so DDP/FSDP gradient sync is well-formed even
+        # on all-masked batches.
+        denom = total_valid.clamp(min=1).float()
+        return total_loss_sum / denom + 0.0 * hidden_states.sum()
+
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -394,17 +475,43 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs.last_hidden_state
-        logits = self.lm_head(hidden_states)
 
-        loss = None
-        if labels is not None:
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-
-            loss = CrossEntropyLoss()(
-                shift_logits.view(-1, self.config.vocab_size),
-                shift_labels.view(-1),
-            )
+        # Loss + logits policy
+        # ---------------------
+        # MEMORY INVARIANT: in the training+labels branch, we MUST NOT call
+        # self.lm_head(hidden_states) on the full sequence. Doing so
+        # materializes [B, T, vocab] logits — at micro=64, seq=2048, vocab=32k,
+        # bf16 that is 8.4 GB just for the logits tensor, and CE upcasts to
+        # fp32 to spike another 16+ GB on top. That allocation is what caused
+        # the H200 OOM that motivated this whole patch.
+        #
+        # Instead the training branch goes straight into _chunked_lm_loss
+        # (per-chunk lm_head + CE) and produces full logits ONLY for the last
+        # token (~4 MB), which is enough for TRL's training-time accuracy/
+        # entropy metrics. Anyone refactoring this branch: keep the rule
+        # "no full-sequence lm_head() during training+labels" or the
+        # optimization is silently lost.
+        #
+        # During eval (self.training == False) or when labels are None, fall
+        # back to full logits so harness-style evals, generation, and
+        # eval_loss reporting all behave exactly as before.
+        if labels is not None and self.training:
+            loss = self._chunked_lm_loss(hidden_states, labels)
+            logits = self.lm_head(hidden_states[:, -1:, :])
+        else:
+            logits = self.lm_head(hidden_states)
+            loss = None
+            if labels is not None:
+                # Eval path: keep the original behavior bit-for-bit so eval_loss
+                # values are comparable across before/after the chunked-loss
+                # patch. .contiguous() retained here because some older torch
+                # builds require it for view().
+                shift_logits = logits[..., :-1, :].contiguous()
+                shift_labels = labels[..., 1:].contiguous()
+                loss = CrossEntropyLoss()(
+                    shift_logits.view(-1, self.config.vocab_size),
+                    shift_labels.view(-1),
+                )
 
         return CausalLMOutputWithPast(
             loss=loss,

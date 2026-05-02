@@ -21,6 +21,21 @@ Answer-only loss:
     conversational dataset (with a "messages" field containing
     role/content message dicts). No formatting_func needed.
 
+Packing:
+    `data.packing` is read from YAML and passed to SFTConfig. Packing
+    concatenates short examples into max_seq_length sequences, dramatically
+    improving throughput on conversational datasets where most examples are
+    much shorter than the context window. assistant_only_loss is compatible
+    with packing in trl 0.28+ — the {% generation %} tags survive packing
+    boundaries because the chat template is applied per-message.
+
+Eval batching:
+    `training.eval_micro_batch_size` controls per-device eval batch size
+    independently of the training micro-batch. Eval doesn't accumulate
+    gradients but still materializes full logits for loss, so a larger
+    eval batch can spike VRAM. Defaults to half of training micro-batch
+    when not specified.
+
 Best-checkpoint selection:
     load_best_model_at_end=True with metric_for_best_model="eval_loss".
     SFTTrainer reloads the lowest-eval-loss checkpoint before save_model(),
@@ -190,6 +205,11 @@ def build_sft_args(cfg: dict, output_dir: Path, num_train_examples: int):
     Requires {% generation %} / {% endgeneration %} tags in the chat template.
     SFTTrainer applies the chat template automatically for conversational datasets.
 
+    Eval micro-batch:
+        Defaults to half the training micro-batch. Eval forward materializes
+        full logits (not chunked like train), so the spike at large
+        micro_batch can OOM even when training fits.
+
     load_best_model_at_end=True with metric_for_best_model="eval_loss" means
     final/ contains the lowest-eval-loss checkpoint, not the last. Constraints:
         - save_strategy must equal eval_strategy (both "steps")
@@ -201,6 +221,7 @@ def build_sft_args(cfg: dict, output_dir: Path, num_train_examples: int):
 
     train_cfg = cfg["training"]
     optim_cfg = cfg["optimizer"]
+    data_cfg  = cfg["data"]
 
     has_cuda = torch.cuda.is_available()
     precision = train_cfg.get("precision", "bf16")
@@ -217,13 +238,30 @@ def build_sft_args(cfg: dict, output_dir: Path, num_train_examples: int):
             f"({eval_steps}) when load_best_model_at_end=True."
         )
 
+    micro_batch = train_cfg["micro_batch_size"]
+    eval_micro_batch = train_cfg.get(
+        "eval_micro_batch_size",
+        max(1, micro_batch // 2),
+    )
+
+    # Default packing on (the throughput win on conversational data is large).
+    # Stays opt-out via YAML for any dataset where packing is wrong.
+    packing = data_cfg.get("packing", True)
+
+    # torch_compile is controlled by YAML. config_gen emits torch_compile:
+    # true for production SFT/DPO configs (the SLM forward is compile-clean
+    # under pretrain so it's safe here). Hand-written smoke configs may omit
+    # the field entirely and the trainer will default to False, since the
+    # one-time compile pass (~30-90s) only pays off on full runs.
+    torch_compile = train_cfg.get("torch_compile", False)
+
     return SFTConfig(
         output_dir=str(output_dir),
         num_train_epochs=train_cfg.get("epochs", 2),
         max_steps=train_cfg.get("max_steps", -1),
         warmup_steps=warmup_steps,
-        per_device_train_batch_size=train_cfg["micro_batch_size"],
-        per_device_eval_batch_size=train_cfg["micro_batch_size"],
+        per_device_train_batch_size=micro_batch,
+        per_device_eval_batch_size=eval_micro_batch,
         gradient_accumulation_steps=train_cfg.get("gradient_accumulation_steps", 4),
         learning_rate=optim_cfg["lr"],
         weight_decay=optim_cfg.get("weight_decay", 0.01),
@@ -233,6 +271,7 @@ def build_sft_args(cfg: dict, output_dir: Path, num_train_examples: int):
         lr_scheduler_type=train_cfg.get("lr_scheduler", "cosine"),
         bf16=use_bf16,
         fp16=use_fp16,
+        torch_compile=torch_compile,
         eval_strategy="steps",
         eval_steps=eval_steps,
         save_strategy="steps",
@@ -251,7 +290,7 @@ def build_sft_args(cfg: dict, output_dir: Path, num_train_examples: int):
         gradient_checkpointing=train_cfg.get("gradient_checkpointing", False),
         # SFT-specific
         max_length=cfg["model"].get("max_seq_length", 2048),
-        packing=cfg["data"].get("packing", False),
+        packing=packing,
         # Answer-only loss — requires {% generation %} tags in chat template
         assistant_only_loss=True,
     )
@@ -341,6 +380,12 @@ def main():
     # ratio without adding another round-trip after the trainer is built.
     sft_args = build_sft_args(cfg, output_dir, num_train_examples=len(train_dataset))
     log.info("Answer-only loss enabled (assistant_only_loss=True)")
+    log.info(f"Packing: {sft_args.packing}")
+    log.info(f"torch_compile: {sft_args.torch_compile}")
+    log.info(
+        f"Batch sizes: train={sft_args.per_device_train_batch_size}, "
+        f"eval={sft_args.per_device_eval_batch_size}"
+    )
     log.info("Best-checkpoint selection enabled (metric_for_best_model=eval_loss)")
 
     # ── SFTTrainer ────────────────────────────────────────────────────────────
