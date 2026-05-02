@@ -188,23 +188,19 @@ def build_dpo_args(cfg: dict, output_dir: Path, beta: float, num_train_examples:
         beta                — KL penalty temperature
         max_prompt_length   — per-prompt truncation applied by trl's data
                               collator. We also pre-filter overlong pairs
-                              in prepare_dpo.py as defense in depth (the
-                              pre-filter uses the real SLM tokenizer, so
-                              counts are exact and the filtered dataset can
-                              serve all model sizes).
+                              in prepare_dpo.py as defense in depth.
 
     DPO-specific fields read from cfg["model"]:
         max_seq_length      → DPOConfig.max_length (prompt + completion).
 
     Eval micro-batch:
         Defaults to half the training micro-batch. DPO eval forwards through
-        policy + reference for both chosen + rejected — the activation
-        footprint can be spikier than training, where we get away with
-        chunked loss in the SLM forward.
+        policy + reference for both chosen + rejected, so the activation
+        footprint can be spikier than training.
 
-    NOTE: (max_prompt_length was removed in trl 0.29 — prompt-length capping
-        is now entirely handled by the pre-filter in prepare_dpo.py, which
-        uses the real SLM tokenizer so counts are exact.)
+    NOTE: max_prompt_length was removed in newer TRL versions. Prompt-length
+        capping is handled by the pre-filter in prepare_dpo.py, which uses
+        the real SLM tokenizer so counts are exact.
 
     load_best_model_at_end=True with metric_for_best_model="eval_loss".
     Constraints:
@@ -240,10 +236,8 @@ def build_dpo_args(cfg: dict, output_dir: Path, beta: float, num_train_examples:
         max(1, micro_batch // 2),
     )
 
-    # torch_compile is controlled by YAML. config_gen emits torch_compile:
-    # true for production DPO configs. Hand-written smoke configs may omit
-    # the field and the trainer defaults to False, since the one-time
-    # compile pass (~30-90s) only pays off on full runs.
+    # torch_compile is controlled by YAML. The compile pass can be expensive
+    # and is not assumed faster for DPO. Leave disabled unless profiled.
     torch_compile = train_cfg.get("torch_compile", False)
 
     return DPOConfig(
@@ -282,8 +276,6 @@ def build_dpo_args(cfg: dict, output_dir: Path, beta: float, num_train_examples:
         # DPO-specific fields
         beta=beta,
         max_length=cfg["model"].get("max_seq_length", 2048),
-        # max_prompt_length was removed in trl <=0.29. Prompt-length capping
-        # is now enforced upstream in prepare_dpo.py via max_total_tokens.
     )
 
 

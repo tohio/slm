@@ -244,15 +244,13 @@ def build_sft_args(cfg: dict, output_dir: Path, num_train_examples: int):
         max(1, micro_batch // 2),
     )
 
-    # Default packing on (the throughput win on conversational data is large).
-    # Stays opt-out via YAML for any dataset where packing is wrong.
-    packing = data_cfg.get("packing", True)
+    # Packing is disabled by default because the current custom attention does
+    # not enforce packed-example boundaries. Enable only after safe packed
+    # attention / FA2 varlen support is implemented.
+    packing = data_cfg.get("packing", False)
 
-    # torch_compile is controlled by YAML. config_gen emits torch_compile:
-    # true for production SFT/DPO configs (the SLM forward is compile-clean
-    # under pretrain so it's safe here). Hand-written smoke configs may omit
-    # the field entirely and the trainer will default to False, since the
-    # one-time compile pass (~30-90s) only pays off on full runs.
+    # torch_compile is controlled by YAML. It is disabled by default because it
+    # has not been proven faster for SFT in this repo. Enable only after profiling.
     torch_compile = train_cfg.get("torch_compile", False)
 
     return SFTConfig(
@@ -388,50 +386,16 @@ def main():
     )
     log.info("Best-checkpoint selection enabled (metric_for_best_model=eval_loss)")
 
-    # ── SFTTrainer ────────────────────────────────────────────────────────────
-    from transformers import Trainer
+    # ── SFTTrainer ────────────────────────────────────────────────────────────────
     from trl import SFTTrainer
 
-
-    class FastSFTTrainer(SFTTrainer):
-        """
-        Use TRL SFTTrainer for dataset formatting/collation, but bypass TRL's
-        training-time token metrics.
-
-        Reason:
-            SLMForCausalLM uses chunked loss during training and returns only
-            last-token logits to avoid materializing full [B, T, vocab] logits.
-            TRL's SFTTrainer.compute_loss expects full-sequence logits for
-            mean_token_accuracy/entropy and will shape-mismatch.
-
-        Eval still runs with model.eval(), so model.py returns full logits and
-        eval_loss remains comparable.
-        """
-
-        def compute_loss(
-            self,
-            model,
-            inputs,
-            return_outputs=False,
-            num_items_in_batch=None,
-        ):
-            return Trainer.compute_loss(
-                self,
-                model,
-                inputs,
-                return_outputs=return_outputs,
-                num_items_in_batch=num_items_in_batch,
-            )
-
-
-    trainer = FastSFTTrainer(
+    trainer = SFTTrainer(
         model=model,
         args=sft_args,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         processing_class=tokenizer,
     )
-
     # ── Train ─────────────────────────────────────────────────────────────────
     log.info("Starting SFT...")
     trainer.train(resume_from_checkpoint=args.resume)

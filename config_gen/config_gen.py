@@ -165,18 +165,15 @@ class SFTProfile:
     beta2: float = 0.98
 
     # Trainer fields (preserved verbatim)
-    # packing defaults True now: TRL's packing concatenates short examples
-    # into max_seq_length sequences, dramatically improving SFT throughput
-    # on conversational data where most examples are far shorter than ctx.
-    # assistant_only_loss=True is compatible with packing in trl 0.28+.
+    # Packing defaults False because the current custom attention does not
+    # enforce packed-example boundaries. Enable only after safe packed attention
+    # / FA2 varlen support is implemented.
     packing: bool = False
-    eval_steps: int = 500
-    save_steps: int = 500
-    # torch_compile gated to True for SFT — pretrain-stable codepath has
-    # been compile-clean; SFT is the same model. First step pays the
-    # compile latency (~30-90s), remaining steps run faster.
-    torch_compile: bool = True
-    measured: bool = False
+    eval_steps: int = 2000
+    save_steps: int = 2000
+
+    # torch_compile is disabled by default for SFT until profiled.
+    torch_compile: bool = False
 
 
 @dataclass(frozen=True)
@@ -202,9 +199,9 @@ class DPOProfile:
     # Trainer fields
     eval_steps: int = 200
     save_steps: int = 200
-    # torch_compile on by default for DPO too — same SLM forward as SFT.
-    torch_compile: bool = True
 
+    # torch_compile is disabled by default for DPO until profiled.
+    torch_compile: bool = False
 
 # consumed_tokens (= corpus_tokens × epochs) is sourced from
 # config/data_mix.py — that's the single source of truth for both numbers.
@@ -243,20 +240,19 @@ SIZE_PROFILES: dict[str, PretrainProfile] = {
 #              re-measure on first real run for each size.
 SFT_CHAT_PROFILES: dict[str, SFTProfile] = {
     "125m": SFTProfile(
-        state_gb=6.0, act_per_seq_gb_no_ckpt=1.9, act_per_seq_gb_ckpt=0.65,
+        state_gb=2.0, act_per_seq_gb_no_ckpt=3.9, act_per_seq_gb_ckpt=1.3,
         max_seq_length=2048, ref_global_batch=64, lr=1.0e-5, epochs=2,
-        warmup_ratio=0.03, eval_steps=500, save_steps=500,
-        measured=True,
+        warmup_ratio=0.03, eval_steps=2000, save_steps=2000,
     ),
     "350m": SFTProfile(
-        state_gb=7.0, act_per_seq_gb_no_ckpt=0.85, act_per_seq_gb_ckpt=0.22,
+        state_gb=5.0, act_per_seq_gb_no_ckpt=5.0, act_per_seq_gb_ckpt=1.7,
         max_seq_length=2048, ref_global_batch=128,
-        lr=8.0e-6, epochs=2, warmup_ratio=0.03,
+        lr=8.0e-6, epochs=2, warmup_ratio=0.03, eval_steps=2000, save_steps=2000,
     ),
     "1b": SFTProfile(
-        state_gb=18.0, act_per_seq_gb_no_ckpt=4.4, act_per_seq_gb_ckpt=0.95,
+        state_gb=14.5, act_per_seq_gb_no_ckpt=14.0, act_per_seq_gb_ckpt=4.5,
         max_seq_length=4096, ref_global_batch=128,
-        lr=5.0e-6, epochs=2, warmup_ratio=0.03,
+        lr=5.0e-6, epochs=2, warmup_ratio=0.03, eval_steps=2000, save_steps=2000,
     ),
 }
 
@@ -264,20 +260,19 @@ SFT_CHAT_PROFILES: dict[str, SFTProfile] = {
 # Recipe differs: lower LR to reduce catastrophic forgetting of chat.
 SFT_CODE_PROFILES: dict[str, SFTProfile] = {
     "125m": SFTProfile(
-        state_gb=6.0, act_per_seq_gb_no_ckpt=1.9, act_per_seq_gb_ckpt=0.65,
+        state_gb=2.0, act_per_seq_gb_no_ckpt=3.9, act_per_seq_gb_ckpt=1.3,
         max_seq_length=2048, ref_global_batch=64, lr=5.0e-6,
-        epochs=2, warmup_ratio=0.03, eval_steps=500, save_steps=500,
-        measured=True,
+        epochs=2, warmup_ratio=0.03, eval_steps=2000, save_steps=2000,
     ),
     "350m": SFTProfile(
-        state_gb=7.0, act_per_seq_gb_no_ckpt=0.85, act_per_seq_gb_ckpt=0.22,
+        state_gb=5.0, act_per_seq_gb_no_ckpt=5.0, act_per_seq_gb_ckpt=1.7,
         max_seq_length=2048, ref_global_batch=128,
-        lr=4.0e-6, epochs=2, warmup_ratio=0.03,
+        lr=4.0e-6, epochs=2, warmup_ratio=0.03, eval_steps=2000, save_steps=2000,
     ),
     "1b": SFTProfile(
-        state_gb=18.0, act_per_seq_gb_no_ckpt=4.4, act_per_seq_gb_ckpt=0.95,
+        state_gb=14.5, act_per_seq_gb_no_ckpt=14.0, act_per_seq_gb_ckpt=4.5,
         max_seq_length=4096, ref_global_batch=128,
-        lr=2.5e-6, epochs=2, warmup_ratio=0.03,
+        lr=2.5e-6, epochs=2, warmup_ratio=0.03, eval_steps=2000, save_steps=2000,
     ),
 }
 
@@ -396,9 +391,9 @@ def _decide_batch_and_ckpt(
         max_no_ckpt = _max_micro_for_budget(state_gb, act_no_ckpt, budget_gb)
         max_with_ckpt = _max_micro_for_budget(state_gb, act_ckpt, budget_gb)
         if max_no_ckpt < 1:
-            ckpt = True   # no choice
+            ckpt = True
         elif max_no_ckpt < mode.ckpt_threshold:
-            ckpt = True   # tight without
+            ckpt = True
         elif max_no_ckpt < per_gpu_target and max_with_ckpt >= 4 * max_no_ckpt:
             # Ckpt unlocks ≥ 4× more micro and the no-ckpt config can't reach
             # the per-GPU target in a single step — eliminating accumulation
@@ -423,12 +418,12 @@ def _decide_batch_and_ckpt(
                 f"{state_gb:.1f} GB; budget is {budget_gb:.1f} GB. "
                 f"Use a larger GPU or shard with FSDP."
             )
-
-    # Snap to per_gpu_target if we're within 5% — flooring at the boundary
-    # (e.g. 63.63 → 63 when target is 64) loses a clean batch shape for
-    # imaginary headroom. The activation estimate has ~10% error bars; one
-    # sequence of slack is well inside the noise.
-    if max_micro >= int(per_gpu_target * 0.95):
+    
+    # Aggressive mode can produce values like 63 when the recipe target is 64
+    # due to conservative floor rounding of noisy memory estimates. If we are
+    # exactly one sequence below the target, snap to the target. Do not use a
+    # wider tolerance here; larger jumps should remain explicit.
+    if not mode.power_of_two_only and max_micro == per_gpu_target - 1:
         max_micro = per_gpu_target
 
     micro_batch = _pick_micro_batch(max_micro, per_gpu_target, mode.power_of_two_only)
@@ -582,18 +577,11 @@ def _compute_sft_config_with_profile(
     actual_global = micro * accum * num_gpus
     tokens_per_step = actual_global * profile.max_seq_length
 
-    if profile.measured:
-        warns.append(
-            f"SFT {size} {sft_variant} memory profile is calibrated against a "
-            f"real run. Re-measure peak VRAM if you change seq_len, optimizer, "
-            f"trainer version, or model architecture."
-        )
-    else:
-        warns.append(
-            f"SFT activation estimates are analytical. After your first real "
-            f"sft-{sft_variant} run, peak VRAM with `nvidia-smi` and update "
-            f"SFT_{sft_variant.upper()}_PROFILES['{size}'] in config_gen/config_gen.py."
-        )
+    warns.append(
+        f"SFT activation estimates are analytical. After your first real "
+        f"sft-{sft_variant} run, peak VRAM with `nvidia-smi` and update "
+        f"SFT_{sft_variant.upper()}_PROFILES['{size}'] in config_gen/config_gen.py."
+    )
 
     return GeneratedConfig(
         micro_batch_size=micro,
@@ -861,10 +849,8 @@ optimizer:
 def _render_sft_yaml(cfg: GeneratedConfig, profile: SFTProfile,
                      base_model_path: str, train_path: str, val_path: str,
                      out_name: str) -> str:
-    # Eval micro-batch defaults to half train micro-batch. Eval doesn't use
-    # the chunked-loss path (full logits are returned for accurate eval_loss),
-    # so the activation footprint at eval is higher than train at the same
-    # batch size — halving keeps eval safe.
+    # Eval micro-batch defaults to half train micro-batch. Eval can materialize
+    # large logits and does not accumulate gradients, so halving keeps eval safer.
     eval_micro = max(1, cfg.micro_batch_size // 2)
 
     return f"""{_yaml_header(cfg)}
@@ -890,9 +876,6 @@ training:
   warmup_ratio_recipe: {profile.warmup_ratio}
   epochs: {profile.epochs}
   micro_batch_size: {cfg.micro_batch_size}
-  # Eval forwards full logits (no chunked-loss path), so VRAM at eval can
-  # spike higher than at train. Halving the train micro-batch keeps eval
-  # safe without pinching throughput on the much bigger train footprint.
   eval_micro_batch_size: {eval_micro}
   gradient_accumulation_steps: {cfg.gradient_accumulation_steps}
   precision: bf16
@@ -910,7 +893,7 @@ training:
     - wandb
 
 optimizer:
-  lr: {profile.lr:.1e}
+  lr: {profile.lr}
   weight_decay: {profile.weight_decay}
   beta1: {profile.beta1}
   beta2: {profile.beta2}
@@ -942,6 +925,7 @@ def render_sft_code_yaml(cfg: GeneratedConfig) -> str:
 def render_dpo_yaml(cfg: GeneratedConfig) -> str:
     profile = DPO_PROFILES[cfg.size]
     eval_micro = max(1, cfg.micro_batch_size // 2)
+
     return f"""{_yaml_header(cfg)}
 name: slm-{cfg.size}-dpo
 wandb_project: slm
@@ -950,27 +934,23 @@ model:
   base_model_path: $RESULTS_DIR/slm-{cfg.size}-chat-code/final
   max_seq_length: {profile.max_seq_length}
 
-dpo:
-  beta: {profile.dpo_beta}
-  max_prompt_length: {profile.max_prompt_length}
-
 data:
   train_path: $DATA_DIR/dpo/train.jsonl
   val_path:   $DATA_DIR/dpo/val.jsonl
 
+dpo:
+  beta: {profile.dpo_beta}
+  max_prompt_length: {profile.max_prompt_length}
+
 training:
-  # micro × accum × gpus = {cfg.micro_batch_size} × {cfg.gradient_accumulation_steps} × {cfg.num_gpus} = {cfg.actual_global_batch} sequences/step
+  # micro × accum × gpus = {cfg.micro_batch_size} × {cfg.gradient_accumulation_steps} × {cfg.num_gpus} = {cfg.actual_global_batch} pairs/step
   #
   # Warmup recipe: {profile.warmup_ratio:.3f} of total steps. Computed at
   # runtime by train_dpo.py from the resolved total_steps and passed to
-  # TrainingArguments as warmup_steps. We don't set warmup_ratio in this
-  # YAML because TRL deprecated it in v5.2 in favor of warmup_steps.
+  # DPOConfig as warmup_steps.
   warmup_ratio_recipe: {profile.warmup_ratio}
   epochs: {profile.epochs}
   micro_batch_size: {cfg.micro_batch_size}
-  # DPO eval forwards through both policy and reference for chosen+rejected
-  # pairs, so the activation footprint at eval can spike higher than train.
-  # Halving the train micro-batch is the conservative default.
   eval_micro_batch_size: {eval_micro}
   gradient_accumulation_steps: {cfg.gradient_accumulation_steps}
   precision: bf16
@@ -988,7 +968,7 @@ training:
     - wandb
 
 optimizer:
-  lr: {profile.lr:.1e}
+  lr: {profile.lr}
   weight_decay: {profile.weight_decay}
   beta1: {profile.beta1}
   beta2: {profile.beta2}
