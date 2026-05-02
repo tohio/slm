@@ -215,6 +215,11 @@ def build_dpo_args(cfg: dict, output_dir: Path, beta: float, num_train_examples:
     optim_cfg = cfg["optimizer"]
     dpo_cfg   = cfg["dpo"]
 
+    lr = float(optim_cfg["lr"])
+    weight_decay = float(optim_cfg.get("weight_decay", 0.01))
+    beta1 = float(optim_cfg.get("beta1", 0.9))
+    beta2 = float(optim_cfg.get("beta2", 0.98))
+
     has_cuda = torch.cuda.is_available()
     precision = train_cfg.get("precision", "bf16")
     use_bf16  = has_cuda and precision == "bf16"

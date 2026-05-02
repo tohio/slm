@@ -223,6 +223,11 @@ def build_sft_args(cfg: dict, output_dir: Path, num_train_examples: int):
     optim_cfg = cfg["optimizer"]
     data_cfg  = cfg["data"]
 
+    lr = float(optim_cfg["lr"])
+    weight_decay = float(optim_cfg.get("weight_decay", 0.01))
+    beta1 = float(optim_cfg.get("beta1", 0.9))
+    beta2 = float(optim_cfg.get("beta2", 0.98))
+
     has_cuda = torch.cuda.is_available()
     precision = train_cfg.get("precision", "bf16")
     use_bf16  = has_cuda and precision == "bf16"
@@ -267,10 +272,10 @@ def build_sft_args(cfg: dict, output_dir: Path, num_train_examples: int):
         per_device_train_batch_size=micro_batch,
         per_device_eval_batch_size=eval_micro_batch,
         gradient_accumulation_steps=train_cfg.get("gradient_accumulation_steps", 4),
-        learning_rate=optim_cfg["lr"],
-        weight_decay=optim_cfg.get("weight_decay", 0.01),
-        adam_beta1=optim_cfg.get("beta1", 0.9),
-        adam_beta2=optim_cfg.get("beta2", 0.98),
+        learning_rate=lr,
+        weight_decay=weight_decay,
+        adam_beta1=beta1,
+        adam_beta2=beta2,
         max_grad_norm=train_cfg.get("gradient_clip_val", 1.0),
         lr_scheduler_type=train_cfg.get("lr_scheduler", "cosine"),
         bf16=use_bf16,
