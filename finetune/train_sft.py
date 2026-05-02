@@ -259,7 +259,7 @@ def build_sft_args(cfg: dict, output_dir: Path, num_train_examples: int):
     # has not been proven faster for SFT in this repo. Enable only after profiling.
     torch_compile = train_cfg.get("torch_compile", False)
 
-    return SFTConfig(
+    sft_args = SFTConfig(
         output_dir=str(output_dir),
         num_train_epochs=train_cfg.get("epochs", 2),
         max_steps=train_cfg.get("max_steps", -1),
@@ -292,14 +292,18 @@ def build_sft_args(cfg: dict, output_dir: Path, num_train_examples: int):
         remove_unused_columns=False,
         seed=train_cfg.get("seed", 42),
         gradient_checkpointing=train_cfg.get("gradient_checkpointing", False),
-        group_by_length=group_by_length,
-        length_column_name=length_column_name,
         # SFT-specific
         max_length=cfg["model"].get("max_seq_length", 2048),
         packing=packing,
-        # Answer-only loss — requires {% generation %} tags in chat template
         assistant_only_loss=True,
     )
+
+    # SFTConfig in trl==0.28.0 does not accept group_by_length in its constructor,
+    # but HF Trainer reads these attributes from args when building the sampler.
+    setattr(sft_args, "group_by_length", group_by_length)
+    setattr(sft_args, "length_column_name", length_column_name)
+
+    return sft_args
 
 
 def main():
