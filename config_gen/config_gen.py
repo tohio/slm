@@ -172,6 +172,10 @@ class SFTProfile:
     eval_steps: int = 2000
     save_steps: int = 2000
 
+    # Groups similar-length examples into the same batch to reduce padding waste.
+    # Safe with normal causal attention because it does not concatenate samples.
+    group_by_length: bool = True
+
     # torch_compile is disabled by default for SFT until profiled.
     torch_compile: bool = False
 
@@ -957,6 +961,8 @@ training:
   gradient_clip_val: 1.0
   gradient_checkpointing: {str(cfg.gradient_checkpointing).lower()}
   torch_compile: {str(profile.torch_compile).lower()}
+  group_by_length: {str(profile.group_by_length).lower()}
+  length_column_name: length
   eval_steps: {profile.eval_steps}
   save_steps: {profile.save_steps}
   save_total_limit: 3

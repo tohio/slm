@@ -249,6 +249,12 @@ def build_sft_args(cfg: dict, output_dir: Path, num_train_examples: int):
     # attention / FA2 varlen support is implemented.
     packing = data_cfg.get("packing", False)
 
+    # Length grouping is safe with normal causal attention. It does not concatenate
+    # samples; it only batches examples of similar tokenized length together to
+    # reduce padding waste.
+    group_by_length = train_cfg.get("group_by_length", True)
+    length_column_name = train_cfg.get("length_column_name", "length")
+
     # torch_compile is controlled by YAML. It is disabled by default because it
     # has not been proven faster for SFT in this repo. Enable only after profiling.
     torch_compile = train_cfg.get("torch_compile", False)
@@ -286,6 +292,8 @@ def build_sft_args(cfg: dict, output_dir: Path, num_train_examples: int):
         remove_unused_columns=False,
         seed=train_cfg.get("seed", 42),
         gradient_checkpointing=train_cfg.get("gradient_checkpointing", False),
+        group_by_length=group_by_length,
+        length_column_name=length_column_name,
         # SFT-specific
         max_length=cfg["model"].get("max_seq_length", 2048),
         packing=packing,
@@ -380,6 +388,8 @@ def main():
     log.info("Answer-only loss enabled (assistant_only_loss=True)")
     log.info(f"Packing: {sft_args.packing}")
     log.info(f"torch_compile: {sft_args.torch_compile}")
+    log.info(f"group_by_length: {sft_args.group_by_length}")
+    log.info(f"length_column_name: {sft_args.length_column_name}")
     log.info(
         f"Batch sizes: train={sft_args.per_device_train_batch_size}, "
         f"eval={sft_args.per_device_eval_batch_size}"
