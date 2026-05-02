@@ -111,11 +111,14 @@ def _prepare_batch(tokenizer, prompts: list[str], *,
     previous_side = tokenizer.padding_side
     tokenizer.padding_side = "left"
     try:
+        
+        encoded = [dict(x) for x in encoded]
+
         batch = tokenizer.pad(
-            encoded,
-            padding=True,
-            return_tensors="pt",
-        )
+        encoded,
+        padding=True,
+        return_tensors="pt",
+    )
     finally:
         tokenizer.padding_side = previous_side
 

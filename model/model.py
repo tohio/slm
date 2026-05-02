@@ -11,8 +11,6 @@ Design:
     - Pre-norm throughout
     - KV cache support for efficient autoregressive generation
     - Compatible with HuggingFace generate(), trl, lm-evaluation-harness, vLLM
-    - Chunked LM loss in training path to avoid materializing full
-      [B, T, vocab] logits tensors at once (see _chunked_lm_loss).
 
 Important implementation detail:
     SLMModel is a plain nn.Module.
@@ -371,8 +369,7 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
 
     def set_decoder(self, decoder: SLMModel) -> None:
         self.model = decoder
-
-    
+        
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
