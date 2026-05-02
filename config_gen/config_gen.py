@@ -424,6 +424,13 @@ def _decide_batch_and_ckpt(
                 f"Use a larger GPU or shard with FSDP."
             )
 
+    # Snap to per_gpu_target if we're within 5% — flooring at the boundary
+    # (e.g. 63.63 → 63 when target is 64) loses a clean batch shape for
+    # imaginary headroom. The activation estimate has ~10% error bars; one
+    # sequence of slack is well inside the noise.
+    if max_micro >= int(per_gpu_target * 0.95):
+        max_micro = per_gpu_target
+
     micro_batch = _pick_micro_batch(max_micro, per_gpu_target, mode.power_of_two_only)
     grad_accum = max(1, ref_global_batch // (micro_batch * num_gpus))
     actual_global = micro_batch * grad_accum * num_gpus
