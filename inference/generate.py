@@ -13,6 +13,12 @@ For batched chat, left-padding is performed by tokenizer.pad() rather than
 a hand-rolled loop; this guarantees correct attention masks and interacts
 properly with the model's positional-encoding path.
 
+Defaults:
+    temperature        = 0.8
+    top_p              = 0.95
+    top_k              = 50
+    repetition_penalty = 1.0   (disabled; try 1.1–1.2 for small models)
+
 Usage:
     # Single prompt (base model completion)
     echo "The history of AI" | python inference/generate.py --model results/slm-125m/final
@@ -49,7 +55,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from inference.utils import load_model_and_tokenizer
 
 
-def _prepare_batch(tokenizer, prompts: list[str], *, chat: bool, add_bos: bool):
+def _resolve_max_input_length(model, max_new_tokens: int) -> int:
+    """
+    Compute how much room prompts have, given the model's context window
+    and the number of tokens we plan to generate. Leaves room for at least
+    one new token even on pathological inputs.
+    """
+    ctx = getattr(model.config, "max_position_embeddings", 2048)
+    return max(1, ctx - max_new_tokens)
+
+
+def _prepare_batch(tokenizer, prompts: list[str], *,
+                   chat: bool, add_bos: bool, max_input_length: int):
     """
     Tokenize and left-pad a batch of prompts for generation.
 
@@ -71,7 +88,7 @@ def _prepare_batch(tokenizer, prompts: list[str], *, chat: bool, add_bos: bool):
                     tokenize=True,
                     add_generation_prompt=True,
                     truncation=True,
-                    max_length=2048,
+                    max_length=max_input_length,
                 )
             }
             for p in prompts
@@ -82,7 +99,7 @@ def _prepare_batch(tokenizer, prompts: list[str], *, chat: bool, add_bos: bool):
                 "input_ids": tokenizer(
                     p,
                     truncation=True,
-                    max_length=2048,
+                    max_length=max_input_length,
                     add_special_tokens=add_bos,
                 )["input_ids"]
             }
@@ -116,7 +133,7 @@ def generate(
     top_p: float = 0.95,
     top_k: int = 50,
     do_sample: bool = True,
-    repetition_penalty: float = 1.1,
+    repetition_penalty: float = 1.0,
     chat: bool = False,
     add_bos: bool = True,
 ) -> list[str]:
@@ -128,24 +145,37 @@ def generate(
     """
     import torch
 
-    batch = _prepare_batch(tokenizer, prompts, chat=chat, add_bos=add_bos)
+    max_input_length = _resolve_max_input_length(model, max_new_tokens)
+    batch = _prepare_batch(
+        tokenizer, prompts,
+        chat=chat, add_bos=add_bos, max_input_length=max_input_length,
+    )
     input_ids      = batch["input_ids"].to(model.device)
     attention_mask = batch["attention_mask"].to(model.device)
     input_length   = input_ids.shape[1]
 
-    with torch.no_grad():
-        outputs = model.generate(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature if do_sample else 1.0,
-            top_p=top_p if do_sample else 1.0,
-            top_k=top_k if do_sample else 0,
-            do_sample=do_sample,
-            repetition_penalty=repetition_penalty,
-            pad_token_id=special_ids.pad,
-            eos_token_id=special_ids.eos_list,
+    # Only pass sampling kwargs when sampling. In greedy mode, passing
+    # temperature/top_p/top_k (even at "neutral" values) makes HF emit
+    # "The following generation flags are not valid and may be ignored"
+    # because GenerationConfig treats them as explicitly set.
+    gen_kwargs = dict(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        max_new_tokens=max_new_tokens,
+        do_sample=do_sample,
+        repetition_penalty=repetition_penalty,
+        pad_token_id=special_ids.pad,
+        eos_token_id=special_ids.eos_list,
+    )
+    if do_sample:
+        gen_kwargs.update(
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
         )
+
+    with torch.no_grad():
+        outputs = model.generate(**gen_kwargs)
 
     completions = []
     for output in outputs:
@@ -174,7 +204,8 @@ def main():
     parser.add_argument(
         "--no-bos",
         action="store_true",
-        help="(raw mode only) Do not prepend BOS. Default prepends BOS, matching pretraining.",
+        help="(raw mode only) Do not prepend BOS. Default prepends BOS, matching pretraining. "
+             "Ignored when --chat is set; the chat template handles its own special tokens.",
     )
     parser.add_argument(
         "--dtype",
@@ -183,15 +214,22 @@ def main():
         choices=["bfloat16", "float16", "float32"],
         help="Model precision (default: bfloat16)",
     )
+    parser.add_argument(
+        "--repetition-penalty",
+        type=float,
+        default=1.0,
+        help="Penalty for repeated tokens. 1.0 disables it. Try 1.1–1.2 for small models.",
+    )
     args = parser.parse_args()
 
-    # For chat mode, require_chat_template=True catches missing templates.
-    # For raw mode, the template is irrelevant — still required to be present
-    # so downstream users of the checkpoint don't get silently-broken chat.
+    if args.chat and args.no_bos:
+        log.warning("--no-bos has no effect when --chat is set; chat template controls special tokens.")
+
     model, tokenizer, special_ids = load_model_and_tokenizer(args.model, dtype=args.dtype)
 
     if args.input:
-        prompts = [l.strip() for l in open(args.input) if l.strip()]
+        with open(args.input) as f:
+            prompts = [l.strip() for l in f if l.strip()]
     else:
         prompts = [l.strip() for l in sys.stdin if l.strip()]
 
@@ -199,39 +237,47 @@ def main():
         log.error("No prompts provided")
         sys.exit(1)
 
+    # Blank line so the INFO log isn't visually glued to the user's last
+    # stdin line (Ctrl-D doesn't emit its own newline).
+    if not args.input:
+        print("", file=sys.stderr)
+
+    effective_add_bos = False if args.chat else not args.no_bos
+
     log.info(
         f"Generating {len(prompts)} completions "
-        f"(chat={args.chat}, greedy={args.greedy}, add_bos={not args.no_bos})..."
+        f"(chat={args.chat}, greedy={args.greedy}, add_bos={effective_add_bos})..."
     )
 
     out_file = open(args.output, "w") if args.output else None
+    try:
+        for i in range(0, len(prompts), args.batch_size):
+            batch = prompts[i : i + args.batch_size]
+            completions = generate(
+                model, tokenizer, special_ids, batch,
+                max_new_tokens=args.max_new_tokens,
+                temperature=args.temperature,
+                top_p=args.top_p,
+                top_k=args.top_k,
+                do_sample=not args.greedy,
+                chat=args.chat,
+                add_bos=effective_add_bos,
+                repetition_penalty=args.repetition_penalty,
+            )
 
-    for i in range(0, len(prompts), args.batch_size):
-        batch = prompts[i : i + args.batch_size]
-        completions = generate(
-            model, tokenizer, special_ids, batch,
-            max_new_tokens=args.max_new_tokens,
-            temperature=args.temperature,
-            top_p=args.top_p,
-            top_k=args.top_k,
-            do_sample=not args.greedy,
-            chat=args.chat,
-            add_bos=not args.no_bos,
-        )
-
-        for prompt, completion in zip(batch, completions):
-            record = {"prompt": prompt, "completion": completion}
-            line = json.dumps(record, ensure_ascii=False)
-            if out_file:
-                out_file.write(line + "\n")
-            else:
-                print(f"\nPrompt:     {prompt}")
-                print(f"Completion: {completion}")
-                print()
-
-    if out_file:
-        out_file.close()
-        log.info(f"Completions written to {args.output}")
+            for prompt, completion in zip(batch, completions):
+                record = {"prompt": prompt, "completion": completion}
+                line = json.dumps(record, ensure_ascii=False)
+                if out_file:
+                    out_file.write(line + "\n")
+                else:
+                    print(f"\nPrompt:     {prompt}")
+                    print(f"Completion: {completion}")
+                    print()
+    finally:
+        if out_file:
+            out_file.close()
+            log.info(f"Completions written to {args.output}")
 
 
 if __name__ == "__main__":
