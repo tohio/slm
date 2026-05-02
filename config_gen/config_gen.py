@@ -169,7 +169,7 @@ class SFTProfile:
     # into max_seq_length sequences, dramatically improving SFT throughput
     # on conversational data where most examples are far shorter than ctx.
     # assistant_only_loss=True is compatible with packing in trl 0.28+.
-    packing: bool = True
+    packing: bool = False
     eval_steps: int = 500
     save_steps: int = 500
     # torch_compile gated to True for SFT — pretrain-stable codepath has
