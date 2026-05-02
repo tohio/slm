@@ -227,17 +227,17 @@ SIZE_PROFILES: dict[str, PretrainProfile] = {
 # Activations sized for SFT seq_len, which differs from pretrain at 1b.
 SFT_CHAT_PROFILES: dict[str, SFTProfile] = {
     "125m": SFTProfile(
-        state_gb=2.0, act_per_seq_gb_no_ckpt=1.75, act_per_seq_gb_ckpt=0.60,
+        state_gb=2.0, act_per_seq_gb_no_ckpt=3.9, act_per_seq_gb_ckpt=1.3,
         max_seq_length=2048, ref_global_batch=64, lr=1.0e-5, epochs=2,
         warmup_ratio=0.03, eval_steps=500, save_steps=500,
     ),
     "350m": SFTProfile(
-        state_gb=5.0, act_per_seq_gb_no_ckpt=0.75, act_per_seq_gb_ckpt=0.16,
+        state_gb=5.0, act_per_seq_gb_no_ckpt=5.0, act_per_seq_gb_ckpt=1.7,
         max_seq_length=2048, ref_global_batch=128,
         lr=8.0e-6, epochs=2, warmup_ratio=0.03,
     ),
     "1b": SFTProfile(
-        state_gb=14.5, act_per_seq_gb_no_ckpt=4.0, act_per_seq_gb_ckpt=0.80,
+        state_gb=14.5, act_per_seq_gb_no_ckpt=14.0, act_per_seq_gb_ckpt=4.5,
         max_seq_length=4096, ref_global_batch=128,
         lr=5.0e-6, epochs=2, warmup_ratio=0.03,
     ),
@@ -247,17 +247,17 @@ SFT_CHAT_PROFILES: dict[str, SFTProfile] = {
 # Recipe differs: lower LR to reduce catastrophic forgetting of chat.
 SFT_CODE_PROFILES: dict[str, SFTProfile] = {
     "125m": SFTProfile(
-        state_gb=2.0, act_per_seq_gb_no_ckpt=1.75, act_per_seq_gb_ckpt=0.60,
+        state_gb=2.0, act_per_seq_gb_no_ckpt=3.9, act_per_seq_gb_ckpt=1.3,
         max_seq_length=2048, ref_global_batch=64, lr=5.0e-6,
         epochs=2, warmup_ratio=0.03, eval_steps=500, save_steps=500,
     ),
     "350m": SFTProfile(
-        state_gb=5.0, act_per_seq_gb_no_ckpt=0.75, act_per_seq_gb_ckpt=0.16,
+        state_gb=5.0, act_per_seq_gb_no_ckpt=5.0, act_per_seq_gb_ckpt=1.7,
         max_seq_length=2048, ref_global_batch=128,
         lr=4.0e-6, epochs=2, warmup_ratio=0.03,
     ),
     "1b": SFTProfile(
-        state_gb=14.5, act_per_seq_gb_no_ckpt=4.0, act_per_seq_gb_ckpt=0.80,
+        state_gb=14.5, act_per_seq_gb_no_ckpt=14.0, act_per_seq_gb_ckpt=4.5,
         max_seq_length=4096, ref_global_batch=128,
         lr=2.5e-6, epochs=2, warmup_ratio=0.03,
     ),
