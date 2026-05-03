@@ -701,8 +701,40 @@ def export(
     log.info(f"Export complete: https://huggingface.co/{repo_id}")
 
 
+def _too_repetitive(tokens: list[int], max_repeat_run: int = 8) -> bool:
+    """Return True when generation contains an obvious repeated-token run.
+
+    This is intentionally conservative: normal text can repeat words, but a
+    healthy checkpoint should not emit the same token 8+ times in a row during
+    a short export validation prompt. The check applies to every model size and
+    variant as export hygiene, not just to 125M.
+    """
+    if not tokens:
+        return True
+
+    run = 1
+    for prev, cur in zip(tokens, tokens[1:]):
+        if cur == prev:
+            run += 1
+            if run >= max_repeat_run:
+                return True
+        else:
+            run = 1
+
+    return False
+
+
+def _as_eos_id_list(eos_ids) -> list[int]:
+    """Normalize an int/list/tuple EOS config to a clean list of IDs."""
+    if eos_ids is None:
+        return []
+    if isinstance(eos_ids, int):
+        return [eos_ids]
+    return [int(eos_id) for eos_id in eos_ids if eos_id is not None]
+
+
 def _validate_model(model, tokenizer, config) -> None:
-    """Generate a short sequence; assert non-empty output. Aborts export on failure."""
+    """Generate a short sequence and reject empty or degenerate output."""
     import torch
     from inference.utils import resolve_special_token_ids
 
@@ -711,8 +743,8 @@ def _validate_model(model, tokenizer, config) -> None:
     special_ids = resolve_special_token_ids(tokenizer)
 
     messages = [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "Hello!"},
+        {"role": "system", "content": "Answer clearly and concisely."},
+        {"role": "user", "content": "What is the capital of France?"},
     ]
     input_ids = tokenizer.apply_chat_template(
         messages,
@@ -724,19 +756,26 @@ def _validate_model(model, tokenizer, config) -> None:
     if hasattr(input_ids, "input_ids"):
         input_ids = input_ids["input_ids"]
     attention_mask = torch.ones_like(input_ids)
-    input_length   = input_ids.shape[1]
+    input_length = input_ids.shape[1]
+
+    eos_ids = _as_eos_id_list(special_ids.eos_list)
+    endofturn_id = tokenizer.convert_tokens_to_ids("<|endofturn|>")
+    if isinstance(endofturn_id, int) and endofturn_id >= 0 and endofturn_id not in eos_ids:
+        eos_ids.append(endofturn_id)
 
     with torch.no_grad():
         output = model.generate(
             input_ids,
             attention_mask=attention_mask,
-            max_new_tokens=20,
+            max_new_tokens=32,
+            do_sample=False,
+            repetition_penalty=1.1,
             pad_token_id=special_ids.pad,
-            eos_token_id=special_ids.eos_list,
+            eos_token_id=eos_ids,
         )
 
     new_tokens = output[0][input_length:].tolist()
-    for stop_id in special_ids.eos_list:
+    for stop_id in eos_ids:
         if stop_id in new_tokens:
             new_tokens = new_tokens[: new_tokens.index(stop_id)]
 
@@ -748,6 +787,13 @@ def _validate_model(model, tokenizer, config) -> None:
         )
 
     decoded = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+
+    if _too_repetitive(new_tokens):
+        raise RuntimeError(
+            "Validation failed: model produced highly repetitive output. "
+            f"Decoded output: {decoded[:200]!r}"
+        )
+
     log.info(f"Validation output ({len(new_tokens)} tokens): {decoded[:100]}")
     log.info("✓ Model validation passed")
 
