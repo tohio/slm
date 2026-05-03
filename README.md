@@ -73,6 +73,20 @@ The model is a dense decoder-only transformer with a modern architecture:
 
 ---
 
+## Post-training Objective
+
+The post-training pipeline is designed to produce a compact, capable assistant that follows instructions, gives the right level of detail for the task, and remains careful with factual claims. Simple questions should receive direct answers; conceptual or technical questions should receive clear, useful explanations; code requests should produce code when requested. The model should stop once the answer is complete and avoid filler, unsupported elaboration, and task-mode confusion.
+
+Post-training goals:
+- Follow user instructions and match the requested format.
+- Give direct answers for simple questions and deeper explanations when warranted.
+- Produce code for code-generation requests, not just explanations.
+- Explain code when explanation is requested.
+- Avoid unsupported factual claims and unnecessary elaboration.
+- Stop cleanly once the answer is complete.
+
+---
+
 ## Repo Structure
 
 ```
@@ -545,7 +559,7 @@ Realized total: ~5.00B corpus tokens (8.31M train + 41.8K val docs). The `blend_
 | `slm-350m` | 15B | 2 |
 | `slm-1b` | 30B | 1 |
 
-Why 1b uses 1 epoch: at 30B tokens / 1 epoch, every source stays below its supply ceiling, so no repetition. Modern small-model training (Llama, Phi) follows the same pattern — fresh tokens outperform repeated ones. 125m and 350m retain 2 epochs because their smaller budgets leave comfortable headroom. Modern small-model training (Llama, Phi) follows the same pattern — fresh tokens outperform repeated ones. 125m and 350m retain 2 epochs because their smaller budgets leave comfortable headroom.
+Why 1b uses 1 epoch: at 30B tokens / 1 epoch, every source stays below its supply ceiling, so no repetition. Modern small-model training (Llama, Phi) follows the same pattern — fresh tokens outperform repeated ones. 125m and 350m retain 2 epochs because their smaller budgets leave comfortable headroom. 
 
 ### Train / val split
 
