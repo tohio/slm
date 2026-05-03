@@ -208,10 +208,11 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
 
-    # Common HF tied-weight declaration.
-    # If a future Transformers version requires the v5 dict form, test:
-    #     {"lm_head.weight": "model.embed_tokens.weight"}
     _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
+
+    # lm_head.weight is intentionally omitted from safetensors when tied
+    # to model.embed_tokens.weight.
+    _keys_to_ignore_on_load_missing = [r"lm_head\.weight"]
 
     def __init__(self, config: SLMConfig):
         super().__init__(config)
