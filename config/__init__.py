@@ -33,6 +33,7 @@ from config.data_mix import (
     dataset_link,
     total_tokens,
     token_target_display,
+    corpus_tokens_display,
     epochs,
     validate,
 )
@@ -53,6 +54,7 @@ __all__ = [
     "dataset_link",
     "total_tokens",
     "token_target_display",
+    "corpus_tokens_display",
     "epochs",
     "validate",
 ]
