@@ -271,13 +271,101 @@ def is_strict_function_completion_prompt(prompt: str) -> bool:
     return False
 
 
+CODE_CREATION_PROMPT_RE = re.compile(
+    r"\b(implement|write|create|complete|add|build|generate|finish|fill in)\b",
+    re.DOTALL,
+)
+
+EXPLANATION_PROMPT_PATTERNS = (
+    re.compile(r"\bexplain\s+(what|how|why|the|this|that|following)\b", re.DOTALL),
+    re.compile(r"\bwhat\s+does\b", re.DOTALL),
+    re.compile(r"\bwhat\s+will\s+(be\s+)?(printed|output)\b", re.DOTALL),
+    re.compile(r"\bpredict\s+the\s+output\b", re.DOTALL),
+    re.compile(r"\bunderstand\s+the\s+behavior\b", re.DOTALL),
+)
+
+
+def is_explanation_prompt(prompt: str) -> bool:
+    """Return True for prompts that ask to explain/analyze existing code.
+
+    Magicoder problem statements often contain words like "describe" while the
+    actual task is still to implement code. Keep this narrow so implementation
+    prompts do not get mislabeled as code_explanation.
+    """
+    prompt = prompt.lower()
+
+    if not any(pattern.search(prompt) for pattern in EXPLANATION_PROMPT_PATTERNS):
+        return False
+
+    # If the prompt explicitly asks for new code, treat it as code generation
+    # unless it is one of the output-prediction forms above.
+    if (
+        CODE_CREATION_PROMPT_RE.search(prompt)
+        and "predict the output" not in prompt
+        and "what will be printed" not in prompt
+        and "what is the output" not in prompt
+    ):
+        return False
+
+    return True
+
+
+def looks_like_mostly_code(text: str) -> bool:
+    """Return True when an assistant response is mostly code, not prose."""
+    stripped = text.strip()
+    if not stripped:
+        return False
+
+    if stripped.startswith("```"):
+        return True
+
+    lines = [line for line in stripped.splitlines() if line.strip()]
+    if not lines:
+        return False
+
+    first = lines[0].strip().lower()
+    code_starts = (
+        "def ", "class ", "import ", "from ", "function ", "const ", "let ",
+        "var ", "public ", "private ", "protected ", "#include", "using ",
+        "package ", "func ", "fn ", "struct ", "enum ", "interface ",
+        "#!/", "mv ", "cp ", "kubectl ", "minikube ",
+    )
+    if first.startswith(code_starts):
+        return True
+
+    fenced = extract_fenced_code(stripped)
+    if fenced:
+        fenced_lines = [line for line in fenced.splitlines() if line.strip()]
+        if len(fenced_lines) >= max(3, len(lines) // 2):
+            return True
+
+    code_lines = 0
+    prose_lines = 0
+    for line in lines:
+        s = line.strip()
+        lower = s.lower()
+        if (
+            any(lower.startswith(prefix) for prefix in code_starts)
+            or any(lower.startswith(keyword) for keyword in CODE_KEYWORDS)
+            or re.search(r"[{};]", s)
+            or re.search(r"\w+\s*=\s*[^=]", s)
+        ):
+            code_lines += 1
+        else:
+            prose_lines += 1
+
+    return code_lines >= 3 and code_lines >= prose_lines
+
+
 def classify_code_sft_type(instruction: str, solution: str) -> str:
     prompt = instruction.lower()
     answer = solution.lower()
 
     # Explanation and repair prompts are task-mode specific and should not be
-    # swallowed by broad completion wording.
-    if "explain" in prompt or "what does" in prompt or "describe" in prompt:
+    # swallowed by broad completion wording. Keep explanation detection narrow:
+    # "implement this" prompts are code_generation even if the generated problem
+    # statement contains explanatory words.
+    if is_explanation_prompt(prompt):
         return "code_explanation"
 
     if "fix" in prompt or "debug" in prompt or "bug" in prompt:
@@ -1008,15 +1096,21 @@ def prepare_code(val_fraction: float) -> None:
             skipped_reasons["missing_solution"] += 1
             continue
 
-        if is_prose_heavy_without_code(solution):
-            skipped_reasons["prose_only"] += 1
-            continue
-
-        if not looks_like_code(solution):
-            skipped_reasons["no_code_detected"] += 1
-            continue
-
         sft_type = classify_code_sft_type(instruction, solution)
+
+        if sft_type == "code_explanation":
+            if looks_like_mostly_code(solution):
+                skipped_reasons["code_explanation_is_code"] += 1
+                continue
+        else:
+            if is_prose_heavy_without_code(solution):
+                skipped_reasons["prose_only"] += 1
+                continue
+
+            if not looks_like_code(solution):
+                skipped_reasons["no_code_detected"] += 1
+                continue
+
         normalized_solution, normalized = normalize_code_solution(solution, sft_type)
 
         if not normalized_solution:
