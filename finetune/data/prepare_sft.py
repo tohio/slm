@@ -707,6 +707,171 @@ def build_handcrafted_function_completion_records() -> list[dict]:
     return records
 
 
+# ── Handcrafted code-explanation examples ─────────────────────────────────────
+
+HANDCRAFTED_CODE_EXPLANATIONS = [
+    {
+        "prompt": "Explain what this Python function does:\n\ndef square(x):\n    return x * x",
+        "answer": "It returns the square of x by multiplying x by itself.",
+    },
+    {
+        "prompt": "Explain what this Python function does:\n\ndef is_even(n):\n    return n % 2 == 0",
+        "answer": "It returns True when n is evenly divisible by 2, otherwise it returns False.",
+    },
+    {
+        "prompt": "Explain what this Python function does:\n\ndef first_item(items):\n    return items[0]",
+        "answer": "It returns the first element from the items list.",
+    },
+    {
+        "prompt": "Explain what this Python function does:\n\ndef count_positive(numbers):\n    return sum(1 for n in numbers if n > 0)",
+        "answer": "It counts how many numbers in the input are greater than zero.",
+    },
+    {
+        "prompt": "Explain what this Python function does:\n\ndef reverse_string(text):\n    return text[::-1]",
+        "answer": "It returns a new string with the characters of text in reverse order.",
+    },
+    {
+        "prompt": "Explain what this Python function does:\n\ndef safe_get(mapping, key, default=None):\n    return mapping.get(key, default)",
+        "answer": "It looks up key in the mapping and returns default if the key is missing.",
+    },
+    {
+        "prompt": "Explain what this Python function does:\n\ndef remove_duplicates(items):\n    return list(dict.fromkeys(items))",
+        "answer": "It removes duplicate values while preserving the original order of the items.",
+    },
+    {
+        "prompt": "Explain what this Python function does:\n\ndef clamp(value, low, high):\n    return max(low, min(value, high))",
+        "answer": "It restricts value to stay between low and high.",
+    },
+    {
+        "prompt": "Explain what this Python function does:\n\ndef has_close_elements(numbers, threshold):\n    for i in range(len(numbers)):\n        for j in range(i + 1, len(numbers)):\n            if abs(numbers[i] - numbers[j]) < threshold:\n                return True\n    return False",
+        "answer": "It checks every pair of numbers and returns True if any pair is closer than the threshold.",
+    },
+    {
+        "prompt": "Explain what this Python function does:\n\ndef trailing_zeroes_in_factorial(num):\n    count = 0\n    while num >= 5:\n        num //= 5\n        count += num\n    return count",
+        "answer": "It counts how many trailing zeroes appear in num factorial by counting factors of 5.",
+    },
+    {
+        "prompt": "Explain this JavaScript function:\n\nfunction add(a, b) {\n  return a + b;\n}",
+        "answer": "It returns the sum of a and b.",
+    },
+    {
+        "prompt": "Explain this JavaScript function:\n\nfunction isEmpty(arr) {\n  return arr.length === 0;\n}",
+        "answer": "It returns true when the array has no elements.",
+    },
+    {
+        "prompt": "Explain this JavaScript function:\n\nfunction getName(user) {\n  return user.name;\n}",
+        "answer": "It returns the name property from the user object.",
+    },
+    {
+        "prompt": "Explain this TypeScript reducer case:\n\ncase 'CUSTOMER_CLEAR_INFO':\n  return { ...state, info: {} };",
+        "answer": "It returns a new state object with the info field reset to an empty object.",
+    },
+    {
+        "prompt": "Explain this Rust function:\n\nfn double(x: i32) -> i32 {\n    x * 2\n}",
+        "answer": "It returns x multiplied by 2.",
+    },
+    {
+        "prompt": "Explain this Rust expression:\n\nnumbers.iter().filter(|n| **n > 0).count()",
+        "answer": "It iterates over numbers, keeps only positive values, and counts how many there are.",
+    },
+    {
+        "prompt": "Explain this SQL query:\n\nSELECT COUNT(*) FROM users WHERE active = true;",
+        "answer": "It counts the number of active users.",
+    },
+    {
+        "prompt": "Explain this Bash command:\n\ncp source.txt backup.txt",
+        "answer": "It copies source.txt to a new file named backup.txt.",
+    },
+    {
+        "prompt": "Explain this Python class method:\n\ndef available_seats(self):\n    return self.capacity - self.reserved",
+        "answer": "It returns the number of seats that are still available by subtracting reserved seats from capacity.",
+    },
+    {
+        "prompt": "Explain what this Python code does:\n\nresult = [x * x for x in numbers]",
+        "answer": "It creates a new list containing the square of each value in numbers.",
+    },
+    {
+        "prompt": "Explain what this Python code does:\n\nwith open(path) as f:\n    lines = f.readlines()",
+        "answer": "It opens the file at path and reads all lines into a list.",
+    },
+    {
+        "prompt": "Explain this Python conditional:\n\nif not items:\n    return []",
+        "answer": "It checks whether items is empty and returns an empty list when it is.",
+    },
+    {
+        "prompt": "Explain this Python loop:\n\nfor item in items:\n    print(item)",
+        "answer": "It iterates through each item in items and prints it.",
+    },
+    {
+        "prompt": "Explain this Python dictionary update:\n\ncounts[word] = counts.get(word, 0) + 1",
+        "answer": "It increments the count for word, starting from 0 if the word is not already present.",
+    },
+    {
+        "prompt": "Explain this Python statement:\n\nreturn sorted(items, key=lambda item: item.name)",
+        "answer": "It returns items sorted by each item's name attribute.",
+    },
+    {
+        "prompt": "Explain this C# property:\n\npublic string Name { get; set; }",
+        "answer": "It declares a public string property named Name with automatic getter and setter methods.",
+    },
+    {
+        "prompt": "Explain this C# condition:\n\nif (items.Count == 0) return false;",
+        "answer": "It returns false when the items collection is empty.",
+    },
+    {
+        "prompt": "Explain this Java method:\n\npublic int size() {\n    return items.size();\n}",
+        "answer": "It returns the number of elements in the items collection.",
+    },
+    {
+        "prompt": "Explain this JavaScript arrow function:\n\nconst double = x => x * 2;",
+        "answer": "It defines a function that returns its input multiplied by 2.",
+    },
+    {
+        "prompt": "Explain this Python exception handler:\n\ntry:\n    value = int(text)\nexcept ValueError:\n    value = 0",
+        "answer": "It tries to convert text to an integer and falls back to 0 if conversion fails.",
+    },
+    {
+        "prompt": "Explain this Python function:\n\ndef merge_dicts(a, b):\n    return {**a, **b}",
+        "answer": "It returns a new dictionary containing keys from a and b, with b overriding duplicate keys.",
+    },
+    {
+        "prompt": "Explain this Python function:\n\ndef get_extension(filename):\n    return filename.rsplit('.', 1)[-1]",
+        "answer": "It returns the part of filename after the final dot.",
+    },
+    {
+        "prompt": "Explain this Python function:\n\ndef fahrenheit_to_celsius(f):\n    return (f - 32) * 5 / 9",
+        "answer": "It converts a Fahrenheit temperature to Celsius.",
+    },
+    {
+        "prompt": "Explain this Python function:\n\ndef non_empty(strings):\n    return [s for s in strings if s]",
+        "answer": "It returns only the strings that are not empty.",
+    },
+    {
+        "prompt": "Explain this Python function:\n\ndef word_count(text):\n    return len(text.split())",
+        "answer": "It returns the number of whitespace-separated words in text.",
+    },
+]
+
+
+def build_handcrafted_code_explanation_records() -> list[dict]:
+    """Return small prose-only examples for code-explanation behavior."""
+    records = []
+
+    for example in HANDCRAFTED_CODE_EXPLANATIONS:
+        records.append({
+            "conversations": [
+                {"role": "system", "content": CODE_SYSTEM},
+                {"role": "user", "content": example["prompt"].strip()},
+                {"role": "assistant", "content": example["answer"].strip()},
+            ],
+            "source": "handcrafted_code_explanation",
+            "sft_type": "code_explanation",
+            "normalized": False,
+        })
+
+    return records
+
+
 # ── Chat SFT — OpenHermes-2.5 ─────────────────────────────────────────────────
 
 def prepare_chat(val_fraction: float) -> None:
@@ -882,6 +1047,14 @@ def prepare_code(val_fraction: float) -> None:
     log.info(
         f"Added handcrafted function-completion examples: "
         f"{len(handcrafted_records):,}"
+    )
+
+    handcrafted_explanation_records = build_handcrafted_code_explanation_records()
+    records.extend(handcrafted_explanation_records)
+    type_counts["code_explanation"] += len(handcrafted_explanation_records)
+    log.info(
+        f"Added handcrafted code-explanation examples: "
+        f"{len(handcrafted_explanation_records):,}"
     )
 
     skipped = sum(skipped_reasons.values())
