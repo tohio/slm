@@ -343,6 +343,29 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
             return model, info
 
         return model
+    
+    def save_pretrained(self, save_directory, *args, **kwargs):
+        """
+        Save model and bundle architecture .py files for remote-code loading.
+
+        Standard HF save writes config.json + model.safetensors. We additionally
+        copy the SLM architecture source into the checkpoint root so the
+        checkpoint loads via `AutoModelForCausalLM.from_pretrained(path,
+        trust_remote_code=True)` from any environment, matching the auto_map
+        paths declared in SLMConfig.
+        """
+        import shutil
+        from pathlib import Path
+
+        result = super().save_pretrained(save_directory, *args, **kwargs)
+
+        src = Path(__file__).parent
+        dst = Path(save_directory)
+        for name in ("config.py", "model.py", "attention.py",
+                     "block.py", "mlp.py", "norm.py"):
+            shutil.copy2(src / name, dst / name)
+
+        return result
 
     def _init_weights(self, module: nn.Module) -> None:
         """
