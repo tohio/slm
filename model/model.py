@@ -199,9 +199,10 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
     - tied embedding behavior
     - HF generation compatibility
 
-    Loading is delegated to the standard PreTrainedModel.from_pretrained,
-    which correctly handles local checkpoints, Hub repo IDs, and the
-    trust_remote_code dispatch path.
+    Loading uses a custom safe from_pretrained() path that loads SLMConfig,
+    instantiates the model, reads model.safetensors or pytorch_model.bin, applies
+    the state dict directly, and re-ties lm_head when embeddings are tied. This
+    avoids local AutoModel loading issues observed with this custom architecture.
     """
 
     config_class = SLMConfig
