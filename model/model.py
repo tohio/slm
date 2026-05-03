@@ -24,14 +24,6 @@ Mistral, GPT-NeoX, Phi, etc.:
 
 Only the outer class calls post_init(), so initialization and HF
 save/load behavior are controlled from one PreTrainedModel.
-
-Important loader note:
-    transformers==5.5.4 was observed to report successful loading for this
-    custom model while not actually applying checkpoint tensors. Therefore
-    SLMForCausalLM.from_pretrained() is overridden to use the verified-safe
-    path:
-
-        config -> model init -> safetensors/torch load -> load_state_dict
 """
 
 from typing import Optional, Union
@@ -203,10 +195,13 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
 
     This is the only PreTrainedModel in the architecture. It owns:
     - initialization via post_init()
-    - save_pretrained()
-    - from_pretrained()
+    - save_pretrained() (extended to bundle architecture .py files)
     - tied embedding behavior
     - HF generation compatibility
+
+    Loading is delegated to the standard PreTrainedModel.from_pretrained,
+    which correctly handles local checkpoints, Hub repo IDs, and the
+    trust_remote_code dispatch path.
     """
 
     config_class = SLMConfig
@@ -223,157 +218,6 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         self.model = SLMModel(config)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.post_init()
-
-    @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
-        """
-        Safe SLM loader.
-
-        transformers==5.5.4 was observed to report successful loading for this
-        custom model while not applying checkpoint tensors correctly. This
-        override preserves the public API while using the verified-safe route:
-
-            config -> cls(config) -> safetensors/torch load -> load_state_dict
-
-        Supports both:
-            - Local checkpoint directories containing model.safetensors or
-              pytorch_model.bin
-            - HuggingFace Hub repo IDs (e.g. "tohio/slm-125m-instruct"),
-              which are resolved via huggingface_hub.snapshot_download
-
-        We use SLMConfig directly rather than AutoConfig to avoid the
-        trust_remote_code interactive prompt that AutoConfig issues when it
-        sees a custom model_type with bundled architecture .py files.
-
-        Notes:
-            - `device_map="auto"` is handled minimally for local loading.
-            - `torch_dtype` and `dtype` are both accepted.
-            - `output_loading_info=True` returns (model, info), matching HF style.
-        """
-        import os
-        import safetensors.torch
-
-        config = kwargs.pop("config", None)
-        torch_dtype = kwargs.pop("torch_dtype", None)
-        dtype = kwargs.pop("dtype", None)
-        device_map = kwargs.pop("device_map", None)
-        output_loading_info = kwargs.pop("output_loading_info", False)
-        revision = kwargs.pop("revision", None)
-        cache_dir = kwargs.pop("cache_dir", None)
-        token = kwargs.pop("token", None)
-
-        # Accepted by many HF call sites, but ignored by this safe local loader.
-        kwargs.pop("low_cpu_mem_usage", None)
-        kwargs.pop("trust_remote_code", None)
-
-        if dtype is not None and torch_dtype is None:
-            torch_dtype = dtype
-
-        raw_path = str(pretrained_model_name_or_path)
-
-        # Resolve Hub repo IDs to a local snapshot directory. Local paths
-        # are detected via os.path.isdir and used as-is. snapshot_download
-        # is idempotent — already-cached snapshots return immediately.
-        if os.path.isdir(raw_path):
-            path = raw_path
-        else:
-            from huggingface_hub import snapshot_download
-            path = snapshot_download(
-                repo_id=raw_path,
-                revision=revision,
-                cache_dir=cache_dir,
-                token=token,
-                # Only download what's needed to load the model.
-                allow_patterns=[
-                    "*.json", "*.safetensors", "*.bin",
-                    "tokenizer*", "*.jinja", "*.py",
-                ],
-            )
-
-        if config is None:
-            # Use SLMConfig directly, NOT AutoConfig. AutoConfig dispatches
-            # via auto_map and prompts for trust_remote_code confirmation,
-            # which fails in non-interactive contexts (scripts, lm_eval CLI).
-            # We know the class here, so call it directly.
-            config = SLMConfig.from_pretrained(path)
-
-        model = cls(config, *model_args)
-
-        safetensors_path = os.path.join(path, "model.safetensors")
-        bin_path = os.path.join(path, "pytorch_model.bin")
-
-        if os.path.exists(safetensors_path):
-            state_dict = safetensors.torch.load_file(safetensors_path, device="cpu")
-        elif os.path.exists(bin_path):
-            state_dict = torch.load(bin_path, map_location="cpu")
-        else:
-            raise FileNotFoundError(
-                f"No model.safetensors or pytorch_model.bin found in {path}"
-            )
-
-        result = model.load_state_dict(state_dict, strict=False)
-
-        allowed_missing = set()
-        if getattr(config, "tie_word_embeddings", False):
-            allowed_missing.add("lm_head.weight")
-
-        missing_keys = set(result.missing_keys)
-        unexpected_keys = set(result.unexpected_keys)
-        unexpected_missing = sorted(k for k in missing_keys if k not in allowed_missing)
-
-        if unexpected_missing:
-            raise RuntimeError(f"Missing keys while loading {path}: {unexpected_missing}")
-
-        if unexpected_keys:
-            raise RuntimeError(f"Unexpected keys while loading {path}: {sorted(unexpected_keys)}")
-
-        if getattr(config, "tie_word_embeddings", False):
-            model.tie_weights()
-
-        if torch_dtype is not None:
-            # Handle string dtypes from CLI tools like lm_eval:
-            # "bfloat16", "float16", "float32", "auto", etc.
-            if isinstance(torch_dtype, str):
-                original_torch_dtype = torch_dtype
-
-                if torch_dtype == "auto":
-                    cfg_dtype = getattr(config, "torch_dtype", None)
-
-                    if isinstance(cfg_dtype, str):
-                        torch_dtype = getattr(torch, cfg_dtype, None)
-                    else:
-                        torch_dtype = cfg_dtype
-                else:
-                    torch_dtype = getattr(torch, torch_dtype, None)
-
-                if torch_dtype is None:
-                    raise ValueError(
-                        f"Unknown torch_dtype string: {original_torch_dtype!r}. "
-                        "Expected a torch.dtype or one of: "
-                        "'bfloat16', 'float16', 'float32', 'auto'."
-                    )
-
-            model = model.to(dtype=torch_dtype)
-
-        # Minimal local device_map support.
-        if device_map is not None:
-            if device_map == "auto" and torch.cuda.is_available():
-                model = model.to("cuda")
-            elif isinstance(device_map, str) and device_map != "auto":
-                model = model.to(device_map)
-
-        model.eval()
-
-        if output_loading_info:
-            info = {
-                "missing_keys": missing_keys,
-                "unexpected_keys": unexpected_keys,
-                "mismatched_keys": set(),
-                "error_msgs": [],
-            }
-            return model, info
-
-        return model
 
     def save_pretrained(self, save_directory, *args, **kwargs):
         """
