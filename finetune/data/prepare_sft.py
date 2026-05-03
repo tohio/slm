@@ -75,7 +75,18 @@ SFT_DIR  = DATA_DIR / "sft"
 
 # Default system prompts
 DEFAULT_SYSTEM = "You are a helpful, harmless, and honest assistant."
-CODE_SYSTEM    = "You are an expert programming assistant. When code is requested, write code directly and avoid unnecessary explanation."
+CODE_SYSTEM = (
+    "You are an expert programming assistant. "
+    "When code is requested, write code directly and avoid unnecessary explanation. "
+    "When explanation is requested, explain clearly in prose and do not rewrite the code."
+)
+
+# Handcrafted explanation examples are intentionally oversampled because the
+# Magicoder code stage is dominated by code-output tasks. A small repeated
+# prose-only explanation signal helps preserve task-mode distinction:
+#   explain code -> explain in prose
+#   write code   -> write code
+HANDCRAFTED_CODE_EXPLANATION_REPEAT = 20
 
 # Per-stage defaults for validation fraction. These are the sources of truth;
 # CLI --val-fraction overrides them only when explicitly passed.
@@ -1143,12 +1154,17 @@ def prepare_code(val_fraction: float) -> None:
         f"{len(handcrafted_records):,}"
     )
 
-    handcrafted_explanation_records = build_handcrafted_code_explanation_records()
+    handcrafted_explanation_base = build_handcrafted_code_explanation_records()
+    handcrafted_explanation_records = (
+        handcrafted_explanation_base * HANDCRAFTED_CODE_EXPLANATION_REPEAT
+    )
     records.extend(handcrafted_explanation_records)
     type_counts["code_explanation"] += len(handcrafted_explanation_records)
     log.info(
         f"Added handcrafted code-explanation examples: "
-        f"{len(handcrafted_explanation_records):,}"
+        f"{len(handcrafted_explanation_records):,} "
+        f"({len(handcrafted_explanation_base):,} unique × "
+        f"{HANDCRAFTED_CODE_EXPLANATION_REPEAT})"
     )
 
     skipped = sum(skipped_reasons.values())
