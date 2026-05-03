@@ -99,6 +99,78 @@ hardware.
 
 ---
 
+### `run_lm_eval.py`
+
+**What it does.** Wraps the `lm-evaluation-harness` CLI with the SLM
+architecture pre-registered via `AutoConfig.register("slm", SLMConfig)`
+and `AutoModelForCausalLM.register(SLMConfig, SLMForCausalLM)`. Hands
+off to `lm_eval.__main__.cli_evaluate` so all standard `lm_eval` flags
+work unchanged.
+
+**When to use it.** Use this for ad-hoc `lm_eval` CLI invocations against
+SLM checkpoints — running a single task with `--limit`, inspecting
+generations with `--log_samples`, testing chat-formatted prompts with
+`--apply_chat_template`, or any other lm_eval flag combination not
+exposed by `eval/eval.py`.
+
+For standard benchmark runs, prefer `make eval-base`, `make eval-instruct`,
+or `make eval-chat` — those use `eval/eval.py` and are sufficient for
+producing the canonical eval JSONs. Reach for this wrapper when you need
+the full surface area of the lm_eval CLI directly.
+
+> **Why a wrapper is needed.** SLM is a custom architecture. lm_eval calls
+> `AutoConfig.from_pretrained` internally before model construction, which
+> raises `KeyError: 'slm'` unless SLM has been registered with the Auto*
+> registries first. Running `python -m lm_eval` directly against an SLM
+> checkpoint will fail; this wrapper handles the registration so the rest
+> of the CLI works transparently.
+
+**How to run.**
+
+```bash
+# Standard invocation — all lm_eval CLI flags work
+.venv/bin/python scripts/run_lm_eval.py \
+  --model hf \
+  --model_args pretrained=results/slm-125m-chat-code/final,dtype=bfloat16 \
+  --tasks humaneval \
+  --num_fewshot 0 \
+  --batch_size 1 \
+  --apply_chat_template \
+  --output_path results/eval/debug_humaneval \
+  --log_samples \
+  --limit 5
+
+# Full eval suite against the DPO checkpoint
+.venv/bin/python scripts/run_lm_eval.py \
+  --model hf \
+  --model_args pretrained=results/slm-125m-dpo/final,dtype=bfloat16 \
+  --tasks hellaswag,arc_easy,arc_challenge,mmlu,truthfulqa,humaneval \
+  --batch_size 1 \
+  --apply_chat_template \
+  --output_path results/eval/slm-125m-dpo-cli \
+  --log_samples
+```
+
+The wrapper accepts every flag `python -m lm_eval` accepts. Anything you
+would pass to lm_eval directly, pass to this script the same way.
+
+**What success looks like.** The script loads the model without
+`KeyError: 'slm'`, runs the requested tasks to completion, and writes
+results to `--output_path`. With `--log_samples`, per-example generations
+are saved alongside results — useful for debugging tasks like HumanEval
+where the score alone doesn't tell you whether the model produced
+plausible code or chat-formatted prose.
+
+A pass@1 of 0.0 on HumanEval is not a wrapper failure — it's the model.
+The wrapper succeeds when the CLI runs to completion and produces
+inspectable output, regardless of the score.
+
+**GPU sizing notes.** Same as your training/eval defaults. The wrapper
+adds no memory overhead beyond what lm_eval itself uses. Pass
+`--batch_size` smaller if you OOM on a smaller GPU.
+
+---
+
 ## Adding new scripts
 
 Each new script gets a section in this README following the template at
