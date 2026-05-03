@@ -276,7 +276,14 @@ def run_evaluation(
                 log_samples=log_samples,
                 confirm_run_unsafe_code=confirm_unsafe,
             )
-            merged_results["results"].update(results.get("results", {}))
+            # Stamp num_fewshot onto each per-task result so the saved JSON
+            # is self-documenting. lm-eval 0.4.x doesn't include shot counts
+            # in its output, so the canonical values from BENCHMARKS would
+            # otherwise be lost.
+            task_results = results.get("results", {})
+            for tk in task_results:
+                task_results[tk]["num_fewshot"] = num_fewshot
+            merged_results["results"].update(task_results)
             # MMLU and other group tasks report per-subtask in "results"
             # and aggregate in "groups"; merge both so metric_score can
             # find group-level scores.
