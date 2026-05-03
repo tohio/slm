@@ -1,6 +1,4 @@
 """
-finetune/data/prepare_sft.py
------------------------------
 Download and format SFT datasets for chat and code fine-tuning.
 
 Formats all data into the SLM conversation format:
@@ -326,6 +324,389 @@ def normalize_code_solution(solution: str, sft_type: str) -> tuple[str, bool]:
     return solution, False
 
 
+# ── Handcrafted function-completion examples ─────────────────────────────────
+
+HANDCRAFTED_FUNCTION_COMPLETIONS = [
+    {
+        "imports": "from typing import List",
+        "signature": "def first_item(items: List[int]) -> int:",
+        "docstring": "Return the first item in the list.",
+        "body": "return items[0]",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def last_item(items: List[int]) -> int:",
+        "docstring": "Return the last item in the list.",
+        "body": "return items[-1]",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def sum_items(items: List[int]) -> int:",
+        "docstring": "Return the sum of all integers in the list.",
+        "body": "return sum(items)",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def max_item(items: List[int]) -> int:",
+        "docstring": "Return the largest integer in the list.",
+        "body": "return max(items)",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def min_item(items: List[int]) -> int:",
+        "docstring": "Return the smallest integer in the list.",
+        "body": "return min(items)",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def count_positive(numbers: List[int]) -> int:",
+        "docstring": "Return the number of positive integers.",
+        "body": "return sum(1 for n in numbers if n > 0)",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def filter_positive(numbers: List[int]) -> List[int]:",
+        "docstring": "Return only the positive integers from the list.",
+        "body": "return [n for n in numbers if n > 0]",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def filter_even(numbers: List[int]) -> List[int]:",
+        "docstring": "Return only the even integers from the list.",
+        "body": "return [n for n in numbers if n % 2 == 0]",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def double_values(numbers: List[int]) -> List[int]:",
+        "docstring": "Return a new list with each value doubled.",
+        "body": "return [n * 2 for n in numbers]",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def contains_value(items: List[int], value: int) -> bool:",
+        "docstring": "Return True if value is present in items.",
+        "body": "return value in items",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def average(numbers: List[float]) -> float:",
+        "docstring": "Return the arithmetic mean of the numbers.",
+        "body": "return sum(numbers) / len(numbers)",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def safe_average(numbers: List[float]) -> float:",
+        "docstring": "Return the average, or 0.0 for an empty list.",
+        "body": "if not numbers:\n    return 0.0\nreturn sum(numbers) / len(numbers)",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def has_close_elements(numbers: List[float], threshold: float) -> bool:",
+        "docstring": "Return True if any two numbers are closer than threshold.",
+        "body": "for i in range(len(numbers)):\n    for j in range(i + 1, len(numbers)):\n        if abs(numbers[i] - numbers[j]) < threshold:\n            return True\nreturn False",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def all_unique(items: List[int]) -> bool:",
+        "docstring": "Return True if all items are unique.",
+        "body": "return len(items) == len(set(items))",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def remove_duplicates(items: List[int]) -> List[int]:",
+        "docstring": "Return items with duplicates removed while preserving order.",
+        "body": "seen = set()\nresult = []\nfor item in items:\n    if item not in seen:\n        seen.add(item)\n        result.append(item)\nreturn result",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def flatten(nested: List[List[int]]) -> List[int]:",
+        "docstring": "Flatten a list of integer lists.",
+        "body": "return [item for group in nested for item in group]",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def chunk_list(items: List[int], size: int) -> List[List[int]]:",
+        "docstring": "Split items into chunks of the given size.",
+        "body": "return [items[i:i + size] for i in range(0, len(items), size)]",
+    },
+    {
+        "imports": "from typing import Dict",
+        "signature": "def get_with_default(data: Dict[str, int], key: str, default: int) -> int:",
+        "docstring": "Return data[key] if present, otherwise default.",
+        "body": "return data.get(key, default)",
+    },
+    {
+        "imports": "from typing import Dict",
+        "signature": "def invert_mapping(data: Dict[str, int]) -> Dict[int, str]:",
+        "docstring": "Invert a dictionary from string-to-int into int-to-string.",
+        "body": "return {value: key for key, value in data.items()}",
+    },
+    {
+        "imports": "from typing import Dict",
+        "signature": "def merge_counts(left: Dict[str, int], right: Dict[str, int]) -> Dict[str, int]:",
+        "docstring": "Merge two count dictionaries by adding values for matching keys.",
+        "body": "result = dict(left)\nfor key, value in right.items():\n    result[key] = result.get(key, 0) + value\nreturn result",
+    },
+    {
+        "imports": "",
+        "signature": "def reverse_string(text: str) -> str:",
+        "docstring": "Return text reversed.",
+        "body": "return text[::-1]",
+    },
+    {
+        "imports": "",
+        "signature": "def is_palindrome(text: str) -> bool:",
+        "docstring": "Return True if text reads the same forward and backward.",
+        "body": "cleaned = ''.join(ch.lower() for ch in text if ch.isalnum())\nreturn cleaned == cleaned[::-1]",
+    },
+    {
+        "imports": "",
+        "signature": "def count_vowels(text: str) -> int:",
+        "docstring": "Return the number of vowels in text.",
+        "body": "return sum(1 for ch in text.lower() if ch in 'aeiou')",
+    },
+    {
+        "imports": "",
+        "signature": "def title_case_words(text: str) -> str:",
+        "docstring": "Return text with each word title-cased.",
+        "body": "return ' '.join(word.capitalize() for word in text.split())",
+    },
+    {
+        "imports": "",
+        "signature": "def normalize_spaces(text: str) -> str:",
+        "docstring": "Collapse repeated whitespace into single spaces.",
+        "body": "return ' '.join(text.split())",
+    },
+    {
+        "imports": "",
+        "signature": "def starts_and_ends_with(text: str, prefix: str, suffix: str) -> bool:",
+        "docstring": "Return True if text starts with prefix and ends with suffix.",
+        "body": "return text.startswith(prefix) and text.endswith(suffix)",
+    },
+    {
+        "imports": "",
+        "signature": "def factorial(n: int) -> int:",
+        "docstring": "Return n factorial.",
+        "body": "result = 1\nfor value in range(2, n + 1):\n    result *= value\nreturn result",
+    },
+    {
+        "imports": "",
+        "signature": "def trailing_zeroes_in_factorial(num: int) -> int:",
+        "docstring": "Return the number of trailing zeroes in num factorial.",
+        "body": "count = 0\nwhile num >= 5:\n    num //= 5\n    count += num\nreturn count",
+    },
+    {
+        "imports": "",
+        "signature": "def clamp(value: int, low: int, high: int) -> int:",
+        "docstring": "Clamp value to the inclusive range [low, high].",
+        "body": "return max(low, min(value, high))",
+    },
+    {
+        "imports": "",
+        "signature": "def gcd(a: int, b: int) -> int:",
+        "docstring": "Return the greatest common divisor of a and b.",
+        "body": "while b:\n    a, b = b, a % b\nreturn abs(a)",
+    },
+    {
+        "imports": "",
+        "signature": "def is_prime(n: int) -> bool:",
+        "docstring": "Return True if n is prime.",
+        "body": "if n < 2:\n    return False\nfor value in range(2, int(n ** 0.5) + 1):\n    if n % value == 0:\n        return False\nreturn True",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def binary_search(items: List[int], target: int) -> int:",
+        "docstring": "Return the index of target in sorted items, or -1 if missing.",
+        "body": "left, right = 0, len(items) - 1\nwhile left <= right:\n    mid = (left + right) // 2\n    if items[mid] == target:\n        return mid\n    if items[mid] < target:\n        left = mid + 1\n    else:\n        right = mid - 1\nreturn -1",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def rotate_left(items: List[int], steps: int) -> List[int]:",
+        "docstring": "Rotate items left by steps positions.",
+        "body": "if not items:\n    return []\nsteps %= len(items)\nreturn items[steps:] + items[:steps]",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def pair_sums(numbers: List[int], target: int) -> List[tuple[int, int]]:",
+        "docstring": "Return pairs of numbers whose sum equals target.",
+        "body": "pairs = []\nseen = set()\nfor number in numbers:\n    complement = target - number\n    if complement in seen:\n        pairs.append((complement, number))\n    seen.add(number)\nreturn pairs",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def transpose(matrix: List[List[int]]) -> List[List[int]]:",
+        "docstring": "Return the transpose of a rectangular matrix.",
+        "body": "return [list(row) for row in zip(*matrix)]",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def diagonal_sum(matrix: List[List[int]]) -> int:",
+        "docstring": "Return the sum of the main diagonal.",
+        "body": "return sum(matrix[i][i] for i in range(min(len(matrix), len(matrix[0]))))",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def find_missing_number(numbers: List[int]) -> int:",
+        "docstring": "Given numbers from 0..n with one missing, return the missing number.",
+        "body": "n = len(numbers)\nreturn n * (n + 1) // 2 - sum(numbers)",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def move_zeroes(numbers: List[int]) -> List[int]:",
+        "docstring": "Return a list with all zeroes moved to the end.",
+        "body": "nonzero = [n for n in numbers if n != 0]\nreturn nonzero + [0] * (len(numbers) - len(nonzero))",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def running_total(numbers: List[int]) -> List[int]:",
+        "docstring": "Return running totals for the input numbers.",
+        "body": "total = 0\nresult = []\nfor number in numbers:\n    total += number\n    result.append(total)\nreturn result",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def longest_word(words: List[str]) -> str:",
+        "docstring": "Return the longest word, or an empty string for no words.",
+        "body": "if not words:\n    return ''\nreturn max(words, key=len)",
+    },
+    {
+        "imports": "from typing import List, Dict",
+        "signature": "def group_by_first_letter(words: List[str]) -> Dict[str, List[str]]:",
+        "docstring": "Group words by their first letter.",
+        "body": "groups = {}\nfor word in words:\n    if not word:\n        continue\n    key = word[0].lower()\n    groups.setdefault(key, []).append(word)\nreturn groups",
+    },
+    {
+        "imports": "from typing import List, Dict",
+        "signature": "def word_counts(words: List[str]) -> Dict[str, int]:",
+        "docstring": "Return a dictionary counting each word.",
+        "body": "counts = {}\nfor word in words:\n    counts[word] = counts.get(word, 0) + 1\nreturn counts",
+    },
+    {
+        "imports": "from typing import Optional, List",
+        "signature": "def find_first_even(numbers: List[int]) -> Optional[int]:",
+        "docstring": "Return the first even number, or None if there is none.",
+        "body": "for number in numbers:\n    if number % 2 == 0:\n        return number\nreturn None",
+    },
+    {
+        "imports": "from typing import Optional, List",
+        "signature": "def find_first_match(words: List[str], prefix: str) -> Optional[str]:",
+        "docstring": "Return the first word that starts with prefix, or None.",
+        "body": "for word in words:\n    if word.startswith(prefix):\n        return word\nreturn None",
+    },
+    {
+        "imports": "",
+        "signature": "def parse_int(value: str, default: int = 0) -> int:",
+        "docstring": "Parse value as an integer, returning default on failure.",
+        "body": "try:\n    return int(value)\nexcept (TypeError, ValueError):\n    return default",
+    },
+    {
+        "imports": "",
+        "signature": "def safe_divide(a: float, b: float) -> float:",
+        "docstring": "Return a divided by b, or 0.0 if b is zero.",
+        "body": "if b == 0:\n    return 0.0\nreturn a / b",
+    },
+    {
+        "imports": "from pathlib import Path",
+        "signature": "def file_extension(path: str) -> str:",
+        "docstring": "Return the lowercase file extension for path.",
+        "body": "return Path(path).suffix.lower()",
+    },
+    {
+        "imports": "from pathlib import Path",
+        "signature": "def file_stem(path: str) -> str:",
+        "docstring": "Return the filename without its extension.",
+        "body": "return Path(path).stem",
+    },
+    {
+        "imports": "import re",
+        "signature": "def slugify(text: str) -> str:",
+        "docstring": "Convert text to a lowercase URL slug.",
+        "body": "slug = re.sub(r'[^a-zA-Z0-9]+', '-', text.lower()).strip('-')\nreturn slug",
+    },
+    {
+        "imports": "import re",
+        "signature": "def is_valid_email(email: str) -> bool:",
+        "docstring": "Return True if email has a simple valid email shape.",
+        "body": "return bool(re.match(r'^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$', email))",
+    },
+    {
+        "imports": "from datetime import datetime",
+        "signature": "def format_date(value: datetime) -> str:",
+        "docstring": "Return a date formatted as YYYY-MM-DD.",
+        "body": "return value.strftime('%Y-%m-%d')",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def join_nonempty(parts: List[str], sep: str = ', ') -> str:",
+        "docstring": "Join non-empty strings with the separator.",
+        "body": "return sep.join(part for part in parts if part)",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def pad_to_length(items: List[int], length: int, fill: int = 0) -> List[int]:",
+        "docstring": "Pad items with fill until it reaches length.",
+        "body": "if len(items) >= length:\n    return items[:length]\nreturn items + [fill] * (length - len(items))",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def split_even_odd(numbers: List[int]) -> tuple[List[int], List[int]]:",
+        "docstring": "Return two lists: even numbers and odd numbers.",
+        "body": "evens = [n for n in numbers if n % 2 == 0]\nodds = [n for n in numbers if n % 2 != 0]\nreturn evens, odds",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def second_largest(numbers: List[int]) -> int:",
+        "docstring": "Return the second-largest unique number.",
+        "body": "unique = sorted(set(numbers))\nreturn unique[-2]",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def remove_none(items: List[object]) -> List[object]:",
+        "docstring": "Return a list with None values removed.",
+        "body": "return [item for item in items if item is not None]",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def every_other(items: List[int]) -> List[int]:",
+        "docstring": "Return every other item from the list.",
+        "body": "return items[::2]",
+    },
+]
+
+
+def build_handcrafted_function_completion_records() -> list[dict]:
+    """Return small body-only examples for HumanEval-style behavior."""
+    records = []
+
+    for example in HANDCRAFTED_FUNCTION_COMPLETIONS:
+        imports = example["imports"].strip()
+        signature = example["signature"].strip()
+        docstring = example["docstring"].strip()
+        body = example["body"].strip()
+
+        snippet_parts = []
+        if imports:
+            snippet_parts.append(imports)
+        snippet_parts.append(f'{signature}\n    """{docstring}"""')
+        snippet = "\n\n".join(snippet_parts)
+
+        prompt = (
+            "Complete this Python function. Return only the function body.\n\n"
+            f"{snippet}"
+        )
+
+        records.append({
+            "conversations": [
+                {"role": "system", "content": CODE_SYSTEM},
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": body},
+            ],
+            "source": "handcrafted_function_completion",
+            "sft_type": "function_completion",
+            "normalized": False,
+        })
+
+    return records
+
+
 # ── Chat SFT — OpenHermes-2.5 ─────────────────────────────────────────────────
 
 def prepare_chat(val_fraction: float) -> None:
@@ -494,6 +875,14 @@ def prepare_code(val_fraction: float) -> None:
             "sft_type": sft_type,
             "normalized": normalized,
         })
+
+    handcrafted_records = build_handcrafted_function_completion_records()
+    records.extend(handcrafted_records)
+    type_counts["function_completion"] += len(handcrafted_records)
+    log.info(
+        f"Added handcrafted function-completion examples: "
+        f"{len(handcrafted_records):,}"
+    )
 
     skipped = sum(skipped_reasons.values())
     log.info(f"Processed: {len(records):,} kept, {skipped:,} skipped")
