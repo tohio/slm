@@ -472,8 +472,8 @@ tokenizer = AutoTokenizer.from_pretrained(
 )
 
 messages = [
-    {{"role": "system", "content": "You are a helpful assistant."}},
-    {{"role": "user", "content": "Explain what a transformer is."}},
+    {"role": "system", "content": "Answer clearly and concisely."},
+    {"role": "user", "content": "Explain what a transformer is."},
 ]
 
 inputs = tokenizer.apply_chat_template(
@@ -482,14 +482,18 @@ inputs = tokenizer.apply_chat_template(
     add_generation_prompt=True,
     return_dict=True,
 )
+
+endofturn_id = tokenizer.convert_tokens_to_ids("<|endofturn|>")
+
 output = model.generate(
     **inputs,
     max_new_tokens=120,
     do_sample=False,
     repetition_penalty=1.1,
     pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
-    eos_token_id=tokenizer.eos_token_id,
+    eos_token_id=[tokenizer.eos_token_id, endofturn_id],
 )
+
 input_len = inputs["input_ids"].shape[1]
 print(tokenizer.decode(output[0][input_len:], skip_special_tokens=True))
 ```
