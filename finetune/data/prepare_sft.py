@@ -88,6 +88,180 @@ CODE_SYSTEM = (
 #   write code   -> write code
 HANDCRAFTED_CODE_EXPLANATION_REPEAT = 20
 
+
+# Small response-control set for chat SFT. These examples target failure modes
+# that broad instruction data often leaves weak in small models: direct factual
+# answers, basic arithmetic, AI/ML concept grounding, factual restraint, and
+# stopping after a complete answer. Keep this set small and explicit; it is a
+# behavior anchor, not a replacement for OpenHermes.
+HANDCRAFTED_RESPONSE_CONTROL_CHATS = [
+    {
+        "user": "What is 2 + 2?",
+        "assistant": "4",
+        "sft_type": "simple_factual",
+    },
+    {
+        "user": "What is 7 + 5?",
+        "assistant": "12",
+        "sft_type": "simple_factual",
+    },
+    {
+        "user": "What is 9 - 3?",
+        "assistant": "6",
+        "sft_type": "simple_factual",
+    },
+    {
+        "user": "What is 3 * 4?",
+        "assistant": "12",
+        "sft_type": "simple_factual",
+    },
+    {
+        "user": "What is 20 divided by 5?",
+        "assistant": "4",
+        "sft_type": "simple_factual",
+    },
+    {
+        "user": "What is the capital of France?",
+        "assistant": "Paris.",
+        "sft_type": "simple_factual",
+    },
+    {
+        "user": "What is the capital of Japan?",
+        "assistant": "Tokyo.",
+        "sft_type": "simple_factual",
+    },
+    {
+        "user": "What is the capital of Italy?",
+        "assistant": "Rome.",
+        "sft_type": "simple_factual",
+    },
+    {
+        "user": "What color is the sky on a clear day?",
+        "assistant": "Blue.",
+        "sft_type": "simple_factual",
+    },
+    {
+        "user": "Give a short answer: What is the capital of Canada?",
+        "assistant": "Ottawa.",
+        "sft_type": "simple_factual",
+    },
+    {
+        "user": "In AI, what is a transformer model?",
+        "assistant": "A transformer is a neural network architecture that uses attention mechanisms to process sequences and learn relationships between tokens.",
+        "sft_type": "ai_concept",
+    },
+    {
+        "user": "Explain what a transformer is in artificial intelligence.",
+        "assistant": "In AI, a transformer is a neural network architecture based on attention. It is widely used for language models because it can learn relationships between tokens in a sequence.",
+        "sft_type": "ai_concept",
+    },
+    {
+        "user": "What is self-attention in a transformer?",
+        "assistant": "Self-attention lets each token compare itself with other tokens in the same sequence so the model can decide which context is most relevant.",
+        "sft_type": "ai_concept",
+    },
+    {
+        "user": "What is a neural network?",
+        "assistant": "A neural network is a machine learning model made of connected layers that learn patterns from data.",
+        "sft_type": "ai_concept",
+    },
+    {
+        "user": "What is supervised learning?",
+        "assistant": "Supervised learning trains a model on examples that include both inputs and correct target outputs.",
+        "sft_type": "ai_concept",
+    },
+    {
+        "user": "What is overfitting?",
+        "assistant": "Overfitting happens when a model memorizes training data too closely and performs poorly on new data.",
+        "sft_type": "ai_concept",
+    },
+    {
+        "user": "What is an embedding in machine learning?",
+        "assistant": "An embedding is a learned vector representation that maps items such as words, tokens, or users into a numeric space.",
+        "sft_type": "ai_concept",
+    },
+    {
+        "user": "What is the difference between training and inference?",
+        "assistant": "Training updates model weights using data. Inference uses the trained model to produce outputs without updating the weights.",
+        "sft_type": "ai_concept",
+    },
+    {
+        "user": "What was Anthropic's private revenue last month?",
+        "assistant": "I do not have enough verified public information to answer that.",
+        "sft_type": "factual_restraint",
+    },
+    {
+        "user": "What was OpenAI's exact internal revenue yesterday?",
+        "assistant": "I do not have access to verified internal revenue figures, so I cannot answer that reliably.",
+        "sft_type": "factual_restraint",
+    },
+    {
+        "user": "What is the private salary of Anthropic's CEO this month?",
+        "assistant": "I do not have verified public information about that private compensation detail.",
+        "sft_type": "factual_restraint",
+    },
+    {
+        "user": "What is Apple's current private unreleased product roadmap?",
+        "assistant": "I do not have verified access to Apple's private unreleased roadmap.",
+        "sft_type": "factual_restraint",
+    },
+    {
+        "user": "Give me the exact current bank balance of Microsoft.",
+        "assistant": "I cannot verify an exact current bank balance. Public financial filings may provide reported cash and equivalents for a specific reporting period.",
+        "sft_type": "factual_restraint",
+    },
+    {
+        "user": "Do you know the exact answer if the information is private and not publicly verified?",
+        "assistant": "No. If information is private or not publicly verified, I should say that I cannot verify it.",
+        "sft_type": "factual_restraint",
+    },
+    {
+        "user": "Answer concisely: What is the capital of Spain?",
+        "assistant": "Madrid.",
+        "sft_type": "stop_behavior",
+    },
+    {
+        "user": "Answer concisely: What is 10 + 1?",
+        "assistant": "11",
+        "sft_type": "stop_behavior",
+    },
+    {
+        "user": "Answer in one sentence: What is a database?",
+        "assistant": "A database is an organized system for storing, retrieving, and managing data.",
+        "sft_type": "stop_behavior",
+    },
+    {
+        "user": "Answer in one sentence: What is Python?",
+        "assistant": "Python is a high-level programming language used for scripting, automation, data work, and application development.",
+        "sft_type": "stop_behavior",
+    },
+    {
+        "user": "What should you do when you are not sure about a factual claim?",
+        "assistant": "I should say that I am not sure or cannot verify it, rather than inventing details.",
+        "sft_type": "factual_restraint",
+    },
+    {
+        "user": "What is a GPU?",
+        "assistant": "A GPU is a processor designed for parallel computation, commonly used for graphics and machine learning workloads.",
+        "sft_type": "ai_concept",
+    },
+]
+
+
+def build_handcrafted_response_control_records() -> list[dict]:
+    records = []
+    for example in HANDCRAFTED_RESPONSE_CONTROL_CHATS:
+        records.append({
+            "conversations": [
+                {"role": "system", "content": DEFAULT_SYSTEM},
+                {"role": "user", "content": example["user"]},
+                {"role": "assistant", "content": example["assistant"]},
+            ],
+            "source": "handcrafted_response_control",
+            "sft_type": example["sft_type"],
+        })
+    return records
+
 # Per-stage defaults for validation fraction. These are the sources of truth;
 # CLI --val-fraction overrides them only when explicitly passed.
 DEFAULT_VAL_FRACTION = {
@@ -1045,6 +1219,9 @@ def prepare_chat(val_fraction: float) -> None:
             "sft_type": "general_assistant",
         })
 
+    handcrafted_records = build_handcrafted_response_control_records()
+    records.extend(handcrafted_records)
+    log.info(f"Added handcrafted response-control chat examples: {len(handcrafted_records):,}")
     log.info(f"Processed: {len(records):,} kept, {skipped:,} skipped")
 
     # Split
