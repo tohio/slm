@@ -1,27 +1,28 @@
 name: slm-350m-chat
 wandb_project: slm
+
 model:
   base_model_path: $RESULTS_DIR/slm-350m/final
   max_seq_length: 2048
+
 data:
   train_path: $DATA_DIR/sft/chat/train.jsonl
   val_path:   $DATA_DIR/sft/chat/val.jsonl
   packing: false
+
 training:
+  warmup_ratio_recipe: 0.03
   epochs: 2
-  warmup_ratio: 0.03
-  micro_batch_size: 2
-  # Target effective batch size: 128
-  # gradient_accumulation_steps = 128 / (micro_batch_size x num_gpus)
-  #   1 GPU:  128 / (2 x 1) = 64
-  #   4 GPU:  128 / (2 x 4) = 16
-  #   8 GPU:  128 / (2 x 8) = 8
-  gradient_accumulation_steps: 16   # adjust based on your GPU count
+  micro_batch_size: 16
+  eval_micro_batch_size: 8
+  gradient_accumulation_steps: 8
   precision: bf16
   gradient_clip_val: 1.0
   gradient_checkpointing: false
-  eval_steps: 500
-  save_steps: 500
+  torch_compile: false
+  group_by_length: true
+  eval_steps: 2000
+  save_steps: 2000
   save_total_limit: 3
   log_steps: 10
   num_workers: 4
@@ -29,8 +30,9 @@ training:
   lr_scheduler: cosine
   report_to:
     - wandb
+
 optimizer:
-  lr: 8.0e-6                         # slightly lower than 125m — larger model more sensitive
+  lr: 8e-06
   weight_decay: 0.01
   beta1: 0.9
   beta2: 0.98

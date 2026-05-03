@@ -1,27 +1,28 @@
 name: slm-1b-chat-code
 wandb_project: slm
+
 model:
   base_model_path: $RESULTS_DIR/slm-1b-chat/final
   max_seq_length: 4096
+
 data:
   train_path: $DATA_DIR/sft/code/train.jsonl
   val_path:   $DATA_DIR/sft/code/val.jsonl
   packing: false
+
 training:
+  warmup_ratio_recipe: 0.03
   epochs: 2
-  warmup_ratio: 0.03
-  micro_batch_size: 1
-  # Target effective batch size: 128
-  # gradient_accumulation_steps = 128 / (micro_batch_size x num_gpus)
-  #   1 GPU:  128 / (1 x 1)  = 128
-  #   4 GPU:  128 / (1 x 4)  = 32
-  #   8 GPU:  128 / (1 x 8)  = 16
-  gradient_accumulation_steps: 32   # adjust based on your GPU count
+  micro_batch_size: 4
+  eval_micro_batch_size: 2
+  gradient_accumulation_steps: 32
   precision: bf16
   gradient_clip_val: 1.0
-  gradient_checkpointing: true
-  eval_steps: 200
-  save_steps: 200
+  gradient_checkpointing: false
+  torch_compile: false
+  group_by_length: true
+  eval_steps: 2000
+  save_steps: 2000
   save_total_limit: 3
   log_steps: 10
   num_workers: 4
@@ -29,8 +30,9 @@ training:
   lr_scheduler: cosine
   report_to:
     - wandb
+
 optimizer:
-  lr: 2.0e-6                         # lower than chat SFT — preserve chat capability
+  lr: 2.5e-06
   weight_decay: 0.01
   beta1: 0.9
   beta2: 0.98
