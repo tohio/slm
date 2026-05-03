@@ -472,8 +472,8 @@ tokenizer = AutoTokenizer.from_pretrained(
 )
 
 messages = [
-    {"role": "system", "content": "Answer clearly and concisely."},
-    {"role": "user", "content": "Explain what a transformer is."},
+    {{"role": "system", "content": "Answer clearly and concisely."}},
+    {{"role": "user", "content": "Explain what a transformer is."}},
 ]
 
 inputs = tokenizer.apply_chat_template(
