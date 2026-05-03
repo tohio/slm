@@ -294,7 +294,7 @@ SFT_CODE_PROFILES: dict[str, SFTProfile] = {
 #        update — same calibration approach used for SFT 125m.
 DPO_PROFILES: dict[str, DPOProfile] = {
     "125m": DPOProfile(
-        state_gb=2.3, act_per_seq_gb_no_ckpt=0.22, act_per_seq_gb_ckpt=0.05,
+        state_gb=2.3, act_per_seq_gb_no_ckpt=7.6, act_per_seq_gb_ckpt=2.6,
         max_seq_length=2048, ref_global_batch=64,
         lr=5.0e-7, epochs=1, warmup_ratio=0.05,
         dpo_beta=0.1, max_prompt_length=1024,
