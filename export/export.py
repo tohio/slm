@@ -62,7 +62,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from eval.eval import metric_score                                 # noqa: E402
 from config import (                                                # noqa: E402
-    DATA_MIX, CODE_SUBMIX, dataset_link, token_target_display,
+    DATA_MIX, CODE_SUBMIX, dataset_link, corpus_tokens_display,
 )
 
 logging.basicConfig(
@@ -337,7 +337,7 @@ def generate_model_card(
     variant_cfg   = VARIANTS[variant]
     description   = variant_cfg["description"]
     pipeline_tag  = variant_cfg["pipeline_tag"]
-    token_tgt     = token_target_display(size)
+    token_tgt     = corpus_tokens_display(size)
     param_str     = f"{n_params / 1e6:.1f}M ({n_params:,} parameters)"
 
     base_model_yaml = "" if variant == "base" else f"base_model: {HF_USERNAME}/slm-{size}"
