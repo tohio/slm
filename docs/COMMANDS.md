@@ -919,7 +919,9 @@ make dpo-resume SIZE=125m GPUS=2
 
 ## Stage 7 — Evaluation
 
-Each variant has its own eval target so per-variant model cards (written by `make export-*`) carry real benchmark scores. Eval results land under `results/eval/<checkpoint-name>/` — that's where `export.py` reads them from.
+Each variant has its own benchmark eval target so per-variant model cards (written by `make export-*`) carry real benchmark scores. Benchmark eval results land under `results/eval/<checkpoint-name>/` — that's where `export.py` reads them from.
+
+Stage 7 also includes behavior sanity eval targets. These run deterministic generation checks for factuality, task format, code behavior, repetition, and clean stopping. Sanity eval complements benchmark evaluation; it does not replace `lm-evaluation-harness`.
 
 ---
 
@@ -968,6 +970,55 @@ Alias for `make eval-chat` — evaluates the final aligned variant. The default 
 
 ```bash
 make eval SIZE=125m
+```
+
+---
+
+### `make eval-sanity-base`
+
+Runs behavior sanity evaluation on the base pretrained checkpoint.
+
+```bash
+make eval-sanity-base SIZE=125m
+```
+
+**Requires:** `results/slm-$(SIZE)/final`, `eval/sanity_eval.py`, `eval/sanity_prompts.jsonl`
+**Produces:** `results/eval/sanity/slm-$(SIZE).json`
+
+---
+
+### `make eval-sanity-instruct`
+
+Runs behavior sanity evaluation on the SFT-tuned (chat + code) checkpoint.
+
+```bash
+make eval-sanity-instruct SIZE=125m
+```
+
+**Requires:** `results/slm-$(SIZE)-chat-code/final`, `eval/sanity_eval.py`, `eval/sanity_prompts.jsonl`
+**Produces:** `results/eval/sanity/slm-$(SIZE)-chat-code.json`
+
+---
+
+### `make eval-sanity-chat`
+
+Runs behavior sanity evaluation on the DPO-aligned checkpoint.
+
+```bash
+make eval-sanity-chat SIZE=125m
+```
+
+**Requires:** `results/slm-$(SIZE)-dpo/final`, `eval/sanity_eval.py`, `eval/sanity_prompts.jsonl`
+**Produces:** `results/eval/sanity/slm-$(SIZE)-dpo.json`
+
+---
+
+### `make eval-sanity`
+
+Alias for `make eval-sanity-chat` — runs behavior sanity evaluation on the final aligned variant.
+
+```bash
+make eval-sanity SIZE=125m
 ```
 
 ---
@@ -1224,6 +1275,7 @@ make export-instruct SIZE=125m
 make prepare-dpo
 make dpo             SIZE=125m GPUS=8
 make eval-chat       SIZE=125m              # also: make eval
+make eval-sanity     SIZE=125m              # behavior sanity eval for final aligned variant
 make export-chat     SIZE=125m
 ```
 
@@ -1299,7 +1351,8 @@ make eval-instruct   SIZE=1b          # Stage 7:  evaluate instruct
 make export-instruct SIZE=1b          # Stage 8:  push instruct to Hub
 make prepare-dpo                      # Stage 6a: download DPO datasets
 make dpo             SIZE=1b GPUS=8   # Stage 6b: DPO alignment
-make eval-chat       SIZE=1b          # Stage 7:  evaluate chat (also: make eval)
+make eval-chat       SIZE=1b          # Stage 7:  benchmark eval for chat (also: make eval)
+make eval-sanity     SIZE=1b          # Stage 7:  behavior sanity eval for chat
 make export-chat     SIZE=1b          # Stage 8:  push chat to Hub
 
 # ── Ship ───────────────────────────────────────────────────────────────────────

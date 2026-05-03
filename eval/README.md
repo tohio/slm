@@ -21,36 +21,103 @@ lm-eval 0.4.x keys result dicts as `"{metric},{filter}"`. `eval.py` handles all 
 
 ---
 
+## Sanity Evaluation
+
+In addition to benchmark evaluation, this directory includes a lightweight sanity eval for post-training behavior:
+
+| File | Purpose |
+|---|---|
+| `sanity_prompts.jsonl` | Fixed prompts covering factual QA, AI/ML concepts, code generation, function completion, code explanation, factual restraint, and stop behavior |
+| `sanity_eval.py` | Deterministic generation runner that checks required text, forbidden text, repetition, answer length for simple prompts, and clean task formatting |
+
+The sanity eval is not a replacement for benchmark evaluation. It is a regression gate for assistant behavior that benchmark scores may not capture.
+
+It checks whether the model can:
+- Answer simple factual questions without unsupported elaboration.
+- Choose the correct domain for ambiguous terms.
+- Provide appropriate-depth explanations.
+- Produce code when code is requested.
+- Explain code when explanation is requested.
+- Avoid obvious repetition.
+- Stop once the answer is complete.
+
+Run against a local checkpoint:
+
+```bash
+python eval/sanity_eval.py \
+  --model results/slm-125m-dpo/final \
+  --json-out results/eval/sanity/slm-125m-dpo.json
+```
+
+---
+
+## Sanity Checks
+
+The sanity eval is a deterministic behavior regression check. It is not a benchmark score and does not replace lm-eval. It catches failures that benchmark aggregates may hide.
+
+| Category | Checks |
+|---|---|
+| Simple factual QA | Direct answer, no unsupported elaboration |
+| AI/ML concepts | Correct domain interpretation, no electrical-transformer confusion |
+| Code generation | Produces code when code is requested |
+| Function completion | Returns function body when requested |
+| Code explanation | Explains code instead of rewriting it |
+| Factual restraint | Avoids inventing private or unverifiable facts |
+| Stop behavior | Stops after a complete answer |
+| Repetition | Rejects obvious repeated-token or repeated-word runs |
+
+---
+
 ## Usage
 
 ```bash
-# Evaluate all benchmarks
+# Evaluate all standard benchmarks
 make eval SIZE=125m
 
-# Or directly
+# Run behavior sanity eval
+make eval-sanity SIZE=125m
+
+# Or directly: standard benchmark eval
 python eval/eval.py --model results/slm-125m-dpo/final
 
-# Quick subset (hellaswag + arc_easy + arc_challenge — faster, no code exec)
+# Or directly: behavior sanity eval
+python eval/sanity_eval.py --model results/slm-125m-dpo/final
+
+# Quick benchmark subset (hellaswag + arc_easy + arc_challenge — faster, no code exec)
 python eval/eval.py --model results/slm-125m-dpo/final --tasks quick
 
-# Specific tasks
+# Specific benchmark tasks
 python eval/eval.py --model results/slm-125m-dpo/final --tasks hellaswag,arc_easy,mmlu
 
-# Limit examples (smoke test)
+# Limit benchmark examples (smoke test)
 python eval/eval.py --model results/slm-125m-dpo/final --tasks quick --limit 100
 
-# Override few-shot count for all tasks
+# Override benchmark few-shot count for all tasks
 python eval/eval.py --model results/slm-125m-dpo/final --num-fewshot 0
 
-# Override precision (default bfloat16)
+# Override benchmark precision (default bfloat16)
 python eval/eval.py --model results/slm-125m-dpo/final --dtype float16
 
-# Debug a weird result by saving per-example inputs/outputs
+# Debug a weird benchmark result by saving per-example inputs/outputs
 python eval/eval.py --model results/slm-125m-dpo/final --tasks mmlu --log-samples
 
-# Compare base vs aligned
+# Save sanity eval results
+python eval/sanity_eval.py \
+  --model results/slm-125m-dpo/final \
+  --json-out results/eval/sanity/slm-125m-dpo.json
+
+# Run sanity eval against the exported Hub model
+python eval/sanity_eval.py \
+  --model tohio/slm-125m-chat \
+  --trust-remote-code
+
+# Compare base vs aligned on standard benchmarks
 python eval/eval.py --model results/slm-125m/final       --tasks all
 python eval/eval.py --model results/slm-125m-dpo/final   --tasks all
+
+# Compare base vs aligned on sanity behavior
+python eval/sanity_eval.py --model results/slm-125m/final
+python eval/sanity_eval.py --model results/slm-125m-dpo/final
 ```
 
 `eval.py` exits with status 1 if any task fails, so it composes correctly with `make` and CI chains.
@@ -85,15 +152,28 @@ results/eval/
     └── eval_20260415_140000Z.json
 ```
 
-Timestamps are UTC (suffix `Z`) so filenames sort consistently across machines in different timezones.
+Sanity eval results can be written to `results/eval/sanity/`:
 
-Each JSON file includes:
+```text
+results/eval/sanity/
+├── slm-125m-dpo.json
+└── tohio-slm-125m-chat.json
+```
+
+Timestamps are UTC (suffix `Z`) so standard benchmark filenames sort consistently across machines in different timezones.
+
+Each standard benchmark JSON file includes:
 - `model`, `model_name`, `tasks`, `failed_tasks` — what was run
 - `dtype` — precision used for the run
 - `timestamp` — UTC timestamp
 - `results` — per-task scores from lm-eval
 - `groups` — aggregated scores for group-tasks like MMLU
 - `config` — lm-eval's run config
+
+Each sanity eval JSON file includes:
+- `model` — local checkpoint path or Hub model ID
+- `passed`, `total` — aggregate pass count
+- `results` — per-prompt output and failure reasons
 
 The `export.py` script reads the most recent result file for the `slm-{size}-dpo` model and embeds the scores in the Hub model card automatically. Run `make eval` before `make export-chat`.
 

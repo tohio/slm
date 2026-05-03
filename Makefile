@@ -71,7 +71,7 @@ endif
         config-gen config-gen-pretrain config-gen-sft config-gen-dpo \
         accel-gen-ddp accel-gen-fsdp \
         pretrain pretrain-mini pretrain-resume reinit-embeds smoke-gen prepare-sft sft sft-mini sft-resume sft-code sft-code-mini sft-code-resume \
-        prepare-dpo dpo dpo-mini dpo-resume eval eval-base eval-instruct eval-chat eval-mini serve serve-local \
+        prepare-dpo dpo dpo-mini dpo-resume eval eval-base eval-instruct eval-chat eval-sanity eval-sanity-base eval-sanity-instruct eval-sanity-chat eval-mini serve serve-local \
         export export-base export-instruct export-chat \
         setup setup-data-dir setup-gpu install install-gpu install-uv install-conda install-kenlm install-orjson \
         download-kenlm-model download-fasttext-model accelerate-config accelerate-config-single accelerate-config-multi \
@@ -331,14 +331,37 @@ eval-instruct:
 	@echo "==> Stage 7: Evaluation (instruct, $(SIZE))"
 	$(PYTHON) eval/eval.py --model results/slm-$(SIZE)-chat-code/final
 
-eval-chat:
+eeval-chat:
 	@echo "==> Stage 7: Evaluation (chat, $(SIZE))"
 	$(PYTHON) eval/eval.py --model results/slm-$(SIZE)-dpo/final
+
+# Behavior sanity eval targets.
+# These are deterministic generation checks for factuality, task format,
+# code behavior, repetition, and clean stopping. They complement lm-eval
+# benchmarks; they do not replace them.
+eval-sanity: eval-sanity-chat
+
+eval-sanity-base:
+	@echo "==> Stage 7: Sanity evaluation (base, $(SIZE))"
+	$(PYTHON) eval/sanity_eval.py \
+		--model results/slm-$(SIZE)/final \
+		--json-out results/eval/sanity/slm-$(SIZE).json
+
+eval-sanity-instruct:
+	@echo "==> Stage 7: Sanity evaluation (instruct, $(SIZE))"
+	$(PYTHON) eval/sanity_eval.py \
+		--model results/slm-$(SIZE)-chat-code/final \
+		--json-out results/eval/sanity/slm-$(SIZE)-chat-code.json
+
+eval-sanity-chat:
+	@echo "==> Stage 7: Sanity evaluation (chat, $(SIZE))"
+	$(PYTHON) eval/sanity_eval.py \
+		--model results/slm-$(SIZE)-dpo/final \
+		--json-out results/eval/sanity/slm-$(SIZE)-dpo.json
 
 eval-mini:
 	@echo "==> Stage 7: Mini evaluation (pipeline validation)"
 	$(PYTHON) eval/eval.py --model results/slm-mini-dpo/final --tasks hellaswag --limit 50 --batch-size 4
-
 # ── Stage 8: Export ───────────────────────────────────────────────────────────
 
 export: export-base export-instruct export-chat
@@ -622,11 +645,15 @@ help:
 	@echo "  prepare-dpo        Stage 6a — download DPO datasets"
 	@echo "  dpo                Stage 6b — DPO alignment"
 	@echo "  dpo-mini           Stage 6b — mini DPO"
-	@echo "  eval-base          Stage 7  — evaluate base (pretrained) variant"
-	@echo "  eval-instruct      Stage 7  — evaluate instruct (SFT) variant"
-	@echo "  eval-chat          Stage 7  — evaluate chat (DPO) variant"
-	@echo "  eval               Stage 7  — alias for eval-chat"
-	@echo "  eval-mini          Stage 7  — mini eval (pipeline validation)"
+	@echo "  eval-base              Stage 7  — benchmark eval for base variant"
+	@echo "  eval-instruct          Stage 7  — benchmark eval for instruct variant"
+	@echo "  eval-chat              Stage 7  — benchmark eval for chat variant"
+	@echo "  eval                   Stage 7  — alias for eval-chat"
+	@echo "  eval-sanity-base       Stage 7  — behavior sanity eval for base variant"
+	@echo "  eval-sanity-instruct   Stage 7  — behavior sanity eval for instruct variant"
+	@echo "  eval-sanity-chat       Stage 7  — behavior sanity eval for chat variant"
+	@echo "  eval-sanity            Stage 7  — alias for eval-sanity-chat"
+	@echo "  eval-mini              Stage 7  — mini eval (pipeline validation)"
 	@echo "  export             Stage 8  — push all variants to HuggingFace Hub"
 	@echo "  serve              Stage 10 — launch vLLM server"
 	@echo ""

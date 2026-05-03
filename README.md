@@ -157,7 +157,9 @@ slm/
 │   └── train_dpo.py
 │
 ├── eval/
-│   └── eval.py
+│   ├── eval.py                    standard benchmark eval via lm-evaluation-harness
+│   ├── sanity_eval.py             behavior sanity eval runner
+│   └── sanity_prompts.jsonl       fixed behavior prompts for sanity eval
 │
 ├── export/
 │   └── export.py
@@ -359,7 +361,8 @@ make eval-instruct   SIZE=125m          # Stage 7:  evaluate instruct variant
 make export-instruct SIZE=125m          # Stage 8:  push instruct model to Hub
 make prepare-dpo
 make dpo             SIZE=125m GPUS=1   # Stage 6b: DPO alignment
-make eval-chat       SIZE=125m          # Stage 7:  evaluate chat variant (also: make eval)
+make eval-chat       SIZE=125m          # Stage 7:  benchmark eval for chat variant (also: make eval)
+make eval-sanity     SIZE=125m          # Stage 7:  behavior sanity eval for chat variant
 make export-chat     SIZE=125m          # Stage 8:  push chat model to Hub
 make serve                              # Stage 10: launch vLLM server
 ```
@@ -672,7 +675,7 @@ make eval-chat     SIZE=125m   # after DPO (also: make eval)
 
 **Why DPO over PPO?** At small model scale, PPO's actor-critic setup requires multiple models simultaneously and is sensitive to reward scaling. DPO achieves comparable alignment with a simpler training loop and no separate reward model.
 
-**Why sequential SFT (chat → code)?** Sequential fine-tuning produces independently evaluable checkpoints at each stage, making regressions immediately visible. The code SFT uses a lower learning rate to reduce catastrophic forgetting of chat capability.
+**Why staged post-training?** Post-training is split into independently evaluable stages so behavior regressions are visible immediately. General assistant SFT teaches broad instruction following; response-control SFT teaches appropriate answer depth, factual restraint, and clean stopping; code-generation and function-completion SFT teach the model to emit code when code is requested rather than merely explaining how to code. Preference alignment is applied only after SFT behavior is sane, and is filtered to prefer factual, task-matching, appropriately detailed responses.
 
 **Why per-variant eval targets?** `eval-base`, `eval-instruct`, and `eval-chat` evaluate the three checkpoints written by the pipeline (`results/slm-{size}/final`, `results/slm-{size}-chat-code/final`, `results/slm-{size}-dpo/final`). Running each one writes its own JSON output, which `export.py` then reads when building per-variant model cards on the Hub. A single combined `eval` target would either skip the base and instruct cards or require running them all in series at the end — splitting them out lets eval run inline with each pipeline stage.
 
