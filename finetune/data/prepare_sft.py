@@ -211,18 +211,85 @@ def is_prose_heavy_without_code(text: str) -> bool:
     return starts_like_explanation and not looks_like_code(text)
 
 
+STRICT_FUNCTION_COMPLETION_PHRASES = (
+    "return only the function body",
+    "return only function body",
+    "return only the method body",
+    "return only method body",
+    "function body only",
+    "method body only",
+    "complete the function body",
+    "complete this function body",
+    "complete the method body",
+    "complete this method body",
+    "implement the function body",
+    "implement this function body",
+    "implement the method body",
+    "implement this method body",
+    "fill in the function body",
+    "fill in this function body",
+    "fill in the method body",
+    "fill in this method body",
+    "replace the pass statement",
+    "replace pass with",
+)
+
+
+def is_strict_function_completion_prompt(prompt: str) -> bool:
+    """Return True only for body/completion-style code prompts.
+
+    Magicoder often says "complete the implementation" for broad tasks that
+    expect a full function, class, script, or module. Those are useful code
+    generation examples, but they are not HumanEval-style function-completion
+    examples. Keep `function_completion` narrow so it teaches body-only /
+    missing-code behavior instead of full-code generation.
+    """
+    prompt = prompt.lower()
+
+    if any(phrase in prompt for phrase in STRICT_FUNCTION_COMPLETION_PHRASES):
+        return True
+
+    body_pattern = re.compile(
+        r"\b(complete|implement|fill in|write)\b.{0,120}\b(function|method)\b.{0,120}\bbody\b",
+        re.DOTALL,
+    )
+    if body_pattern.search(prompt):
+        return True
+
+    return_only_body_pattern = re.compile(
+        r"\breturn only\b.{0,80}\b(function|method)\b.{0,40}\bbody\b",
+        re.DOTALL,
+    )
+    if return_only_body_pattern.search(prompt):
+        return True
+
+    missing_code_pattern = re.compile(
+        r"\b(fill in|complete)\b.{0,80}\b(missing code|todo|pass statement)\b",
+        re.DOTALL,
+    )
+    if missing_code_pattern.search(prompt):
+        return True
+
+    return False
+
+
 def classify_code_sft_type(instruction: str, solution: str) -> str:
     prompt = instruction.lower()
     answer = solution.lower()
 
-    if "complete" in prompt and ("function" in prompt or "method" in prompt):
-        return "function_completion"
-
-    if "explain" in prompt or "what does" in prompt:
+    # Explanation and repair prompts are task-mode specific and should not be
+    # swallowed by broad completion wording.
+    if "explain" in prompt or "what does" in prompt or "describe" in prompt:
         return "code_explanation"
 
     if "fix" in prompt or "debug" in prompt or "bug" in prompt:
         return "code_repair"
+
+    # Keep function_completion strict. Broad prompts like "complete the
+    # implementation of this class/method" usually expect full code and should
+    # remain code_generation.
+    if is_strict_function_completion_prompt(prompt):
+        return "function_completion"
 
     if "```" in answer or looks_like_code(solution):
         return "code_generation"
