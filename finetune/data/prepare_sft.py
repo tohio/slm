@@ -25,8 +25,12 @@ Stage 1 — Chat SFT:
 
 Stage 2 — Code SFT:
     Dataset: ise-uiuc/Magicoder-OSS-Instruct-75K
-    Size:    ~75k examples
+    Size:    ~75k examples before filtering
     Output:  data/sft/code/train.jsonl + val.jsonl
+
+    Code SFT keeps examples whose assistant responses contain actual code.
+    Obvious prose-only / explanation-only examples are dropped so this stage
+    teaches the model to emit code when code is requested.
 
 Output format — one conversation per line:
     {
@@ -35,7 +39,8 @@ Output format — one conversation per line:
             {"role": "user",      "content": "..."},
             {"role": "assistant", "content": "..."}
         ],
-        "source": "openhermes"
+        "source": "openhermes",
+        "sft_type": "general_assistant"
     }
 
 Usage:
@@ -49,7 +54,9 @@ import json
 import logging
 import os
 import random
+import re
 import sys
+from collections import Counter
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -70,7 +77,7 @@ SFT_DIR  = DATA_DIR / "sft"
 
 # Default system prompts
 DEFAULT_SYSTEM = "You are a helpful, harmless, and honest assistant."
-CODE_SYSTEM    = "You are an expert programming assistant. Write clean, efficient, and well-documented code."
+CODE_SYSTEM    = "You are an expert programming assistant. When code is requested, write code directly and avoid unnecessary explanation."
 
 # Per-stage defaults for validation fraction. These are the sources of truth;
 # CLI --val-fraction overrides them only when explicitly passed.
@@ -86,6 +93,134 @@ def write_jsonl(records: list[dict], path: Path) -> None:
         for record in records:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
     log.info(f"Wrote {len(records):,} records to {path}")
+
+
+# ── Code SFT filtering helpers ────────────────────────────────────────────────
+
+CODE_KEYWORDS = (
+    "def ",
+    "class ",
+    "return ",
+    "import ",
+    "from ",
+    "for ",
+    "while ",
+    "if ",
+    "elif ",
+    "else:",
+    "try:",
+    "except ",
+    "with ",
+    "lambda ",
+    "async ",
+    "await ",
+)
+
+PROSE_ONLY_STARTS = (
+    "the given code",
+    "the provided code",
+    "this code",
+    "this function",
+    "this program",
+    "to solve this problem",
+    "to implement this",
+    "here is an explanation",
+    "here's an explanation",
+    "in this solution",
+    "we need to",
+    "you can",
+)
+
+
+def has_code_fence(text: str) -> bool:
+    return "```" in text
+
+
+def count_indented_code_lines(text: str) -> int:
+    count = 0
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if line.startswith(("    ", "	")) and not stripped.startswith(("-", "*")):
+            count += 1
+    return count
+
+
+def count_code_keyword_lines(text: str) -> int:
+    count = 0
+    for line in text.splitlines():
+        stripped = line.strip()
+        if any(stripped.startswith(keyword) for keyword in CODE_KEYWORDS):
+            count += 1
+    return count
+
+
+def has_programming_syntax(text: str) -> bool:
+    patterns = [
+        r"\w+\s*=\s*[^=]",
+        r"\w+\([^)]*\)",
+        r"[{};]",
+        r"==|!=|<=|>=|->|=>",
+        r"\[[^\]]+\]",
+    ]
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def looks_like_code(text: str) -> bool:
+    """Return True when an assistant response contains substantial code.
+
+    This intentionally uses broad signals because Magicoder contains multiple
+    languages and formats. The goal is not perfect language detection; the goal
+    is to drop obvious prose-only examples from the code SFT stage.
+    """
+    if not text or len(text.strip()) < 20:
+        return False
+
+    keyword_lines = count_code_keyword_lines(text)
+    indented_lines = count_indented_code_lines(text)
+
+    if has_code_fence(text) and (keyword_lines >= 1 or has_programming_syntax(text)):
+        return True
+
+    if keyword_lines >= 2:
+        return True
+
+    if indented_lines >= 2 and has_programming_syntax(text):
+        return True
+
+    if "def " in text and "return" in text:
+        return True
+
+    if "class " in text and ("def " in text or "return" in text):
+        return True
+
+    return False
+
+
+def is_prose_heavy_without_code(text: str) -> bool:
+    stripped = text.strip().lower()
+    starts_like_explanation = stripped.startswith(PROSE_ONLY_STARTS)
+    return starts_like_explanation and not looks_like_code(text)
+
+
+def classify_code_sft_type(instruction: str, solution: str) -> str:
+    prompt = instruction.lower()
+    answer = solution.lower()
+
+    if "complete" in prompt and ("function" in prompt or "method" in prompt):
+        return "function_completion"
+
+    if "explain" in prompt or "what does" in prompt:
+        return "code_explanation"
+
+    if "fix" in prompt or "debug" in prompt or "bug" in prompt:
+        return "code_repair"
+
+    if "```" in answer or looks_like_code(solution):
+        return "code_generation"
+
+    return "code_other"
 
 
 # ── Chat SFT — OpenHermes-2.5 ─────────────────────────────────────────────────
@@ -159,6 +294,7 @@ def prepare_chat(val_fraction: float) -> None:
         records.append({
             "conversations": messages,
             "source": "openhermes",
+            "sft_type": "general_assistant",
         })
 
     log.info(f"Processed: {len(records):,} kept, {skipped:,} skipped")
@@ -183,12 +319,12 @@ def prepare_code(val_fraction: float) -> None:
     Download and format Magicoder-OSS-Instruct-75K for code SFT.
 
     Magicoder generates coding problems inspired by real open-source code,
-    then generates solutions. Higher quality and diversity than CodeAlpaca.
-    Each example is a single-turn instruction/response pair.
+    then generates solutions. Each example is a single-turn instruction/response
+    pair.
 
-    Solutions are passed through unchanged. Magicoder's solutions typically
-    include triple-backtick code fences where appropriate; we do not apply
-    any language-specific wrapping heuristic.
+    This stage now keeps only examples whose assistant response contains real
+    code. Obvious prose-only / explanation-only examples are dropped so code SFT
+    teaches the model to produce code directly when code is requested.
     """
     from datasets import load_dataset
 
@@ -205,16 +341,32 @@ def prepare_code(val_fraction: float) -> None:
     log.info(f"Magicoder: {len(dataset):,} examples")
 
     records = []
-    skipped = 0
+    skipped_reasons = Counter()
+    type_counts = Counter()
 
     for example in dataset:
         # Use `or ""` to handle None values
         instruction = (example.get("problem") or "").strip()
         solution    = (example.get("solution") or "").strip()
 
-        if not instruction or not solution:
-            skipped += 1
+        if not instruction:
+            skipped_reasons["missing_instruction"] += 1
             continue
+
+        if not solution:
+            skipped_reasons["missing_solution"] += 1
+            continue
+
+        if is_prose_heavy_without_code(solution):
+            skipped_reasons["prose_only"] += 1
+            continue
+
+        if not looks_like_code(solution):
+            skipped_reasons["no_code_detected"] += 1
+            continue
+
+        sft_type = classify_code_sft_type(instruction, solution)
+        type_counts[sft_type] += 1
 
         messages = [
             {"role": "system",    "content": CODE_SYSTEM},
@@ -225,12 +377,29 @@ def prepare_code(val_fraction: float) -> None:
         records.append({
             "conversations": messages,
             "source": "magicoder",
+            "sft_type": sft_type,
         })
 
+    skipped = sum(skipped_reasons.values())
     log.info(f"Processed: {len(records):,} kept, {skipped:,} skipped")
+    if skipped_reasons:
+        log.info("Skipped by reason:")
+        for reason, count in skipped_reasons.most_common():
+            log.info(f"  {reason}: {count:,}")
+    if type_counts:
+        log.info("Kept by sft_type:")
+        for sft_type, count in type_counts.most_common():
+            log.info(f"  {sft_type}: {count:,}")
+
+    if not records:
+        raise RuntimeError(
+            "Code SFT filtering removed all examples. Relax looks_like_code() "
+            "or inspect Magicoder schema changes."
+        )
 
     # Split
     n_val = max(500, int(len(records) * val_fraction))
+    n_val = min(n_val, max(1, len(records) - 1))
     random.seed(42)
     random.shuffle(records)
     val_records   = records[:n_val]
@@ -240,7 +409,6 @@ def prepare_code(val_fraction: float) -> None:
     write_jsonl(val_records, val_path)
 
     log.info(f"Code SFT: {len(train_records):,} train, {len(val_records):,} val")
-
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
