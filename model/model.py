@@ -300,8 +300,28 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
             model.tie_weights()
 
         if torch_dtype is not None:
-            model = model.to(dtype=torch_dtype)
+        # Handle string dtypes from CLI tools like lm_eval which pass
+        # torch_dtype as a string ("bfloat16", "float16", "auto", etc.)
+        if isinstance(torch_dtype, str):
+            if torch_dtype == "auto":
+                # "auto" means use the dtype recorded in config (or default fp32).
+                # Resolve from config if present; otherwise leave as-is.
+                cfg_dtype = getattr(config, "torch_dtype", None)
+                if isinstance(cfg_dtype, str):
+                    torch_dtype = getattr(torch, cfg_dtype, None)
+                else:
+                    torch_dtype = cfg_dtype  # may be None or a real dtype
+            else:
+                torch_dtype = getattr(torch, torch_dtype, None)
+                if torch_dtype is None:
+                    raise ValueError(
+                        f"Unknown torch_dtype string: {torch_dtype!r}. "
+                        f"Expected a torch.dtype or one of: 'bfloat16', "
+                        f"'float16', 'float32', 'auto'."
+                    )
 
+    if torch_dtype is not None:
+        model = model.to(dtype=torch_dtype)
         # Minimal local device_map support.
         if device_map is not None:
             if device_map == "auto" and torch.cuda.is_available():
@@ -369,7 +389,7 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
 
     def set_decoder(self, decoder: SLMModel) -> None:
         self.model = decoder
-        
+
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
