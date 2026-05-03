@@ -131,6 +131,13 @@ PROSE_ONLY_STARTS = (
     "you can",
 )
 
+CODE_OUTPUT_TYPES = {"code_generation", "function_completion", "code_repair"}
+
+CODE_BLOCK_RE = re.compile(
+    r"```(?:[a-zA-Z0-9_+\-.#]+)?\s*\n(.*?)```",
+    re.DOTALL,
+)
+
 
 def has_code_fence(text: str) -> bool:
     return "```" in text
@@ -221,6 +228,35 @@ def classify_code_sft_type(instruction: str, solution: str) -> str:
         return "code_generation"
 
     return "code_other"
+
+
+def extract_fenced_code(text: str) -> str | None:
+    """Return the largest fenced code block from a response, without fences."""
+    blocks = [match.group(1).strip() for match in CODE_BLOCK_RE.finditer(text)]
+    blocks = [block for block in blocks if block]
+    if not blocks:
+        return None
+    return max(blocks, key=len).strip()
+
+
+def normalize_code_solution(solution: str, sft_type: str) -> tuple[str, bool]:
+    """Normalize assistant output for code-output SFT examples.
+
+    Magicoder often emits a fenced code block followed by prose explanation.
+    For code_generation, function_completion, and code_repair, keep only the
+    largest fenced code block when present. This teaches code-output tasks to
+    produce code directly. For code_explanation, keep the original prose.
+    """
+    solution = solution.strip()
+
+    if sft_type not in CODE_OUTPUT_TYPES:
+        return solution, False
+
+    fenced = extract_fenced_code(solution)
+    if fenced:
+        return fenced, True
+
+    return solution, False
 
 
 # ── Chat SFT — OpenHermes-2.5 ─────────────────────────────────────────────────
@@ -322,8 +358,9 @@ def prepare_code(val_fraction: float) -> None:
     then generates solutions. Each example is a single-turn instruction/response
     pair.
 
-    This stage now keeps only examples whose assistant response contains real
-    code. Obvious prose-only / explanation-only examples are dropped so code SFT
+    This stage keeps only examples whose assistant response contains real code.
+    Obvious prose-only / explanation-only examples are dropped. For code-output
+    task types, fenced code is normalized to code-only targets so code SFT
     teaches the model to produce code directly when code is requested.
     """
     from datasets import load_dataset
@@ -343,6 +380,7 @@ def prepare_code(val_fraction: float) -> None:
     records = []
     skipped_reasons = Counter()
     type_counts = Counter()
+    normalized_count = 0
 
     for example in dataset:
         # Use `or ""` to handle None values
@@ -366,22 +404,33 @@ def prepare_code(val_fraction: float) -> None:
             continue
 
         sft_type = classify_code_sft_type(instruction, solution)
+        normalized_solution, normalized = normalize_code_solution(solution, sft_type)
+
+        if not normalized_solution:
+            skipped_reasons["empty_after_normalization"] += 1
+            continue
+
+        if normalized:
+            normalized_count += 1
+
         type_counts[sft_type] += 1
 
         messages = [
             {"role": "system",    "content": CODE_SYSTEM},
             {"role": "user",      "content": instruction},
-            {"role": "assistant", "content": solution},
+            {"role": "assistant", "content": normalized_solution},
         ]
 
         records.append({
             "conversations": messages,
             "source": "magicoder",
             "sft_type": sft_type,
+            "normalized": normalized,
         })
 
     skipped = sum(skipped_reasons.values())
     log.info(f"Processed: {len(records):,} kept, {skipped:,} skipped")
+    log.info(f"Normalized code-only outputs: {normalized_count:,}")
     if skipped_reasons:
         log.info("Skipped by reason:")
         for reason, count in skipped_reasons.most_common():
