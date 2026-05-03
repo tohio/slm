@@ -466,7 +466,6 @@ model = AutoModelForCausalLM.from_pretrained(
     "{HF_USERNAME}/{hub_name}",
     trust_remote_code=True,
 )
-
 tokenizer = AutoTokenizer.from_pretrained(
     "{HF_USERNAME}/{hub_name}",
     trust_remote_code=True,
@@ -485,10 +484,11 @@ inputs = tokenizer.apply_chat_template(
 )
 output = model.generate(
     **inputs,
-    max_new_tokens=200,
-    temperature=0.7,
-    do_sample=True,
+    max_new_tokens=120,
+    do_sample=False,
+    repetition_penalty=1.1,
     pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+    eos_token_id=tokenizer.eos_token_id,
 )
 input_len = inputs["input_ids"].shape[1]
 print(tokenizer.decode(output[0][input_len:], skip_special_tokens=True))
