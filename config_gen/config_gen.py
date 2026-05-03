@@ -973,7 +973,7 @@ training:
     - wandb
 
 optimizer:
-  lr: {profile.lr}
+  lr: {profile.lr:.1e}
   weight_decay: {profile.weight_decay}
   beta1: {profile.beta1}
   beta2: {profile.beta2}
