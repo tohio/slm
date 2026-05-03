@@ -235,9 +235,15 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
 
             config -> cls(config) -> safetensors/torch load -> load_state_dict
 
-        Supports local checkpoint directories containing:
-            - model.safetensors, or
-            - pytorch_model.bin
+        Supports both:
+            - Local checkpoint directories containing model.safetensors or
+              pytorch_model.bin
+            - HuggingFace Hub repo IDs (e.g. "tohio/slm-125m-instruct"),
+              which are resolved via huggingface_hub.snapshot_download
+
+        We use SLMConfig directly rather than AutoConfig to avoid the
+        trust_remote_code interactive prompt that AutoConfig issues when it
+        sees a custom model_type with bundled architecture .py files.
 
         Notes:
             - `device_map="auto"` is handled minimally for local loading.
@@ -246,13 +252,15 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         """
         import os
         import safetensors.torch
-        from transformers import AutoConfig
 
         config = kwargs.pop("config", None)
         torch_dtype = kwargs.pop("torch_dtype", None)
         dtype = kwargs.pop("dtype", None)
         device_map = kwargs.pop("device_map", None)
         output_loading_info = kwargs.pop("output_loading_info", False)
+        revision = kwargs.pop("revision", None)
+        cache_dir = kwargs.pop("cache_dir", None)
+        token = kwargs.pop("token", None)
 
         # Accepted by many HF call sites, but ignored by this safe local loader.
         kwargs.pop("low_cpu_mem_usage", None)
@@ -261,10 +269,33 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         if dtype is not None and torch_dtype is None:
             torch_dtype = dtype
 
-        path = str(pretrained_model_name_or_path)
+        raw_path = str(pretrained_model_name_or_path)
+
+        # Resolve Hub repo IDs to a local snapshot directory. Local paths
+        # are detected via os.path.isdir and used as-is. snapshot_download
+        # is idempotent — already-cached snapshots return immediately.
+        if os.path.isdir(raw_path):
+            path = raw_path
+        else:
+            from huggingface_hub import snapshot_download
+            path = snapshot_download(
+                repo_id=raw_path,
+                revision=revision,
+                cache_dir=cache_dir,
+                token=token,
+                # Only download what's needed to load the model.
+                allow_patterns=[
+                    "*.json", "*.safetensors", "*.bin",
+                    "tokenizer*", "*.jinja", "*.py",
+                ],
+            )
 
         if config is None:
-            config = AutoConfig.from_pretrained(path)
+            # Use SLMConfig directly, NOT AutoConfig. AutoConfig dispatches
+            # via auto_map and prompts for trust_remote_code confirmation,
+            # which fails in non-interactive contexts (scripts, lm_eval CLI).
+            # We know the class here, so call it directly.
+            config = SLMConfig.from_pretrained(path)
 
         model = cls(config, *model_args)
 
@@ -343,7 +374,7 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
             return model, info
 
         return model
-    
+
     def save_pretrained(self, save_directory, *args, **kwargs):
         """
         Save model and bundle architecture .py files for remote-code loading.
@@ -457,6 +488,7 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
         )
+
     def prepare_inputs_for_generation(
         self,
         input_ids: torch.LongTensor,
