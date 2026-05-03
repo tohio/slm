@@ -219,6 +219,171 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         self.model = SLMModel(config)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.post_init()
+    
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
+        """
+        Safe SLM loader.
+
+        Transformers local AutoModel loading has been observed to instantiate
+        this custom architecture while leaving most checkpoint tensors at fresh
+        initialization. This loader uses the verified path:
+
+            SLMConfig -> cls(config) -> safetensors/torch load -> load_state_dict
+
+        Supports:
+            - local checkpoint directories
+            - Hub repo IDs
+            - model.safetensors
+            - pytorch_model.bin
+            - dtype / torch_dtype strings from CLI tools
+            - tied lm_head.weight missing from checkpoint
+        """
+        import os
+        from pathlib import Path
+
+        import safetensors.torch
+
+        config = kwargs.pop("config", None)
+        torch_dtype = kwargs.pop("torch_dtype", None)
+        dtype = kwargs.pop("dtype", None)
+        device_map = kwargs.pop("device_map", None)
+        output_loading_info = kwargs.pop("output_loading_info", False)
+
+        revision = kwargs.pop("revision", None)
+        cache_dir = kwargs.pop("cache_dir", None)
+        token = kwargs.pop("token", None)
+        local_files_only = kwargs.pop("local_files_only", False)
+
+        # Accepted by many HF call sites, but not needed by this loader.
+        kwargs.pop("low_cpu_mem_usage", None)
+        kwargs.pop("trust_remote_code", None)
+        kwargs.pop("weights_only", None)
+        kwargs.pop("use_safetensors", None)
+
+        if dtype is not None and torch_dtype is None:
+            torch_dtype = dtype
+
+        path = str(pretrained_model_name_or_path)
+
+        # Hub repo ID support: resolve repo into a local snapshot first.
+        if not os.path.isdir(path):
+            from huggingface_hub import snapshot_download
+
+            snapshot_kwargs = {
+                "repo_id": path,
+                "local_files_only": local_files_only,
+                "allow_patterns": [
+                    "config.json",
+                    "generation_config.json",
+                    "model.safetensors",
+                    "pytorch_model.bin",
+                    "tokenizer.json",
+                    "tokenizer_config.json",
+                    "special_tokens_map.json",
+                    "chat_template.jinja",
+                    "*.py",
+                ],
+            }
+            if revision is not None:
+                snapshot_kwargs["revision"] = revision
+            if cache_dir is not None:
+                snapshot_kwargs["cache_dir"] = cache_dir
+            if token is not None:
+                snapshot_kwargs["token"] = token
+
+            path = snapshot_download(**snapshot_kwargs)
+
+        if config is None:
+            config = SLMConfig.from_pretrained(path)
+
+        model = cls(config, *model_args)
+
+        safetensors_path = Path(path) / "model.safetensors"
+        bin_path = Path(path) / "pytorch_model.bin"
+
+        if safetensors_path.exists():
+            state_dict = safetensors.torch.load_file(str(safetensors_path), device="cpu")
+        elif bin_path.exists():
+            state_dict = torch.load(str(bin_path), map_location="cpu")
+        else:
+            raise FileNotFoundError(
+                f"No model.safetensors or pytorch_model.bin found in {path}"
+            )
+
+        result = model.load_state_dict(state_dict, strict=False)
+
+        allowed_missing = set()
+        if getattr(config, "tie_word_embeddings", False):
+            allowed_missing.add("lm_head.weight")
+
+        missing_keys = set(result.missing_keys)
+        unexpected_keys = set(result.unexpected_keys)
+        unexpected_missing = sorted(k for k in missing_keys if k not in allowed_missing)
+
+        if unexpected_missing:
+            raise RuntimeError(
+                f"Missing keys while loading {path}: {unexpected_missing}"
+            )
+
+        if unexpected_keys:
+            raise RuntimeError(
+                f"Unexpected keys while loading {path}: {sorted(unexpected_keys)}"
+            )
+
+        if getattr(config, "tie_word_embeddings", False):
+            model.tie_weights()
+
+        # Normalize dtype passed by HF / lm-eval / CLI tools.
+        if isinstance(torch_dtype, str):
+            original_torch_dtype = torch_dtype
+
+            if torch_dtype == "auto":
+                cfg_dtype = getattr(config, "torch_dtype", None)
+                if isinstance(cfg_dtype, str):
+                    torch_dtype = getattr(torch, cfg_dtype, None)
+                else:
+                    torch_dtype = cfg_dtype
+            else:
+                torch_dtype = {
+                    "float16": torch.float16,
+                    "fp16": torch.float16,
+                    "bfloat16": torch.bfloat16,
+                    "bf16": torch.bfloat16,
+                    "float32": torch.float32,
+                    "fp32": torch.float32,
+                }.get(torch_dtype, getattr(torch, torch_dtype, None))
+
+            if torch_dtype is None:
+                raise ValueError(
+                    f"Unknown torch_dtype string: {original_torch_dtype!r}. "
+                    "Expected a torch.dtype or one of: "
+                    "'bfloat16', 'bf16', 'float16', 'fp16', 'float32', "
+                    "'fp32', 'auto'."
+                )
+
+        if torch_dtype is not None:
+            model = model.to(dtype=torch_dtype)
+
+        # Minimal local device_map support.
+        if device_map is not None:
+            if device_map == "auto" and torch.cuda.is_available():
+                model = model.to("cuda")
+            elif isinstance(device_map, str) and device_map != "auto":
+                model = model.to(device_map)
+
+        model.eval()
+
+        if output_loading_info:
+            info = {
+                "missing_keys": sorted(missing_keys),
+                "unexpected_keys": sorted(unexpected_keys),
+                "mismatched_keys": [],
+                "error_msgs": [],
+            }
+            return model, info
+
+        return model
 
     def save_pretrained(self, save_directory, *args, **kwargs):
         """
