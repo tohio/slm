@@ -522,27 +522,39 @@ def load_tokenizer(tokenizer_path: Path):
 
 def _validate_bundled_files(checkpoint: Path) -> None:
     """
-    Confirm architecture .py files are present at the checkpoint root.
+    Confirm architecture .py files at checkpoint root match the live source.
 
-    SLMForCausalLM.save_pretrained() writes these automatically during
-    training; this validates rather than re-bundles. A missing file here
-    means the checkpoint was created without the save_pretrained override
-    or has been corrupted — re-saving via SLMForCausalLM.from_pretrained()
-    + save_pretrained() will fix it.
+    Existence alone isn't enough — a stale bundled copy from an earlier
+    training run can ship buggy code to the Hub silently. We compare bytes
+    against the live source to catch drift.
     """
-    missing = []
+    import hashlib
+    missing, mismatched = [], []
     for filename in BUNDLED_SOURCE_FILES:
-        if not (checkpoint / filename).is_file():
+        ckpt_file = checkpoint / filename
+        live_file = MODEL_PKG_DIR / filename
+        if not ckpt_file.is_file():
             missing.append(filename)
+            continue
+        if hashlib.sha256(ckpt_file.read_bytes()).digest() != \
+           hashlib.sha256(live_file.read_bytes()).digest():
+            mismatched.append(filename)
+
     if missing:
         raise FileNotFoundError(
             f"Architecture files missing from {checkpoint}: {missing}. "
-            f"Re-save the checkpoint via SLMForCausalLM.save_pretrained() "
-            f"or run the relevant training stage to regenerate."
+            f"Re-save the checkpoint or run the relevant training stage."
+        )
+    if mismatched:
+        raise RuntimeError(
+            f"Bundled architecture files at {checkpoint} differ from live "
+            f"source: {mismatched}. Re-sync via "
+            f"`cp model/<file>.py {checkpoint}/<file>.py` for each, or "
+            f"re-save the checkpoint."
         )
     log.info(
         f"Bundled remote code validated: "
-        f"{len(BUNDLED_SOURCE_FILES)} files present at checkpoint root"
+        f"{len(BUNDLED_SOURCE_FILES)} files match live source"
     )
 
 
