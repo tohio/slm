@@ -27,8 +27,12 @@ def _record(system: str, user: str, assistant: str, sft_type: str) -> dict:
 
 
 def arithmetic_examples(system: str) -> list[dict]:
-    records = []
+    """Generate balanced arithmetic SFT examples.
 
+    Important: keep operation types interleaved. If addition examples are all
+    generated first, the 2k response-control cap can accidentally select mostly
+    addition and miss subtraction/multiplication/division.
+    """
     templates = [
         "What is {expr}?",
         "Answer only the result: {expr}",
@@ -38,52 +42,63 @@ def arithmetic_examples(system: str) -> list[dict]:
         "Return only the number: {expr}",
     ]
 
-    # Addition
+    def make_group(problems: list[tuple[str, int]]) -> list[dict]:
+        group = []
+        for i, (expr, answer) in enumerate(problems):
+            prompt = templates[i % len(templates)].format(expr=expr)
+            group.append(_record(system, prompt, str(answer), "arithmetic"))
+        return group
+
+    addition = []
     for a in range(1, 31):
         for b in range(1, 31):
-            expr = f"{a} + {b}"
-            answer = str(a + b)
-            for template in templates[:2]:
-                records.append(_record(system, template.format(expr=expr), answer, "arithmetic"))
+            addition.append((f"{a} + {b}", a + b))
 
-    # Subtraction, non-negative
+    subtraction = []
     for a in range(2, 41):
         for b in range(1, min(a, 20) + 1):
-            expr = f"{a} - {b}"
-            answer = str(a - b)
-            records.append(_record(system, templates[(a + b) % len(templates)].format(expr=expr), answer, "arithmetic"))
+            subtraction.append((f"{a} - {b}", a - b))
 
-    # Multiplication
+    multiplication = []
     for a in range(2, 16):
         for b in range(2, 16):
-            expr = f"{a} * {b}"
-            answer = str(a * b)
-            records.append(_record(system, templates[(a * b) % len(templates)].format(expr=expr), answer, "arithmetic"))
+            multiplication.append((f"{a} * {b}", a * b))
 
-    # Exact division
+    division = []
     for divisor in range(2, 16):
         for quotient in range(1, 21):
             dividend = divisor * quotient
-            expr = f"{dividend} / {divisor}"
-            answer = str(quotient)
-            records.append(_record(system, templates[(dividend + divisor) % len(templates)].format(expr=expr), answer, "arithmetic"))
+            division.append((f"{dividend} / {divisor}", quotient))
 
-    # Word-form anchors for known failure mode.
-    word_examples = [
-        ("What is two plus two?", "4"),
-        ("Two plus two equals what?", "4"),
-        ("Answer only the number: two plus two", "4"),
-        ("What is three plus four?", "7"),
-        ("What is ten minus six?", "4"),
-        ("What is four times two?", "8"),
-        ("What is eight divided by two?", "4"),
-        ("What is twelve divided by three?", "4"),
+    word = [
+        _record(system, "What is two plus two?", "4", "arithmetic"),
+        _record(system, "Two plus two equals what?", "4", "arithmetic"),
+        _record(system, "Answer only the number: two plus two", "4", "arithmetic"),
+        _record(system, "What is 2 plus 2?", "4", "arithmetic"),
+        _record(system, "Compute two plus two.", "4", "arithmetic"),
+        _record(system, "What is three plus four?", "7", "arithmetic"),
+        _record(system, "What is ten minus six?", "4", "arithmetic"),
+        _record(system, "What is four times two?", "8", "arithmetic"),
+        _record(system, "What is eight divided by two?", "4", "arithmetic"),
+        _record(system, "What is twelve divided by three?", "4", "arithmetic"),
     ]
-    for user, answer in word_examples:
-        records.append(_record(system, user, answer, "arithmetic"))
+
+    groups = [
+        make_group(addition),
+        make_group(subtraction),
+        make_group(multiplication),
+        make_group(division),
+        word,
+    ]
+
+    records = []
+    max_len = max(len(group) for group in groups)
+    for i in range(max_len):
+        for group in groups:
+            if i < len(group):
+                records.append(group[i])
 
     return records
-
 
 def simple_factual_examples(system: str) -> list[dict]:
     facts = [
