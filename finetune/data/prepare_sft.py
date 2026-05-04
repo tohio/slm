@@ -94,8 +94,6 @@ HANDCRAFTED_CODE_EXPLANATION_REPEAT = 20
 # answers, basic arithmetic, AI/ML concept grounding, factual restraint, and
 # stopping after a complete answer. Keep this set small and explicit; it is a
 # behavior anchor, not a replacement for OpenHermes.
-HANDCRAFTED_RESPONSE_CONTROL_REPEAT = 100
-
 HANDCRAFTED_RESPONSE_CONTROL_CHATS = [
     {
         "user": "What is 2 + 2?",
@@ -1221,16 +1219,9 @@ def prepare_chat(val_fraction: float) -> None:
             "sft_type": "general_assistant",
         })
 
-    handcrafted_base_records = build_handcrafted_response_control_records()
-    handcrafted_records = handcrafted_base_records * HANDCRAFTED_RESPONSE_CONTROL_REPEAT
+    handcrafted_records = build_handcrafted_response_control_records()
     records.extend(handcrafted_records)
-
-    log.info(
-        "Added handcrafted response-control chat examples: "
-        f"{len(handcrafted_records):,} "
-        f"({len(handcrafted_base_records):,} unique × "
-        f"{HANDCRAFTED_RESPONSE_CONTROL_REPEAT})"
-    )
+    log.info(f"Added handcrafted response-control chat examples: {len(handcrafted_records):,}")
     log.info(f"Processed: {len(records):,} kept, {skipped:,} skipped")
 
     # Split
