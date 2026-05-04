@@ -253,12 +253,49 @@ def build_response_control_records(
     system: str,
     max_examples: int = 2000,
 ) -> list[dict]:
-    records = []
-    records.extend(arithmetic_examples(system))
-    records.extend(simple_factual_examples(system))
-    records.extend(ai_concept_examples(system))
-    records.extend(factual_restraint_examples(system))
-    records.extend(concise_answer_examples(system))
+    """Return a balanced response-control SFT mix.
 
-    # Deterministic ordering; cap for conservative 125M SFT.
+    Do not take a naive prefix of the generated records. Arithmetic produces
+    many examples, so prefix slicing would drop every other behavior category.
+    """
+    buckets = {
+        "arithmetic": arithmetic_examples(system),
+        "simple_factual": simple_factual_examples(system),
+        "ai_concept": ai_concept_examples(system),
+        "factual_restraint": factual_restraint_examples(system),
+        "concise_answer": concise_answer_examples(system),
+    }
+
+    # Conservative 125M mix. Arithmetic gets the largest share because it is
+    # the most brittle observed failure, but factual restraint and AI concept
+    # grounding must remain visible.
+    target_mix = {
+        "arithmetic": 900,
+        "simple_factual": 250,
+        "ai_concept": 250,
+        "factual_restraint": 250,
+        "concise_answer": 100,
+    }
+
+    records = []
+    for sft_type, target in target_mix.items():
+        records.extend(buckets[sft_type][:target])
+
+    # Add any remaining examples round-robin until max_examples is reached.
+    positions = {key: min(target_mix.get(key, 0), len(value)) for key, value in buckets.items()}
+    keys = list(buckets)
+
+    while len(records) < max_examples:
+        added = False
+        for key in keys:
+            pos = positions[key]
+            if pos < len(buckets[key]):
+                records.append(buckets[key][pos])
+                positions[key] += 1
+                added = True
+                if len(records) >= max_examples:
+                    break
+        if not added:
+            break
+
     return records[:max_examples]
