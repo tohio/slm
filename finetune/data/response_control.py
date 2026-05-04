@@ -104,20 +104,35 @@ def simple_factual_examples(system: str) -> list[dict]:
         ("How many days are in a normal week?", "7."),
     ]
 
-    records = []
-    prefixes = [
+    templates = [
         "{q}",
         "Answer briefly: {q}",
         "Give a concise answer: {q}",
         "Answer in one sentence: {q}",
+        "Answer directly: {q}",
+        "Give only the answer: {q}",
+        "What is the correct answer? {q}",
+        "Respond with the factual answer: {q}",
+        "Keep it short: {q}",
+        "Do not elaborate. {q}",
+        "Give the answer without extra context: {q}",
+        "Short answer only: {q}",
+        "State the answer: {q}",
+        "What is the answer to this? {q}",
+        "Reply factually and stop: {q}",
+        "Give a simple factual answer: {q}",
+        "Answer with the right level of detail: {q}",
+        "No explanation needed: {q}",
+        "One short answer: {q}",
+        "Just answer: {q}",
     ]
 
+    records = []
     for q, a in facts:
-        for template in prefixes:
+        for template in templates:
             records.append(_record(system, template.format(q=q), a, "simple_factual"))
 
     return records
-
 
 def ai_concept_examples(system: str) -> list[dict]:
     pairs = [
@@ -171,20 +186,40 @@ def ai_concept_examples(system: str) -> list[dict]:
         ),
     ]
 
-    records = []
-    prefixes = [
+    templates = [
         "{q}",
         "Answer clearly: {q}",
         "Briefly answer: {q}",
         "In one or two sentences, answer: {q}",
+        "Give a concise ML answer: {q}",
+        "Explain directly: {q}",
+        "Give the correct machine-learning definition: {q}",
+        "Answer without extra background: {q}",
+        "State the concept clearly: {q}",
+        "Give a short technical answer: {q}",
+        "Answer for a beginner: {q}",
+        "Answer factually: {q}",
+        "Keep it concise: {q}",
+        "Define this clearly: {q}",
+        "What is the correct explanation? {q}",
+        "Give the key idea: {q}",
+        "Answer in plain language: {q}",
+        "Give a precise answer: {q}",
+        "Do not confuse related architectures. {q}",
+        "Avoid incorrect RNN comparisons. {q}",
+        "Use attention in the explanation. {q}",
+        "Mention the central mechanism. {q}",
+        "Give a sequence-modeling answer: {q}",
+        "Answer as an ML tutor: {q}",
+        "Answer and stop: {q}",
     ]
 
+    records = []
     for q, a in pairs:
-        for template in prefixes:
+        for template in templates:
             records.append(_record(system, template.format(q=q), a, "ai_concept"))
 
     return records
-
 
 def factual_restraint_examples(system: str) -> list[dict]:
     prompts = [
@@ -209,9 +244,34 @@ def factual_restraint_examples(system: str) -> list[dict]:
         "I do not have verified public information for that specific private detail.",
     ]
 
+    templates = [
+        "{q}",
+        "Answer carefully: {q}",
+        "Be factual and avoid guessing: {q}",
+        "If you cannot verify it, say so. {q}",
+        "Do not invent private details. {q}",
+        "Give a safe factual answer: {q}",
+        "Answer only if verified: {q}",
+        "What is the verified answer? {q}",
+        "Avoid hallucinated specifics: {q}",
+        "Use factual restraint: {q}",
+        "Do not make up numbers. {q}",
+        "If the information is private, say you cannot verify it. {q}",
+        "Answer honestly: {q}",
+        "Be careful with private/current claims: {q}",
+        "State whether you can verify this: {q}",
+        "Give the correct uncertainty response: {q}",
+        "Do not claim access to private data. {q}",
+        "Respond without unsupported details: {q}",
+        "No speculation: {q}",
+        "Answer and stop: {q}",
+    ]
+
     records = []
     for i, prompt in enumerate(prompts):
-        records.append(_record(system, prompt, answers[i % len(answers)], "factual_restraint"))
+        for j, template in enumerate(templates):
+            answer = answers[(i + j) % len(answers)]
+            records.append(_record(system, template.format(q=prompt), answer, "factual_restraint"))
 
     uncertainty_prompts = [
         "What should you do when you are not sure about a factual claim?",
@@ -227,13 +287,13 @@ def factual_restraint_examples(system: str) -> list[dict]:
     ]
 
     for prompt, answer in zip(uncertainty_prompts, uncertainty_answers):
-        records.append(_record(system, prompt, answer, "factual_restraint"))
+        for template in templates[:10]:
+            records.append(_record(system, template.format(q=prompt), answer, "factual_restraint"))
 
     return records
 
-
 def concise_answer_examples(system: str) -> list[dict]:
-    examples = [
+    base = [
         ("Say only: hello", "hello"),
         ("Return exactly one word: done", "done"),
         ("Answer with only the number: 3", "3"),
@@ -246,8 +306,25 @@ def concise_answer_examples(system: str) -> list[dict]:
         ("Answer in one sentence: What is a database?", "A database is an organized system for storing and retrieving data."),
     ]
 
-    return [_record(system, user, assistant, "concise_answer") for user, assistant in examples]
+    templates = [
+        "{q}",
+        "Follow the requested format exactly. {q}",
+        "Do not add extra explanation. {q}",
+        "Answer and stop. {q}",
+        "Keep the answer minimal. {q}",
+        "Return only what was requested. {q}",
+        "No extra words. {q}",
+        "Be concise. {q}",
+        "Use the shortest correct answer. {q}",
+        "Do not elaborate. {q}",
+    ]
 
+    records = []
+    for q, a in base:
+        for template in templates:
+            records.append(_record(system, template.format(q=q), a, "concise_answer"))
+
+    return records
 
 def build_response_control_records(
     system: str,
