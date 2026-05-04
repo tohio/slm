@@ -3,17 +3,19 @@ alignment/data/prepare_dpo.py
 ------------------------------
 Download and format DPO preference datasets.
 
-Blends three complementary sources:
+Blends four complementary sources:
     1. Anthropic/hh-rlhf        — 170k pairs upstream, capped to 50k (shuffled)
     2. Intel/orca_dpo_pairs      — ~12k synthetic Orca preference pairs
     3. argilla/dpo-mix-7k        — ~7k curated high-quality pairs
+    4. handcrafted_behavior      — small targeted behavior pairs for repo sanity failures
 
 Output format — conversational format for trl DPOTrainer:
     {
         "prompt":   [{"role": "system", "content": "..."}, {"role": "user", "content": "..."}],
         "chosen":   [{"role": "assistant", "content": "preferred response"}],
         "rejected": [{"role": "assistant", "content": "rejected response"}],
-        "source":   "hh-rlhf | orca | argilla"
+        "source":   "hh-rlhf | orca | argilla | handcrafted_behavior",
+        "dpo_type": "optional category label for handcrafted behavior records"
     }
 
 trl DPOTrainer detects list inputs and uses apply_chat_template, which
@@ -37,6 +39,7 @@ Usage:
     python alignment/data/prepare_dpo.py
     python alignment/data/prepare_dpo.py --source all
     python alignment/data/prepare_dpo.py --source hh-rlhf
+    python alignment/data/prepare_dpo.py --source handcrafted
     python alignment/data/prepare_dpo.py --force            # re-run even if output exists
 """
 
@@ -406,6 +409,180 @@ def prepare_argilla_dpo() -> list[dict]:
     return records
 
 
+# ── Source 4: handcrafted behavior DPO ───────────────────────────────────────
+
+def prepare_handcrafted_behavior_dpo() -> list[dict]:
+    """
+    Small targeted preference set for known post-SFT sanity failures.
+
+    This is intentionally small. It should steer DPO toward the behavior we
+    want without reopening chat SFT or overwhelming the upstream preference
+    blend. If this helps at 125M, scale later with distinct generated examples
+    instead of repeating this tiny set.
+    """
+    log.info("Preparing handcrafted behavior DPO pairs...")
+
+    examples = [
+        {
+            "dpo_type": "arithmetic",
+            "user": "What is 2 + 2?",
+            "chosen": "4",
+            "rejected": "The expression 2 + 2 can be simplified to 2 + 2.",
+        },
+        {
+            "dpo_type": "arithmetic",
+            "user": "What is 7 - 3?",
+            "chosen": "4",
+            "rejected": "7 - 3 is a mathematical expression involving seven and three.",
+        },
+        {
+            "dpo_type": "arithmetic",
+            "user": "What is 5 * 3?",
+            "chosen": "15",
+            "rejected": "5 * 3 equals 8 because you combine the two numbers.",
+        },
+        {
+            "dpo_type": "simple_factual",
+            "user": "What is the capital of France?",
+            "chosen": "Paris.",
+            "rejected": "The capital of France is Paris. Paris is a city in the French Riviera known for beaches and coastal resorts.",
+        },
+        {
+            "dpo_type": "simple_factual",
+            "user": "What planet is known as the Red Planet?",
+            "chosen": "Mars.",
+            "rejected": "The Red Planet is Jupiter because it has a large red storm.",
+        },
+        {
+            "dpo_type": "simple_factual",
+            "user": "What is the boiling point of water at sea level in Celsius?",
+            "chosen": "100°C.",
+            "rejected": "Water boils at 50°C at sea level because sea-level pressure lowers the boiling point.",
+        },
+        {
+            "dpo_type": "ai_concept",
+            "user": "In AI, what is a transformer model?",
+            "chosen": "A transformer is a neural network architecture that uses attention mechanisms to process sequences and learn relationships between tokens.",
+            "rejected": "A transformer model is a type of machine learning algorithm that uses a set of rules to predict behavior.",
+        },
+        {
+            "dpo_type": "ai_concept",
+            "user": "What is attention in a transformer?",
+            "chosen": "Attention lets a model weigh different tokens in a sequence so it can focus on the most relevant context when producing each output.",
+            "rejected": "Attention is when the model randomly picks one word and ignores the rest of the sentence.",
+        },
+        {
+            "dpo_type": "ai_concept",
+            "user": "What does next-token prediction mean?",
+            "chosen": "Next-token prediction trains a language model to predict the next token from the previous tokens in a sequence.",
+            "rejected": "Next-token prediction means the model predicts the next full paragraph without looking at previous tokens.",
+        },
+        {
+            "dpo_type": "factual_restraint",
+            "user": "What was Anthropic's private revenue last month?",
+            "chosen": "I do not have enough verified public information to answer that.",
+            "rejected": "Anthropic's private revenue last month was $1.50.",
+        },
+        {
+            "dpo_type": "factual_restraint",
+            "user": "What is my neighbor's private phone number?",
+            "chosen": "I do not have access to that private information.",
+            "rejected": "Your neighbor's private phone number is 555-0199.",
+        },
+        {
+            "dpo_type": "factual_restraint",
+            "user": "Who will win the stock market tomorrow?",
+            "chosen": "I cannot know that with certainty.",
+            "rejected": "The stock market will definitely go up tomorrow.",
+        },
+        {
+            "dpo_type": "concise_answer",
+            "user": "Answer briefly: what is the capital of Japan?",
+            "chosen": "Tokyo.",
+            "rejected": "The capital of Japan is Tokyo. Tokyo has many neighborhoods, a long history, and many different cultural attractions that are worth discussing in detail.",
+        },
+        {
+            "dpo_type": "concise_answer",
+            "user": "Answer in one sentence: what is Python?",
+            "chosen": "Python is a high-level programming language.",
+            "rejected": "Python is a high-level programming language. It can be used for web development, data science, automation, machine learning, scripting, and many other tasks, and it has a large ecosystem.",
+        },
+        {
+            "dpo_type": "concise_answer",
+            "user": "What is 10 / 2? Answer only the result.",
+            "chosen": "5",
+            "rejected": "10 / 2 is an arithmetic division problem where ten is divided by two, and the answer can be found by thinking about how many groups of two fit into ten.",
+        },
+        {
+            "dpo_type": "code_explanation",
+            "user": "Explain what this Python function does:\n\ndef square(x):\n    return x * x",
+            "chosen": "It returns the square of x by multiplying x by itself.",
+            "rejected": "def square(x):\n    return x * x",
+        },
+        {
+            "dpo_type": "code_explanation",
+            "user": "Explain this Python code:\n\nfor item in items:\n    print(item)",
+            "chosen": "It loops through each item in items and prints it.",
+            "rejected": "for item in items:\n    print(item)",
+        },
+        {
+            "dpo_type": "code_explanation",
+            "user": "Explain what this function does:\n\ndef is_empty(items):\n    return len(items) == 0",
+            "chosen": "It returns True when the list has no items, otherwise it returns False.",
+            "rejected": "def is_empty(items):\n    return len(items) == 0",
+        },
+        {
+            "dpo_type": "function_completion",
+            "user": "Complete this Python function. Return only the function body.\n\nfrom typing import List\n\ndef first_item(items: List[int]) -> int:\n    \"\"\"Return the first item in the list.\"\"\"",
+            "chosen": "return items[0]",
+            "rejected": "def first_item(items: List[int]) -> int:\n    return items[0]",
+        },
+        {
+            "dpo_type": "function_completion",
+            "user": "Complete this Python function. Return only the function body.\n\ndef add_one(x: int) -> int:\n    \"\"\"Return x plus one.\"\"\"",
+            "chosen": "return x + 1",
+            "rejected": "def add_one(x: int) -> int:\n    return x + 1",
+        },
+        {
+            "dpo_type": "function_completion",
+            "user": "Complete this Python function. Return only the function body.\n\ndef is_positive(x: int) -> bool:\n    \"\"\"Return True if x is greater than zero.\"\"\"",
+            "chosen": "return x > 0",
+            "rejected": "if x > 0:\n    return True\nelse:\n    return False\n\nThe function checks whether a number is positive.",
+        },
+        {
+            "dpo_type": "stop_behavior",
+            "user": "Say only: hello",
+            "chosen": "hello",
+            "rejected": "hello hello hello hello hello hello hello",
+        },
+        {
+            "dpo_type": "stop_behavior",
+            "user": "Return exactly one word: done",
+            "chosen": "done",
+            "rejected": "done\n\ndone\n\ndone\n\nThis means the task is complete.",
+        },
+        {
+            "dpo_type": "stop_behavior",
+            "user": "Answer with only the number: 3",
+            "chosen": "3",
+            "rejected": "3 is the number three. It comes after two and before four. 3 3 3.",
+        },
+    ]
+
+    records = []
+    for example in examples:
+        records.append({
+            "prompt": make_prompt(DEFAULT_SYSTEM, example["user"]),
+            "chosen": make_response(example["chosen"]),
+            "rejected": make_response(example["rejected"]),
+            "source": "handcrafted_behavior",
+            "dpo_type": example["dpo_type"],
+        })
+
+    log.info(f"  handcrafted_behavior: {len(records):,} kept")
+    return records
+
+
 # ── Blend and split ────────────────────────────────────────────────────────────
 
 def blend_and_split(
@@ -415,9 +592,13 @@ def blend_and_split(
 ) -> tuple[list[dict], list[dict]]:
     rng = random.Random(seed)
     rng.shuffle(records)
-    n_val = max(500, int(len(records) * val_fraction))
-    return records[n_val:], records[:n_val]
 
+    if len(records) < 500:
+        n_val = max(1, int(len(records) * val_fraction))
+    else:
+        n_val = max(500, int(len(records) * val_fraction))
+
+    return records[n_val:], records[:n_val]
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
@@ -425,7 +606,7 @@ def main():
     parser = argparse.ArgumentParser(description="Prepare DPO datasets")
     parser.add_argument(
         "--source",
-        choices=["all", "hh-rlhf", "orca", "argilla"],
+        choices=["all", "hh-rlhf", "orca", "argilla", "handcrafted"],
         default="all",
         help="Which source(s) to prepare",
     )
@@ -470,6 +651,8 @@ def main():
         all_records.extend(prepare_orca_dpo())
     if args.source in ("all", "argilla"):
         all_records.extend(prepare_argilla_dpo())
+    if args.source in ("all", "handcrafted"):
+        all_records.extend(prepare_handcrafted_behavior_dpo())
 
     log.info(f"Total records before length filter: {len(all_records):,}")
 
@@ -482,6 +665,14 @@ def main():
         pct = 100 * count / len(all_records) if all_records else 0
         log.info(f"  {source:<15} {count:>8,}  ({pct:.1f}%)")
 
+    dpo_type_counts = Counter(
+        r["dpo_type"] for r in all_records if r.get("source") == "handcrafted_behavior"
+    )
+    if dpo_type_counts:
+        log.info("Handcrafted behavior DPO types:")
+        for dpo_type, count in sorted(dpo_type_counts.items()):
+            log.info(f"  {dpo_type:<20} {count:>8,}")
+
     train_records, val_records = blend_and_split(all_records, args.val_fraction)
 
     write_jsonl(train_records, train_path)
@@ -492,6 +683,7 @@ def main():
         "train":            len(train_records),
         "val":              len(val_records),
         "sources":          dict(source_counts),
+        "handcrafted_dpo_types": dict(dpo_type_counts),
         "max_total_tokens": args.max_total_tokens,
         "hh_rlhf_cap":      HH_RLHF_CAP,
     }
