@@ -331,7 +331,7 @@ eval-instruct:
 	@echo "==> Stage 7: Evaluation (instruct, $(SIZE))"
 	$(PYTHON) eval/eval.py --model results/slm-$(SIZE)-chat-code/final
 
-eeval-chat:
+eval-chat:
 	@echo "==> Stage 7: Evaluation (chat, $(SIZE))"
 	$(PYTHON) eval/eval.py --model results/slm-$(SIZE)-dpo/final
 
