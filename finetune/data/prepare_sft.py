@@ -59,11 +59,11 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from finetune.data.response_control import build_response_control_records
-
 load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from finetune.data.response_control import build_response_control_records
 
 logging.basicConfig(
     level=logging.INFO,
