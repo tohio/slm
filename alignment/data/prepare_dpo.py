@@ -409,161 +409,6 @@ def prepare_argilla_dpo() -> list[dict]:
     return records
 
 
-
-def arithmetic_behavior_examples() -> list[dict]:
-    """
-    Generate distinct arithmetic DPO pairs.
-
-    Goal: teach the model to answer small arithmetic directly instead of
-    describing the expression or producing numerology-like explanations.
-    """
-    examples = []
-
-    prompt_templates = [
-        "What is {expr}?",
-        "Answer only the result: {expr}",
-        "Compute {expr}.",
-        "What does {expr} equal?",
-        "Give the answer to {expr}.",
-    ]
-
-    rejected_templates = [
-        "{expr} is a math expression involving numbers.",
-        "{expr} means the numbers have different meanings in mathematics.",
-        "Being {a}, it means that {a} is equal to itself.",
-        "The expression {expr} can be simplified to {expr}.",
-        "{expr} is a question about arithmetic, but the answer depends on context.",
-    ]
-
-    problems = []
-
-    # Addition
-    for a in range(1, 13):
-        for b in range(1, 13):
-            problems.append((a, b, "+", a + b))
-
-    # Subtraction, non-negative results
-    for a in range(2, 16):
-        for b in range(1, min(a, 10) + 1):
-            problems.append((a, b, "-", a - b))
-
-    # Multiplication
-    for a in range(2, 11):
-        for b in range(2, 11):
-            problems.append((a, b, "*", a * b))
-
-    # Exact division
-    for b in range(2, 10):
-        for q in range(1, 11):
-            a = b * q
-            problems.append((a, b, "/", q))
-
-    # Keep this targeted but not huge.
-    for i, (a, b, op, answer) in enumerate(problems[:120]):
-        expr = f"{a} {op} {b}"
-        prompt = prompt_templates[i % len(prompt_templates)].format(expr=expr)
-        rejected = rejected_templates[i % len(rejected_templates)].format(
-            expr=expr,
-            a=a,
-            b=b,
-            answer=answer,
-        )
-
-        examples.append({
-            "dpo_type": "arithmetic",
-            "user": prompt,
-            "chosen": str(answer),
-            "rejected": rejected,
-        })
-
-    # Add word-form variants for the exact failing pattern.
-    examples.extend([
-        {
-            "dpo_type": "arithmetic",
-            "user": "What is two plus two?",
-            "chosen": "4",
-            "rejected": "Two and two are both numbers, but they have different meanings in mathematics.",
-        },
-        {
-            "dpo_type": "arithmetic",
-            "user": "Two plus two equals what?",
-            "chosen": "4",
-            "rejected": "Two plus two is a phrase about the number two.",
-        },
-        {
-            "dpo_type": "arithmetic",
-            "user": "Answer only the number: two plus two",
-            "chosen": "4",
-            "rejected": "two plus two",
-        },
-        {
-            "dpo_type": "arithmetic",
-            "user": "What is 2 plus 2?",
-            "chosen": "4",
-            "rejected": "2 and 2 are both numbers, but they represent the same concept.",
-        },
-        {
-            "dpo_type": "arithmetic",
-            "user": "Compute two plus two.",
-            "chosen": "4",
-            "rejected": "Being 2, it means that 2 is equal to 2 times itself.",
-        },
-    ])
-
-    return examples
-
-
-def transformer_behavior_examples() -> list[dict]:
-    """
-    Generate distinct transformer/RNN contrast DPO pairs.
-
-    Goal: preserve the attention explanation while suppressing the specific
-    bad behavior where the model says a transformer is an RNN.
-    """
-    prompts = [
-        "In AI, what is a transformer model?",
-        "What is a transformer model in machine learning?",
-        "Briefly define a transformer architecture.",
-        "What mechanism is central to transformer models?",
-        "Is a transformer the same as an RNN?",
-        "Does a transformer mainly rely on recurrence?",
-        "Compare transformers and RNNs briefly.",
-        "What is self-attention in a transformer?",
-        "How do transformers process sequences?",
-        "Why are transformers useful for language models?",
-    ]
-
-    chosen = [
-        "A transformer is a neural network architecture that uses attention mechanisms to process sequences and learn relationships between tokens.",
-        "A transformer is a neural network architecture based on attention, commonly used for language and sequence modeling.",
-        "Attention is central to transformer models; it lets the model weigh relevant tokens when processing a sequence.",
-        "No. A transformer uses attention mechanisms, while an RNN processes sequences recurrently.",
-        "Transformers process sequences with attention rather than relying mainly on recurrent hidden states.",
-        "Self-attention lets each token attend to other tokens in the sequence to build contextual representations.",
-    ]
-
-    rejected = [
-        "A transformer is also known as a Recurrent Neural Network that processes tokens one at a time.",
-        "A transformer is simply another name for a recurrent neural network.",
-        "A transformer is an RNN that mainly relies on recurrence.",
-        "The central mechanism in transformers is recurrence, not attention.",
-        "Transformers are recurrent neural networks that remember previous tokens using hidden states.",
-        "A transformer is a type of RNN where tokens are processed one after another through recurrent loops.",
-    ]
-
-    examples = []
-    for i in range(60):
-        examples.append({
-            "dpo_type": "ai_concept",
-            "user": prompts[i % len(prompts)],
-            "chosen": chosen[i % len(chosen)],
-            "rejected": rejected[i % len(rejected)],
-        })
-
-    return examples
-
-
-
 # ── Source 4: handcrafted behavior DPO ───────────────────────────────────────
 
 def prepare_handcrafted_behavior_dpo() -> list[dict]:
@@ -577,11 +422,7 @@ def prepare_handcrafted_behavior_dpo() -> list[dict]:
     """
     log.info("Preparing handcrafted behavior DPO pairs...")
 
-    examples = []
-    examples.extend(arithmetic_behavior_examples())
-    examples.extend(transformer_behavior_examples())
-    examples.extend([
-
+    examples = [
         {
             "dpo_type": "arithmetic",
             "user": "What is 2 + 2?",
@@ -792,7 +633,7 @@ def prepare_handcrafted_behavior_dpo() -> list[dict]:
             "chosen": "3",
             "rejected": "3 is the number three. It comes after two and before four. 3 3 3.",
         },
-    ])
+    ]
 
     records = []
     for example in examples:
