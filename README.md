@@ -24,7 +24,7 @@ All three sizes run through the same code path — the only differences are conf
 
 | Size | Curation time | Training time | Rough cost | Suits |
 |---|---|---|---|---|
-| `slm-125m` | ~16 hrs (measured) | ~14 hrs (measured)  | ~$80.00 | learning the pipeline, single-GPU runs |
+| `slm-125m` | ~16 hrs (measured) | ~15 hrs (measured)  | ~$82.00 | learning the pipeline, single-GPU runs |
 | `slm-350m` | _TBD — pending 350m run_ | _TBD_ | _TBD_ | serious research budget, multi-GPU |
 | `slm-1b` | _TBD — pending 1b run_ | _TBD_ | _TBD_ | production-useful small model, GPU cluster |
 
