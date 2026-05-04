@@ -59,6 +59,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from finetune.data.response_control import build_response_control_records
+
 load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -249,18 +251,15 @@ HANDCRAFTED_RESPONSE_CONTROL_CHATS = [
 
 
 def build_handcrafted_response_control_records() -> list[dict]:
-    records = []
-    for example in HANDCRAFTED_RESPONSE_CONTROL_CHATS:
-        records.append({
-            "conversations": [
-                {"role": "system", "content": DEFAULT_SYSTEM},
-                {"role": "user", "content": example["user"]},
-                {"role": "assistant", "content": example["assistant"]},
-            ],
-            "source": "handcrafted_response_control",
-            "sft_type": example["sft_type"],
-        })
-    return records
+    """Return generated response-control chat examples.
+
+    Kept under the old function name so prepare_chat() does not need broader
+    wiring changes. The source field is now "response_control".
+    """
+    return build_response_control_records(
+        system=DEFAULT_SYSTEM,
+        max_examples=2000,
+    )
 
 # Per-stage defaults for validation fraction. These are the sources of truth;
 # CLI --val-fraction overrides them only when explicitly passed.
@@ -1221,7 +1220,7 @@ def prepare_chat(val_fraction: float) -> None:
 
     handcrafted_records = build_handcrafted_response_control_records()
     records.extend(handcrafted_records)
-    log.info(f"Added handcrafted response-control chat examples: {len(handcrafted_records):,}")
+    log.info(f"Added generated response-control chat examples: {len(handcrafted_records):,}")
     log.info(f"Processed: {len(records):,} kept, {skipped:,} skipped")
 
     # Split
