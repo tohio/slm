@@ -341,14 +341,40 @@ def concise_answer_examples(system: str) -> list[dict]:
 
     return records
 
+def _variant_record(record: dict, variant: str) -> dict:
+    """Return a deterministic prompt-variant copy of a response-control record."""
+    conversations = [dict(msg) for msg in record["conversations"]]
+    user = conversations[1]["content"]
+
+    if variant == "direct":
+        conversations[1]["content"] = f"Answer directly. {user}"
+    elif variant == "brief":
+        conversations[1]["content"] = f"Give a brief correct answer. {user}"
+    elif variant == "stop":
+        conversations[1]["content"] = f"Answer correctly and stop. {user}"
+    elif variant == "no_extra":
+        conversations[1]["content"] = f"Do not add extra explanation. {user}"
+    elif variant == "factual":
+        conversations[1]["content"] = f"Be factual. {user}"
+    else:
+        conversations[1]["content"] = user
+
+    out = dict(record)
+    out["conversations"] = conversations
+    out["source"] = "response_control"
+    out["variant"] = variant
+    return out
+
+
 def build_response_control_records(
     system: str,
-    max_examples: int = 2000,
+    max_examples: int = 5000,
 ) -> list[dict]:
     """Return a balanced response-control SFT mix.
 
-    Do not take a naive prefix of the generated records. Arithmetic produces
-    many examples, so prefix slicing would drop every other behavior category.
+    `max_examples` is treated as the desired count. If the base generators do
+    not produce enough unique rows, top up with deterministic prompt variants
+    instead of silently returning fewer examples.
     """
     buckets = {
         "arithmetic": arithmetic_examples(system),
@@ -358,25 +384,26 @@ def build_response_control_records(
         "concise_answer": concise_answer_examples(system),
     }
 
-    # Conservative 125M mix. Arithmetic gets the largest share because it is
-    # the most brittle observed failure, but factual restraint and AI concept
-    # grounding must remain visible.
     target_mix = {
-        "arithmetic": 900,
-        "simple_factual": 250,
-        "ai_concept": 250,
-        "factual_restraint": 250,
-        "concise_answer": 100,
+        "arithmetic": 2500,
+        "simple_factual": 650,
+        "ai_concept": 650,
+        "factual_restraint": 550,
+        "concise_answer": 150,
     }
 
     records = []
     for sft_type, target in target_mix.items():
-        records.extend(buckets[sft_type][:target])
+        bucket = buckets[sft_type]
+        records.extend(bucket[:target])
 
-    # Add any remaining examples round-robin until max_examples is reached.
-    positions = {key: min(target_mix.get(key, 0), len(value)) for key, value in buckets.items()}
+    positions = {
+        key: min(target_mix.get(key, 0), len(value))
+        for key, value in buckets.items()
+    }
     keys = list(buckets)
 
+    # First, consume any remaining base generated examples round-robin.
     while len(records) < max_examples:
         added = False
         for key in keys:
@@ -387,6 +414,34 @@ def build_response_control_records(
                 added = True
                 if len(records) >= max_examples:
                     break
+        if not added:
+            break
+
+    # Then top up with deterministic prompt variants, preserving category mix.
+    variants = ["direct", "brief", "stop", "no_extra", "factual"]
+    variant_index = 0
+    base_by_type = {
+        key: buckets[key]
+        for key in keys
+        if buckets[key]
+    }
+
+    while len(records) < max_examples:
+        added = False
+        for key in keys:
+            bucket = base_by_type[key]
+            if not bucket:
+                continue
+
+            base = bucket[(len(records) + variant_index) % len(bucket)]
+            variant = variants[variant_index % len(variants)]
+            records.append(_variant_record(base, variant))
+            variant_index += 1
+            added = True
+
+            if len(records) >= max_examples:
+                break
+
         if not added:
             break
 
