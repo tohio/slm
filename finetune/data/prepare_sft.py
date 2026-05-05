@@ -271,7 +271,23 @@ def build_handcrafted_code_explanation_records() -> list[dict]:
     return records
 
 
+def write_jsonl(records: list[dict], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        for record in records:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    log.info(f"Wrote {len(records):,} records to {path}")
+
+
 # ── Chat SFT — OpenHermes-2.5 ─────────────────────────────────────────────────
+
+# Per-stage defaults for validation fraction. These are the sources of truth;
+# CLI --val-fraction overrides them only when explicitly passed.
+DEFAULT_VAL_FRACTION = {
+    "chat": 0.02,
+    "code": 0.05,
+}
+
 
 def prepare_chat(val_fraction: float) -> None:
     """
