@@ -56,6 +56,7 @@ log = logging.getLogger(__name__)
 # level. Accepting the trade-off: some non-English content in these
 # sources won't be language-filtered.
 CODE_SOURCES: frozenset[str] = frozenset({
+    "synthetic_arithmetic",
     "codesearchnet",
     "stack_smol",
     "stack_v1",

@@ -75,7 +75,7 @@ DATA_MIX: dict[str, dict] = {
         "url":     "https://commoncrawl.org",
     },
     "fineweb": {
-        "pct":     47.5,
+        "pct":     46.0,
         "display": "FineWeb",
         "hub":     "HuggingFaceFW/fineweb",
     },
@@ -103,6 +103,11 @@ DATA_MIX: dict[str, dict] = {
         "pct":     5.0,
         "display": "StackExchange",
         "hub":     "HuggingFaceH4/stack-exchange-preferences",
+    },
+    "synthetic_arithmetic": {
+        "pct":     1.5,
+        "display": "Synthetic arithmetic",
+        "url":     "generated locally by curator/sources/synthetic_arithmetic.py",
     },
     "code": {
         "pct":     10.0,
@@ -275,6 +280,7 @@ MINI_OVERRIDES: dict[str, int] = {
     "pes2o":         2_000,
     "open_web_math": 3_000,
     "stackexchange": 2_000,
+    "synthetic_arithmetic": 2_000,
     "codesearchnet": 5_000,
     "stack_smol":    2_000,
     "stack_v1":      3_000,

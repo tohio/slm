@@ -105,6 +105,7 @@ from curator.sources.pg19 import PG19Source
 from curator.sources.pes2o import PeS2oSource
 from curator.sources.open_web_math import OpenWebMathSource
 from curator.sources.stackexchange import StackExchangeSource
+from curator.sources.synthetic_arithmetic import SyntheticArithmeticSource
 from curator.sources.code_search_net import CodeSearchNetSource
 from curator.sources.stack_smol import StackSmolSource
 from curator.sources.stack_v1 import StackV1Source
@@ -185,6 +186,7 @@ _AVG_CHARS_PER_DOC: dict[str, int] = {
     "pes2o":         1_400,
     "open_web_math": 8_000,
     "stackexchange": 1_700,
+    "synthetic_arithmetic": 2_500,
     "stack_v1":      5_500,
     "stack_smol":    10_000,
     "jupyter":       11_000,
@@ -355,6 +357,8 @@ def _build_source(
         return OpenWebMathSource(output_dir=raw_dir, max_docs=cap)
     if name == "stackexchange":
         return StackExchangeSource(output_dir=raw_dir, max_docs=cap)
+    if name == "synthetic_arithmetic":
+        return SyntheticArithmeticSource(output_dir=raw_dir, max_docs=cap)
     if name == "codesearchnet":
         return CodeSearchNetSource(output_dir=raw_dir, max_docs=cap)
     if name == "stack_smol":
