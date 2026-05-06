@@ -106,6 +106,439 @@ def build_handcrafted_response_control_records() -> list[dict]:
     )
 
 
+
+
+# ── Code SFT filtering helpers ────────────────────────────────────────────────
+
+CODE_KEYWORDS = (
+    "def ",
+    "class ",
+    "return ",
+    "import ",
+    "from ",
+    "for ",
+    "while ",
+    "if ",
+    "elif ",
+    "else:",
+    "try:",
+    "except ",
+    "with ",
+    "lambda ",
+    "async ",
+    "await ",
+)
+
+PROSE_ONLY_STARTS = (
+    "the given code",
+    "the provided code",
+    "this code",
+    "this function",
+    "this program",
+    "to solve this problem",
+    "to implement this",
+    "here is an explanation",
+    "here's an explanation",
+    "in this solution",
+    "we need to",
+    "you can",
+)
+
+CODE_OUTPUT_TYPES = {"code_generation", "function_completion", "code_repair"}
+
+CODE_BLOCK_RE = re.compile(
+    r"```(?:[a-zA-Z0-9_+\-.#]+)?\s*\n(.*?)```",
+    re.DOTALL,
+)
+
+
+def has_code_fence(text: str) -> bool:
+    return "```" in text
+
+
+def count_indented_code_lines(text: str) -> int:
+    count = 0
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if line.startswith(("    ", "\t")) and not stripped.startswith(("-", "*")):
+            count += 1
+    return count
+
+
+def count_code_keyword_lines(text: str) -> int:
+    count = 0
+    for line in text.splitlines():
+        stripped = line.strip()
+        if any(stripped.startswith(keyword) for keyword in CODE_KEYWORDS):
+            count += 1
+    return count
+
+
+def has_programming_syntax(text: str) -> bool:
+    patterns = [
+        r"\w+\s*=\s*[^=]",
+        r"\w+\([^)]*\)",
+        r"[{};]",
+        r"==|!=|<=|>=|->|=>",
+        r"\[[^\]]+\]",
+    ]
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def looks_like_code(text: str) -> bool:
+    """Return True when an assistant response contains substantial code."""
+    if not text or len(text.strip()) < 20:
+        return False
+
+    keyword_lines = count_code_keyword_lines(text)
+    indented_lines = count_indented_code_lines(text)
+
+    if has_code_fence(text) and (keyword_lines >= 1 or has_programming_syntax(text)):
+        return True
+
+    if keyword_lines >= 2:
+        return True
+
+    if indented_lines >= 2 and has_programming_syntax(text):
+        return True
+
+    if "def " in text and "return" in text:
+        return True
+
+    if "class " in text and ("def " in text or "return" in text):
+        return True
+
+    return False
+
+
+def is_prose_heavy_without_code(text: str) -> bool:
+    stripped = text.strip().lower()
+    starts_like_explanation = stripped.startswith(PROSE_ONLY_STARTS)
+    return starts_like_explanation and not looks_like_code(text)
+
+
+STRICT_FUNCTION_COMPLETION_PHRASES = (
+    "return only the function body",
+    "return only function body",
+    "return only the method body",
+    "return only method body",
+    "function body only",
+    "method body only",
+    "complete the function body",
+    "complete this function body",
+    "complete the method body",
+    "complete this method body",
+    "implement the function body",
+    "implement this function body",
+    "implement the method body",
+    "implement this method body",
+    "fill in the function body",
+    "fill in this function body",
+    "fill in the method body",
+    "fill in this method body",
+    "replace the pass statement",
+    "replace pass with",
+)
+
+
+def is_strict_function_completion_prompt(prompt: str) -> bool:
+    """Return True only for body/completion-style code prompts."""
+    prompt = prompt.lower()
+
+    if any(phrase in prompt for phrase in STRICT_FUNCTION_COMPLETION_PHRASES):
+        return True
+
+    body_pattern = re.compile(
+        r"\b(complete|implement|fill in|write)\b.{0,120}\b(function|method)\b.{0,120}\bbody\b",
+        re.DOTALL,
+    )
+    if body_pattern.search(prompt):
+        return True
+
+    return_only_body_pattern = re.compile(
+        r"\breturn only\b.{0,80}\b(function|method)\b.{0,40}\bbody\b",
+        re.DOTALL,
+    )
+    if return_only_body_pattern.search(prompt):
+        return True
+
+    missing_code_pattern = re.compile(
+        r"\b(fill in|complete)\b.{0,80}\b(missing code|todo|pass statement)\b",
+        re.DOTALL,
+    )
+    if missing_code_pattern.search(prompt):
+        return True
+
+    return False
+
+
+CODE_CREATION_PROMPT_RE = re.compile(
+    r"\b(implement|write|create|complete|add|build|generate|finish|fill in)\b",
+    re.DOTALL,
+)
+
+EXPLANATION_PROMPT_PATTERNS = (
+    re.compile(r"\bexplain\s+(what|how|why|the|this|that|following)\b", re.DOTALL),
+    re.compile(r"\bwhat\s+does\b", re.DOTALL),
+    re.compile(r"\bwhat\s+will\s+(be\s+)?(printed|output)\b", re.DOTALL),
+    re.compile(r"\bpredict\s+the\s+output\b", re.DOTALL),
+    re.compile(r"\bunderstand\s+the\s+behavior\b", re.DOTALL),
+)
+
+
+def is_explanation_prompt(prompt: str) -> bool:
+    """Return True for prompts that ask to explain/analyze existing code."""
+    prompt = prompt.lower()
+
+    if not any(pattern.search(prompt) for pattern in EXPLANATION_PROMPT_PATTERNS):
+        return False
+
+    if (
+        CODE_CREATION_PROMPT_RE.search(prompt)
+        and "predict the output" not in prompt
+        and "what will be printed" not in prompt
+        and "what is the output" not in prompt
+    ):
+        return False
+
+    return True
+
+
+def looks_like_mostly_code(text: str) -> bool:
+    """Return True when an assistant response is mostly code, not prose."""
+    stripped = text.strip()
+    if not stripped:
+        return False
+
+    if stripped.startswith("```"):
+        return True
+
+    lines = [line for line in stripped.splitlines() if line.strip()]
+    if not lines:
+        return False
+
+    first = lines[0].strip().lower()
+    code_starts = (
+        "def ", "class ", "import ", "from ", "function ", "const ", "let ",
+        "var ", "public ", "private ", "protected ", "#include", "using ",
+        "package ", "func ", "fn ", "struct ", "enum ", "interface ",
+        "#!/", "mv ", "cp ", "kubectl ", "minikube ",
+    )
+    if first.startswith(code_starts):
+        return True
+
+    fenced = extract_fenced_code(stripped)
+    if fenced:
+        fenced_lines = [line for line in fenced.splitlines() if line.strip()]
+        if len(fenced_lines) >= max(3, len(lines) // 2):
+            return True
+
+    code_lines = 0
+    prose_lines = 0
+    for line in lines:
+        s_line = line.strip()
+        lower = s_line.lower()
+        if (
+            any(lower.startswith(prefix) for prefix in code_starts)
+            or any(lower.startswith(keyword) for keyword in CODE_KEYWORDS)
+            or re.search(r"[{};]", s_line)
+            or re.search(r"\w+\s*=\s*[^=]", s_line)
+        ):
+            code_lines += 1
+        else:
+            prose_lines += 1
+
+    return code_lines >= 3 and code_lines >= prose_lines
+
+
+def classify_code_sft_type(instruction: str, solution: str) -> str:
+    prompt = instruction.lower()
+
+    if is_explanation_prompt(prompt):
+        return "code_explanation"
+
+    if "fix" in prompt or "debug" in prompt or "bug" in prompt:
+        return "code_repair"
+
+    if is_strict_function_completion_prompt(prompt):
+        return "function_completion"
+
+    if "```" in solution.lower() or looks_like_code(solution):
+        return "code_generation"
+
+    return "code_other"
+
+
+def extract_fenced_code(text: str) -> str | None:
+    """Return the largest fenced code block from a response, without fences."""
+    blocks = [match.group(1).strip() for match in CODE_BLOCK_RE.finditer(text)]
+    blocks = [block for block in blocks if block]
+    if not blocks:
+        return None
+    return max(blocks, key=len).strip()
+
+
+def normalize_code_solution(solution: str, sft_type: str) -> tuple[str, bool]:
+    """Normalize assistant output for code-output SFT examples."""
+    solution = solution.strip()
+
+    if sft_type not in CODE_OUTPUT_TYPES:
+        return solution, False
+
+    fenced = extract_fenced_code(solution)
+    if fenced:
+        return fenced, True
+
+    return solution, False
+
+
+# ── Handcrafted function-completion examples ─────────────────────────────────
+
+HANDCRAFTED_FUNCTION_COMPLETIONS = [
+    {
+        "imports": "from typing import List",
+        "signature": "def first_item(items: List[int]) -> int:",
+        "docstring": "Return the first item in the list.",
+        "body": "return items[0]",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def last_item(items: List[int]) -> int:",
+        "docstring": "Return the last item in the list.",
+        "body": "return items[-1]",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def sum_items(items: List[int]) -> int:",
+        "docstring": "Return the sum of all integers in the list.",
+        "body": "return sum(items)",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def max_item(items: List[int]) -> int:",
+        "docstring": "Return the largest integer in the list.",
+        "body": "return max(items)",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def min_item(items: List[int]) -> int:",
+        "docstring": "Return the smallest integer in the list.",
+        "body": "return min(items)",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def count_positive(numbers: List[int]) -> int:",
+        "docstring": "Return the number of positive integers.",
+        "body": "return sum(1 for n in numbers if n > 0)",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def filter_positive(numbers: List[int]) -> List[int]:",
+        "docstring": "Return only the positive integers from the list.",
+        "body": "return [n for n in numbers if n > 0]",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def filter_even(numbers: List[int]) -> List[int]:",
+        "docstring": "Return only the even integers from the list.",
+        "body": "return [n for n in numbers if n % 2 == 0]",
+    },
+    {
+        "imports": "from typing import List",
+        "signature": "def has_close_elements(numbers: List[float], threshold: float) -> bool:",
+        "docstring": "Return True if any two numbers are closer than threshold.",
+        "body": "for i in range(len(numbers)):\n    for j in range(i + 1, len(numbers)):\n        if abs(numbers[i] - numbers[j]) < threshold:\n            return True\nreturn False",
+    },
+    {
+        "imports": "",
+        "signature": "def square(x: int) -> int:",
+        "docstring": "Return x squared.",
+        "body": "return x * x",
+    },
+    {
+        "imports": "",
+        "signature": "def add_one(x: int) -> int:",
+        "docstring": "Return x plus one.",
+        "body": "return x + 1",
+    },
+    {
+        "imports": "",
+        "signature": "def is_positive(x: int) -> bool:",
+        "docstring": "Return True if x is greater than zero.",
+        "body": "return x > 0",
+    },
+    {
+        "imports": "",
+        "signature": "def clamp(value: int, low: int, high: int) -> int:",
+        "docstring": "Clamp value to the inclusive range [low, high].",
+        "body": "return max(low, min(value, high))",
+    },
+    {
+        "imports": "",
+        "signature": "def reverse_string(text: str) -> str:",
+        "docstring": "Return text reversed.",
+        "body": "return text[::-1]",
+    },
+    {
+        "imports": "",
+        "signature": "def safe_divide(a: float, b: float) -> float:",
+        "docstring": "Return a divided by b, or 0.0 if b is zero.",
+        "body": "if b == 0:\n    return 0.0\nreturn a / b",
+    },
+]
+
+
+def build_handcrafted_function_completion_records() -> list[dict]:
+    """Return body-only examples for HumanEval-style behavior.
+
+    These examples explicitly teach:
+      - return only the function body
+      - do not repeat imports
+      - do not repeat the function signature
+      - do not add explanations
+    """
+    records = []
+
+    prompt_variants = [
+        "Complete this Python function. Return only the function body.",
+        "Fill in the function body only. Do not include imports, the function signature, or explanation.",
+        "Implement only the body for this function. Do not repeat the function definition.",
+        "Return only the executable body lines that belong inside this function.",
+        "Replace the missing body. Output only the function body, with no surrounding code.",
+    ]
+
+    for example in HANDCRAFTED_FUNCTION_COMPLETIONS:
+        imports = example["imports"].strip()
+        signature = example["signature"].strip()
+        docstring = example["docstring"].strip()
+        body = example["body"].strip()
+
+        snippet_parts = []
+        if imports:
+            snippet_parts.append(imports)
+        snippet_parts.append(f'{signature}\n    """{docstring}"""')
+        snippet = "\n\n".join(snippet_parts)
+
+        for variant in prompt_variants:
+            prompt = f"{variant}\n\n{snippet}"
+
+            records.append({
+                "conversations": [
+                    {"role": "system", "content": CODE_SYSTEM},
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": body},
+                ],
+                "source": "handcrafted_function_completion",
+                "sft_type": "function_completion",
+                "normalized": False,
+                "body_only_variant": True,
+            })
+
+    return records
+
+
 # ── Handcrafted code-explanation examples ─────────────────────────────────────
 
 HANDCRAFTED_CODE_EXPLANATIONS = [

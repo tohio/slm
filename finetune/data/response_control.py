@@ -1,12 +1,17 @@
 """
 Generated response-control SFT examples.
 
-These examples target small-model behavior weaknesses:
-- direct arithmetic
+These examples target chat response-control weaknesses:
 - concise factual answers
 - transformer / RNN distinction
+- AI concept grounding
 - factual restraint for private or unverifiable claims
 - clean stopping / exact-format answers
+
+Arithmetic examples are kept as a helper for future continued-pretraining
+experiments, but arithmetic is intentionally excluded from the active chat
+response-control mix. For this 125M model, arithmetic is treated as a base
+capability issue rather than a late chat-SFT patch.
 
 The goal is distinct examples, not repeated tiny handcrafted rows.
 """
@@ -366,44 +371,50 @@ def _variant_record(record: dict, variant: str) -> dict:
     return out
 
 
+
 def build_response_control_records(
     system: str,
     max_examples: int = 5000,
 ) -> list[dict]:
-    """Return a balanced response-control SFT mix.
+    """Return chat response-control SFT examples.
 
-    `max_examples` is treated as the desired count. If the base generators do
-    not produce enough unique rows, top up with deterministic prompt variants
-    instead of silently returning fewer examples.
+    This intentionally excludes arithmetic. Arithmetic is a capability issue
+    for this 125M model and should move to synthetic pretraining / continued
+    pretraining instead of late chat SFT patches.
+
+    Focus:
+      - factual restraint
+      - AI concept grounding
+      - concise/exact answer behavior
+      - short factual answers
     """
     buckets = {
-        "arithmetic": arithmetic_examples(system),
-        "simple_factual": simple_factual_examples(system),
-        "ai_concept": ai_concept_examples(system),
         "factual_restraint": factual_restraint_examples(system),
+        "ai_concept": ai_concept_examples(system),
         "concise_answer": concise_answer_examples(system),
+        "simple_factual": simple_factual_examples(system),
     }
 
     target_mix = {
-        "arithmetic": 2500,
-        "simple_factual": 650,
-        "ai_concept": 650,
-        "factual_restraint": 550,
-        "concise_answer": 150,
+        "factual_restraint": 900,
+        "ai_concept": 800,
+        "concise_answer": 400,
+        "simple_factual": 300,
     }
 
     records = []
+    keys = list(target_mix)
+
     for sft_type, target in target_mix.items():
         bucket = buckets[sft_type]
         records.extend(bucket[:target])
 
     positions = {
-        key: min(target_mix.get(key, 0), len(value))
-        for key, value in buckets.items()
+        key: min(target_mix.get(key, 0), len(buckets[key]))
+        for key in keys
     }
-    keys = list(buckets)
 
-    # First, consume any remaining base generated examples round-robin.
+    # Consume remaining base examples round-robin.
     while len(records) < max_examples:
         added = False
         for key in keys:
@@ -417,32 +428,22 @@ def build_response_control_records(
         if not added:
             break
 
-    # Then top up with deterministic prompt variants, preserving category mix.
+    # Top up with deterministic prompt variants if needed.
     variants = ["direct", "brief", "stop", "no_extra", "factual"]
     variant_index = 0
-    base_by_type = {
-        key: buckets[key]
-        for key in keys
-        if buckets[key]
-    }
 
     while len(records) < max_examples:
-        added = False
         for key in keys:
-            bucket = base_by_type[key]
+            bucket = buckets[key]
             if not bucket:
                 continue
-
             base = bucket[(len(records) + variant_index) % len(bucket)]
             variant = variants[variant_index % len(variants)]
             records.append(_variant_record(base, variant))
             variant_index += 1
-            added = True
 
             if len(records) >= max_examples:
                 break
 
-        if not added:
-            break
-
     return records[:max_examples]
+
