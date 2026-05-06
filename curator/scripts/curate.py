@@ -186,7 +186,7 @@ _AVG_CHARS_PER_DOC: dict[str, int] = {
     "pes2o":         1_400,
     "open_web_math": 8_000,
     "stackexchange": 1_700,
-    "synthetic_arithmetic": 2_500,
+    "synthetic_arithmetic": 1_500,
     "stack_v1":      5_500,
     "stack_smol":    10_000,
     "jupyter":       11_000,
