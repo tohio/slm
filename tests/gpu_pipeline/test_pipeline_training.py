@@ -21,7 +21,7 @@ import pytest
 import torch
 import yaml
 
-from tests.conftest import pipeline_path
+from tests.data_pipeline.helpers import pipeline_path
 
 
 class TestPretrainOutputs:

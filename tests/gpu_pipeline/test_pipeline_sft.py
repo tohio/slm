@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from tests.conftest import requires_stage, pipeline_path
+from tests.data_pipeline.helpers import requires_stage, pipeline_path
 
 
 def load_model_and_tokenizer(model_dir: Path):
