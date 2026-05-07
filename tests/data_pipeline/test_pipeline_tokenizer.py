@@ -29,10 +29,12 @@ from tests.conftest import DATA_DIR, requires_stage, read_jsonl, pipeline_path
 # import below is safe — drift fails at import, not silently at assert time.
 from tokenizer.train_tokenizer import SPECIAL_TOKENS, BOS_ID, EOS_ID, PAD_ID
 # CODE_SOURCES is the authoritative "which sources are code" set — imported
-# from config/data_mix.py where it lives alongside DATA_MIX. Previously we
-# hand-maintained a `source != "code"` filter, which was dead code under
-# the 10-source mix (no source is literally named "code").
+# from config/data_mix.py where it lives alongside DATA_MIX. Tokenizer prose
+# fertility tests also exclude symbol-heavy generated sources that are not
+# representative natural-language prose.
 from config import CODE_SOURCES
+
+NON_PROSE_FERTILITY_SOURCES = set(CODE_SOURCES) | {"synthetic_arithmetic"}
 
 
 pytestmark = requires_stage("tokenizer")
@@ -127,16 +129,15 @@ class TestFertility:
         if not validated_path.exists():
             pytest.skip("validated/train.jsonl not found — run make validate first")
 
-        # Filter out code sources using the authoritative set from config.
-        # The previous filter was `source != "code"` which is dead — no
-        # document has source="code" under the 10-source mix.
+        # Filter out code and symbol-heavy generated sources. Fertility here
+        # measures natural-language prose compression, not code/math density.
         sample_texts = []
         with open(validated_path) as f:
             for i, line in enumerate(f):
                 if i >= 500:
                     break
                 doc = json.loads(line)
-                if doc.get("source") in CODE_SOURCES:
+                if doc.get("source") in NON_PROSE_FERTILITY_SOURCES:
                     continue
                 sample_texts.append(doc.get("text", ""))
 
@@ -342,7 +343,7 @@ class TestFertilityBaseline:
                 if len(samples) >= 200:
                     break
                 doc = json.loads(line)
-                if doc.get("source") in CODE_SOURCES:
+                if doc.get("source") in NON_PROSE_FERTILITY_SOURCES:
                     continue
                 samples.append(doc.get("text", ""))
         

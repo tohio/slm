@@ -381,7 +381,8 @@ Use [`{HF_USERNAME}/slm-{size}`](https://huggingface.co/{HF_USERNAME}/slm-{size}
 | Stage | Dataset | Size |
 |---|---|---|
 | Chat SFT | [OpenHermes-2.5](https://huggingface.co/datasets/teknium/OpenHermes-2.5) | ~1M examples |
-| Code SFT | [Magicoder-OSS-Instruct-75K](https://huggingface.co/datasets/ise-uiuc/Magicoder-OSS-Instruct-75K) | ~75K examples |
+| Response-control SFT | Generated locally by `finetune/data/response_control.py` | 5K examples |
+| Code SFT | [Magicoder-OSS-Instruct-75K](https://huggingface.co/datasets/ise-uiuc/Magicoder-OSS-Instruct-75K) + handcrafted body-only completions | ~75K examples + small handcrafted set |
 """,
         "chat": f"""\
 **Pretraining corpus** — {token_tgt} tokens blended across the following sources:
@@ -393,7 +394,8 @@ Use [`{HF_USERNAME}/slm-{size}`](https://huggingface.co/{HF_USERNAME}/slm-{size}
 | Stage | Dataset | Size |
 |---|---|---|
 | Chat SFT | [OpenHermes-2.5](https://huggingface.co/datasets/teknium/OpenHermes-2.5) | ~1M examples |
-| Code SFT | [Magicoder-OSS-Instruct-75K](https://huggingface.co/datasets/ise-uiuc/Magicoder-OSS-Instruct-75K) | ~75K examples |
+| Response-control SFT | Generated locally by `finetune/data/response_control.py` | 5K examples |
+| Code SFT | [Magicoder-OSS-Instruct-75K](https://huggingface.co/datasets/ise-uiuc/Magicoder-OSS-Instruct-75K) + handcrafted body-only completions | ~75K examples + small handcrafted set |
 | DPO alignment | [Anthropic/hh-rlhf](https://huggingface.co/datasets/Anthropic/hh-rlhf) + [Intel/orca_dpo_pairs](https://huggingface.co/datasets/Intel/orca_dpo_pairs) + [argilla/dpo-mix-7k](https://huggingface.co/datasets/argilla/dpo-mix-7k) | ~60K pairs after filtering |
 """,
     }[variant]
@@ -434,7 +436,7 @@ built entirely from scratch, from raw web data through to a production-ready ali
 | Variant | Hub | Description |
 |---|---|---|
 | Base | [{HF_USERNAME}/slm-{size}](https://huggingface.co/{HF_USERNAME}/slm-{size}) | Pretrained only |
-| Instruct | [{HF_USERNAME}/slm-{size}-instruct](https://huggingface.co/{HF_USERNAME}/slm-{size}-instruct) | Chat + code SFT |
+| Instruct | [{HF_USERNAME}/slm-{size}-instruct](https://huggingface.co/{HF_USERNAME}/slm-{size}-instruct) | Chat + response-control + code SFT |
 | Chat | [{HF_USERNAME}/slm-{size}-chat](https://huggingface.co/{HF_USERNAME}/slm-{size}-chat) | SFT + DPO aligned |
 
 ## Architecture

@@ -1,6 +1,6 @@
 # curator
 
-Data curation pipeline for SLM pretraining. Downloads raw data from twelve sources (7 non-code top-level + 5 code sub-sources), applies quality filters, deduplicates, blends to target token ratios with cap-and-redistribute overflow handling, and uploads to S3.
+Data curation pipeline for SLM pretraining. Downloads raw data from thirteen sources (8 non-code top-level + 5 code sub-sources), applies quality filters, deduplicates, blends to target token ratios with cap-and-redistribute overflow handling, and uploads to S3.
 
 ---
 
@@ -14,6 +14,7 @@ pg19           ─┤
 pes2o          ─┼─► quality filter ─► dedup ─► blend ─► train.jsonl + val.jsonl ─► S3
 open_web_math  ─┤
 stackexchange  ─┤
+synthetic_math ─┤
 code × 5       ─┘
 ```
 
@@ -23,17 +24,18 @@ Each source runs independently through filtering and deduplication. The blend st
 
 ## Data Sources
 
-7 top-level non-code sources plus 5 code sub-sources sharing the 10% code budget = 12 source loaders total.
+8 top-level non-code sources plus 5 code sub-sources sharing the 10% code budget = 13 source loaders total.
 
 | Source | Target Share | Supply | Notes |
 |---|---|---|---|
 | Common Crawl | 10% | unlimited (time-bound) | direct WARC download via HTTPS |
-| FineWeb | 47.5% | 15T tokens | `HuggingFaceFW/fineweb` (`sample-100BT` subset), overflow sink |
+| FineWeb | 46% | 15T tokens | `HuggingFaceFW/fineweb` (`sample-100BT` subset), overflow sink |
 | Wikipedia | 10% | ~3.7B tokens | `wikimedia/wikipedia` 20231101.en |
 | pg19 | 2.5% | ~2.9B tokens | `pg19` — public-domain books pre-1919 |
 | peS2o | 5% | ~0.8B tokens (abstracts only) | `allenai/peS2o` v2 — supply-bound at 350m+ |
 | open-web-math | 10% | ~14.7B tokens | `open-web-math/open-web-math` |
 | StackExchange | 5% | ~15B tokens | `HuggingFaceH4/stack-exchange-preferences` Q+A |
+| Synthetic arithmetic | 1.5% | generated locally | `curator/sources/synthetic_arithmetic.py` — dense elementary arithmetic examples |
 | **Code total** | **10%** | | split across 5 sub-sources |
 
 ### Code sub-mix (percentages of the 10% code share)
@@ -56,28 +58,13 @@ Several sources are supply-bound at large scales: peS2o (abstracts only) and jup
 
 This behavior is load-bearing at 1b scale; partially load-bearing at 125m/350m for the always-supply-bound sources (peS2o, jupyter).
 
-### Realized mix at 125m
+### Run-specific realized mix
 
-The 125m run produces a corpus matching this design intent except where supply binds: peS2o fills only ~64% of its target (abstract-only upstream), jupyter ~72% (small upstream). Combined ~0.47B chars of deficit routes to FineWeb, lifting its realized share from 47.5% target to 49.39% realized.
+The source mix above is the current pretraining target mix. The actual realized mix for each curation run is written to `data/curated/blend_stats.json` at the end of the blend stage.
 
-| Source | Target Share | Realized Share |
-|---|---|---|
-| `common_crawl` | 10.00% | 10.00% |
-| `fineweb` | 47.50% | 49.39% |
-| `wikipedia` | 10.00% | 10.00% |
-| `pg19` | 2.50% | 2.50% |
-| `pes2o` | 5.00% | 3.22% ⚠ |
-| `open_web_math` | 10.00% | 10.00% |
-| `stackexchange` | 5.00% | 5.00% |
-| `stack_v1` | 5.00% | 5.00% |
-| `codesearchnet` | 3.50% | 3.50% |
-| `stack_smol` | 1.00% | 1.00% |
-| `jupyter` | 0.40% | 0.29% ⚠ |
-| `conala` | 0.10% | 0.10% |
+Realized percentages can differ slightly from target percentages when a source is supply-bound or filtered/deduplicated more aggressively than expected. Any deficit is routed to FineWeb as the overflow sink so the token target is still reached.
 
-Realized total: ~5.00B tokens, 8.36M docs (8.31M train + 41.8K val). The `data/curated/blend_stats.json` written at the end of the blend stage records these realized numbers per source; `export.py` reads from it to populate the model card.
-
----
+Use `blend_stats.json` as the source of truth for a completed run. `export.py` reads this file when producing per-model cards.
 
 ## Token Targets
 
@@ -105,6 +92,7 @@ curator/
 │   ├── pes2o.py               allenai/peS2o academic papers (streaming)
 │   ├── open_web_math.py       open-web-math (streaming)
 │   ├── stackexchange.py       HuggingFaceH4 stack-exchange Q+A (streaming)
+│   ├── synthetic_arithmetic.py generated clean arithmetic pretraining source
 │   ├── code_search_net.py     CodeSearchNet — 6 languages
 │   ├── stack_smol.py          bigcode/the-stack-smol — 30 languages
 │   ├── stack_v1.py            bigcode/the-stack-dedup (inline content)
@@ -143,7 +131,7 @@ One environment variable is required beyond the existing ones:
 python curator/scripts/curate.py --target mini --mini
 ```
 
-Mini exercises every source at small scale (~100 docs to a few thousand per source) to validate end-to-end that all 12 source loaders, filter logic, dedup, and the mix layer work correctly. Total runtime 30–60 min.
+Mini exercises every source at small scale (~100 docs to a few thousand per source) to validate end-to-end that all 13 source loaders, filter logic, dedup, and the mix layer work correctly. Total runtime 30–60 min.
 
 Run each stage individually to inspect output between steps:
 
@@ -208,6 +196,7 @@ data/
 │   ├── pes2o/                      streamed peS2o shards
 │   ├── open_web_math/              streamed math web shards
 │   ├── stackexchange/              streamed SE Q+A shards
+│   ├── synthetic_arithmetic/       generated arithmetic shards
 │   ├── codesearchnet/              CSN 6-language shards
 │   ├── stack_smol/                 stack-smol 30-language shards
 │   ├── stack_v1/                   stack-v1 4-language shards (content inline)
@@ -255,9 +244,9 @@ Re-uploading on the same day overwrites that day's run. Runs on different days a
 
 ## Quality Filters
 
-Heuristics adapted from FineWeb and Gopher. Filters marked ✗ are skipped for code-adjacent sources (`codesearchnet`, `stack_smol`, `stack_v1`, `jupyter`, `conala`) — symbol-heavy syntax, long identifiers, and absence of stop words are normal properties of code, not quality signals.
+Heuristics adapted from FineWeb and Gopher. Filters marked ✗ are skipped for code-adjacent or symbol-heavy generated sources (`synthetic_arithmetic`, `codesearchnet`, `stack_smol`, `stack_v1`, `jupyter`, `conala`) — symbol-heavy syntax, long identifiers, numeric expressions, and absence of stop words are normal properties of these sources, not quality signals.
 
-The set of code-adjacent source tags lives in `curator/filters/quality.py` as `CODE_SOURCES`. Adding a new code-adjacent source is a single-line change.
+The set of code-adjacent source tags lives in `curator/filters/quality.py` as `CODE_SOURCES`. Adding a new code-adjacent or symbol-heavy source is a single-line change.
 
 | Filter | Threshold | Catches | Skipped for code |
 |---|---|---|---|
@@ -273,7 +262,7 @@ The set of code-adjacent source tags lives in `curator/filters/quality.py` as `C
 | Language (fasttext) | EN score ≥ 0.65 | Non-English content | ✗ |
 | Stop words (fallback) | ≥ 3 EN stop words | Non-English when fasttext missing | ✗ |
 
-**Mixed-content sources (jupyter, conala) are included in `CODE_SOURCES`.** Their prose components bypass English-prose filters as a result. This is an accepted trade-off: per-chunk filter dispatch isn't feasible at the source level, and skipping prose filters on these is safer than rejecting valid code.
+**Mixed-content sources (jupyter, conala) and synthetic arithmetic are included in `CODE_SOURCES`.** Their prose or numeric components bypass English-prose filters as a result. This is an accepted trade-off: per-chunk filter dispatch isn't feasible at the source level, and skipping prose filters on these is safer than rejecting valid code or dense arithmetic examples.
 
 **StackExchange HTML stripping.** The HF `HuggingFaceH4/stack-exchange-preferences` dataset stores Q+A bodies as raw HTML (`<p>...</p>` etc.). Tags are stripped at extraction time in `curator/sources/stackexchange.py` — without this, the symbol-ratio filter would reject 99.93% of records. Block-level closing tags (`</p>`, `</div>`, etc.) are converted to paragraph breaks before stripping so structure survives.
 
@@ -287,7 +276,7 @@ Two-stage deduplication applied after quality filtering, per source:
 
 **Stage 2 — Fuzzy dedup (datatrove).** 4-stage disk-based MinHash LSH pipeline: signatures → buckets → cluster → filter. Catches near-duplicates (Jaccard similarity > 0.8). Peak RAM is bounded by shard size, not corpus size — 125m, 350m, and 1b run with the same memory footprint.
 
-Per-source scratch (`data/dedup_scratch/<source>/`) is deleted automatically after each source's MinHash filter writes its output successfully. Without this, the 125m run accumulated 135 GB of scratch across 12 sources; at 1b it would scale to ~780 GB and not fit on a 2 TB disk alongside raw + filtered + curated.
+Per-source scratch (`data/dedup_scratch/<source>/`) is deleted automatically after each source's MinHash filter writes its output successfully. Without this, the 125m run accumulated 135 GB of scratch across 13 sources; at 1b it would scale to ~780 GB and not fit on a 2 TB disk alongside raw + filtered + curated.
 
 ---
 
@@ -367,7 +356,7 @@ MinHash dedup of large sources (stack_v1 has ~2,103 shards at 125m) opens many f
 
 ## Key Design Decisions
 
-**Why 12 sources?** Distribution coverage. A model pretrained only on web scrape (even filtered) has characteristic weaknesses: poor factual recall on niche topics (→ Wikipedia), no long-range coherence over book-length spans (→ pg19), weak technical/academic prose (→ peS2o), weak math reasoning (→ open-web-math), weak Q+A structure (→ StackExchange), weak code (→ 5 code sources covering raw bulk, curated functions, multi-language samples, notebook prose+code, and NL→code intent). Each source covers a specific gap.
+**Why 13 sources?** Distribution coverage. A model pretrained only on web scrape (even filtered) has characteristic weaknesses: poor factual recall on niche topics (→ Wikipedia), no long-range coherence over book-length spans (→ pg19), weak technical/academic prose (→ peS2o), weak math reasoning and math-page style (→ open-web-math), sparse clean elementary arithmetic mappings (→ synthetic_arithmetic), weak Q+A structure (→ StackExchange), and weak code (→ 5 code sources covering raw bulk, curated functions, multi-language samples, notebook prose+code, and NL→code intent). Each source covers a specific gap.
 
 **Why scale-invariant percentages?** A reader scaling from 125m to 1b should change one number (`target_tokens`) and get proportionally more of everything. Per-scale mix tuning is an axis of complexity that serves no one; the supply-constrained case is handled by cap-and-redistribute, not per-scale knobs.
 
@@ -429,6 +418,6 @@ One source worth flagging: peS2o overlaps with academic papers. If future evals 
 
 **Jupyter and CoNaLa prose components are not language-filtered.** Labeling them as code-adjacent skips English-prose filters, which means non-English prose in these sources passes through. The prose volume is small and largely English-coded on GitHub/StackOverflow, so this is not a meaningful corpus contamination, but the model will see the occasional non-English notebook comment or SO intent.
 
-**Char-to-token ratio is approximate.** `CHARS_PER_TOKEN = 4.3` in `config/data_mix.py` is the measured average for the trained tokenizer on the 125m corpus (excluding code sources). Real ratios vary by domain: English prose ~4.5, code ~3.5, math ~3. The approximation is fine for target sizing; the 125m run produced ~5.36B actual tokens against a 5.0B target (7% over). Recalibrate if the tokenizer is retrained on a different mix.
+**Char-to-token ratio is approximate.** `CHARS_PER_TOKEN = 4.3` in `config/data_mix.py` is the measured average for the trained tokenizer on the 125m corpus (excluding code sources). Real ratios vary by domain: English prose ~4.5, code ~3.5, math ~3. The approximation is fine for target sizing; the previous 125m run produced ~5.36B actual tokens against a 5.0B target (7% over). Recalibrate if the tokenizer is retrained on a substantially different mix, especially after adding symbol-heavy generated data.
 
 **wikipedia cold-cache overhead.** wikipedia's `wikimedia/wikipedia` 20231101.en config loads the full ~19GB dataset (~6.4M articles) before iteration starts, even though mini only uses 5000 articles and 125m/1b only use a fraction. Cold-cache runs spend 10–15 minutes on wikipedia alone; once cached, subsequent runs are instant. Could be migrated to streaming like pg19 was, if this overhead becomes disruptive.

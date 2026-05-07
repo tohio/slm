@@ -120,6 +120,7 @@ slm/
 │   │   ├── pes2o.py
 │   │   ├── open_web_math.py
 │   │   ├── stackexchange.py
+│   │   ├── synthetic_arithmetic.py  generated clean arithmetic pretraining source
 │   │   ├── code_search_net.py
 │   │   ├── stack_smol.py
 │   │   ├── stack_v1.py
@@ -147,11 +148,6 @@ slm/
 │   ├── data/
 │   │   ├── prepare_sft.py              prepares OpenHermes chat SFT + Magicoder code SFT
 │   │   └── response_control.py         generated response-control chat examples
-│   └── train_sft.py
-│
-├── finetune/
-│   ├── configs/
-│   ├── data/prepare_sft.py
 │   └── train_sft.py
 │
 ├── alignment/
@@ -307,7 +303,7 @@ make download-fasttext-model DATA_DIR=/data/slm/data   # language ID model (~1MB
 make download-kenlm-model    DATA_DIR=/data/slm/data   # perplexity model (~4GB)
 
 # ── Step 2: Validate curation pipeline ───────────────────────────────────────
-# Exercises every curation stage end-to-end on tiny data — all 12 sources.
+# Exercises every curation stage end-to-end on tiny data — all 13 sources.
 # All tests run here — catch issues before spending hours on the full run.
 make curate-mini && make test-curator
 make validate    && make test-validate
@@ -381,7 +377,7 @@ Tests validate real pipeline outputs at each stage. Each test target is paired w
 **CPU curation instance:**
 
 ```bash
-make curate-mini   && make test-curator      # validate curation outputs (all 12 sources)
+make curate-mini   && make test-curator      # validate curation outputs (all 13 sources)
 make validate      && make test-validate     # validate validation outputs
 make tokenizer     && make test-tokenizer    # validate tokenizer outputs
 
@@ -419,7 +415,7 @@ make test-unit            # all of the above
 
 | Target | Stage | Validates |
 |---|---|---|
-| `test-curator` | `curate-mini` | Raw shards exist for all 12 sources, filter quality, dedup correctness, blend output, stats |
+| `test-curator` | `curate-mini` | Raw shards exist for all 13 sources, filter quality, dedup correctness, blend output, stats |
 | `test-validate` | `validate` | Retention rate, subset correctness, quality of retained docs |
 | `test-tokenizer` | `tokenizer` | Special token IDs, roundtrip, fertility, chat template |
 | `test-data-pipeline` | all three above | Runs curator + validate + tokenizer tests |
@@ -521,41 +517,29 @@ make pretrain CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
 
 ### Source Mix
 
-12 sources total — 7 non-code top-level sources plus 5 code sub-sources that share the 10% code budget. Scale-invariant percentages — the same mix applies at every size. Defined in `config/data_mix.py` and referenced by the curator, export, and notebooks — do not duplicate these numbers elsewhere.
+13 sources total — 8 non-code top-level sources plus 5 code sub-sources that share the 10% code budget. Scale-invariant percentages — the same mix applies at every size. Defined in `config/data_mix.py` and referenced by the curator, export, and notebooks — do not duplicate these numbers elsewhere.
 
 | Source | Target Share | Notes |
 |---|---|---|
 | Common Crawl | 10% | direct WARC via trafilatura |
-| FineWeb | 47.5% | `HuggingFaceFW/fineweb` sample-100BT, overflow sink |
+| FineWeb | 46% | `HuggingFaceFW/fineweb` sample-100BT, overflow sink |
 | Wikipedia | 10% | `wikimedia/wikipedia` EN |
 | pg19 | 2.5% | public-domain books pre-1919 |
 | peS2o | 5% | `allenai/peS2o` v2 — academic papers |
 | open-web-math | 10% | math-heavy web filtered from CC |
 | StackExchange | 5% | Q+A across dozens of sites |
+| Synthetic arithmetic | 1.5% | generated locally by `curator/sources/synthetic_arithmetic.py`; dense elementary arithmetic examples |
 | Code (total) | 10% | split across 5 code sub-sources (see curator/README.md) |
 
 When supply-constrained sources (peS2o, jupyter, and at 1b also Wikipedia / pg19 / open_web_math / stack_smol) fall short of their character budget, the deficit is automatically routed to FineWeb as an overflow sink. The mix shape is preserved; the token target is hit.
 
-### Realized mix at 125m
+### Run-specific realized mix
 
-The 125m run produces a corpus with the following actual breakdown. Supply-bound sources (peS2o, jupyter) under-fill their char target; the deficit routes to FineWeb, inflating its realized share above the 47.5% target. All other sources land on target.
+The source mix above is the current pretraining target mix. The actual realized mix for each curation run is written to `data/curated/blend_stats.json` at the end of the blend stage.
 
-| Source | Target Share | Realized Share |
-|---|---|---|
-| `common_crawl` | 10.00% | 10.00% |
-| `fineweb` | 47.50% | 49.39% |
-| `wikipedia` | 10.00% | 10.00% |
-| `pg19` | 2.50% | 2.50% |
-| `pes2o` | 5.00% | 3.22% ⚠ |
-| `open_web_math` | 10.00% | 10.00% |
-| `stackexchange` | 5.00% | 5.00% |
-| `stack_v1` | 5.00% | 5.00% |
-| `codesearchnet` | 3.50% | 3.50% |
-| `stack_smol` | 1.00% | 1.00% |
-| `jupyter` | 0.40% | 0.29% ⚠ |
-| `conala` | 0.10% | 0.10% |
+Realized percentages can differ slightly from target percentages when a source is supply-bound or filtered/deduplicated more aggressively than expected. Any deficit is routed to FineWeb as the overflow sink so the token target is still reached.
 
-Realized total: ~5.00B corpus tokens (8.31M train + 41.8K val docs). The `blend_stats.json` written by the curator records these realized numbers; `export.py` reads from it to produce the per-model card.
+Use `blend_stats.json` as the source of truth for a completed run. `export.py` reads this file when producing per-model cards.
 
 ### Token Targets
 
@@ -682,7 +666,7 @@ make eval-chat     SIZE=125m   # after DPO (also: make eval)
 
 **Why per-variant eval targets?** `eval-base`, `eval-instruct`, and `eval-chat` evaluate the three checkpoints written by the pipeline (`results/slm-{size}/final`, `results/slm-{size}-chat-code/final`, `results/slm-{size}-dpo/final`). Running each one writes its own JSON output, which `export.py` then reads when building per-variant model cards on the Hub. A single combined `eval` target would either skip the base and instruct cards or require running them all in series at the end — splitting them out lets eval run inline with each pipeline stage.
 
-**Why 12 data sources?** Distribution coverage. A model pretrained only on web scrape (even filtered) has characteristic weaknesses: poor factual recall on niche topics, no long-range coherence over book-length spans, weak technical/academic prose, weak math reasoning, weak Q+A structure, weak code. Each of the 12 sources covers a specific gap — 7 non-code top-level sources for prose breadth, plus 5 code sub-sources for code coverage from raw files (stack-v1) through curated function/notebook/intent corpora (CodeSearchNet, stack-smol, jupyter, CoNaLa). See [curator/README.md](curator/README.md) for the full mix and sub-source rationale.
+**Why 13 data sources?** Distribution coverage. A model pretrained only on web scrape (even filtered) has characteristic weaknesses: poor factual recall on niche topics, no long-range coherence over book-length spans, weak technical/academic prose, weak math reasoning, weak Q+A structure, weak code. Each of the 13 sources covers a specific gap — 8 non-code top-level sources for prose breadth and targeted arithmetic signal, plus 5 code sub-sources for code coverage from raw files (stack-v1) through curated function/notebook/intent corpora (CodeSearchNet, stack-smol, jupyter, CoNaLa). The `synthetic_arithmetic` source was added after inspecting the base model and curation data: OpenWebMath contributes math-heavy text, but simple arithmetic supervision was too sparse and noisy for reliable elementary arithmetic behavior. See [curator/README.md](curator/README.md) for the full mix and sub-source rationale.
 
 **Why scale-invariant mix percentages?** A reader scaling from 125m to 1b changes one number (`target_tokens`) and gets proportionally more of everything — no per-scale mix tuning. Supply variance is handled by cap-and-redistribute, not by per-scale knobs.
 
@@ -694,7 +678,7 @@ make eval-chat     SIZE=125m   # after DPO (also: make eval)
 
 **Why cap-and-redistribute?** Several sources have finite supply at large scales — peS2o (abstracts only) and jupyter are supply-bound at 350m+; Wikipedia, pg19, open_web_math, and stack_smol become supply-bound at 1b. Rather than add per-scale knobs or accept repetition, the deficit routes to FineWeb — which has 15T tokens of headroom — preserving mix shape and hitting the token target.
 
-**Why a single `config/` package for locked values?** The data mix, token targets, CHARS_PER_TOKEN, CC_CHARS_PER_SEGMENT, PRETRAIN_VAL_FRACTION, and a few other constants are each read by multiple stages (curator, export, pretrain, notebooks, tests). Previously they were duplicated — and the duplicates drifted, most visibly in an export pipeline that was writing stale 3-source pretraining tables to the Hub while the curator was actually running the 12-source mix. Centralising into `config/data_mix.py` with an import-time `validate()` makes drift impossible: every consumer sees the same values, and percentages sum-to-100 at the moment the module is loaded.
+**Why a single `config/` package for locked values?** The data mix, token targets, CHARS_PER_TOKEN, CC_CHARS_PER_SEGMENT, PRETRAIN_VAL_FRACTION, and a few other constants are each read by multiple stages (curator, export, pretrain, notebooks, tests). Previously they were duplicated — and the duplicates drifted, most visibly in an export pipeline that was writing stale pretraining tables to the Hub while the curator was actually running the 13-source mix. Centralising into `config/data_mix.py` with an import-time `validate()` makes drift impossible: every consumer sees the same values, and percentages sum-to-100 at the moment the module is loaded.
 
 **Why a separate `config_gen/` package for `config_gen.py`?** The pretrain configs need to be tuned per GPU — `micro_batch_size` that fits on H200 fits trivially on B200 but not on A100 40GB, and the right `gradient_accumulation_steps` depends on both GPU memory and the count. Hand-tuning these for every (size, GPU, num_gpus) combination is error-prone and stale configs silently waste GPU hours. Centralising the math in `config_gen/config_gen.py` — keyed off measured GPU specs and per-size memory profiles — makes "tune for this hardware" a one-line `make config-gen` rather than a careful manual edit. The script intentionally leaves LR, schedule, and architecture untouched: those are recipe decisions, not hardware decisions.
 

@@ -80,6 +80,87 @@ class TestSFTData:
         )
 
     @requires_stage("prepare-sft")
+    def test_chat_data_contains_response_control_examples(self):
+        """
+        Chat SFT should include the generated response-control supplement.
+
+        This catches regressions where prepare_sft.py still downloads
+        OpenHermes but silently stops adding local behavior-control records.
+        """
+        path = pipeline_path("sft", "chat", "train.jsonl")
+        found = 0
+        with open(path) as f:
+            for line in f:
+                record = json.loads(line)
+                if record.get("source") == "response_control":
+                    found += 1
+                    if found >= 10:
+                        break
+
+        assert found > 0, (
+            "No response_control examples found in chat SFT train.jsonl. "
+            "Run make prepare-sft after ensuring response_control.py is wired "
+            "into prepare_sft.py."
+        )
+
+    @requires_stage("prepare-sft")
+    def test_response_control_examples_have_expected_types(self):
+        """
+        Response-control records should cover the behavior categories that
+        sanity_eval.py checks: direct facts, AI concepts, factual restraint,
+        and concise stopping.
+        """
+        path = pipeline_path("sft", "chat", "train.jsonl")
+        expected = {
+            "simple_factual",
+            "ai_concept",
+            "factual_restraint",
+            "concise_answer",
+        }
+        seen = set()
+
+        with open(path) as f:
+            for line in f:
+                record = json.loads(line)
+                if record.get("source") != "response_control":
+                    continue
+                sft_type = record.get("sft_type")
+                if sft_type:
+                    seen.add(sft_type)
+                if expected <= seen:
+                    break
+
+        missing = expected - seen
+        assert not missing, (
+            f"Missing response-control categories in chat SFT data: {missing}. "
+            f"Seen: {seen}"
+        )
+
+    @requires_stage("prepare-sft")
+    def test_response_control_examples_do_not_include_arithmetic(self):
+        """
+        Arithmetic was moved out of response-control SFT and into the
+        synthetic_arithmetic pretraining source. Response-control should
+        not be the mechanism for teaching base arithmetic.
+        """
+        path = pipeline_path("sft", "chat", "train.jsonl")
+        bad = 0
+
+        with open(path) as f:
+            for line in f:
+                record = json.loads(line)
+                if record.get("source") != "response_control":
+                    continue
+                if record.get("sft_type") == "arithmetic":
+                    bad += 1
+                    break
+
+        assert bad == 0, (
+            "Found arithmetic response-control examples. Arithmetic should "
+            "come from the synthetic_arithmetic pretraining source instead."
+        )
+
+    @requires_stage("prepare-sft")
     def test_code_data_has_code_system_prompt(self):
         path = pipeline_path("sft", "code", "train.jsonl")
         with open(path) as f:

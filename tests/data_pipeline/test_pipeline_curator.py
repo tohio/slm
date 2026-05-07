@@ -7,7 +7,7 @@ Run after: make curate-mini
 Command:   make test-curator
 
 Checks:
-    - Raw source directories exist and have shards for all 10 sources
+    - Raw source directories exist and have shards for all configured sources
     - Filtered shards exist and contain no documents failing quality checks
     - Deduped shards exist and have no exact duplicates
     - data/curated/train.jsonl exists, is non-empty, contains most sources
@@ -29,8 +29,12 @@ from curator.filters.dedup import exact_hash
 # here, which meant every change to the mix needed a matching edit in this
 # file. TestConfigurationDrift still guards the separate quality-filter
 # CODE_SOURCES constant (defined in curator.filters.quality) against drift
-# from config.
+# from config, allowing symbol-heavy generated sources that should also
+# bypass prose filters.
 from config import ALL_SOURCES, CODE_SOURCES, NON_CODE_SOURCES
+
+SYMBOL_HEAVY_SKIP_SOURCES = {"synthetic_arithmetic"}
+QUALITY_SKIP_SOURCES = set(CODE_SOURCES) | SYMBOL_HEAVY_SKIP_SOURCES
 
 
 pytestmark = requires_stage("curate-mini")
@@ -49,19 +53,25 @@ REQUIRED_IN_TRAIN = list(ALL_SOURCES)
 # ── Configuration drift guard ──────────────────────────────────────────────────
 
 class TestConfigurationDrift:
-    """Catch drift between the two CODE_SOURCES definitions."""
+    """Catch drift between quality-filter skip routing and config source lists."""
 
-    def test_quality_filter_code_sources_match_config(self):
+    def test_quality_filter_skip_sources_match_expected_sources(self):
         """
-        curator.filters.quality defines its own CODE_SOURCES set for filter
-        routing; config defines CODE_SOURCES for data-mix bookkeeping. They
-        must stay in sync — if a source is code in the mix it must bypass
-        the English-prose quality filters, and vice versa.
+        config.CODE_SOURCES means the 5 code sub-sources in the data mix.
+        quality.CODE_SOURCES is broader: it is the set of sources that bypass
+        English-prose filters. That includes code plus symbol-heavy generated
+        sources such as synthetic_arithmetic.
         """
-        assert set(QUALITY_CODE_SOURCES) == set(CODE_SOURCES), (
+        assert set(QUALITY_CODE_SOURCES) == QUALITY_SKIP_SOURCES, (
             f"CODE_SOURCES in quality.py ({set(QUALITY_CODE_SOURCES)}) drifted "
-            f"from CODE_SOURCES in config ({set(CODE_SOURCES)}). "
-            f"Update one or both."
+            f"from expected prose-filter skip sources ({QUALITY_SKIP_SOURCES}). "
+            f"Update quality.py or this test if a new symbol-heavy source is added."
+        )
+
+    def test_symbol_heavy_skip_sources_are_real_sources(self):
+        missing = SYMBOL_HEAVY_SKIP_SOURCES - set(ALL_SOURCES)
+        assert not missing, (
+            f"Symbol-heavy quality skip sources are not in ALL_SOURCES: {missing}"
         )
 
 
@@ -237,7 +247,7 @@ class TestCuratedOutput:
         docs = read_jsonl(pipeline_path("curated", "train.jsonl"))
         short_non_code = [
             d for d in docs
-            if d.get("source") not in CODE_SOURCES
+            if d.get("source") not in QUALITY_SKIP_SOURCES
             and len(d.get("text", "")) < MIN_CHARS
         ]
         assert len(short_non_code) == 0, (
