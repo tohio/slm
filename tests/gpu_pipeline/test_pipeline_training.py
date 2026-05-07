@@ -163,7 +163,14 @@ class TestPretrainingDataset:
         assert item["input_ids"].shape == (64,)
         assert item["labels"].shape == (64,)
 
-    def test_labels_are_input_ids_shifted_left(self):
+    def test_labels_match_input_ids_for_causal_lm(self):
+        """
+        Dataset labels should match input_ids.
+
+        The causal-LM shift happens inside SLMForCausalLM.forward() when
+        labels are provided: logits[:, :-1] predict labels[:, 1:]. The dataset
+        should not pre-shift labels, otherwise training would be shifted twice.
+        """
         from pretrain.data.dataset import PretrainingDataset
         bin_path = pipeline_path("tokenized", "train.bin")
         if not bin_path.exists():
@@ -172,5 +179,4 @@ class TestPretrainingDataset:
         dataset = PretrainingDataset(bin_path, seq_len=32)
         item = dataset[0]
 
-        # labels[i] should equal input_ids[i+1]
-        assert torch.equal(item["input_ids"][1:], item["labels"][:-1])
+        assert torch.equal(item["input_ids"], item["labels"])
