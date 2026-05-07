@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import requires_stage, read_jsonl, pipeline_path
+from tests.data_pipeline.helpers import requires_stage, read_jsonl, pipeline_path
 from curator.filters.quality import QualityFilter
 from curator.filters.dedup import exact_hash
 

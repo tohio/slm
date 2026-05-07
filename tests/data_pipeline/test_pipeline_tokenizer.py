@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import requires_stage, read_jsonl, pipeline_path
+from tests.data_pipeline.helpers import requires_stage, read_jsonl, pipeline_path
 
 # Import special tokens and ID constants from the training module, not
 # hand-copies. train_tokenizer.py runs an import-time consistency assertion
