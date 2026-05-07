@@ -152,7 +152,7 @@ tokenize-download:
 
 tokenizer-upload:
 	@echo "==> Uploading tokenizer to S3..."
-	$(PYTHON) curator/scripts/upload_s3.py upload --src $(DATA_DIR)/tokenizer --dst tokenizer
+	$(PYTHON) curator/scripts/upload_s3.py upload --src $(DATA_DIR)/tokenizer --dst tokenizer --overwrite
 	@echo "  Tokenizer uploaded"
 
 tokenizer-download:
@@ -484,7 +484,7 @@ test-validate:
 	.venv/bin/pytest tests/data_pipeline/test_pipeline_validate.py -v --tb=short
 
 test-tokenizer:
-	@echo "==> Validating tokenizer outputs..."
+	@echo "==> Validating tokenizer and tokenized binary outputs..."
 	.venv/bin/pytest tests/data_pipeline/test_pipeline_tokenizer.py -v --tb=short
 
 test-data-pipeline: test-curator test-validate test-tokenizer
@@ -603,7 +603,7 @@ help:
 	@echo "Tests (CPU — data pipeline):"
 	@echo "  test-curator             Validate curate-mini outputs"
 	@echo "  test-validate            Validate validate outputs"
-	@echo "  test-tokenizer           Validate tokenizer outputs"
+	@echo "  test-tokenizer           Validate tokenizer outputs and tokenized binaries"
 	@echo "  test-data-pipeline       Run all data pipeline tests"
 	@echo ""
 	@echo "Tests (GPU — training pipeline, use SIZE=<size>, default mini):"

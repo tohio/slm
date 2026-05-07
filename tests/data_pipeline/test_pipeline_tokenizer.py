@@ -3,7 +3,7 @@ tests/data_pipeline/test_pipeline_tokenizer.py
 -----------------------------------------------
 Validates real outputs from 'make tokenizer'.
 
-Run after: make tokenizer
+Run after: make tokenizer && make tokenize
 Command:   make test-tokenizer
 
 Checks:
@@ -275,9 +275,10 @@ class TestTokenizedBinIntegrity:
     """
     def test_tokenized_bin_ids_in_vocab_range(self):
         tokenized_dir = pipeline_path("tokenized")
-        if not (tokenized_dir / "train.bin").exists():
-            pytest.skip("train.bin not found — run make tokenize first")
-        
+        assert (tokenized_dir / "train.bin").exists(), (
+            "train.bin not found — run make tokenize before make test-tokenizer"
+        )
+
         import numpy as np
         train = np.memmap(tokenized_dir / "train.bin", dtype=np.uint16, mode="r")
         # Sample 10k random positions rather than scanning the whole file
@@ -291,9 +292,10 @@ class TestTokenizedBinIntegrity:
 
     def test_tokenized_bin_decodes_to_real_text(self):
         tokenized_dir = pipeline_path("tokenized")
-        if not (tokenized_dir / "train.bin").exists():
-            pytest.skip("train.bin not found — run make tokenize first")
-        
+        assert (tokenized_dir / "train.bin").exists(), (
+            "train.bin not found — run make tokenize before make test-tokenizer"
+        )
+
         import numpy as np
         tokenizer = load_hf_tokenizer()
         train = np.memmap(tokenized_dir / "train.bin", dtype=np.uint16, mode="r")

@@ -307,10 +307,10 @@ make download-kenlm-model    DATA_DIR=/data/slm/data   # perplexity model (~4GB)
 # All tests run here — catch issues before spending hours on the full run.
 make curate-mini && make test-curator
 make validate    && make test-validate
-make tokenizer   && make test-tokenizer
-make tokenize                     # produces train.bin + val.bin
-make tokenize-upload SIZE=mini    # push mini tokenized binaries to S3 for GPU instance
-make tokenizer-upload             # push tokenizer to S3 (shared across all sizes)
+make tokenizer   
+make tokenize    && make test-tokenizer      # produces train.bin + val.bin
+make tokenize-upload SIZE=mini              # push mini tokenized binaries to S3 for GPU instance
+make tokenizer-upload                       # push tokenizer to S3 (shared across all sizes)
 
 # ── Step 3: Full curation ─────────────────────────────────────────────────────
 make curate SIZE=125m WORKERS=62    # Stage 1: download, filter, dedup, blend (→ train.jsonl + val.jsonl), upload
@@ -379,7 +379,7 @@ Tests validate real pipeline outputs at each stage. Each test target is paired w
 ```bash
 make curate-mini   && make test-curator      # validate curation outputs (all 13 sources)
 make validate      && make test-validate     # validate validation outputs
-make tokenizer     && make test-tokenizer    # validate tokenizer outputs
+make tokenize      && make test-tokenizer    # validate tokenizer outputs
 
 make test-data-pipeline                      # run all three at once
 ```
