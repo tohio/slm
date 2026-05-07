@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import DATA_DIR, requires_stage, read_jsonl, pipeline_path
+from tests.conftest import requires_stage, read_jsonl, pipeline_path
 from curator.filters.quality import QualityFilter, CODE_SOURCES as QUALITY_CODE_SOURCES
 from curator.filters.dedup import exact_hash
 
