@@ -3,7 +3,7 @@ curator/scripts/curate.py
 --------------------------
 Main data curation pipeline.
 
-Orchestrates 10 data sources through quality filtering, deduplication,
+Orchestrates configured data sources through quality filtering, deduplication,
 blending, and upload. Produces train.jsonl + val.jsonl ready for tokenizer
 training and model pretraining. The val split is sampled uniformly from
 the shuffled blend output, so it represents the same distribution as train.
@@ -63,6 +63,7 @@ import logging
 import math
 import os
 import random
+import shutil
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
@@ -148,6 +149,13 @@ DATA_DIR     = Path(os.environ.get("DATA_DIR", "data"))
 RAW_DIR      = DATA_DIR / "raw"
 FILTERED_DIR = DATA_DIR / "filtered"
 CURATED_DIR  = DATA_DIR / "curated"
+
+# Generated arithmetic is intentionally template-like and dense.
+# Fuzzy MinHash dedup collapses it aggressively, which destroys the
+# intended 1.5% arithmetic signal. Near-duplicate arithmetic templates are
+# useful training signal here, not contamination, so this source bypasses
+# fuzzy dedup and relies on the generator to avoid exact duplicate records.
+SKIP_FUZZY_DEDUP_SOURCES = {"synthetic_arithmetic"}
 
 
 # ── Per-source download cap derivation ─────────────────────────────────────────
@@ -504,6 +512,16 @@ def stage_dedup(workers: int | None = None) -> None:
 
         if dst_dir.exists() and list(dst_dir.glob("*.jsonl")):
             log.info(f"  {source}: already deduped — skipping")
+            continue
+
+        if source in SKIP_FUZZY_DEDUP_SOURCES:
+            log.info(
+                f"  {source}: skipping fuzzy dedup; copying filtered shards "
+                f"to deduped output"
+            )
+            dst_dir.mkdir(parents=True, exist_ok=True)
+            for shard in sorted(src_dir.glob("*.jsonl")):
+                shutil.copy2(shard, dst_dir / shard.name)
             continue
 
         dedup.deduplicate_source(
