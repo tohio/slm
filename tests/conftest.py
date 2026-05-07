@@ -1,5 +1,5 @@
 """
-tests/gpu_pipeline/conftest.py
+tests/conftest.py
 -------------------------------
 GPU-pipeline-scoped fixtures. Adds a --size pytest option so the same tests
 can validate any model size (mini, 125m, 350m, 1b) without code changes.

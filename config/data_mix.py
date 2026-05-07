@@ -205,12 +205,12 @@ TARGET_CONFIGS: dict[str, dict] = {
         "display_tokens": "1M",
     },
     "125m": {
-        "corpus_tokens":  5_000_000_000,
+        "corpus_tokens":  5_500_000_000,
         "epochs":         2,
         "cc_crawls":      ["CC-MAIN-2024-10"],
-        "display_corpus": "5B",
-        "total_tokens":   5_000_000_000,
-        "display_tokens": "5B",
+        "display_corpus": "5.5B",
+        "total_tokens":   5_500_000_000,
+        "display_tokens": "5.5B",
     },
     "350m": {
         "corpus_tokens":  15_000_000_000,
