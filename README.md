@@ -532,7 +532,7 @@ make pretrain CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
 | peS2o | 5% | `allenai/peS2o` v2 — academic/scientific prose |
 | OpenWebMath | 10% | math-heavy web text |
 | StackExchange | 5% | Q&A across dozens of sites |
-| Synthetic arithmetic | 3% | generated locally; arithmetic formats: QA, equations, word problems, comparisons |
+| Synthetic arithmetic | 3% | generated locally; arithmetic formats: QA, bare equations, equation completion, word problems, comparisons, and simple multi-step arithmetic |
 | Synthetic task code | 5% | generated locally; task-shaped code examples, Python 70% / Go 15% / Rust 10% / Bash 5% |
 | Educational QA/MCQ | 3% | generated locally; QA, MCQ, explanation, and cloze formats; benchmark datasets excluded |
 | Factual restraint | 0.5% | generated locally; uncertainty, private/unverifiable facts, no fake search/tool claims |
