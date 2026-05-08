@@ -346,7 +346,7 @@ make test-unit
 
 ## Stage 1 — Data Curation
 
-Downloads raw data from 12 sources (7 non-code top-level + 5 code sub-sources), applies quality filters, deduplicates, blends to target token ratios, and uploads to S3. The mix is defined in `config/data_mix.py` — see [README.md](../README.md#source-mix) for the full per-source breakdown.
+Downloads raw data from 17 concrete sources (12 non-code top-level sources + 5 code sub-sources), applies quality filters, deduplicates, blends to target token ratios, and uploads to S3. The mix is defined in `config/data_mix.py` — see [README.md](../README.md#source-mix) for the full per-source breakdown.
 
 ### Token targets
 
@@ -389,7 +389,7 @@ make curate-mini
 
 ### `make curate-download`
 
-Runs the download stage only — fetches raw data for all 12 sources.
+Runs the download stage only — fetches raw data for all 17 concrete sources.
 
 ```bash
 make curate-download SIZE=125m
