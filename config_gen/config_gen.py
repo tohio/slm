@@ -18,11 +18,13 @@ Recipe-driven (preserved verbatim from the profile):
     max_seq_length, dpo.beta, dpo.max_prompt_length, paths, etc.
 
 Token vocabulary used in this file:
-    corpus_tokens     unique tokens in the curated dataset (the public-facing
-                      figure on model cards). Lives in config/data_mix.py.
-    consumed_tokens   corpus_tokens × epochs; the count of tokens the optimizer
-                      sees over the whole run. Used internally to compute
-                      max_steps. NOT a public-facing number. Sourced from
+    corpus_tokens     curation-side corpus target for a model size. This is
+                      the planning figure from config/data_mix.py, not a
+                      guarantee that the final retained/tokenized corpus will
+                      contain exactly that many usable tokens.
+    consumed_tokens   corpus_tokens × epochs; the target count of tokens the
+                      optimizer is scheduled to see over the whole pretraining
+                      run. Used internally to compute max_steps. Sourced from
                       config.data_mix.consumed_tokens(size) — no hard-coded
                       duplicates here.
 
@@ -127,8 +129,9 @@ class PretrainProfile:
     ref_global_batch: int             # sequences per optimizer step
 
     # Token target — used only to compute max_steps.
-    # consumed_tokens = corpus_tokens × epochs. NOT the public corpus figure.
-    # The unique-data number lives in config/data_mix.py TARGET_CONFIGS.
+    # consumed_tokens = corpus_tokens × epochs.
+    # corpus_tokens is the curator-side target from config/data_mix.py
+    # TARGET_CONFIGS, not a guaranteed retained/tokenized count.
     consumed_tokens: int
 
     # Recipe (preserved verbatim)
