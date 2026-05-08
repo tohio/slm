@@ -9,7 +9,7 @@ English quality; most documents pass downstream quality filters.
 
 Uses the `sample-100BT` pre-made subset by default. This is a deterministic
 100B-token sample of FineWeb — reproducible across runs and provides headroom
-at every SLM scale (125m needs ~2.4B, 350m ~7.1B, 1b ~14.25B at 47.5% share).
+at every SLM scale. The exact target is computed from config/data_mix.py.
 
 FineWeb is too large to materialize locally — we stream documents and write
 sharded JSONL as they arrive. Resume works at shard granularity: if shards

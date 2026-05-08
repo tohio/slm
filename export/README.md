@@ -71,7 +71,7 @@ Generated automatically at export time. Every variant gets:
 
 - **Architecture table** — component choices and rationale
 - **Training section**
-  - Pretraining corpus table: all 13 sources (8 non-code top-level + 5 code sub-sources) with target percentages from `config/data_mix.py` and realized percentages from `data/curated/blend_stats.json` if available. Realized columns appear when blend_stats.json is present and matches the export size; otherwise the table falls back to design-target-only with a caveat noting that the realized mix may differ. Both views are sourced from `config/data_mix.py` as the single source of truth shared with the curator and notebooks
+  - Pretraining corpus table: all 17 concrete sources (12 non-code top-level sources + 5 code sub-sources) with target percentages from `config/data_mix.py` and realized percentages from `data/curated/blend_stats.json` if available. Realized columns appear when blend_stats.json is present and matches the export size; otherwise the table falls back to design-target-only with a caveat noting that the realized mix may differ. Both views are sourced from `config/data_mix.py` as the single source of truth shared with the curator and notebooks
   - Fine-tuning tables for the `instruct` and `chat` variants, listing chat SFT, response-control SFT, code SFT, and (for chat) DPO datasets
 - **Parameter count** — actual value from the loaded checkpoint
 - **Token targets** — sourced from `config/data_mix.py` (6.5B/16.5B/50B curation targets for 125m/350m/1b)

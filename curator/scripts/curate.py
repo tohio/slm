@@ -138,7 +138,7 @@ def default_workers() -> int:
 
 # ── Local share lookups ────────────────────────────────────────────────────────
 #
-# DATA_MIX stores percentages as floats (10.0, 47.5 ...) for display. The
+# DATA_MIX stores percentages as floats (for example 5.0, 26.5, 15.0) for display. The
 # curator's math wants shares as fractions (0.10, 0.475 ...). Derive the
 # fractional views once here.
 _TOP_LEVEL_SHARE: dict[str, float] = {
@@ -241,7 +241,7 @@ def _derive_max_docs(name: str, target: str) -> int | None:
         and be a no-op.
 
     Formula for a top-level source (name in DATA_MIX):
-        target_chars = total_tokens × _TOP_LEVEL_SHARE[name] × CHARS_PER_TOKEN
+        target_chars = corpus_tokens × _TOP_LEVEL_SHARE[name] × CHARS_PER_TOKEN
 
     Formula for a code sub-source (name in CODE_SUBMIX):
         target_chars = total_tokens
@@ -278,7 +278,7 @@ def compute_cc_segments(total_tokens: int) -> int:
     """
     Segments of Common Crawl needed to hit CC's character share.
 
-    Computed from: total_tokens × DATA_MIX[common_crawl] share × CHARS_PER_TOKEN
+    Computed from: corpus_tokens × DATA_MIX[common_crawl] share × CHARS_PER_TOKEN
     bytes of text, divided by CC_CHARS_PER_SEGMENT bytes produced per segment
     after trafilatura + language filtering.
     """

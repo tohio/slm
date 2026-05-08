@@ -233,7 +233,7 @@ def _format_data_mix_table(size: str) -> str:
     realized mix may differ.
 
     Top-level vs code sub-sources:
-        DATA_MIX has a logical "code" bucket at 10% — the actual code
+        DATA_MIX has a logical "code" bucket — the actual code
         sources live in CODE_SUBMIX. blend_stats.json's source_mix dict
         contains the 5 expanded code sub-sources (no "code" entry). To
         render correctly we expand "code" into its sub-sources here when
@@ -286,7 +286,7 @@ def _format_data_mix_table(size: str) -> str:
         )
 
     # Code sub-sources, each as its own row. Their target % is
-    # CODE_SUBMIX[name].pct of the 10% code share.
+    # CODE_SUBMIX[name].pct of the current DATA_MIX['code'] share.
     code_top_pct = DATA_MIX["code"]["pct"]
     for name, entry in CODE_SUBMIX.items():
         target_pct_of_total = (entry["pct"] / 100.0) * code_top_pct
