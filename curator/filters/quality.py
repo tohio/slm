@@ -56,7 +56,14 @@ log = logging.getLogger(__name__)
 # level. Accepting the trade-off: some non-English content in these
 # sources won't be language-filtered.
 CODE_SOURCES: frozenset[str] = frozenset({
+    # Generated/template-like sources. These can be short, symbol-heavy,
+    # repetitive by design, or formatted unlike normal prose.
     "synthetic_arithmetic",
+    "synthetic_task_code",
+    "educational_qa_mcq",
+    "factual_restraint",
+
+    # Code and code-adjacent sources.
     "codesearchnet",
     "stack_smol",
     "stack_v1",

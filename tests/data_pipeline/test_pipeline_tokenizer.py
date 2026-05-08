@@ -34,7 +34,12 @@ from tokenizer.train_tokenizer import SPECIAL_TOKENS, BOS_ID, EOS_ID, PAD_ID
 # representative natural-language prose.
 from config import CODE_SOURCES
 
-NON_PROSE_FERTILITY_SOURCES = set(CODE_SOURCES) | {"synthetic_arithmetic"}
+NON_PROSE_FERTILITY_SOURCES = set(CODE_SOURCES) | {
+    "synthetic_arithmetic",
+    "synthetic_task_code",
+    "educational_qa_mcq",
+    "factual_restraint",
+}
 
 
 pytestmark = requires_stage("tokenizer")

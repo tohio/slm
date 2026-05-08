@@ -33,7 +33,12 @@ from curator.filters.dedup import exact_hash
 # bypass prose filters.
 from config import ALL_SOURCES, CODE_SOURCES, NON_CODE_SOURCES
 
-SYMBOL_HEAVY_SKIP_SOURCES = {"synthetic_arithmetic"}
+SYMBOL_HEAVY_SKIP_SOURCES = {
+    "synthetic_arithmetic",
+    "synthetic_task_code",
+    "educational_qa_mcq",
+    "factual_restraint",
+}
 QUALITY_SKIP_SOURCES = set(CODE_SOURCES) | SYMBOL_HEAVY_SKIP_SOURCES
 
 
@@ -186,7 +191,7 @@ class TestDedupedData:
                 for doc in docs:
                     h = exact_hash(doc.get("text", ""))
                     if h in seen_hashes:
-                        duplicates.append(f"{source}: {doc["text"][:60]}")
+                        duplicates.append(f"{source}: {doc['text'][:60]}")
                     seen_hashes.add(h)
 
         assert len(duplicates) == 0, (
