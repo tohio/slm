@@ -26,7 +26,8 @@ DATA_DIR ?= data
 PYTHON     ?= .venv/bin/python
 _ACCELERATE = .venv/bin/accelerate
 
-PRETRAIN_CONFIG ?= pretrain/configs/gpt_$(SIZE).yaml
+CONFIG ?=
+PRETRAIN_CONFIG ?= $(if $(CONFIG),$(CONFIG),pretrain/configs/gpt_$(SIZE).yaml)
 SFT_CHAT_CONFIG ?= finetune/configs/sft_chat_$(SIZE).yaml
 SFT_CODE_CONFIG ?= finetune/configs/sft_code_$(SIZE).yaml
 DPO_CONFIG      ?= alignment/configs/dpo_$(SIZE).yaml
@@ -40,6 +41,12 @@ else
 endif
 
 SANITY_SIZE ?= 125m
+
+# GPU pipeline tests should stay mini-focused by default.
+# If SIZE is explicitly supplied on the command line or environment, use it.
+# Otherwise test targets validate mini artifacts even though the pipeline
+# default SIZE remains 125m.
+TEST_SIZE ?= $(if $(filter command line environment,$(origin SIZE)),$(SIZE),mini)
 
 # config-gen flags
 #   GPU=h200|b200|...        force a specific GPU (otherwise auto-detect via nvidia-smi)
@@ -490,25 +497,24 @@ test-tokenizer:
 test-data-pipeline: test-curator test-validate test-tokenizer
 	@echo "==> Data pipeline tests complete"
 
-# GPU pipeline tests respect SIZE — defaults to mini for the tests themselves
-# (not the Makefile-wide SIZE) so a fresh clone with no training outputs still
-# has something sensible to validate against. Pass SIZE=125m / 350m / 1b to
-# validate larger runs.
+# GPU pipeline tests respect TEST_SIZE. By default TEST_SIZE=mini so normal
+# development stays mini-focused. Passing SIZE=125m / 350m / 1b on the make
+# command line also sets TEST_SIZE to that size for full-artifact checks.
 test-training:
-	@echo "==> Validating pretrain outputs (SIZE=$(SIZE))..."
-	.venv/bin/pytest tests/gpu_pipeline/test_pipeline_training.py --size=$(SIZE) -v --tb=short
+	@echo "==> Validating pretrain outputs (TEST_SIZE=$(TEST_SIZE))..."
+	.venv/bin/pytest tests/gpu_pipeline/test_pipeline_training.py --size=$(TEST_SIZE) -v --tb=short
 
 test-sft-chat:
-	@echo "==> Validating chat SFT outputs (SIZE=$(SIZE))..."
-	.venv/bin/pytest tests/gpu_pipeline/test_pipeline_sft.py::TestChatSFTModel tests/gpu_pipeline/test_pipeline_sft.py::TestSFTData --size=$(SIZE) -v --tb=short
+	@echo "==> Validating chat SFT outputs (TEST_SIZE=$(TEST_SIZE))..."
+	.venv/bin/pytest tests/gpu_pipeline/test_pipeline_sft.py::TestChatSFTModel tests/gpu_pipeline/test_pipeline_sft.py::TestSFTData --size=$(TEST_SIZE) -v --tb=short
 
 test-sft-code:
-	@echo "==> Validating code SFT outputs (SIZE=$(SIZE))..."
-	.venv/bin/pytest tests/gpu_pipeline/test_pipeline_sft.py::TestCodeSFTModel --size=$(SIZE) -v --tb=short
+	@echo "==> Validating code SFT outputs (TEST_SIZE=$(TEST_SIZE))..."
+	.venv/bin/pytest tests/gpu_pipeline/test_pipeline_sft.py::TestCodeSFTModel --size=$(TEST_SIZE) -v --tb=short
 
 test-dpo:
-	@echo "==> Validating DPO outputs (SIZE=$(SIZE))..."
-	.venv/bin/pytest tests/gpu_pipeline/test_pipeline_dpo.py --size=$(SIZE) -v --tb=short
+	@echo "==> Validating DPO outputs (TEST_SIZE=$(TEST_SIZE))..."
+	.venv/bin/pytest tests/gpu_pipeline/test_pipeline_dpo.py --size=$(TEST_SIZE) -v --tb=short
 
 test-gpu-pipeline: test-training test-sft-chat test-sft-code test-dpo
 	@echo "==> GPU pipeline tests complete"

@@ -14,7 +14,8 @@ All targets accept these variables as overrides:
 | `GPUS` | `1` | Number of GPUs for `accelerate launch`. Used by `pretrain`, `sft`, `sft-code`, `dpo`. |
 | `WORKERS` | _(cpu_count - 2)_ | Parallel workers for filter, dedup, and blend stages. Defaults to `cpu_count - 2` automatically — only set this to override. |
 | `DATA_DIR` | `data` | Root data directory. Override when using a separate disk volume. |
-| `CONFIG` | _(derived from SIZE)_ | Explicit path to a YAML config file. Overrides the SIZE-derived default. |
+| `CONFIG` | _(derived from SIZE)_ | Backward-compatible pretrain config override. Prefer `PRETRAIN_CONFIG` for clarity. |
+| `TEST_SIZE` | `mini` unless `SIZE` is explicitly supplied | Model size used by GPU pipeline test targets. Keeps default tests mini-focused while allowing `SIZE=125m`, `350m`, or `1b` opt-in checks. |
 | `GPU` | _(auto-detect)_ | GPU model for `config-gen-*` (e.g. `h200`, `b200`, `h100`, `a100_80`). When unset, the script uses `nvidia-smi` to detect the GPU. |
 | `MODE` | `balanced` | Tuning mode for `config-gen-*` — one of `conservative` (70% VRAM), `balanced` (80%, default), or `aggressive` (90%). Aggressive mode also allows non-power-of-2 micro_batch values. |
 | `AGGRESSIVE` | _(unset)_ | Backwards-compat alias for `MODE=aggressive`. Wins over `MODE` if both are set. |
