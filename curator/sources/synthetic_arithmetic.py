@@ -14,9 +14,12 @@ Purpose:
 Design:
     - pretraining text only, not chat/SFT format
     - deterministic generation
-    - mixed symbolic, QA, word-form, and answer-only styles
-    - documents are long enough to pass minimum-length filters
-    - many numeric combinations/templates to reduce dedup collapse
+    - explicit format mix aligned to observed weak spots:
+        qa_arithmetic, bare_equation_full, bare_equation_completion,
+        word_problem, comparison_arithmetic, and multi_step_simple
+    - generated/template-like records bypass minimum-length prose filtering
+      and fuzzy MinHash dedup, while still going through exact dedup
+    - many numeric combinations/templates to reduce exact duplication
 """
 
 from __future__ import annotations
@@ -122,65 +125,116 @@ class SyntheticArithmeticSource:
 
         return f"{a} {op} {b}", word, str(ans)
 
-    def _make_doc(self, doc_id: int, rng: random.Random) -> str:
-        """Create one pretraining document with varied arithmetic forms."""
-        headings = [
-            "Arithmetic practice examples",
-            "Elementary arithmetic facts",
-            "Simple calculation exercises",
-            "Basic number operation examples",
-            "Arithmetic question and answer practice",
-        ]
+    def _format_type(self, doc_id: int) -> str:
+        """
+        Deterministic locked format mix:
+            qa_arithmetic              25%
+            bare_equation_full         20%
+            bare_equation_completion   20%
+            word_problem               15%
+            comparison_arithmetic      10%
+            multi_step_simple          10%
+        """
+        bucket = doc_id % 100
+        if bucket < 25:
+            return "qa_arithmetic"
+        if bucket < 45:
+            return "bare_equation_full"
+        if bucket < 65:
+            return "bare_equation_completion"
+        if bucket < 80:
+            return "word_problem"
+        if bucket < 90:
+            return "comparison_arithmetic"
+        return "multi_step_simple"
 
-        lines: list[str] = [
-            rng.choice(headings),
-            (
-                "This document contains simple arithmetic examples. "
-                "Each line gives a small calculation and its correct result. "
-                "The goal is to practice addition, subtraction, multiplication, "
-                "and exact division with clear answers."
-            ),
-            "",
-        ]
+    def _make_multi_step(self, rng: random.Random) -> tuple[str, str]:
+        """Return (expression text, answer) for simple two-step arithmetic."""
+        a = rng.randint(0, 30)
+        b = rng.randint(0, 30)
+        c = rng.randint(0, 20)
+        pattern = rng.choice(["add_then_subtract", "add_then_add", "multiply_then_add"])
 
-        n_examples = rng.randint(28, 44)
+        if pattern == "add_then_subtract":
+            ans = a + b - c
+            return f"({a} + {b}) - {c}", str(ans)
+        if pattern == "add_then_add":
+            ans = a + b + c
+            return f"({a} + {b}) + {c}", str(ans)
 
-        for _ in range(n_examples):
-            expr, word, ans = self._problem(rng)
-            style = rng.choices(
-                ["equation", "qa", "answer_only", "word", "explain_short"],
-                weights=[0.35, 0.25, 0.15, 0.15, 0.10],
-                k=1,
-            )[0]
+        x = rng.randint(0, 12)
+        y = rng.randint(0, 12)
+        z = rng.randint(0, 20)
+        ans = x * y + z
+        return f"({x} * {y}) + {z}", str(ans)
 
-            if style == "equation":
-                lines.append(f"{expr} = {ans}")
-            elif style == "qa":
-                lines.append(f"Question: What is {expr}?")
-                lines.append(f"Answer: {ans}")
-            elif style == "answer_only":
-                lines.append("Answer only the result:")
-                lines.append(expr)
-                lines.append(ans)
-            elif style == "word":
-                lines.append(f"What is {word}?")
-                lines.append(ans)
+    def _make_doc(self, doc_id: int, rng: random.Random) -> tuple[str, str]:
+        """Create one arithmetic record and return (text, format_type)."""
+        format_type = self._format_type(doc_id)
+
+        if format_type == "multi_step_simple":
+            expr, ans = self._make_multi_step(rng)
+            templates = [
+                f"{expr} = {ans}",
+                f"Question: What is {expr}?\nAnswer: {ans}",
+                f"Solve step by step: {expr}\nAnswer: {ans}",
+            ]
+            return rng.choice(templates), format_type
+
+        expr, word, ans = self._problem(rng)
+
+        if format_type == "qa_arithmetic":
+            templates = [
+                f"Question: What is {expr}?\nAnswer: {ans}",
+                f"Q: What is {expr}?\nA: {ans}",
+                f"What is {expr}?\nAnswer: {ans}",
+            ]
+
+        elif format_type == "bare_equation_full":
+            templates = [
+                f"{expr} = {ans}",
+                f"{expr} equals {ans}",
+                f"The result of {expr} is {ans}.",
+            ]
+
+        elif format_type == "bare_equation_completion":
+            templates = [
+                f"{expr} =\n{ans}",
+                f"Complete the equation: {expr} =\n{ans}",
+                f"Answer only the result.\n{expr} =\n{ans}",
+            ]
+
+        elif format_type == "word_problem":
+            templates = [
+                f"What is {word}?\nAnswer: {ans}",
+                f"Compute {word}.\nThe answer is {ans}.",
+                f"A student calculates {word}. The result is {ans}.",
+            ]
+
+        elif format_type == "comparison_arithmetic":
+            expr2, _, ans2 = self._problem(rng)
+            left = int(ans)
+            right = int(ans2)
+            if left > right:
+                comp = "greater than"
+                symbol = ">"
+            elif left < right:
+                comp = "less than"
+                symbol = "<"
             else:
-                lines.append(f"The result of {expr} is {ans}.")
-                lines.append(f"So, {expr} = {ans}.")
+                comp = "equal to"
+                symbol = "="
 
-            if rng.random() < 0.20:
-                lines.append("")
+            templates = [
+                f"Compare the results: {expr} and {expr2}.\n{ans} is {comp} {ans2}.",
+                f"{expr} = {ans}\n{expr2} = {ans2}\nTherefore {ans} {symbol} {ans2}.",
+                f"Which is larger: {expr} or {expr2}?\nAnswer: {expr if left >= right else expr2}",
+            ]
 
-        # Add a deterministic footer to make records self-describing without
-        # changing the answer mappings.
-        lines.append("")
-        lines.append(
-            f"End of arithmetic practice document {doc_id}. "
-            "All examples above show the complete calculation and answer."
-        )
+        else:
+            raise ValueError(f"Unknown arithmetic format_type: {format_type}")
 
-        return "\n".join(lines)
+        return rng.choice(templates), format_type
 
     def download(self) -> None:
         """Generate JSONL shards under output_dir."""
@@ -213,11 +267,12 @@ class SyntheticArithmeticSource:
 
             with shard_path.open("w", encoding="utf-8") as f:
                 for _ in range(n_this):
-                    text = self._make_doc(doc_id, rng)
+                    text, format_type = self._make_doc(doc_id, rng)
                     rec = {
                         "id": f"{self.name}_{doc_id}",
                         "source": self.name,
                         "text": text,
+                        "format_type": format_type,
                     }
                     f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
@@ -255,10 +310,24 @@ class SyntheticArithmeticSource:
         return chars
 
     def stats(self) -> dict:
+        by_format: dict[str, int] = {}
+        shards = sorted(self.output_dir.glob("*.jsonl"))
+
+        for shard in shards:
+            with shard.open("r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
+                        continue
+                    fmt = rec.get("format_type", "unknown")
+                    by_format[fmt] = by_format.get(fmt, 0) + 1
+
         return {
             "source": self.name,
             "docs": self._docs_written,
             "chars": self._chars_written,
             "max_docs": self.max_docs,
             "output_dir": str(self.output_dir),
+            "by_format": by_format,
         }
