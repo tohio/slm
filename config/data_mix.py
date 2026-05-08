@@ -21,15 +21,36 @@ Organising principle:
       stay in their stage's own config file.
 
 Token vocabulary:
-    corpus_tokens     unique tokens in the curated dataset for a given size.
-                      The public-facing figure on model cards and in the
-                      README "Token Targets" table. Stored on each
-                      TARGET_CONFIGS entry as `corpus_tokens`.
-    consumed_tokens   corpus_tokens × epochs. The number of tokens the
-                      optimiser sees over the whole pretraining run. Used
-                      by config_gen/config_gen.py to compute max_steps.
-                      Computed by the consumed_tokens() helper below; not
-                      a stored field. NOT a public-facing number.
+    corpus_tokens     curation-side corpus target for a given model size.
+                      The curator attempts to build this token budget before
+                      final validation/filtering/tokenization losses. It is
+                      the public planning figure shown on model cards and in
+                      README token-target tables, but it is not a guarantee
+                      that the final retained/tokenized corpus will contain
+                      exactly this many usable tokens.
+
+                      Example from the completed 125M run:
+                          5.5B curation target
+                          -> ~5.12B retained/tokenized tokens
+
+                      Future targets include a retention buffer so final
+                      retained/tokenized artifacts land closer to the intended
+                      usable-token goal.
+
+    retained_tokens   final usable tokenized tokens after validation,
+                      filtering, blending, train/val split, and tokenization.
+                      This is measured after the pipeline runs. It is not
+                      stored in TARGET_CONFIGS because it depends on source
+                      availability, filtering loss, tokenizer behavior, and
+                      validation outcomes.
+
+    consumed_tokens   corpus_tokens × epochs. The scheduling quantity used by
+                      config_gen/config_gen.py to compute max_steps. This is
+                      the number of target tokens the optimiser is expected to
+                      see over the whole pretraining run. Computed by the
+                      consumed_tokens() helper below; not a stored field.
+                      Do not confuse this with retained_tokens.
+
     total_tokens      DEPRECATED. Used to be the field name and helper for
                       the corpus figure, but read ambiguously between
                       "unique tokens" and "tokens the model is trained on".
@@ -40,7 +61,7 @@ Token vocabulary:
 
 Section layout:
     1. DATA_MIX                 top-level source percentages + metadata
-    2. CODE_SUBMIX              sub-mix of the 10% code share
+    2. CODE_SUBMIX              sub-mix of the 15% code share
     3. OVERFLOW_SINK            which source absorbs supply deficits
     4. Source name lists        NON_CODE_SOURCES, CODE_SOURCES, ALL_SOURCES
     5. TARGET_CONFIGS           per-size corpus + epochs + CC crawls
@@ -70,14 +91,19 @@ import warnings
 
 DATA_MIX: dict[str, dict] = {
     "common_crawl": {
-        "pct":     10.0,
+        "pct":     5.0,
         "display": "Common Crawl",
         "url":     "https://commoncrawl.org",
     },
     "fineweb": {
-        "pct":     46.0,
+        "pct":     26.5,
         "display": "FineWeb",
         "hub":     "HuggingFaceFW/fineweb",
+    },
+    "fineweb_edu": {
+        "pct":     10.0,
+        "display": "FineWeb-Edu",
+        "hub":     "HuggingFaceFW/fineweb-edu",
     },
     "wikipedia": {
         "pct":     10.0,
@@ -105,23 +131,38 @@ DATA_MIX: dict[str, dict] = {
         "hub":     "HuggingFaceH4/stack-exchange-preferences",
     },
     "synthetic_arithmetic": {
-        "pct":     1.5,
+        "pct":     3.0,
         "display": "Synthetic arithmetic",
         "url":     "generated locally by curator/sources/synthetic_arithmetic.py",
     },
+    "synthetic_task_code": {
+        "pct":     5.0,
+        "display": "Synthetic task code",
+        "url":     "generated locally by curator/sources/synthetic_task_code.py",
+    },
+    "educational_qa_mcq": {
+        "pct":     3.0,
+        "display": "Educational QA/MCQ",
+        "url":     "generated locally from trusted educational/reference sources",
+    },
+    "factual_restraint": {
+        "pct":     0.5,
+        "display": "Factual restraint",
+        "url":     "generated locally by curator/sources/factual_restraint.py",
+    },
     "code": {
-        "pct":     10.0,
+        "pct":     15.0,
         "display": "Code (multi-source)",
         # Dispatched across CODE_SUBMIX. The "code" entry itself is a logical
         # bucket — the actual per-source char targets are computed using
-        # CODE_SUBMIX percentages × the 10% code share.
+        # CODE_SUBMIX percentages × the 15% code share.
     },
 }
 
 
 # ── 2. Code sub-mix ────────────────────────────────────────────────────────────
 #
-# Percentages of the 10% code share (not of total tokens). stack_v1 is capped
+# Percentages of the 15% code share (not of total tokens). stack_v1 is capped
 # at 50% so bulk raw code doesn't drown out the curated code sources.
 
 CODE_SUBMIX: dict[str, dict] = {
@@ -175,15 +216,21 @@ ALL_SOURCES: list[str] = NON_CODE_SOURCES + CODE_SOURCES
 # ── 5. Target configurations ───────────────────────────────────────────────────
 #
 # Per-size training targets. Carries everything a size-specific run needs:
-#   corpus_tokens    — unique tokens in the curated dataset (PUBLIC figure).
-#                      This is what shows up on model cards and the README
-#                      "Token Targets" table. Multiplying by `epochs` gives
+#   corpus_tokens    — curation-side corpus target for this model size
+#                      (PUBLIC planning figure). The curator attempts to build
+#                      this many tokens before final validation/filtering and
+#                      tokenization losses. The final retained/tokenized token
+#                      count may be lower and should be measured from the
+#                      generated train/val artifacts after the run.
+#
+#                      Multiplying corpus_tokens by `epochs` gives
 #                      consumed_tokens, which is what config_gen uses to
 #                      compute max_steps.
-#   epochs           — number of training epochs over the corpus.
+#
+#   epochs           — number of training epochs over the corpus target.
 #   cc_crawls        — Common Crawl snapshots to draw from at this scale.
-#   display_corpus   — human-readable shorthand of corpus_tokens (5B / 15B /
-#                      30B). Used by export.py when rendering model cards.
+#   display_corpus   — human-readable shorthand of corpus_tokens. Used by
+#                      export.py when rendering model cards.
 #
 #   total_tokens     — DEPRECATED back-compat alias for corpus_tokens. Kept
 #                      so older consumers don't break; new code should read
@@ -193,6 +240,12 @@ ALL_SOURCES: list[str] = NON_CODE_SOURCES + CODE_SOURCES
 #
 # cc_segments is computed at runtime from corpus_tokens × cc_share ×
 # CHARS_PER_TOKEN ÷ CC_CHARS_PER_SEGMENT — see curator/scripts/curate.py.
+#
+# Important:
+#   Finite/supply-constrained sources may not hit their nominal percentage at
+#   larger scales after filtering. Deficits are routed to OVERFLOW_SINK, which
+#   is currently FineWeb. Therefore DATA_MIX describes the intended target mix;
+#   the realized post-filter mix should be audited after curation.
 
 TARGET_CONFIGS: dict[str, dict] = {
     "mini": {
@@ -205,28 +258,28 @@ TARGET_CONFIGS: dict[str, dict] = {
         "display_tokens": "1M",
     },
     "125m": {
-        "corpus_tokens":  5_500_000_000,
+        "corpus_tokens":  6_500_000_000,
         "epochs":         2,
         "cc_crawls":      ["CC-MAIN-2024-10"],
-        "display_corpus": "5.5B",
-        "total_tokens":   5_500_000_000,
-        "display_tokens": "5.5B",
+        "display_corpus": "6.5B",
+        "total_tokens":   6_500_000_000,
+        "display_tokens": "6.5B",
     },
     "350m": {
-        "corpus_tokens":  15_000_000_000,
+        "corpus_tokens":  16_500_000_000,
         "epochs":         2,
         "cc_crawls":      ["CC-MAIN-2024-10", "CC-MAIN-2023-50"],
-        "display_corpus": "15B",
-        "total_tokens":   15_000_000_000,
-        "display_tokens": "15B",
+        "display_corpus": "16.5B",
+        "total_tokens":   16_500_000_000,
+        "display_tokens": "16.5B",
     },
     "1b": {
-        "corpus_tokens":  30_000_000_000,
+        "corpus_tokens":  50_000_000_000,
         "epochs":         1,
         "cc_crawls":      ["CC-MAIN-2024-10", "CC-MAIN-2023-50", "CC-MAIN-2023-40"],
-        "display_corpus": "30B",
-        "total_tokens":   30_000_000_000,
-        "display_tokens": "30B",
+        "display_corpus": "50B",
+        "total_tokens":   50_000_000_000,
+        "display_tokens": "50B",
     },
 }
 
@@ -275,12 +328,16 @@ PRETRAIN_VAL_FRACTION: float = 0.005
 MINI_OVERRIDES: dict[str, int] = {
     "common_crawl":  2,         # WARC segments
     "fineweb":       10_000,
+    "fineweb_edu":   5_000,
     "wikipedia":     5_000,
     "pg19":          50,
     "pes2o":         2_000,
     "open_web_math": 3_000,
     "stackexchange": 2_000,
     "synthetic_arithmetic": 2_000,
+    "synthetic_task_code":   2_000,
+    "educational_qa_mcq":    2_000,
+    "factual_restraint":     1_000,
     "codesearchnet": 5_000,
     "stack_smol":    2_000,
     "stack_v1":      3_000,
@@ -306,14 +363,16 @@ def dataset_link(entry: dict) -> str:
 
 def corpus_tokens(size: str) -> int:
     """
-    Return the unique-token count of the curated corpus for a given size.
+    Return the curation-side corpus target for a given model size.
 
-    This is the public-facing figure: the number that appears on model
-    cards, in the README "Token Targets" table, and anywhere a reader
-    would ask "how much data did you train on?".
+    This is the public planning figure used by the curator and shown in
+    model cards / README token-target tables. It is not a guarantee that
+    the final retained/tokenized corpus will contain exactly this many
+    usable tokens; filtering, validation, source availability, blending,
+    and tokenization can reduce the final artifact size.
 
-    Multiply by epochs(size) to get consumed_tokens (the optimiser-step
-    quantity used by config_gen to compute max_steps).
+    Multiply by epochs(size) to get consumed_tokens, the scheduling
+    quantity used by config_gen to compute max_steps.
     """
     return TARGET_CONFIGS[size]["corpus_tokens"]
 
