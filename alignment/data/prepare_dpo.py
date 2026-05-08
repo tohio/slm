@@ -75,6 +75,11 @@ MAX_TOTAL_TOKENS = 2048
 # Upstream cap for hh-rlhf (170k pairs; capping for blend balance with orca/argilla).
 HH_RLHF_CAP = 50_000
 
+# Handcrafted behavior examples are intentionally small but high-value.
+# Repeat them in the DPO blend so targeted safety/restraint failures are not
+# drowned out by the large upstream preference datasets.
+HANDCRAFTED_BEHAVIOR_REPEAT = 30
+
 
 def make_prompt(system: str, user: str) -> list[dict]:
     """Return prompt as a list of message dicts for trl conversational format."""
@@ -646,6 +651,24 @@ def main():
     if args.source in ("all", "handcrafted"):
         all_records.extend(prepare_handcrafted_behavior_dpo())
 
+    handcrafted = [
+        r for r in all_records
+        if r.get("source") == "handcrafted_behavior"
+    ]
+    if handcrafted and HANDCRAFTED_BEHAVIOR_REPEAT > 1:
+        repeated = []
+        for repeat_idx in range(HANDCRAFTED_BEHAVIOR_REPEAT - 1):
+            for rec in handcrafted:
+                clone = dict(rec)
+                clone["repeat_idx"] = repeat_idx + 1
+                repeated.append(clone)
+        all_records.extend(repeated)
+        log.info(
+            "Upweighted handcrafted_behavior: "
+            f"{len(handcrafted):,} base records × {HANDCRAFTED_BEHAVIOR_REPEAT} "
+            f"= {len(handcrafted) * HANDCRAFTED_BEHAVIOR_REPEAT:,} records"
+        )
+
     log.info(f"Total records before length filter: {len(all_records):,}")
 
     # Apply length filter with the same tokenizer trl will use at train time.
@@ -669,6 +692,7 @@ def main():
         "sources":          dict(source_counts),
         "max_total_tokens": args.max_total_tokens,
         "hh_rlhf_cap":      HH_RLHF_CAP,
+        "handcrafted_behavior_repeat": HANDCRAFTED_BEHAVIOR_REPEAT,
     }
     with open(DPO_DIR / "stats.json", "w") as f:
         json.dump(stats, f, indent=2)
