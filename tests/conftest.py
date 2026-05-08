@@ -1,8 +1,14 @@
 """
 tests/conftest.py
 -------------------------------
-GPU-pipeline-scoped fixtures. Adds a --size pytest option so the same tests
+Shared test fixtures. Adds a --size pytest option so GPU pipeline tests
 can validate any model size (mini, 125m, 350m, 1b) without code changes.
+
+Default is mini. Full-size artifact checks are opt-in by passing
+--size=125m, --size=350m, or --size=1b after the corresponding run completes.
+
+Default is mini. Full-size artifact checks are opt-in by passing
+--size=125m, --size=350m, or --size=1b after the corresponding run completes.
 
 Usage:
     pytest tests/gpu_pipeline/ --size=mini

@@ -11,7 +11,7 @@ tests/
 ├── conftest.py                         Shared fixtures, DATA_DIR resolution, fasttext mock
 │
 ├── data_pipeline/                      CPU curation instance — run after each data stage
-│   ├── test_pipeline_curator.py        Validates make curate-mini outputs (all 12 sources)
+│   ├── test_pipeline_curator.py        Validates make curate-mini outputs (all 17 concrete sources)
 │   ├── test_pipeline_validate.py       Validates make validate outputs
 │   └── test_pipeline_tokenizer.py      Validates make tokenizer outputs
 │
@@ -45,7 +45,7 @@ make test-data-pipeline
 
 **GPU training instance:**
 
-The four GPU pipeline test targets (`test-training`, `test-sft-chat`, `test-sft-code`, `test-dpo`) accept `SIZE=<size>` and pass `--size=<size>` through to pytest. A fixture in `tests/gpu_pipeline/conftest.py` derives the checkpoint directory from `--size`. The Makefile default for these targets is `SIZE=mini`, so the standard pipeline-validation flow works with no flag:
+The four GPU pipeline test targets (`test-training`, `test-sft-chat`, `test-sft-code`, `test-dpo`) accept `SIZE=<size>` and pass `--size=<size>` through to pytest. A fixture in `tests/conftest.py` derives the checkpoint directory from `--size`. The Makefile default for these targets is `SIZE=mini`, so the standard pipeline-validation flow works with no flag. Full-size artifact checks are explicit opt-in checks after a completed full run:
 
 ```bash
 # After mini runs (SIZE=mini is the default for these test targets)
@@ -77,19 +77,19 @@ make test-model
 
 ### `test-curator` — after `make curate-mini`
 
-The mini curation run exercises all 12 data sources (7 non-code top-level + 5 code sub-sources) with small per-source budgets (a few hundred to a few thousand docs each). This validates that every source loader works, that the filter and dedup stages handle the full source set, and that the cap-and-redistribute blend logic covers any supply shortfall via FineWeb overflow.
+The mini curation run exercises all 17 concrete data sources (12 non-code top-level sources + 5 code sub-sources) with small per-source budgets (a few hundred to a few thousand docs each). This validates that every source loader works, that the filter and dedup stages handle the full source set, and that the cap-and-redistribute blend logic covers any supply shortfall via FineWeb overflow.
 
 | Check | What it catches |
 |---|---|
-| Raw shards exist for all 12 sources | A source loader is broken or didn't run |
+| Raw shards exist for all 17 concrete sources | A source loader is broken or didn't run |
 | Source tag in each shard matches its directory | Source wrote to wrong directory or used wrong SOURCE_TAG |
 | `quality.py` `CODE_SOURCES` matches `config.CODE_SOURCES` | Drift between the filter-routing set and the data-mix source of truth |
 | Filtered docs pass quality checks | Filter stage did not run or has a bug |
 | Non-code filtered docs meet min length (500 chars) | Min length filter not applied |
-| Deduped dirs exist and are non-empty for all 12 sources | Dedup stage failed for one or more sources |
+| Deduped dirs exist and are non-empty for all 17 concrete sources | Dedup stage failed for one or more sources |
 | No exact duplicates across all deduped output | Exact dedup not working |
 | `train.jsonl` exists and is non-empty | Blend stage failed |
-| `train.jsonl` contains all 12 sources | Blend missing a source |
+| `train.jsonl` contains the configured source set | Blend missing a source |
 | `train.jsonl` has no unknown source tags | Corruption or wrong source tag introduced |
 | No short non-code docs in `train.jsonl` | Filtered data not used as blend input |
 | No exact duplicates in `train.jsonl` | Deduped data not used as blend input |
@@ -101,7 +101,7 @@ The mini curation run exercises all 12 data sources (7 non-code top-level + 5 co
 | FineWeb has overflow when other sources have deficit | Overflow sink not triggered |
 | Per-source val_docs sum matches val.jsonl line count | Reservoir sample tracking broken |
 
-**All 12 sources must appear in `train.jsonl`.** Unlike the previous stack_v2 setup (which depended on SWH and could legitimately produce zero docs during rate-limit windows), stack_v1 has file content inline in the parquet shards and will always produce output if the mini cap is reached. A missing source now indicates a real failure — gated-dataset license not accepted, `HF_TOKEN` misconfigured, or a loader regression — and the test should fail in that case, not skip.
+**The configured source set should appear in `train.jsonl`.** Unlike the previous stack_v2 setup (which depended on SWH and could legitimately produce zero docs during rate-limit windows), stack_v1 has file content inline in the parquet shards and will always produce output if the mini cap is reached. A missing source now indicates a real failure — gated-dataset license not accepted, `HF_TOKEN` misconfigured, or a loader regression — and the test should fail in that case, not skip.
 
 ### `test-validate` — after `make validate`
 
@@ -214,7 +214,7 @@ Two files cover the model layer, run together by `make test-model`:
 
 ## Requirements
 
-**No downloads required for any tests.** The fasttext model (`lid.176.ftz`) is mocked in `conftest.py`. KenLM is not used directly in tests. GPU pipeline tests require CUDA but only run if the relevant checkpoint exists — they skip automatically if the model directory for the requested `SIZE` isn't there.
+**No downloads required for any tests.** The fasttext model (`lid.176.ftz`) is mocked in `conftest.py`. KenLM is not used directly in tests. GPU pipeline tests default to `SIZE=mini`. Full-size checks are opt-in by passing `SIZE=125m`, `SIZE=350m`, or `SIZE=1b` after the corresponding run completes. They require CUDA and skip automatically if the model directory for the requested `SIZE` is not present.
 
 **`DATA_DIR` must be set** for data pipeline tests. It is set automatically by `setup.sh` and written to `~/.bashrc`. If tests are skipping unexpectedly, check:
 

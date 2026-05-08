@@ -195,7 +195,6 @@ slm/
 │   ├── model/
 │   │   └── test_model.py
 │   └── gpu_pipeline/
-│       ├── conftest.py            adds --size pytest option for GPU pipeline tests
 │       ├── test_pipeline_training.py
 │       ├── test_pipeline_sft.py
 │       └── test_pipeline_dpo.py
@@ -692,7 +691,7 @@ make eval-chat     SIZE=125m   # after DPO (also: make eval)
 
 **Why a separate `config_gen/` package for `config_gen.py`?** The pretrain configs need to be tuned per GPU — `micro_batch_size` that fits on H200 fits trivially on B200 but not on A100 40GB, and the right `gradient_accumulation_steps` depends on both GPU memory and the count. Hand-tuning these for every (size, GPU, num_gpus) combination is error-prone and stale configs silently waste GPU hours. Centralising the math in `config_gen/config_gen.py` — keyed off measured GPU specs and per-size memory profiles — makes "tune for this hardware" a one-line `make config-gen` rather than a careful manual edit. The script intentionally leaves LR, schedule, and architecture untouched: those are recipe decisions, not hardware decisions.
 
-**Why parametrize GPU pipeline tests by `--size`?** A test pinned to `results/slm-mini/final` skips on any larger checkpoint — defeating the purpose after a real run. The four GPU pipeline test targets (`test-training`, `test-sft-chat`, `test-sft-code`, `test-dpo`) accept `SIZE=<size>` and pass `--size=<size>` to pytest, where a fixture in `tests/gpu_pipeline/conftest.py` derives the model directory. Same tests, same Makefile pattern as everything else, no new targets per size.
+**Why parametrize GPU pipeline tests by `--size`?** A test pinned to `results/slm-mini/final` skips on any larger checkpoint — defeating the purpose after a real run. The four GPU pipeline test targets (`test-training`, `test-sft-chat`, `test-sft-code`, `test-dpo`) accept `SIZE=<size>` and pass `--size=<size>` to pytest, where a fixture in `tests/conftest.py` derives the model directory. Same tests, same Makefile pattern as everything else, no new targets per size.
 
 **Why vLLM for serving?** PagedAttention enables continuous batching and efficient KV cache management. The OpenAI-compatible API means any client built against the OpenAI SDK works out of the box.
 
