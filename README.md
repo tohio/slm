@@ -540,6 +540,9 @@ make pretrain CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
 
 When supply-constrained sources (peS2o, jupyter, and at 1b also Wikipedia / pg19 / open_web_math / stack_smol) fall short of their character budget, the deficit is automatically routed to FineWeb as an overflow sink. The mix shape is preserved; the token target is hit.
 
+
+Generated/template-like sources run exact dedup but bypass fuzzy MinHash dedup so useful near-duplicate training signal is not collapsed.
+
 ### Run-specific realized mix
 
 The source mix above is the current pretraining target mix. The actual realized mix for each curation run is written to `data/curated/blend_stats.json` at the end of the blend stage.

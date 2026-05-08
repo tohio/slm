@@ -195,11 +195,19 @@ class QualityConfig:
 
     # Length filter skip lists. Separate min/max so sources can opt out
     # of one bound without the other:
-    #   pg19     — books run 200k–1M chars; skip max only (keep min).
-    #   conala   — NL→code pairs run 50–500 chars; skip min only (keep max).
-    #   jupyter  — wide range; skip both bounds.
+    #   pg19                 — books run 200k–1M chars; skip max only.
+    #   conala               — NL→code pairs run 50–500 chars; skip min only.
+    #   jupyter              — wide range; skip both bounds.
+    #   generated sources    — short/template-like examples; skip min only.
     skip_min_length_sources: frozenset[str] = field(
-        default_factory=lambda: frozenset({"conala", "jupyter"})
+        default_factory=lambda: frozenset({
+            "conala",
+            "jupyter",
+            "synthetic_arithmetic",
+            "synthetic_task_code",
+            "educational_qa_mcq",
+            "factual_restraint",
+        })
     )
     skip_max_length_sources: frozenset[str] = field(
         default_factory=lambda: frozenset({"pg19", "jupyter"})

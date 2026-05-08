@@ -154,11 +154,10 @@ RAW_DIR      = DATA_DIR / "raw"
 FILTERED_DIR = DATA_DIR / "filtered"
 CURATED_DIR  = DATA_DIR / "curated"
 
-# Generated arithmetic is intentionally template-like and dense.
-# Fuzzy MinHash dedup collapses it aggressively, which destroys the
-# intended 1.5% arithmetic signal. Near-duplicate arithmetic templates are
-# useful training signal here, not contamination, so this source bypasses
-# fuzzy dedup and relies on the generator to avoid exact duplicate records.
+# Generated/template-like sources are intentionally dense and repetitive.
+# Fuzzy MinHash dedup collapses them aggressively, which destroys the intended
+# amplified signal. These sources still run exact dedup, but bypass fuzzy
+# MinHash so near-duplicate templates remain available as training signal.
 SKIP_FUZZY_DEDUP_SOURCES = {
     "synthetic_arithmetic",
     "synthetic_task_code",
@@ -541,12 +540,17 @@ def stage_dedup(workers: int | None = None) -> None:
 
         if source in SKIP_FUZZY_DEDUP_SOURCES:
             log.info(
-                f"  {source}: skipping fuzzy dedup; copying filtered shards "
-                f"to deduped output"
+                f"  {source}: running exact dedup; skipping fuzzy MinHash dedup"
             )
+            scratch_dir = working_dir / source
+            exact_dir = scratch_dir / "exact_deduped"
+            dedup.exact_dedup_source(src_dir=src_dir, dst_dir=exact_dir)
+
             dst_dir.mkdir(parents=True, exist_ok=True)
-            for shard in sorted(src_dir.glob("*.jsonl")):
+            for shard in sorted(exact_dir.glob("*.jsonl")):
                 shutil.copy2(shard, dst_dir / shard.name)
+
+            shutil.rmtree(scratch_dir, ignore_errors=True)
             continue
 
         dedup.deduplicate_source(

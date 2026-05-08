@@ -79,6 +79,16 @@ class TestConfigurationDrift:
             f"Symbol-heavy quality skip sources are not in ALL_SOURCES: {missing}"
         )
 
+    def test_generated_sources_skip_fuzzy_dedup_only(self):
+        """
+        Generated/template-like sources should bypass fuzzy MinHash dedup, but
+        still run exact dedup. MinHash collapses useful near-duplicate template
+        signal; exact dedup only removes true duplicate rows.
+        """
+        from curator.scripts.curate import SKIP_FUZZY_DEDUP_SOURCES
+
+        assert SKIP_FUZZY_DEDUP_SOURCES == SYMBOL_HEAVY_SKIP_SOURCES
+
 
 # ── Raw data ───────────────────────────────────────────────────────────────────
 
@@ -151,11 +161,15 @@ class TestFilteredData:
             + "\n".join(failures[:5])
         )
 
-    @pytest.mark.parametrize("source", list(NON_CODE_SOURCES))
+    @pytest.mark.parametrize(
+        "source",
+        [s for s in NON_CODE_SOURCES if s not in QUALITY_SKIP_SOURCES],
+    )
     def test_filtered_non_code_has_minimum_length(self, source):
         """
-        Non-code sources go through the full length filter. Every filtered
-        doc should meet the minimum character threshold (500 from QualityConfig).
+        Prose-like non-code sources go through the full minimum-length filter.
+        Generated/template-like sources are excluded because they intentionally
+        produce short examples.
         """
         MIN_CHARS = 500
         shards = sorted(pipeline_path("filtered", source).glob("*.jsonl"))

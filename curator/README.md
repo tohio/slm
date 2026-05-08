@@ -294,6 +294,8 @@ Two-stage deduplication applied after quality filtering, per source:
 
 **Stage 2 — Fuzzy dedup (datatrove).** 4-stage disk-based MinHash LSH pipeline: signatures → buckets → cluster → filter. Catches near-duplicates (Jaccard similarity > 0.8). Peak RAM is bounded by shard size, not corpus size — 125m, 350m, and 1b run with the same memory footprint.
 
+Generated/template-like sources (`synthetic_arithmetic`, `synthetic_task_code`, `educational_qa_mcq`, `factual_restraint`) still run exact dedup, but bypass fuzzy MinHash dedup. MinHash collapses useful near-duplicate template variation too aggressively; exact dedup only removes true duplicate rows.
+
 Per-source scratch (`data/dedup_scratch/<source>/`) is deleted automatically after each source's MinHash filter writes its output successfully. Without this, the 125m run accumulated 135 GB of scratch across the source set; at 1b it would scale to ~780 GB and not fit on a 2 TB disk alongside raw + filtered + curated.
 
 ---
