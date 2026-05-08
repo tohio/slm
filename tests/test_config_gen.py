@@ -74,8 +74,8 @@ class TestPretrainInvariants:
     @pytest.mark.parametrize("num_gpus", [1, 4, 8])
     def test_token_budget_within_2pct(self, size, num_gpus):
         cfg = compute_pretrain_config("h200", size, num_gpus)
-        target = SIZE_PROFILES[size].tokens
-        err = abs(cfg.actual_total_tokens - target) / target
+        target = SIZE_PROFILES[size].consumed_tokens
+        err = abs(cfg.actual_consumed_tokens - target) / target
         assert err < 0.02, f"{size}/{num_gpus}: err={err:.3%}"
 
     @pytest.mark.parametrize("size", sorted(SIZE_PROFILES))
@@ -228,10 +228,20 @@ class TestUserOverrides:
         cfg = compute_pretrain_config("h200", "125m", 1, target_global_batch=64)
         assert cfg.actual_global_batch == 64
 
-    def test_target_tokens(self):
-        cfg = compute_pretrain_config("h200", "125m", 1,
-                                      target_global_batch=64,
-                                      target_tokens=5_000_000_000)
+    def test_target_consumed_tokens_override(self):
+        """
+        Explicit consumed-token override should control max_steps.
+
+        This tests the new API name. The deprecated CLI flag --target-tokens
+        is covered in config_gen.config_gen argument parsing, not here.
+        """
+        cfg = compute_pretrain_config(
+            "h200",
+            "125m",
+            1,
+            target_global_batch=64,
+            target_consumed_tokens=5_000_000_000,
+        )
         assert 38_000 < cfg.max_steps < 38_300
 
 
