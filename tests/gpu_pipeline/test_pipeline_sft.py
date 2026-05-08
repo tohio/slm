@@ -177,6 +177,7 @@ class TestSFTData:
 
 # ── Chat SFT model ─────────────────────────────────────────────────────────────
 
+@requires_stage("sft")
 class TestChatSFTModel:
     @pytest.fixture(autouse=True)
     def _skip_if_no_model(self, chat_sft_model_dir):
@@ -236,6 +237,7 @@ class TestChatSFTModel:
 
 # ── Code SFT model ─────────────────────────────────────────────────────────────
 
+@requires_stage("sft-code")
 class TestCodeSFTModel:
     @pytest.fixture(autouse=True)
     def _skip_if_no_model(self, code_sft_model_dir):

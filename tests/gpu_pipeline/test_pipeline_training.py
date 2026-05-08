@@ -21,9 +21,10 @@ import pytest
 import torch
 import yaml
 
-from tests.data_pipeline.helpers import pipeline_path
+from tests.data_pipeline.helpers import pipeline_path, requires_stage
 
 
+@requires_stage("pretrain")
 class TestPretrainOutputs:
     @pytest.fixture(autouse=True)
     def _skip_if_no_model(self, pretrain_model_dir):
@@ -139,6 +140,7 @@ class TestPretrainOutputs:
         )
 
 
+@requires_stage("tokenize")
 class TestPretrainingDataset:
     def test_tokenized_bin_exists(self):
         assert pipeline_path("tokenized", "train.bin").exists(), (
