@@ -689,7 +689,7 @@ make pretrain SIZE=350m GPUS=6
 make pretrain SIZE=1b   GPUS=8
 
 # Override config explicitly
-make pretrain CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
+make pretrain PRETRAIN_CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
 ```
 
 **Requires:** `data/tokenized/train.bin`, `data/tokenizer/`, `pretrain/configs/gpt_$(SIZE).yaml` (run `make config-gen-pretrain` first), accelerate configured.

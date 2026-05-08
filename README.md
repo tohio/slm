@@ -511,7 +511,7 @@ make sft-code  SIZE=125m GPUS=8
 make dpo       SIZE=125m GPUS=8
 
 # Override config directly
-make pretrain CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
+make pretrain PRETRAIN_CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
 ```
 
 ---

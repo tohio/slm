@@ -5,7 +5,7 @@
 #   make <target> SIZE=350m                              # different model size
 #   make <target> GPUS=4                                 # multi-GPU
 #   make <target> WORKERS=16                             # parallel workers for filter, dedup, blend
-#   make <target> CONFIG=pretrain/configs/gpt_125m.yaml  # explicit config override
+#   make pretrain PRETRAIN_CONFIG=pretrain/configs/gpt_125m.yaml  # explicit pretrain config override
 #   make config-gen-* GPU=h200                           # override GPU auto-detection
 #   make config-gen-* MODE=aggressive                    # 90% VRAM budget (or conservative=70%)
 #
