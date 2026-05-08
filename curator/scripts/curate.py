@@ -101,12 +101,16 @@ from curator.filters.quality import QualityFilter
 
 from curator.sources.common_crawl import CommonCrawlSource
 from curator.sources.fineweb import FineWebSource
+from curator.sources.fineweb_edu import FineWebEduSource
 from curator.sources.wikipedia import WikipediaSource
 from curator.sources.pg19 import PG19Source
 from curator.sources.pes2o import PeS2oSource
 from curator.sources.open_web_math import OpenWebMathSource
 from curator.sources.stackexchange import StackExchangeSource
 from curator.sources.synthetic_arithmetic import SyntheticArithmeticSource
+from curator.sources.synthetic_task_code import SyntheticTaskCodeSource
+from curator.sources.educational_qa_mcq import EducationalQAMCQSource
+from curator.sources.factual_restraint import FactualRestraintSource
 from curator.sources.code_search_net import CodeSearchNetSource
 from curator.sources.stack_smol import StackSmolSource
 from curator.sources.stack_v1 import StackV1Source
@@ -155,7 +159,12 @@ CURATED_DIR  = DATA_DIR / "curated"
 # intended 1.5% arithmetic signal. Near-duplicate arithmetic templates are
 # useful training signal here, not contamination, so this source bypasses
 # fuzzy dedup and relies on the generator to avoid exact duplicate records.
-SKIP_FUZZY_DEDUP_SOURCES = {"synthetic_arithmetic"}
+SKIP_FUZZY_DEDUP_SOURCES = {
+    "synthetic_arithmetic",
+    "synthetic_task_code",
+    "educational_qa_mcq",
+    "factual_restraint",
+}
 
 
 # ── Per-source download cap derivation ─────────────────────────────────────────
@@ -189,12 +198,16 @@ SKIP_FUZZY_DEDUP_SOURCES = {"synthetic_arithmetic"}
 
 _AVG_CHARS_PER_DOC: dict[str, int] = {
     "fineweb":       3_000,
+    "fineweb_edu":   3_000,
     "wikipedia":     5_000,
     "pg19":          400_000,
     "pes2o":         1_400,
     "open_web_math": 8_000,
     "stackexchange": 1_700,
     "synthetic_arithmetic": 1_500,
+    "synthetic_task_code":   1_200,
+    "educational_qa_mcq":    1_000,
+    "factual_restraint":       400,
     "stack_v1":      5_500,
     "stack_smol":    10_000,
     "jupyter":       11_000,
@@ -202,12 +215,16 @@ _AVG_CHARS_PER_DOC: dict[str, int] = {
 
 _DOWNLOAD_INFLATION: dict[str, float] = {
     "fineweb":       5.0,
+    "fineweb_edu":   5.0,
     "wikipedia":     3.0,
     "pg19":          5.0,
     "pes2o":         5.0,
     "open_web_math": 5.0,
     "stackexchange": 5.0,
     "synthetic_arithmetic": 1.5,
+    "synthetic_task_code":   1.5,
+    "educational_qa_mcq":    1.5,
+    "factual_restraint":     1.2,
     "stack_v1":      5.0,
     "stack_smol":    5.0,
     "jupyter":       5.0,
@@ -275,9 +292,9 @@ def compute_source_char_targets(total_tokens: int) -> dict[str, int]:
     """
     Compute the character budget for each source from the target tokens.
 
-    Returns a dict mapping each concrete source name (7 non-code + 5 code)
-    to its target character count. Code sources get their share of the
-    10% code budget according to CODE_SUBMIX.
+    Returns a dict mapping each concrete source name to its target character
+    count. Code sources get their share of the code budget according to
+    CODE_SUBMIX.
     """
     targets: dict[str, int] = {}
     for source, share in _TOP_LEVEL_SHARE.items():
@@ -356,6 +373,8 @@ def _build_source(
 
     if name == "fineweb":
         return FineWebSource(output_dir=raw_dir, max_docs=cap)
+    if name == "fineweb_edu":
+        return FineWebEduSource(output_dir=raw_dir, max_docs=cap)
     if name == "wikipedia":
         return WikipediaSource(output_dir=raw_dir, max_docs=cap)
     if name == "pg19":
@@ -368,6 +387,12 @@ def _build_source(
         return StackExchangeSource(output_dir=raw_dir, max_docs=cap)
     if name == "synthetic_arithmetic":
         return SyntheticArithmeticSource(output_dir=raw_dir, max_docs=cap)
+    if name == "synthetic_task_code":
+        return SyntheticTaskCodeSource(output_dir=raw_dir, max_docs=cap)
+    if name == "educational_qa_mcq":
+        return EducationalQAMCQSource(output_dir=raw_dir, max_docs=cap)
+    if name == "factual_restraint":
+        return FactualRestraintSource(output_dir=raw_dir, max_docs=cap)
     if name == "codesearchnet":
         return CodeSearchNetSource(output_dir=raw_dir, max_docs=cap)
     if name == "stack_smol":
