@@ -85,7 +85,7 @@ The mini curation run exercises all 17 concrete data sources (12 non-code top-le
 | Source tag in each shard matches its directory | Source wrote to wrong directory or used wrong SOURCE_TAG |
 | `quality.py` `CODE_SOURCES` matches `config.CODE_SOURCES` | Drift between the filter-routing set and the data-mix source of truth |
 | Filtered docs pass quality checks | Filter stage did not run or has a bug |
-| Non-code filtered docs meet min length (500 chars) | Min length filter not applied |
+| Prose-like non-code filtered docs meet min length (500 chars) | Min length filter not applied to prose-like sources, or generated/template sources incorrectly included |
 | Deduped dirs exist and are non-empty for all 17 concrete sources | Dedup stage failed for one or more sources |
 | No exact duplicates across all deduped output | Exact dedup not working |
 | `train.jsonl` exists and is non-empty | Blend stage failed |
