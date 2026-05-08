@@ -115,12 +115,16 @@ slm/
 │   ├── sources/
 │   │   ├── common_crawl.py
 │   │   ├── fineweb.py
+│   │   ├── fineweb_edu.py             educational/explanatory FineWeb-Edu source
 │   │   ├── wikipedia.py
 │   │   ├── pg19.py
 │   │   ├── pes2o.py
 │   │   ├── open_web_math.py
 │   │   ├── stackexchange.py
-│   │   ├── synthetic_arithmetic.py  generated clean arithmetic pretraining source
+│   │   ├── synthetic_arithmetic.py  generated arithmetic pretraining source
+│   │   ├── synthetic_task_code.py    generated task-shaped code examples
+│   │   ├── educational_qa_mcq.py     generated QA/MCQ educational examples
+│   │   ├── factual_restraint.py      generated factual-restraint examples
 │   │   ├── code_search_net.py
 │   │   ├── stack_smol.py
 │   │   ├── stack_v1.py
@@ -303,7 +307,7 @@ make download-fasttext-model DATA_DIR=/data/slm/data   # language ID model (~1MB
 make download-kenlm-model    DATA_DIR=/data/slm/data   # perplexity model (~4GB)
 
 # ── Step 2: Validate curation pipeline ───────────────────────────────────────
-# Exercises every curation stage end-to-end on tiny data — all 13 sources.
+# Exercises every curation stage end-to-end on tiny data — all 17 sources.
 # All tests run here — catch issues before spending hours on the full run.
 make curate-mini && make test-curator
 make validate    && make test-validate
@@ -313,7 +317,7 @@ make tokenize-upload SIZE=mini              # push mini tokenized binaries to S3
 make tokenizer-upload                       # push tokenizer to S3 (shared across all sizes)
 
 # ── Step 3: Full curation ─────────────────────────────────────────────────────
-make curate SIZE=125m WORKERS=62    # Stage 1: download, filter, dedup, blend (→ train.jsonl + val.jsonl), upload
+make curate SIZE=125m WORKERS=62    # Stage 1: 6.5B curation target; download, filter, dedup, blend, upload
 make validate                       # Stage 2: perplexity filter (applied to both splits)
 make validate-upload SIZE=125m      # Stage 2: push validated data to S3
 make tokenizer                      # Stage 3: train BPE tokenizer
@@ -377,7 +381,7 @@ Tests validate real pipeline outputs at each stage. Each test target is paired w
 **CPU curation instance:**
 
 ```bash
-make curate-mini   && make test-curator      # validate curation outputs (all 13 sources)
+make curate-mini   && make test-curator      # validate curation outputs (all 17 sources)
 make validate      && make test-validate     # validate validation outputs
 make tokenize      && make test-tokenizer    # validate tokenizer outputs
 
@@ -386,7 +390,7 @@ make test-data-pipeline                      # run all three at once
 
 **GPU training instance:**
 
-GPU pipeline test targets accept `SIZE=<size>` to validate any model size. Default is `mini` (matches the pipeline-validation flow). Pass `SIZE=125m` (or `350m`, `1b`) after a full run.
+GPU pipeline test targets accept `SIZE=<size>` to validate any model size. Default is `mini` and should remain mini-focused for normal development. Pass `SIZE=125m` (or `350m`, `1b`) only after a full run when you explicitly want larger artifact checks.
 
 ```bash
 # After mini runs (default SIZE=mini)
@@ -415,7 +419,7 @@ make test-unit            # all of the above
 
 | Target | Stage | Validates |
 |---|---|---|
-| `test-curator` | `curate-mini` | Raw shards exist for all 13 sources, filter quality, dedup correctness, blend output, stats |
+| `test-curator` | `curate-mini` | Raw shards exist for all 17 sources, filter quality, dedup correctness, blend output, stats |
 | `test-validate` | `validate` | Retention rate, subset correctness, quality of retained docs |
 | `test-tokenizer` | `tokenizer` | Special token IDs, roundtrip, fertility, chat template |
 | `test-data-pipeline` | all three above | Runs curator + validate + tokenizer tests |
@@ -453,29 +457,29 @@ If you double the GPUs, halve `gradient_accumulation_steps` to keep the global b
 
 The committed configs are written for 1 GPU. For multi-GPU pretraining, scale these values:
 
-**125m** — global batch 32 sequences, 5B corpus × 2 epochs:
+**125m** — global batch 32 sequences, 6.5B curation target × 2 epochs:
 
 | GPUs | gradient_accumulation_steps | max_steps |
 |---|---|---|
-| 1 | 8 | 152,000 |
-| 4 | 2 | 38,000 |
-| 8 | 1 | 19,000 |
+| 1 | 8 | _regenerate with `make config-gen`_ |
+| 4 | 2 | _regenerate with `make config-gen`_ |
+| 8 | 1 | _regenerate with `make config-gen`_ |
 
-**350m** — global batch 128 sequences, 15B corpus × 2 epochs:
-
-| GPUs | gradient_accumulation_steps | max_steps |
-|---|---|---|
-| 1 | 16 | 230,000 |
-| 4 | 4 | 57,500 |
-| 8 | 2 | 28,750 |
-
-**1b** — global batch 128 sequences, 30B corpus × 1 epoch:
+**350m** — global batch 128 sequences, 16.5B curation target × 2 epochs:
 
 | GPUs | gradient_accumulation_steps | max_steps |
 |---|---|---|
-| 1 | 64 | 57,000 |
-| 4 | 16 | 14,250 |
-| 8 | 8 | 7,125 |
+| 1 | 16 | _regenerate with `make config-gen`_ |
+| 4 | 4 | _regenerate with `make config-gen`_ |
+| 8 | 2 | _regenerate with `make config-gen`_ |
+
+**1b** — global batch 128 sequences, 50B curation target × 1 epoch:
+
+| GPUs | gradient_accumulation_steps | max_steps |
+|---|---|---|
+| 1 | 64 | _regenerate with `make config-gen`_ |
+| 4 | 16 | _regenerate with `make config-gen`_ |
+| 8 | 8 | _regenerate with `make config-gen`_ |
 
 ### Per-stage scaling fields
 
@@ -517,19 +521,23 @@ make pretrain CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
 
 ### Source Mix
 
-13 sources total — 8 non-code top-level sources plus 5 code sub-sources that share the 10% code budget. Scale-invariant percentages — the same mix applies at every size. Defined in `config/data_mix.py` and referenced by the curator, export, and notebooks — do not duplicate these numbers elsewhere.
+17 concrete sources total — 12 non-code top-level sources plus 5 code sub-sources that share the 15% code budget. Scale-invariant percentages — the same mix applies at every size. Defined in `config/data_mix.py` and referenced by the curator, export, and notebooks — do not duplicate these numbers elsewhere.
 
 | Source | Target Share | Notes |
-|---|---|---|
-| Common Crawl | 10% | direct WARC via trafilatura |
-| FineWeb | 46% | `HuggingFaceFW/fineweb` sample-100BT, overflow sink |
+|---|---:|---|
+| Common Crawl | 5% | direct WARC via trafilatura |
+| FineWeb | 26.5% | `HuggingFaceFW/fineweb`, overflow sink |
+| FineWeb-Edu | 10% | `HuggingFaceFW/fineweb-edu`, educational/explanatory web text |
 | Wikipedia | 10% | `wikimedia/wikipedia` EN |
 | pg19 | 2.5% | public-domain books pre-1919 |
-| peS2o | 5% | `allenai/peS2o` v2 — academic papers |
-| open-web-math | 10% | math-heavy web filtered from CC |
-| StackExchange | 5% | Q+A across dozens of sites |
-| Synthetic arithmetic | 1.5% | generated locally by `curator/sources/synthetic_arithmetic.py`; dense elementary arithmetic examples |
-| Code (total) | 10% | split across 5 code sub-sources (see curator/README.md) |
+| peS2o | 5% | `allenai/peS2o` v2 — academic/scientific prose |
+| OpenWebMath | 10% | math-heavy web text |
+| StackExchange | 5% | Q&A across dozens of sites |
+| Synthetic arithmetic | 3% | generated locally; arithmetic formats: QA, equations, word problems, comparisons |
+| Synthetic task code | 5% | generated locally; task-shaped code examples, Python 70% / Go 15% / Rust 10% / Bash 5% |
+| Educational QA/MCQ | 3% | generated locally; QA, MCQ, explanation, and cloze formats; benchmark datasets excluded |
+| Factual restraint | 0.5% | generated locally; uncertainty, private/unverifiable facts, no fake search/tool claims |
+| Code (total) | 15% | split across 5 code sub-sources (see curator/README.md) |
 
 When supply-constrained sources (peS2o, jupyter, and at 1b also Wikipedia / pg19 / open_web_math / stack_smol) fall short of their character budget, the deficit is automatically routed to FineWeb as an overflow sink. The mix shape is preserved; the token target is hit.
 
@@ -543,13 +551,15 @@ Use `blend_stats.json` as the source of truth for a completed run. `export.py` r
 
 ### Token Targets
 
-| Model | Corpus tokens | Epochs |
-|---|---:|---:|
-| `slm-125m` | 5B | 2 |
-| `slm-350m` | 15B | 2 |
-| `slm-1b` | 30B | 1 |
+| Model | Curation target | Expected retained/tokenized | Epochs | Consumed target |
+|---|---:|---:|---:|---:|
+| `slm-125m` | 6.5B | ~6.0B | 2 | 13B |
+| `slm-350m` | 16.5B | ~15B | 2 | 33B |
+| `slm-1b` | 50B | 45B+ | 1 | 50B |
 
-Why 1b uses 1 epoch: at 30B tokens / 1 epoch, every source stays below its supply ceiling, so no repetition. Modern small-model training (Llama, Phi) follows the same pattern — fresh tokens outperform repeated ones. 125m and 350m retain 2 epochs because their smaller budgets leave comfortable headroom. 
+`corpus_tokens` is the curator-side target, not a guaranteed final retained/tokenized count. Filtering, validation, deduplication, source availability, and tokenization reduce the final retained corpus. The revised targets include a retention buffer based on the completed 125M run, where a 5.5B curation target produced about 5.12B retained/tokenized tokens.
+
+Why 1b uses 1 epoch: at a 50B curation target, one epoch gives the 1B model a materially larger fresh-token budget while avoiding an immediate second pass over finite sources. 125m and 350m retain 2 epochs because their smaller corpus targets are intended for cheaper iteration and validation. 
 
 ### Train / val split
 
@@ -666,15 +676,15 @@ make eval-chat     SIZE=125m   # after DPO (also: make eval)
 
 **Why per-variant eval targets?** `eval-base`, `eval-instruct`, and `eval-chat` evaluate the three checkpoints written by the pipeline (`results/slm-{size}/final`, `results/slm-{size}-chat-code/final`, `results/slm-{size}-dpo/final`). Running each one writes its own JSON output, which `export.py` then reads when building per-variant model cards on the Hub. A single combined `eval` target would either skip the base and instruct cards or require running them all in series at the end — splitting them out lets eval run inline with each pipeline stage.
 
-**Why 13 data sources?** Distribution coverage. A model pretrained only on web scrape (even filtered) has characteristic weaknesses: poor factual recall on niche topics, no long-range coherence over book-length spans, weak technical/academic prose, weak math reasoning, weak Q+A structure, weak code. Each of the 13 sources covers a specific gap — 8 non-code top-level sources for prose breadth and targeted arithmetic signal, plus 5 code sub-sources for code coverage from raw files (stack-v1) through curated function/notebook/intent corpora (CodeSearchNet, stack-smol, jupyter, CoNaLa). The `synthetic_arithmetic` source was added after inspecting the base model and curation data: OpenWebMath contributes math-heavy text, but simple arithmetic supervision was too sparse and noisy for reliable elementary arithmetic behavior. See [curator/README.md](curator/README.md) for the full mix and sub-source rationale.
+**Why 17 concrete data sources?** Distribution coverage. A model pretrained only on web scrape (even filtered) has characteristic weaknesses: poor factual recall on niche topics, no long-range coherence over book-length spans, weak technical/academic prose, weak math reasoning, weak Q+A structure, weak code. Each of the 17 concrete sources covers a specific gap — 12 non-code top-level sources for prose breadth, educational/explanatory text, arithmetic, QA/MCQ format, factual restraint, and task-code signal, plus 5 code sub-sources for code coverage from raw files (stack-v1) through curated function/notebook/intent corpora (CodeSearchNet, stack-smol, jupyter, CoNaLa). The `synthetic_arithmetic` source was added after inspecting the base model and curation data: OpenWebMath contributes math-heavy text, but simple arithmetic supervision was too sparse and noisy for reliable elementary arithmetic behavior. See [curator/README.md](curator/README.md) for the full mix and sub-source rationale.
 
 **Why scale-invariant mix percentages?** A reader scaling from 125m to 1b changes one number (`target_tokens`) and gets proportionally more of everything — no per-scale mix tuning. Supply variance is handled by cap-and-redistribute, not by per-scale knobs.
 
 **Why `rope_theta=500000` across all sizes?** RoPE's base period is the slow axis of the position encoding — larger values give the model room to extrapolate to longer contexts than it was trained on. Using 500000 uniformly across 125m, 350m, and 1b means any size can be length-extended later (via YaRN, dynamic scaling, or similar) without retraining from scratch. The tradeoff at 2048 context (125m, 350m) is negligible — large base values don't hurt in-context quality at short sequence lengths, and consistency across sizes is worth more than micro-optimising each tier. Llama 3 and Qwen follow this same pre-stretched-base pattern.
 
-**Why different epoch counts per scale?** Corpus size versus per-source supply. At 125m (5B corpus tokens), 2 epochs is comfortable; at 1b (30B corpus tokens), 1 epoch leaves every source below its supply ceiling, so no repetition. Modern small-model training (Llama, Phi, Qwen) follows the single-epoch pattern at scale — fresh tokens outperform repeated ones.
+**Why different epoch counts per scale?** Corpus size versus per-source supply. At 125m (6.5B curation target), 2 epochs is used for cheaper iteration; at 1b (50B curation target), 1 epoch gives substantially more fresh-token exposure and avoids an immediate second pass over finite sources. Modern small-model training (Llama, Phi, Qwen) follows the single-epoch pattern at scale — fresh tokens outperform repeated ones.
 
-**Why streaming-first curation?** At 1b with 30B+ tokens, materializing sources in memory is infeasible on reasonable hardware. FineWeb and stack-v1 require streaming; the other sources use it for consistency. RAM is not the load-bearing scaling axis — vCPU count and network throughput are. This means readers on modest hardware (32 GB RAM) can still run 1b, just slower.
+**Why streaming-first curation?** At 1b with a 50B curation target, materializing sources in memory is infeasible on reasonable hardware. FineWeb and stack-v1 require streaming; the other sources use it for consistency. RAM is not the load-bearing scaling axis — vCPU count and network throughput are. This means readers on modest hardware (32 GB RAM) can still run 1b, just slower.
 
 **Why cap-and-redistribute?** Several sources have finite supply at large scales — peS2o (abstracts only) and jupyter are supply-bound at 350m+; Wikipedia, pg19, open_web_math, and stack_smol become supply-bound at 1b. Rather than add per-scale knobs or accept repetition, the deficit routes to FineWeb — which has 15T tokens of headroom — preserving mix shape and hitting the token target.
 
@@ -700,7 +710,7 @@ The pipeline is designed to extend past 1b. Scale-invariant percentages, streami
 
 To run at 3b or beyond:
 
-1. Add a new entry to `TARGET_CONFIGS` in `config/data_mix.py` with the new `total_tokens`, `epochs`, and `cc_crawls` list.
+1. Add a new entry to `TARGET_CONFIGS` in `config/data_mix.py` with the new `corpus_tokens`, `epochs`, and `cc_crawls` list.
 2. Add a matching entry to `SIZE_PROFILES` in `config_gen/config_gen.py` with `state_gb`, `act_per_seq_gb_*`, `ctx`, `ref_global_batch`, `tokens`, `lr`, `hidden`, `layers`, and head counts. After this, `make config-gen SIZE=3b GPUS=N` produces a tuned pretrain config automatically.
 3. Add hand-written SFT and DPO configs for the new size in `finetune/configs/` and `alignment/configs/`.
 4. Review Wikipedia and pg19 supply: at budgets approaching 40B × 1 epoch, Wikipedia repetition approaches 1.6×. Options: drop Wikipedia's share, add multilingual Wikipedia, or accept the repetition.
