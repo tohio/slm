@@ -249,6 +249,16 @@ def _format_data_mix_table(size: str) -> str:
             "|---|---|---|",
         ]
         for name, entry in DATA_MIX.items():
+            if name == "code":
+                code_top_pct = entry["pct"]
+                for code_name, code_entry in CODE_SUBMIX.items():
+                    target_pct = (code_entry["pct"] / 100.0) * code_top_pct
+                    lines.append(
+                        f"| `{code_name}` | {target_pct:.2f}% | "
+                        f"{dataset_link(code_entry)} |"
+                    )
+                continue
+
             lines.append(f"| `{name}` | {entry['pct']:.1f}% | {dataset_link(entry)} |")
         lines.append("")
         lines.append(
@@ -344,7 +354,7 @@ def generate_model_card(
 
     variant_section = {
         "base": f"""\
-This is the **base** variant — pretrained on {token_tgt} tokens with no fine-tuning.
+This is the **base** variant — pretrained from a {token_tgt} curation target with no fine-tuning.
 It is suitable for research and as a starting point for further fine-tuning.
 Use [`{HF_USERNAME}/slm-{size}-instruct`](https://huggingface.co/{HF_USERNAME}/slm-{size}-instruct) for instruction following or
 [`{HF_USERNAME}/slm-{size}-chat`](https://huggingface.co/{HF_USERNAME}/slm-{size}-chat) for aligned conversation.
@@ -367,12 +377,12 @@ Use [`{HF_USERNAME}/slm-{size}`](https://huggingface.co/{HF_USERNAME}/slm-{size}
 
     training_section = {
         "base": f"""\
-**Pretraining corpus** — {token_tgt} tokens blended across the following sources:
+**Pretraining corpus** — {token_tgt} curation target blended across the following sources:
 
 {pretrain_table}
 """,
         "instruct": f"""\
-**Pretraining corpus** — {token_tgt} tokens blended across the following sources:
+**Pretraining corpus** — {token_tgt} curation target blended across the following sources:
 
 {pretrain_table}
 
@@ -385,7 +395,7 @@ Use [`{HF_USERNAME}/slm-{size}`](https://huggingface.co/{HF_USERNAME}/slm-{size}
 | Code SFT | [Magicoder-OSS-Instruct-75K](https://huggingface.co/datasets/ise-uiuc/Magicoder-OSS-Instruct-75K) + handcrafted body-only completions | ~75K examples + small handcrafted set |
 """,
         "chat": f"""\
-**Pretraining corpus** — {token_tgt} tokens blended across the following sources:
+**Pretraining corpus** — {token_tgt} curation target blended across the following sources:
 
 {pretrain_table}
 
