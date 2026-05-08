@@ -353,9 +353,9 @@ Downloads raw data from 17 concrete sources (12 non-code top-level sources + 5 c
 | Model | Total tokens | CC segments |
 |---|---|---|
 | `mini` | 1M | 2 |
-| `125m` | 5B | 459 |
-| `350m` | 15B | 916 (split across 2 crawls) |
-| `1b` | 30B | 1,833 (split across 3 crawls) |
+| `125m` | 6.5B curation target | computed from `config/data_mix.py` |
+| `350m` | 16.5B curation target | computed from `config/data_mix.py` |
+| `1b` | 50B curation target | computed from `config/data_mix.py` |
 
 ---
 

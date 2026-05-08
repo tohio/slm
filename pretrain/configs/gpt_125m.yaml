@@ -23,7 +23,7 @@ training:
   #   divide gradient_accumulation_steps by num_gpus to hold global batch constant
   #   divide max_steps by num_gpus to hold token budget constant
   #
-  # Dataset: 5B tokens
+  # Dataset: 6.5B curation target
   # Tokens/step (1 GPU): 4 × 8 × 1 × 2048 = ~65k tokens/step
   # 1 epoch  → ~76,000 steps
   # 2 epochs → ~152,000 steps  ← recommended

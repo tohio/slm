@@ -74,7 +74,7 @@ Generated automatically at export time. Every variant gets:
   - Pretraining corpus table: all 13 sources (8 non-code top-level + 5 code sub-sources) with target percentages from `config/data_mix.py` and realized percentages from `data/curated/blend_stats.json` if available. Realized columns appear when blend_stats.json is present and matches the export size; otherwise the table falls back to design-target-only with a caveat noting that the realized mix may differ. Both views are sourced from `config/data_mix.py` as the single source of truth shared with the curator and notebooks
   - Fine-tuning tables for the `instruct` and `chat` variants, listing chat SFT, response-control SFT, code SFT, and (for chat) DPO datasets
 - **Parameter count** — actual value from the loaded checkpoint
-- **Token targets** — sourced from `config/data_mix.py` (5B/15B/30B for 125m/350m/1b)
+- **Token targets** — sourced from `config/data_mix.py` (6.5B/16.5B/50B curation targets for 125m/350m/1b)
 - **Benchmark results** — populated from the most recent `eval.py` run for **this variant's checkpoint**. `base` shows base-model scores, `instruct` shows SFT scores, `chat` shows post-DPO scores
 - **Hardware** — training hardware used
 - **Limitations** — scale, hallucination, safety, language, and code coverage

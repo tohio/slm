@@ -23,11 +23,11 @@ training:
   #   divide gradient_accumulation_steps by num_gpus to hold global batch constant
   #   divide max_steps by num_gpus to hold token budget constant
   #
-  # Dataset: 30B tokens
+  # Dataset: 50B curation target
   # Tokens/step (1 GPU): 2 × 64 × 1 × 4096 = ~524k tokens/step
   # 1 epoch  → ~57,000 steps  ← recommended
   #
-  # At 30B tokens / 1 epoch every source stays below its supply ceiling, so
+  # At 50B curation target / 1 epoch, the run prioritizes fresh-token exposure and avoids an immediate second pass over finite sources.
   # no repetition is needed. Modern small-model training (Llama, Phi, Qwen)
   # follows the single-epoch pattern at this scale — fresh tokens outperform
   # repeated ones.

@@ -212,9 +212,9 @@ class DPOProfile:
 # The values here therefore evolve automatically when the curator's TARGET_CONFIGS
 # is edited; no manual sync required.
 #
-#   125m: 5B  × 2 = 10B
-#   350m: 15B × 2 = 30B
-#   1b:   30B × 1 = 30B
+#   125m: 6.5B  × 2 = 13B
+#   350m: 16.5B × 2 = 33B
+#   1b:   50B   × 1 = 50B
 SIZE_PROFILES: dict[str, PretrainProfile] = {
     "125m": PretrainProfile(
         state_gb=2.0, act_per_seq_gb_no_ckpt=1.75, act_per_seq_gb_ckpt=0.60,

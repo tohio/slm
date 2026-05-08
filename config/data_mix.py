@@ -296,7 +296,7 @@ TARGET_CONFIGS: dict[str, dict] = {
 # excluding code sources). Rounded to 4.3 for budget math.
 #
 # Previous value of 5 was a planning estimate that overshot tokens by ~17%
-# at all scales (a 5B-token target produced ~5.84B actual tokens). All
+# at all scales. The completed 125M run showed that validation/filtering
 # 16 consumers use this constant in arithmetic only — int → float is safe.
 #
 # If the tokenizer is retrained on a substantially different mix, rerun
