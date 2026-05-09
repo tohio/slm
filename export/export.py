@@ -600,6 +600,40 @@ def _validate_bundled_files(checkpoint: Path) -> None:
     )
 
 
+def _ensure_remote_code_auto_map(checkpoint: Path) -> None:
+    """
+    Ensure config.json advertises the bundled custom architecture to
+    Transformers AutoConfig / AutoModelForCausalLM.
+
+    Without auto_map, trust_remote_code=True is not enough: Transformers sees
+    model_type="slm" but does not know which remote classes to load.
+    """
+    config_path = checkpoint / "config.json"
+    if not config_path.is_file():
+        raise FileNotFoundError(f"Missing config.json at {config_path}")
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+
+    expected_auto_map = {
+        "AutoConfig": "config.SLMConfig",
+        "AutoModelForCausalLM": "model.SLMForCausalLM",
+    }
+
+    current = cfg.get("auto_map")
+    if current == expected_auto_map:
+        log.info("Remote-code auto_map already present in config.json")
+        return
+
+    cfg["auto_map"] = expected_auto_map
+
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+
+    log.info("Injected remote-code auto_map into config.json")
+
+
 def export(
     size: str,
     variant: str,
@@ -671,6 +705,7 @@ def export(
         # Confirm architecture files are bundled at the checkpoint root —
         # catches missing files before a real push is attempted.
         _validate_bundled_files(checkpoint)
+        _ensure_remote_code_auto_map(checkpoint)
         card = generate_model_card(size, variant, hub_name, n_params, eval_scores)
         log.info(f"Model card preview ({len(card):,} chars, first 400):")
         log.info(card[:400].replace("\n", "\n  "))
@@ -688,6 +723,7 @@ def export(
     # training; this validates rather than re-bundles since training
     # already did the work.
     _validate_bundled_files(checkpoint)
+    _ensure_remote_code_auto_map(checkpoint)
 
     model_card = generate_model_card(size, variant, hub_name, n_params, eval_scores)
     card_path  = checkpoint / "README.md"
