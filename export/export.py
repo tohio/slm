@@ -33,18 +33,13 @@ checkpoint directory, so the Hub tables reflect real scores for that
 specific variant.
 
 Remote-code bundling:
-    SLMConfig declares auto_map pointing at config.SLMConfig and
-    model.SLMForCausalLM (flat layout, no subpackage). The architecture
-    .py files (config.py, model.py, attention.py, block.py, mlp.py,
-    norm.py) are written into the checkpoint root by
-    SLMForCausalLM.save_pretrained() during training, so by export time
-    they're already present alongside the weights. The export step
-    validates their presence rather than re-bundling.
+    Export writes the architecture files into checkpoint/slm_remote/ and
+    config.json declares auto_map entries pointing at
+    slm_remote.config.SLMConfig and slm_remote.model.SLMForCausalLM.
 
-    The flat layout works because transformers' dynamic module loader
-    namespaces remote code under transformers_modules.<sanitized_name>.*,
-    so the bare module names `config` / `model` don't leak into the host's
-    sys.path.
+    The package layout is required because model.py uses relative imports
+    such as `from .block import SLMDecoderBlock`. A flat Hub layout with
+    relative imports breaks Transformers' dynamic remote-code loader.
 """
 
 import argparse
@@ -85,9 +80,12 @@ BLEND_STATS_PATH = DATA_DIR / "curated" / "blend_stats.json"
 REPO_ROOT   = Path(__file__).resolve().parents[1]
 MODEL_PKG_DIR = REPO_ROOT / "model"
 
-# Architecture source files expected at the checkpoint root. Listed
-# explicitly so _validate_bundled_files can detect a checkpoint that
-# wasn't saved through the SLMForCausalLM.save_pretrained() override.
+# Remote-code package written into the checkpoint before Hub upload.
+# model.py uses relative imports such as `from .block import ...`, so these
+# files must be uploaded as a real package, not as unrelated flat files.
+REMOTE_CODE_PACKAGE = "slm_remote"
+
+# Architecture source files bundled into checkpoint/<REMOTE_CODE_PACKAGE>/.
 BUNDLED_SOURCE_FILES = [
     "config.py",
     "model.py",
@@ -562,43 +560,81 @@ def load_tokenizer(tokenizer_path: Path):
     return tokenizer
 
 
+def _bundle_remote_code_package(checkpoint: Path) -> Path:
+    """
+    Copy live architecture source files into checkpoint/<REMOTE_CODE_PACKAGE>/.
+
+    The model source uses package-relative imports, so the Hub upload must
+    contain a real package directory:
+        slm_remote/config.py
+        slm_remote/model.py
+        ...
+    """
+    import shutil
+
+    package_dir = checkpoint / REMOTE_CODE_PACKAGE
+    package_dir.mkdir(parents=True, exist_ok=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+
+    for filename in BUNDLED_SOURCE_FILES:
+        live_file = MODEL_PKG_DIR / filename
+        if not live_file.is_file():
+            raise FileNotFoundError(f"Missing live architecture source file: {live_file}")
+        shutil.copy2(live_file, package_dir / filename)
+
+    log.info(
+        f"Bundled remote-code package: {package_dir} "
+        f"({len(BUNDLED_SOURCE_FILES)} files)"
+    )
+    return package_dir
+
+
 def _validate_bundled_files(checkpoint: Path) -> None:
     """
-    Confirm architecture .py files at checkpoint root match the live source.
+    Confirm bundled remote-code package files match the live source.
 
-    Existence alone isn't enough — a stale bundled copy from an earlier
-    training run can ship buggy code to the Hub silently. We compare bytes
-    against the live source to catch drift.
+    Existence alone is not enough — a stale bundled copy from an earlier
+    export can ship buggy code to the Hub silently. Compare bytes against
+    the live source to catch drift.
     """
     import hashlib
+
+    package_dir = checkpoint / REMOTE_CODE_PACKAGE
+    if not package_dir.is_dir():
+        raise FileNotFoundError(
+            f"Remote-code package missing from checkpoint: {package_dir}. "
+            f"Run _bundle_remote_code_package() before export."
+        )
+
+    init_file = package_dir / "__init__.py"
+    if not init_file.is_file():
+        raise FileNotFoundError(f"Missing package marker: {init_file}")
+
     missing, mismatched = [], []
     for filename in BUNDLED_SOURCE_FILES:
-        ckpt_file = checkpoint / filename
+        ckpt_file = package_dir / filename
         live_file = MODEL_PKG_DIR / filename
         if not ckpt_file.is_file():
-            missing.append(filename)
+            missing.append(str(ckpt_file.relative_to(checkpoint)))
             continue
         if hashlib.sha256(ckpt_file.read_bytes()).digest() != \
            hashlib.sha256(live_file.read_bytes()).digest():
-            mismatched.append(filename)
+            mismatched.append(str(ckpt_file.relative_to(checkpoint)))
 
     if missing:
         raise FileNotFoundError(
-            f"Architecture files missing from {checkpoint}: {missing}. "
-            f"Re-save the checkpoint or run the relevant training stage."
+            f"Architecture files missing from {package_dir}: {missing}."
         )
     if mismatched:
         raise RuntimeError(
-            f"Bundled architecture files at {checkpoint} differ from live "
-            f"source: {mismatched}. Re-sync via "
-            f"`cp model/<file>.py {checkpoint}/<file>.py` for each, or "
-            f"re-save the checkpoint."
+            f"Bundled architecture files differ from live source: {mismatched}. "
+            f"Re-run export so {REMOTE_CODE_PACKAGE}/ is refreshed."
         )
+
     log.info(
         f"Bundled remote code validated: "
         f"{len(BUNDLED_SOURCE_FILES)} files match live source"
     )
-
 
 def _ensure_remote_code_auto_map(checkpoint: Path) -> None:
     """
@@ -616,8 +652,8 @@ def _ensure_remote_code_auto_map(checkpoint: Path) -> None:
         cfg = json.load(f)
 
     expected_auto_map = {
-        "AutoConfig": "config.SLMConfig",
-        "AutoModelForCausalLM": "model.SLMForCausalLM",
+        "AutoConfig": f"{REMOTE_CODE_PACKAGE}.config.SLMConfig",
+        "AutoModelForCausalLM": f"{REMOTE_CODE_PACKAGE}.model.SLMForCausalLM",
     }
 
     current = cfg.get("auto_map")
@@ -702,8 +738,8 @@ def export(
         log.info("Dry run — skipping Hub push")
         log.info(f"Would push to: https://huggingface.co/{repo_id}")
         _validate_model(model, tokenizer, config)
-        # Confirm architecture files are bundled at the checkpoint root —
-        # catches missing files before a real push is attempted.
+        # Bundle and validate remote-code package before preview.
+        _bundle_remote_code_package(checkpoint)
         _validate_bundled_files(checkpoint)
         _ensure_remote_code_auto_map(checkpoint)
         card = generate_model_card(size, variant, hub_name, n_params, eval_scores)
@@ -718,10 +754,8 @@ def export(
 
     _validate_model(model, tokenizer, config)
 
-    # Confirm architecture files are bundled at the checkpoint root.
-    # SLMForCausalLM.save_pretrained() writes them automatically during
-    # training; this validates rather than re-bundles since training
-    # already did the work.
+    # Bundle and validate remote-code package before Hub upload.
+    _bundle_remote_code_package(checkpoint)
     _validate_bundled_files(checkpoint)
     _ensure_remote_code_auto_map(checkpoint)
 
@@ -732,7 +766,7 @@ def export(
     log.info(f"Model card written to {card_path} ({len(model_card):,} chars)")
 
     # Single-commit push of the entire checkpoint dir — weights, config
-    # (with auto_map), tokenizer, README.md, and the bundled .py files.
+    # (with auto_map), tokenizer, README.md, and the bundled remote-code package.
     # Using push_to_hub on the model would omit the README and any other
     # files at the checkpoint root, so we upload the folder directly.
     from huggingface_hub import HfApi
