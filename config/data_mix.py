@@ -295,9 +295,10 @@ TARGET_CONFIGS: dict[str, dict] = {
 # pretraining corpus (10k docs sampled from data/validated/train.jsonl,
 # excluding code sources). Rounded to 4.3 for budget math.
 #
-# Previous value of 5 was a planning estimate that overshot tokens by ~17%
-# at all scales. The completed 125M run showed that validation/filtering
-# 16 consumers use this constant in arithmetic only — int → float is safe.
+# Previous value of 5 was a planning estimate that overshot retained tokens.
+# The completed 125M run showed that validation/filtering/tokenization can
+# reduce the final retained/tokenized corpus relative to the curation target.
+# Consumers use this constant in arithmetic only — int → float is safe.
 #
 # If the tokenizer is retrained on a substantially different mix, rerun
 # the chars-per-token measurement (see tokenizer/README.md) and update.
@@ -394,7 +395,7 @@ def consumed_tokens(size: str) -> int:
 
 
 def corpus_tokens_display(size: str) -> str:
-    """Return the human-readable corpus size (e.g. "5B") for a given size."""
+    """Return the human-readable corpus size (e.g. "6.5B") for a given size."""
     return TARGET_CONFIGS[size]["display_corpus"]
 
 
