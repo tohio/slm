@@ -136,6 +136,7 @@ slm/
 │   │   └── dedup.py
 │   └── scripts/
 │       ├── curate.py
+│       ├── sample_source.py        prints actual source/stage records for human review
 │       └── upload_s3.py
 │
 ├── validation/

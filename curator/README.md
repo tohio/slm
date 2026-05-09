@@ -118,6 +118,7 @@ curator/
 │   └── dedup.py               Exact + datatrove disk-based MinHash deduplication
 └── scripts/
 ├── curate.py              Main pipeline entry point, mix layer, cap-and-redistribute
+├── sample_source.py       Print actual source/stage records for human review
 └── upload_s3.py           S3 upload/download utilities
 ```
 
@@ -178,6 +179,41 @@ python curator/scripts/curate.py --target 125m --stage dedup --workers 8
 python curator/scripts/curate.py --target 125m --stage blend
 python curator/scripts/curate.py --target 125m --stage upload
 ```
+
+**Human sample inspection**
+
+Before changing source percentages or launching an expensive training run, inspect the actual records produced by each source. This is a human review step: the goal is to see whether the data itself is readable, complete, useful, and aligned with the signal expected from that source.
+
+```bash
+# Inspect actual records from one source/stage.
+python curator/scripts/sample_source.py --stage raw --source wikipedia --limit 10 --max-chars 2500
+python curator/scripts/sample_source.py --stage filtered --source wikipedia --limit 10 --max-chars 2500
+python curator/scripts/sample_source.py --stage deduped --source wikipedia --limit 10 --max-chars 2500
+
+# After blend/validation, train.jsonl and val.jsonl are mixed-source files,
+# so the script filters records by their source field.
+python curator/scripts/sample_source.py --stage curated --source wikipedia --limit 10 --max-chars 2500
+python curator/scripts/sample_source.py --stage validated --source wikipedia --limit 10 --max-chars 2500
+```
+
+Use `--random` to sample from across the available files instead of reading the first matching records:
+
+```bash
+python curator/scripts/sample_source.py --stage filtered --source fineweb --limit 20 --random --seed 13
+python curator/scripts/sample_source.py --stage filtered --source open_web_math --limit 20 --random --seed 13
+python curator/scripts/sample_source.py --stage filtered --source stackexchange --limit 20 --random --seed 13
+python curator/scripts/sample_source.py --stage filtered --source codesearchnet --limit 20 --random --seed 13
+```
+
+When reviewing samples, ask:
+
+- Is the text readable and complete?
+- Does it look like real content or boilerplate/noise?
+- Does the source provide the expected signal, such as factual prose, math, Q&A, code, or instruction-shaped examples?
+- Did filtering or validation remove useful formatting?
+- Are generated/template-like sources producing direct, verified examples rather than vague prose?
+
+This inspection step is separate from automated filtering. Quality filters can remove obvious junk, but they do not prove that a source teaches the model the behavior we want.
 
 **S3 upload**
 
