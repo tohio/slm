@@ -324,15 +324,29 @@ def _format_data_mix_table(size: str) -> str:
 
 def _format_data_mix_table_design_only() -> str:
     """
-    Render DATA_MIX as a design-only table. Used as a defensive fallback
-    inside _format_data_mix_table when blend_stats has zero chars.
+    Render the design target table with concrete source rows.
+
+    DATA_MIX contains a logical "code" bucket, so expand that bucket into
+    CODE_SUBMIX rows instead of showing a single abstract code row.
     """
     lines = [
         "| Source | Target Share | Link |",
         "|---|---|---|",
     ]
+
     for name, entry in DATA_MIX.items():
+        if name == "code":
+            code_top_pct = entry["pct"]
+            for code_name, code_entry in CODE_SUBMIX.items():
+                target_pct = (code_entry["pct"] / 100.0) * code_top_pct
+                lines.append(
+                    f"| `{code_name}` | {target_pct:.2f}% | "
+                    f"{dataset_link(code_entry)} |"
+                )
+            continue
+
         lines.append(f"| `{name}` | {entry['pct']:.1f}% | {dataset_link(entry)} |")
+
     return "\n".join(lines)
 
 
