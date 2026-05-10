@@ -105,7 +105,7 @@ slm/
 │   │   ├── wikipedia.py
 │   │   ├── pg19.py
 │   │   ├── pes2o.py
-│   │   ├── open_web_math.py
+│   │   ├── nemotron_cc_math.py
 │   │   ├── stackexchange.py
 │   │   ├── synthetic_arithmetic.py  generated arithmetic pretraining source
 │   │   ├── synthetic_task_code.py    generated task-shaped code examples
@@ -529,7 +529,7 @@ make pretrain PRETRAIN_CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
 | Factual restraint | 0.5% | generated locally; uncertainty, private/unverifiable facts, no fake search/tool claims |
 | Code (total) | 15% | split across 7 code sub-sources (see curator/README.md) |
 
-When supply-constrained sources (peS2o, jupyter, and at 1b also Wikipedia / pg19 / open_web_math / stack_smol) fall short of their character budget, the deficit is automatically routed to FineWeb as an overflow sink. The mix shape is preserved; the token target is hit.
+When supply-constrained sources (peS2o, jupyter, and at 1b also Wikipedia / pg19 / nemotron_cc_math / stack_smol) fall short of their character budget, the deficit is automatically routed to FineWeb as an overflow sink. The mix shape is preserved; the token target is hit.
 
 
 Generated/template-like sources run exact dedup but bypass fuzzy MinHash dedup so useful near-duplicate training signal is not collapsed.
@@ -736,7 +736,7 @@ slang/context grounding.
 
 **Why per-variant eval targets?** `eval-base`, `eval-instruct`, and `eval-chat` evaluate the three checkpoints written by the pipeline (`results/slm-{size}/final`, `results/slm-{size}-chat-code/final`, `results/slm-{size}-dpo/final`). Running each one writes its own JSON output, which `export.py` then reads when building per-variant model cards on the Hub. A single combined `eval` target would either skip the base and instruct cards or require running them all in series at the end — splitting them out lets eval run inline with each pipeline stage.
 
-**Why 17 concrete data sources?** Distribution coverage. A model pretrained only on web scrape (even filtered) has characteristic weaknesses: poor factual recall on niche topics, no long-range coherence over book-length spans, weak technical/academic prose, weak math reasoning, weak Q+A structure, weak code. Each of the 20 concrete sources covers a specific gap — 12 non-code top-level sources for prose breadth, educational/explanatory text, arithmetic, QA/MCQ format, factual restraint, and task-code signal, plus 5 code sub-sources for code coverage from raw files (stack-v1) through curated function/notebook/intent corpora (CodeSearchNet, stack-smol, jupyter, CoNaLa). The `synthetic_arithmetic` source was added after inspecting the base model and curation data: OpenWebMath contributes math-heavy text, but simple arithmetic supervision was too sparse and noisy for reliable elementary arithmetic behavior. See [curator/README.md](curator/README.md) for the full mix and sub-source rationale.
+**Why 17 concrete data sources?** Distribution coverage. A model pretrained only on web scrape (even filtered) has characteristic weaknesses: poor factual recall on niche topics, no long-range coherence over book-length spans, weak technical/academic prose, weak math reasoning, weak Q+A structure, weak code. Each of the 20 concrete sources covers a specific gap — 12 non-code top-level sources for prose breadth, educational/explanatory text, arithmetic, QA/MCQ format, factual restraint, and task-code signal, plus 5 code sub-sources for code coverage from raw files (stack-v1) through curated function/notebook/intent corpora (CodeSearchNet, stack-smol, jupyter, CoNaLa). The `synthetic_arithmetic` source was added after inspecting the base model and curation data: Nemotron CC Math contributes math-heavy text, but simple arithmetic supervision was too sparse and noisy for reliable elementary arithmetic behavior. See [curator/README.md](curator/README.md) for the full mix and sub-source rationale.
 
 **Why scale-invariant mix percentages?** A reader scaling from 125m to 1b changes one number (`corpus_tokens`) and gets proportionally more of everything — no per-scale mix tuning. Supply variance is handled by cap-and-redistribute, not by per-scale knobs.
 
@@ -746,7 +746,7 @@ slang/context grounding.
 
 **Why streaming-first curation?** At 1b with a 75B curation target, materializing sources in memory is infeasible on reasonable hardware. FineWeb and stack-v1 require streaming; the other sources use it for consistency. RAM is not the load-bearing scaling axis — vCPU count and network throughput are. This means readers on modest hardware (32 GB RAM) can still run 1b, just slower.
 
-**Why cap-and-redistribute?** Several sources have finite supply at large scales — peS2o (abstracts only) and jupyter are supply-bound at 350m+; Wikipedia, pg19, open_web_math, and stack_smol become supply-bound at 1b. Rather than add per-scale knobs or accept repetition, the deficit routes to FineWeb — which has 15T tokens of headroom — preserving mix shape and hitting the token target.
+**Why cap-and-redistribute?** Several sources have finite supply at large scales — peS2o (abstracts only) and jupyter are supply-bound at 350m+; Wikipedia, pg19, nemotron_cc_math, and stack_smol become supply-bound at 1b. Rather than add per-scale knobs or accept repetition, the deficit routes to FineWeb — which has 15T tokens of headroom — preserving mix shape and hitting the token target.
 
 **Why a single `config/` package for locked values?** The data mix, token targets, CHARS_PER_TOKEN, CC_CHARS_PER_SEGMENT, PRETRAIN_VAL_FRACTION, and a few other constants are each read by multiple stages (curator, export, pretrain, notebooks, tests). Previously they were duplicated — and the duplicates drifted, most visibly in an export pipeline that was writing stale pretraining tables to the Hub while the curator was actually running the 13-source mix. Centralising into `config/data_mix.py` with an import-time `validate()` makes drift impossible: every consumer sees the same values, and percentages sum-to-100 at the moment the module is loaded.
 
@@ -820,3 +820,156 @@ This project is scoped as a complete end-to-end training pipeline and demonstrat
 ## License
 
 MIT
+
+## Accept dataset Terms of Use
+
+Some upstream datasets are gated on Hugging Face and require accepting the
+dataset terms before curation can stream them. Accept the terms in the browser
+while signed in to the Hugging Face account whose token will be used for
+curation.
+
+Required gated/source-access checks for the current mix:
+
+| Dataset | Purpose | Notes |
+|---|---|---|
+| `nvidia/Nemotron-CC-Math-v1` | math/STEM source replacing OpenWebMath | use the higher-quality `4plus` config by default |
+| `nvidia/Nemotron-Pretraining-Specialized-v1.1` | scalable specialized/synthetic source and local-synthetic overflow reservoir | use approved subsets only; exclude Multiple Choice by default |
+| `nvidia/Nemotron-Pretraining-Code-v2` | primary scalable code source in the code submix | may require NVIDIA dataset access approval |
+| `nvidia/Nemotron-CC-Code-v1` | CC-derived code/tutorial/docs-style source | may require NVIDIA dataset access approval |
+| `bigcode/the-stack-dedup` | reduced raw-code diversity source | may require accepting BigCode terms |
+| `bigcode/the-stack-smol` | small broad-language code diversity slice | may require accepting BigCode terms |
+
+After accepting terms, make sure the same Hugging Face token is available on
+both the development machine and the curation instance:
+
+```bash
+huggingface-cli login
+# or
+export HF_TOKEN=hf_...
+```
+
+Quick access check:
+
+```bash
+python3 - <<'PY'
+from datasets import load_dataset
+
+tests = [
+    ("nvidia/Nemotron-CC-Math-v1", "4plus"),
+    ("nvidia/Nemotron-Pretraining-Specialized-v1.1", None),
+    ("nvidia/Nemotron-Pretraining-Code-v2", None),
+    ("nvidia/Nemotron-CC-Code-v1", None),
+]
+
+for name, config in tests:
+    print("\n==>", name, config or "")
+    ds = (
+        load_dataset(name, config, split="train", streaming=True)
+        if config
+        else load_dataset(name, split="train", streaming=True)
+    )
+    row = next(iter(ds))
+    print(row.keys())
+PY
+```
+
+## Current curation source policy
+
+The current curation policy prioritizes useful-token density over simply adding
+more generic web text.
+
+### Corpus targets
+
+| Model size | Corpus target | Epochs | Consumed-token target |
+|---|---:|---:|---:|
+| `125m` | 10B | 2 | 20B |
+| `350m` | 25B | 2 | 50B |
+| `1b` | 75B | 1 | 75B |
+
+`mini` remains a small inspection run and is not scaled with the model-size
+targets.
+
+### Top-level mix direction
+
+| Source | Share | Role |
+|---|---:|---|
+| Common Crawl | 5% | raw-web diversity; keep reduced because it is expensive and mixed quality |
+| FineWeb | 10% | broad web and final fallback |
+| FineWeb-Edu | 26% | primary educational/explanatory web source |
+| Wikipedia | 10% | factual encyclopedia prose |
+| PG-19 | 2.5% | long-form public-domain text |
+| peS2o | 5% | academic/scientific prose |
+| Nemotron CC Math | 5% | math/STEM source replacing OpenWebMath |
+| StackExchange | 5% | Q&A-style explanatory text |
+| Synthetic arithmetic | 3% | local targeted arithmetic signal |
+| Synthetic task code | 5% | local targeted code-output behavior |
+| Educational QA/MCQ | 3% | local controlled QA/MCQ/cloze signal |
+| Factual restraint | 0.5% | local no-guess/no-fake-tool factual-restraint signal |
+| Nemotron Specialized | 5% | scalable specialized/synthetic reservoir |
+| Code total | 15% | split across the code submix |
+
+OpenWebMath is intentionally removed from the active mix. Nemotron CC Math is
+the preferred math source for this iteration.
+
+### Code submix
+
+The code share remains 15% of the corpus. Within that code share:
+
+| Code source | Sub-share | Role |
+|---|---:|---|
+| Nemotron Pretraining Code v2 | 30% | primary scalable code source |
+| the-stack-dedup v1 | 25% | reduced raw-code diversity source |
+| CodeSearchNet | 25% | function/docstring code signal |
+| Nemotron CC Code | 10% | code/tutorial/docs-style web code |
+| the-stack-smol | 5% | small broad-language diversity slice |
+| Jupyter | 4% | code-plus-prose notebook signal |
+| CoNaLa | 1% | NL-to-code intent pairs |
+
+### Overflow policy
+
+Deficits are source-aware.
+
+Local synthetic source deficits:
+
+```text
+synthetic_arithmetic
+synthetic_task_code
+educational_qa_mcq
+factual_restraint
+    -> nemotron_specialized
+    -> fineweb_edu
+    -> fineweb
+```
+
+General source deficits:
+
+```text
+all other underfilled sources
+    -> fineweb_edu
+    -> fineweb
+```
+
+FineWeb remains the final broad-web fallback, but it is no longer the first
+overflow target for every shortfall.
+
+### Local synthetic source policy
+
+Local synthetic sources are targeted behavior patches, not bulk-scale corpus
+replacements. They should scale to a safe local level, and any remaining deficit
+should overflow to Nemotron Specialized first.
+
+### Nemotron Specialized subset policy
+
+Use the following Specialized subsets by default:
+
+```text
+Nemotron-Pretraining-Code-Concepts
+Nemotron-Pretraining-Unconditional-Algorithmic
+Nemotron-Pretraining-Formal-Logic
+Nemotron-Pretraining-Economics
+```
+
+Exclude the `Nemotron-Pretraining-Multiple-Choice` subset by default. That
+subset may introduce DeepSeek license obligations for distributed or hosted
+derivative models. The local `educational_qa_mcq` source remains the controlled
+small QA/MCQ source.
