@@ -652,6 +652,32 @@ subset may introduce DeepSeek license obligations for distributed or hosted
 derivative models. The local `educational_qa_mcq` source remains the controlled
 small QA/MCQ source.
 
+## NVIDIA/Nemotron sources are supplemental
+
+FineWeb and FineWeb-Edu remain the broad web base for this from-scratch
+training pipeline. NVIDIA/Nemotron datasets are used only to supplement
+specific high-signal gaps: math, code, and specialized synthetic overflow.
+They are not a replacement for the repo's core curation approach.
+
+Current use:
+
+```text
+Nemotron-CC-Math-v1:
+  math/STEM supplement replacing OpenWebMath
+
+Nemotron-Pretraining-Code-v2:
+  code supplement replacing part of the raw Stack/code share
+
+Nemotron-CC-Code-v1:
+  code-web/tutorial/docs-style supplement
+
+Nemotron-Pretraining-Specialized-v1.1:
+  specialized synthetic supplement and local synthetic overflow target
+
+Nemotron-CC-v2.1:
+  not active in this mix
+```
+
 ## Mini curation inspection gate
 
 `make curate-mini` is an inspection gate, not just a smoke test. After a mini
