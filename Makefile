@@ -271,8 +271,8 @@ reinit-embeds:
 # ── Stage 5: SFT ──────────────────────────────────────────────────────────────
 
 prepare-sft:
-	@echo "==> Stage 5a: Prepare SFT data"
-	$(PYTHON) finetune/data/prepare_sft.py --stage both
+	@echo "==> Stage 5a: Prepare SFT data ($(SIZE))"
+	$(PYTHON) finetune/data/prepare_sft.py --stage both --size $(SIZE)
 
 sft:
 	@echo "==> Stage 5b: Chat SFT ($(SIZE), $(GPUS) GPU(s), config=$(SFT_CHAT_CONFIG))"

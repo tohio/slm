@@ -17,8 +17,11 @@ Chat template application:
     assistant_only_loss=True.
 
 Stage 1 — Chat SFT:
-    Dataset: teknium/OpenHermes-2.5
-    Size:    ~1M examples
+    Dataset: size-aware SmolTalk policy
+        125m: 50% of HuggingFaceTB/smol-smoltalk
+        350m: full HuggingFaceTB/smol-smoltalk
+        1b:   full HuggingFaceTB/smoltalk
+    Plus:    generated response-control examples from finetune/data/response_control.py
     Output:  data/sft/chat/train.jsonl + val.jsonl
 
 Stage 2 — Code SFT:
@@ -37,13 +40,13 @@ Output format — one conversation per line:
             {"role": "user",      "content": "..."},
             {"role": "assistant", "content": "..."}
         ],
-        "source": "openhermes",
+        "source": "smol_smoltalk",
         "sft_type": "general_assistant"
     }
 
 Usage:
-    python finetune/data/prepare_sft.py --stage both
-    python finetune/data/prepare_sft.py --stage chat
+    python finetune/data/prepare_sft.py --stage both --size 125m
+    python finetune/data/prepare_sft.py --stage chat --size 350m
     python finetune/data/prepare_sft.py --stage code
 """
 
@@ -92,6 +95,40 @@ HANDCRAFTED_CODE_EXPLANATION_REPEAT = 20
 
 
 # Generated response-control chat examples are built in finetune/data/response_control.py.
+
+
+# ── Chat SFT backbone policy ──────────────────────────────────────────────────
+#
+# OpenHermes is intentionally no longer the default chat SFT source.
+# SmolTalk / smol-smoltalk provides the general assistant backbone, while
+# response_control supplies the targeted custom gap-fill examples.
+#
+# Size policy:
+#   125m: half of smol-smoltalk
+#   350m: full smol-smoltalk
+#   1b: full smoltalk
+CHAT_SFT_BACKBONE = {
+    "125m": {
+        "dataset": "HuggingFaceTB/smol-smoltalk",
+        "split": "train",
+        "source": "smol_smoltalk",
+        "fraction": 0.50,
+    },
+    "350m": {
+        "dataset": "HuggingFaceTB/smol-smoltalk",
+        "split": "train",
+        "source": "smol_smoltalk",
+        "fraction": 1.00,
+    },
+    "1b": {
+        "dataset": "HuggingFaceTB/smoltalk",
+        "split": "train",
+        "source": "smoltalk",
+        "fraction": 1.00,
+    },
+}
+
+VALID_SFT_SIZES = tuple(CHAT_SFT_BACKBONE.keys())
 
 
 def build_handcrafted_response_control_records() -> list[dict]:
@@ -712,7 +749,99 @@ def write_jsonl(records: list[dict], path: Path) -> None:
     log.info(f"Wrote {len(records):,} records to {path}")
 
 
-# ── Chat SFT — OpenHermes-2.5 ─────────────────────────────────────────────────
+# ── Chat SFT — SmolTalk backbone + custom response-control ─────────────────────
+
+def normalize_chat_messages(example: dict) -> list[dict] | None:
+    """
+    Normalize common chat/instruction schemas into SLM's conversation format.
+
+    Supported shapes:
+      - {"messages": [{"role": "...", "content": "..."}]}
+      - {"conversations": [{"from": "...", "value": "..."}]}
+      - {"prompt": "...", "response"/"completion"/"answer": "..."}
+    """
+    raw = example.get("messages") or example.get("conversations")
+
+    messages: list[dict] = []
+
+    if isinstance(raw, list):
+        for turn in raw:
+            if not isinstance(turn, dict):
+                return None
+
+            role = (turn.get("role") or turn.get("from") or "").strip().lower()
+            content = (turn.get("content") or turn.get("value") or "").strip()
+
+            if not content:
+                return None
+
+            if role in ("system",):
+                mapped_role = "system"
+            elif role in ("human", "user"):
+                mapped_role = "user"
+            elif role in ("gpt", "assistant"):
+                mapped_role = "assistant"
+            else:
+                return None
+
+            messages.append({"role": mapped_role, "content": content})
+
+    else:
+        prompt = (example.get("prompt") or example.get("instruction") or "").strip()
+        response = (
+            example.get("response")
+            or example.get("completion")
+            or example.get("answer")
+            or ""
+        ).strip()
+
+        if not prompt or not response:
+            return None
+
+        messages = [
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": response},
+        ]
+
+    if not messages:
+        return None
+
+    if messages[0]["role"] != "system":
+        messages.insert(0, {"role": "system", "content": DEFAULT_SYSTEM})
+
+    if messages[-1]["role"] != "assistant":
+        return None
+
+    roles = {m["role"] for m in messages}
+    if "user" not in roles or "assistant" not in roles:
+        return None
+
+    return messages
+
+
+def smoltalk_policy(size: str) -> dict:
+    if size not in CHAT_SFT_BACKBONE:
+        raise ValueError(f"Unsupported SFT size {size!r}. Choices: {VALID_SFT_SIZES}")
+    return CHAT_SFT_BACKBONE[size]
+
+
+def select_backbone_records(records: list[dict], fraction: float, seed: int = 42) -> list[dict]:
+    """Deterministically select a fraction of valid backbone records."""
+    if not records:
+        return records
+
+    if fraction >= 1.0:
+        return records
+
+    if fraction <= 0.0:
+        return []
+
+    n_keep = max(1, int(len(records) * fraction))
+    rng = random.Random(seed)
+    rng.shuffle(records)
+    return records[:n_keep]
+
+
 
 # Per-stage defaults for validation fraction. These are the sources of truth;
 # CLI --val-fraction overrides them only when explicitly passed.
@@ -722,17 +851,21 @@ DEFAULT_VAL_FRACTION = {
 }
 
 
-def prepare_chat(val_fraction: float) -> None:
+def prepare_chat(size: str, val_fraction: float) -> None:
     """
-    Download and format OpenHermes-2.5 for chat SFT.
+    Download and format the size-aware SmolTalk chat SFT backbone.
 
-    OpenHermes-2.5 is a high-quality synthetic instruction dataset
-    generated by GPT-4. Contains diverse instruction-following examples
-    across coding, reasoning, creative writing, and general knowledge.
+    Policy:
+      - 125m: 50% of HuggingFaceTB/smol-smoltalk
+      - 350m: full HuggingFaceTB/smol-smoltalk
+      - 1b: full HuggingFaceTB/smoltalk
 
-    Format: each example has a "conversations" field with role/value pairs.
+    Generated response-control examples are appended as the current custom
+    targeted gap-fill dataset.
     """
     from datasets import load_dataset
+
+    policy = smoltalk_policy(size)
 
     out_dir    = SFT_DIR / "chat"
     train_path = out_dir / "train.jsonl"
@@ -742,65 +875,55 @@ def prepare_chat(val_fraction: float) -> None:
         log.info(f"Chat SFT data already exists at {out_dir}")
         return
 
-    log.info("Loading OpenHermes-2.5...")
-    dataset = load_dataset("teknium/OpenHermes-2.5", split="train")
-    log.info(f"OpenHermes-2.5: {len(dataset):,} examples")
+    dataset_name = policy["dataset"]
+    split = policy["split"]
+    fraction = float(policy["fraction"])
+    source_name = policy["source"]
 
-    records = []
+    log.info(
+        f"Loading chat SFT backbone: dataset={dataset_name}, "
+        f"split={split}, size={size}, fraction={fraction:.2f}"
+    )
+    dataset = load_dataset(dataset_name, split=split)
+    log.info(f"{dataset_name}: {len(dataset):,} raw examples")
+
+    backbone_records = []
     skipped = 0
 
     for example in dataset:
-        conversations = example.get("conversations") or []
-        if not conversations:
+        messages = normalize_chat_messages(example)
+        if messages is None:
             skipped += 1
             continue
 
-        messages = []
-
-        # Add system prompt — use `or ""` to handle None values
-        system = (example.get("system_prompt") or "").strip()
-        messages.append({
-            "role": "system",
-            "content": system if system else DEFAULT_SYSTEM,
-        })
-
-        valid = True
-        for turn in conversations:
-            # Use `or ""` to handle None values in role and content fields
-            role    = (turn.get("from") or turn.get("role") or "").lower()
-            content = (turn.get("value") or turn.get("content") or "").strip()
-
-            if not content:
-                valid = False
-                break
-
-            if role in ("human", "user"):
-                messages.append({"role": "user", "content": content})
-            elif role in ("gpt", "assistant"):
-                messages.append({"role": "assistant", "content": content})
-
-        if not valid or len(messages) < 2:
-            skipped += 1
-            continue
-
-        # Must end with assistant turn
-        if messages[-1]["role"] != "assistant":
-            skipped += 1
-            continue
-
-        records.append({
+        record = {
             "conversations": messages,
-            "source": "openhermes",
+            "source": source_name,
+            "dataset": dataset_name,
             "sft_type": "general_assistant",
-        })
+        }
+
+        for meta_key in ("subset", "task", "category", "source_id"):
+            if meta_key in example and example[meta_key] is not None:
+                record[meta_key] = example[meta_key]
+
+        backbone_records.append(record)
+
+    selected_backbone = select_backbone_records(backbone_records, fraction=fraction, seed=42)
+
+    log.info(
+        f"Chat backbone: {len(backbone_records):,} valid, "
+        f"{len(selected_backbone):,} selected, {skipped:,} skipped"
+    )
 
     handcrafted_records = build_handcrafted_response_control_records()
-    records.extend(handcrafted_records)
-    log.info(f"Added generated response-control chat examples: {len(handcrafted_records):,}")
-    log.info(f"Processed: {len(records):,} kept, {skipped:,} skipped")
+    records = selected_backbone + handcrafted_records
 
-    # Split
+    log.info(f"Added generated response-control chat examples: {len(handcrafted_records):,}")
+    log.info(f"Processed: {len(records):,} total chat SFT records")
+
     n_val = max(1000, int(len(records) * val_fraction))
+    n_val = min(n_val, max(1, len(records) - 1))
     random.seed(42)
     random.shuffle(records)
     val_records   = records[:n_val]
@@ -969,12 +1092,25 @@ def main():
             f"defaults: {DEFAULT_VAL_FRACTION}"
         ),
     )
+    parser.add_argument(
+        "--size",
+        choices=VALID_SFT_SIZES,
+        default="125m",
+        help=(
+            "Model size used for size-aware chat SFT source policy. "
+            "125m=half smol-smoltalk, 350m=full smol-smoltalk, 1b=full smoltalk."
+        ),
+    )
     args = parser.parse_args()
 
     if args.stage in ("chat", "both"):
-        log.info("=== Preparing Chat SFT data (OpenHermes-2.5) ===")
+        policy = smoltalk_policy(args.size)
+        log.info(
+            "=== Preparing Chat SFT data "
+            f"({policy['dataset']}, size={args.size}, fraction={policy['fraction']:.2f}) ==="
+        )
         frac = args.val_fraction if args.val_fraction is not None else DEFAULT_VAL_FRACTION["chat"]
-        prepare_chat(val_fraction=frac)
+        prepare_chat(size=args.size, val_fraction=frac)
 
     if args.stage in ("code", "both"):
         log.info("=== Preparing Code SFT data (Magicoder-OSS-Instruct) ===")
