@@ -96,7 +96,7 @@ DATA_MIX: dict[str, dict] = {
         "url":     "https://commoncrawl.org",
     },
     "fineweb": {
-        "pct":     26.5,
+        "pct":     26.0,
         "display": "FineWeb",
         "hub":     "HuggingFaceFW/fineweb",
     },
