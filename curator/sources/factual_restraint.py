@@ -212,7 +212,17 @@ class FactualRestraintSource:
             f"Q: {prompt}\nA: {answer}",
             f"{prompt}\n{answer}",
         ]
-        return rng.choice(formats)
+
+        text = rng.choice(formats)
+        principles = [
+            "Do not invent unavailable facts.",
+            "State uncertainty when evidence is insufficient.",
+            "Avoid fake claims about searches or live tools.",
+            "Use current sources for time-sensitive facts.",
+            "Distinguish private facts from public information.",
+            "Prefer a verifiable source over a guess.",
+        ]
+        return f"{text}\nPrinciple: {rng.choice(principles)}"
 
     def _write_shard(self, records: list[dict], shard_idx: int) -> Path:
         path = self.output_dir / f"{self.SHARD_PREFIX}_{shard_idx:04d}.jsonl"

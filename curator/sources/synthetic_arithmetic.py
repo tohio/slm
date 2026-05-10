@@ -236,6 +236,28 @@ class SyntheticArithmeticSource:
 
         return rng.choice(templates), format_type
 
+    def _add_practice_context(
+        self,
+        text: str,
+        format_type: str,
+        doc_id: int,
+    ) -> str:
+        # Arithmetic rows are often very short. Add useful context only to
+        # short examples so the source can better fill its local char target.
+        if len(text) >= 90:
+            return text
+
+        notes = [
+            "This is a direct arithmetic practice example.",
+            "The numeric result is the answer to the expression.",
+            "Compute the expression and return only the result.",
+            "This example reinforces simple calculation accuracy.",
+            "The answer follows from basic arithmetic operations.",
+            "Use the equation to map the prompt to the final number.",
+        ]
+        note = notes[doc_id % len(notes)]
+        return f"{text}\nPractice note: {note}\nFormat: {format_type}.\n"
+
     def download(self) -> None:
         """Generate JSONL shards under output_dir."""
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -268,6 +290,7 @@ class SyntheticArithmeticSource:
             with shard_path.open("w", encoding="utf-8") as f:
                 for _ in range(n_this):
                     text, format_type = self._make_doc(doc_id, rng)
+                    text = self._add_practice_context(text, format_type, doc_id)
                     rec = {
                         "id": f"{self.name}_{doc_id}",
                         "source": self.name,

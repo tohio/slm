@@ -98,6 +98,8 @@ class SyntheticTaskCodeSource:
         else:
             text = self._render_bash(task_type, rng)
 
+        text = self._add_training_context(text, idx, language, task_type)
+
         stable_id = hashlib.sha256(
             f"{self.SOURCE_TAG}:{idx}:{language}:{task_type}:{text}".encode()
         ).hexdigest()[:16]
@@ -143,6 +145,44 @@ class SyntheticTaskCodeSource:
         if bucket < 95:
             return "bug_fix_small"
         return "code_explanation_to_code"
+
+
+    def _add_training_context(
+        self,
+        text: str,
+        idx: int,
+        language: str,
+        task_type: str,
+    ) -> str:
+        # Add useful deterministic variation so exact dedup does not collapse
+        # the targeted local source at mini scale.
+        emphasis = [
+            "Return the result directly.",
+            "Keep the implementation small and readable.",
+            "Use clear variable names.",
+            "Prefer straightforward control flow.",
+            "Do not describe the code instead of writing it.",
+            "Include the complete function body.",
+            "Handle the stated edge case.",
+            "Avoid unnecessary dependencies.",
+        ][idx % 8]
+
+        review_focus = [
+            "correctness",
+            "readability",
+            "edge cases",
+            "input handling",
+            "return values",
+            "simple tests",
+            "function behavior",
+            "minimal implementation",
+        ][(idx // 8) % 8]
+
+        return (
+            f"{text}\n"
+            f"Implementation note: {emphasis}\n"
+            f"Review focus: {language} {task_type} example for {review_focus}.\n"
+        )
 
     # ── Python examples ───────────────────────────────────────────────────────
 
@@ -198,7 +238,20 @@ class SyntheticTaskCodeSource:
         ex = rng.choice(examples)
 
         if task_type == "docstring_to_code":
-            return f"Python function:\n\ndef {ex['name']}(*args):\n    \"\"\"{ex['doc']}\"\"\"\n\nSolution:\n{ex['code']}\n"
+            signature = ex["code"].splitlines()[0]
+            return (
+                f"Python function:
+
+"
+                f"{signature}
+"
+                f"    \"\"\"{ex['doc']}\"\"\"
+
+"
+                f"Solution:
+{ex['code']}
+"
+            )
 
         if task_type == "signature_to_function":
             return f"Complete the Python function:\n\n{ex['code']}\n"

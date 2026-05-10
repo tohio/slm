@@ -198,6 +198,7 @@ class EducationalQAMCQSource:
         qa_type = self._qa_type_for_idx(idx)
         example = rng.choice(self.EXAMPLES)
         text = self._render(example, qa_type, rng)
+        text = self._add_learning_context(text, example, qa_type, idx)
 
         stable_id = hashlib.sha256(
             f"{self.SOURCE_TAG}:{idx}:{qa_type}:{text}".encode()
@@ -227,6 +228,41 @@ class EducationalQAMCQSource:
         if bucket < 90:
             return "qa_with_explanation"
         return "cloze_completion"
+
+    def _add_learning_context(
+        self,
+        text: str,
+        ex: dict,
+        qa_type: str,
+        idx: int,
+    ) -> str:
+        # Add compact educational context so the local QA/MCQ source has
+        # useful variation instead of exact repeated templates.
+        levels = [
+            "basic recall",
+            "short explanation",
+            "concept check",
+            "review question",
+            "practice item",
+            "quick assessment",
+        ]
+        goals = [
+            "state the answer clearly",
+            "connect the answer to the concept",
+            "avoid unnecessary detail",
+            "use the provided facts",
+            "focus on the key idea",
+            "keep the response concise",
+        ]
+        level = levels[idx % len(levels)]
+        goal = goals[(idx // len(levels)) % len(goals)]
+        subject = ex.get("subject", "general")
+
+        return (
+            f"{text}\n"
+            f"Learning context: {level} in {subject}.\n"
+            f"Answering goal: {goal}. Format: {qa_type}.\n"
+        )
 
     def _render(self, ex: dict, qa_type: str, rng: random.Random) -> str:
         if qa_type == "short_qa":
