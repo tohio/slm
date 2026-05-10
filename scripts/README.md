@@ -170,6 +170,142 @@ adds no memory overhead beyond what lm_eval itself uses. Pass
 `--batch_size` smaller if you OOM on a smaller GPU.
 
 ---
+---
+
+### `pretrain_hf_125m.py`
+
+**What it does.** Creates a 125M-only clean Hugging Face pretraining baseline
+using `HuggingFaceTB/dclm-edu` by default. It writes the same normal pipeline
+paths used by regular pretraining so downstream SFT, DPO, export, and eval
+commands work without modification.
+
+**When to use it.** Use this when you want to validate the 125M model and
+training stack against already-cleaned Hugging Face pretraining data instead
+of the custom curated corpus. This helps separate model/trainer issues from
+custom data-quality issues.
+
+This script is intentionally **not** a separate training lane. It is a
+destructive data-substitution benchmark for 125M only.
+
+**Destructive behavior.** The script writes normal paths:
+
+```text
+data/curated/train.jsonl
+data/curated/val.jsonl
+data/curated/blend_stats.json
+data/tokenized/...
+results/slm-125m/final
+```
+
+If existing artifacts are found, the script refuses to continue unless you
+choose one of these:
+
+```bash
+# Recommended: move existing artifacts to timestamped backups first.
+.venv/bin/python scripts/pretrain_hf_125m.py --stage prepare --backup-existing
+
+# Dangerous: delete existing artifacts without backup.
+.venv/bin/python scripts/pretrain_hf_125m.py --stage prepare --force --no-backup
+```
+
+Backup locations:
+
+```text
+data/backups/hf_125m_baseline/<timestamp>/
+results/backups/hf_125m_baseline/<timestamp>/
+```
+
+**How to run.**
+
+```bash
+# Prepare only: writes data/curated/train.jsonl, val.jsonl, and blend_stats.json.
+.venv/bin/python scripts/pretrain_hf_125m.py --stage prepare --backup-existing
+
+# Prepare, train tokenizer, tokenize, and pretrain using existing Make targets.
+.venv/bin/python scripts/pretrain_hf_125m.py --stage all --backup-existing
+
+# Smoke-test the script with a tiny budget.
+.venv/bin/python scripts/pretrain_hf_125m.py \
+  --stage prepare \
+  --target-tokens 1000000 \
+  --max-docs 5000 \
+  --backup-existing
+```
+
+Default settings:
+
+| Field | Value |
+|---|---|
+| Dataset | `HuggingFaceTB/dclm-edu` |
+| Size | `125m` only |
+| Target budget | `6.5B` curation tokens |
+| Source tag | `dclm_edu` |
+| Output path | normal `data/curated` and `results/slm-125m` paths |
+
+**What success looks like.** After `--stage prepare`, `data/curated/train.jsonl`,
+`data/curated/val.jsonl`, and `data/curated/blend_stats.json` exist and contain
+records with `source="dclm_edu"`. After `--stage all`, the normal checkpoint
+`results/slm-125m/final` exists, and the usual downstream commands can run:
+
+```bash
+make sft-chat SIZE=125m
+make sft-code SIZE=125m
+make dpo SIZE=125m
+make eval-chat SIZE=125m
+```
+
+**GPU sizing notes.** The prepare stage is CPU/network/disk bound. The tokenizer,
+tokenize, and pretrain stages use the existing Make targets and therefore inherit
+the same GPU requirements as normal 125M pretraining.
+
+---
+
+### `reinit_special_embeds.py`
+
+**What it does.** Re-initializes the chat-template special token embeddings in
+a pretrained checkpoint before SFT:
+
+```text
+<|system|>
+<|user|>
+<|assistant|>
+<|endofturn|>
+```
+
+It uses direct `safetensors` I/O instead of `SLMForCausalLM.from_pretrained()`
+and `SLMForCausalLM.save_pretrained()`.
+
+**When to use it.** Use this after pretraining and before chat SFT when the
+tokenizer contains chat/control tokens whose embeddings need to be reset to a
+safe initialization. This is especially useful when recovering or patching a
+checkpoint without relying on the custom-model `from_pretrained()` path.
+
+**How to run.**
+
+```bash
+# Default: patch results/slm-125m/final in place, with a backup.
+make reinit-embeds SIZE=125m
+
+# Direct invocation.
+.venv/bin/python scripts/reinit_special_embeds.py --size 125m
+
+# Explicit recovery from a checkpoint into final.
+.venv/bin/python scripts/reinit_special_embeds.py \
+  --src results/slm-125m/checkpoint-152000 \
+  --dst results/slm-125m/final
+
+# Skip backup only when you are sure.
+.venv/bin/python scripts/reinit_special_embeds.py --size 125m --no-backup
+```
+
+**What success looks like.** The script prints the special token IDs, verifies
+that only those embedding rows changed, saves `model.safetensors`, and reports
+the patched checkpoint path. If the destination exists and `--no-backup` is not
+used, it creates a timestamped backup before overwriting.
+
+**GPU sizing notes.** No GPU is required. The script loads weights on CPU and
+writes `model.safetensors` directly.
+
 
 ## Adding new scripts
 

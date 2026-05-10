@@ -182,7 +182,11 @@ slm/
 │   └── serve.sh
 │
 ├── scripts/
-│   └── sanity_train.py
+│   ├── README.md
+│   ├── pretrain_hf_125m.py       125M clean HF pretraining-data substitution benchmark
+│   ├── reinit_special_embeds.py  reinitializes chat special-token embeddings before SFT
+│   ├── run_lm_eval.py            lm-eval wrapper for custom SLM architecture
+│   └── sanity_train.py           known-good FineWeb-Edu sanity training diagnostic
 │
 ├── tests/
 │   ├── conftest.py
