@@ -362,12 +362,31 @@ def _build_source(
             max_segments = MINI_OVERRIDES.get(name)
         else:
             max_segments = compute_cc_segments(cfg["total_tokens"])
+
+        # Common Crawl is a two-stage pipeline:
+        #   - download_workers are network-bound HTTPS WARC reads
+        #   - extract_workers are CPU-bound WARC parsing + trafilatura + fastText
+        # Derive both from the global worker count so CC scales with the same
+        # CPU-aware policy as the rest of curation, while keeping sane caps for
+        # very large machines and safe behavior on small 2–8 vCPU test boxes.
+        cc_download_workers = min(32, max(1, math.ceil(workers / 3)))
+        cc_extract_workers = max(1, workers - cc_download_workers)
+        cc_in_flight = min(64, max(2, cc_download_workers * 2))
+
+        log.info(
+            "Common Crawl worker config: "
+            f"download_workers={cc_download_workers}, "
+            f"extract_workers={cc_extract_workers}, "
+            f"in_flight={cc_in_flight}"
+        )
+
         return CommonCrawlSource(
             output_dir=raw_dir,
             crawls=cfg["cc_crawls"],
             max_segments=max_segments,
-            download_workers=16,
-            extract_workers=max(1, workers - 4),
+            download_workers=cc_download_workers,
+            extract_workers=cc_extract_workers,
+            in_flight=cc_in_flight,
         )
 
     if name == "fineweb":

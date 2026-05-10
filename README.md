@@ -570,12 +570,18 @@ See `curator/README.md` for full details on the mix, sub-source breakdowns, cap-
 
 Runs on CPU instances. No GPU required. Hardware recommendations below, not floors — the pipeline streams everywhere and runs on less RAM with longer wall time.
 
-| Target | vCPUs | RAM | Curation runtime |
-|---|---|---|---|
-| `mini` | 4+ | 8 GB | 30–60 min |
+| Target | Recommended vCPUs | RAM | Curation runtime |
+|---|---:|---:|---:|
+| `mini` | 4+ | 8 GB+ | 30–60 min |
 | `slm-125m` | 64 | 256 GB | ~16 hrs (measured: 11h25m download + 16m filter + 3h6m dedup + 3m blend) |
-| `slm-350m` | 64 | 256 GB | _TBD — pending 350m run_ |
-| `slm-1b` | 64 | 256 GB | _TBD — pending 1b run_ |
+| `slm-350m` | 64+ | 256 GB+ | _TBD — pending 350m run_ |
+| `slm-1b` | 64+ | 256 GB+ | _TBD — pending 1b run_ |
+
+Full curation is strongly recommended on **16+ vCPU** machines. Smaller
+machines can run `curate-mini` and may complete full curation eventually, but
+download, extraction, validation, and deduplication stages are parallel by
+design and will be slow on 2–8 vCPU instances. For the measured 125M run,
+64 vCPU / 256 GiB was used.
 
 > **Measure your own throughput before committing.** Many variables dominate:
 > network peering between your cloud and Common Crawl's AWS `us-east-1` origin,
