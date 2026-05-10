@@ -22,12 +22,12 @@ referenced by export.py, notebooks, and tests, and drift between copies
 is what this refactor exists to prevent.
 
 Cap-and-redistribute:
-    Finite sources (Wikipedia, pg19, etc.) may supply less than their
-    character budget allows at large scales. Each source writes up to
-    its budget or until its supply is exhausted, whichever comes first.
-    The total shortfall is added to OVERFLOW_SINK's budget at the end,
-    which acts as the sink. FineWeb (the default sink) has effectively
-    unlimited supply (15T tokens) so this always closes the gap.
+    Finite sources may supply less than their character budget allows at
+    large scales. Each source writes up to its budget or until its supply is
+    exhausted, whichever comes first. Local synthetic source deficits route
+    first to Nemotron Specialized, then FineWeb-Edu, then FineWeb. General
+    source deficits route first to FineWeb-Edu, then FineWeb. FineWeb remains
+    the final broad-web fallback via OVERFLOW_SINK.
 
 Per-source download caps:
     Each finite source has a derived `max_docs` cap based on the target
@@ -44,8 +44,8 @@ Per-source download caps:
 Blend stage:
     - Pass 1 (parallel): stream each source to a staging file, recording
                          chars written vs target.
-    - Pass 2 (sequential): write overflow source's extra content to cover
-                           deficit.
+    - Pass 2 (sequential): route deficits through source-aware overflow
+                                chains.
     - Pass 3 (shuffle + split): if total size fits in RAM budget, one-shot
                                 in-memory shuffle; otherwise weighted-
                                 interleave shuffle with reservoir sampling
@@ -168,6 +168,27 @@ SKIP_FUZZY_DEDUP_SOURCES = {
     "educational_qa_mcq",
     "factual_restraint",
 }
+
+# Local synthetic sources are controlled behavior patches, not bulk reservoirs.
+# If they underfill, use the scalable specialized synthetic source first, then
+# cleaner educational web text, and only then the broad FineWeb fallback.
+LOCAL_SYNTHETIC_SOURCES = {
+    "synthetic_arithmetic",
+    "synthetic_task_code",
+    "educational_qa_mcq",
+    "factual_restraint",
+}
+
+SYNTHETIC_OVERFLOW_CHAIN = (
+    "nemotron_specialized",
+    "fineweb_edu",
+    OVERFLOW_SINK,
+)
+
+DEFAULT_OVERFLOW_CHAIN = (
+    "fineweb_edu",
+    OVERFLOW_SINK,
+)
 
 
 # ── Per-source download cap derivation ─────────────────────────────────────────
@@ -714,6 +735,53 @@ def _append_overflow(args: tuple) -> tuple[int, int]:
     return docs_appended, chars_appended
 
 
+def _append_overflow_to_source(
+    overflow_source: str,
+    requested_chars: int,
+    source_dirs: dict[str, Path],
+    staging_paths: dict[str, Path],
+    source_stats: dict[str, dict],
+) -> tuple[int, int]:
+    # Append additional docs from one overflow source into its staging file.
+    if requested_chars <= 0:
+        return 0, 0
+
+    if overflow_source not in staging_paths:
+        log.warning(
+            f"Overflow source {overflow_source!r} unavailable; "
+            f"cannot cover {requested_chars / 1e9:.3f}B chars"
+        )
+        return 0, 0
+
+    src_dir = source_dirs.get(overflow_source)
+    if src_dir is None:
+        log.warning(
+            f"Overflow source {overflow_source!r} has no source directory; "
+            f"cannot cover {requested_chars / 1e9:.3f}B chars"
+        )
+        return 0, 0
+
+    docs, chars = _append_overflow(
+        (str(src_dir), str(staging_paths[overflow_source]), requested_chars)
+    )
+
+    source_stats[overflow_source]["docs"] += docs
+    source_stats[overflow_source]["chars"] += chars
+    source_stats[overflow_source]["overflow_docs"] = (
+        source_stats[overflow_source].get("overflow_docs", 0) + docs
+    )
+    source_stats[overflow_source]["overflow_chars"] = (
+        source_stats[overflow_source].get("overflow_chars", 0) + chars
+    )
+
+    log.info(
+        f"  {overflow_source} overflow: +{docs:,} docs, "
+        f"+{chars / 1e9:.3f}B chars "
+        f"(requested {requested_chars / 1e9:.3f}B)"
+    )
+    return docs, chars
+
+
 def _shuffle_in_memory(
     staging_paths: dict[str, Path],
     train_path: Path,
@@ -971,8 +1039,9 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
                        its character target or its supply, whichever is
                        smaller. Deficits are recorded per source.
 
-    Pass 2 (sequential): OVERFLOW_SINK appends extra content to cover the
-                         total deficit from all supply-constrained sources.
+    Pass 2 (sequential): deficits route through source-aware overflow chains.
+                         Local synthetic deficits use Nemotron Specialized
+                         first; general deficits use FineWeb-Edu first.
 
     Pass 3 (shuffle + split): if effective RAM is below budget, one-shot
                               in-memory shuffle. Otherwise weighted-

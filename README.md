@@ -538,7 +538,7 @@ Generated/template-like sources run exact dedup but bypass fuzzy MinHash dedup s
 
 The source mix above is the current pretraining target mix. The actual realized mix for each curation run is written to `data/curated/blend_stats.json` at the end of the blend stage.
 
-Realized percentages can differ slightly from target percentages when a source is supply-bound or filtered/deduplicated more aggressively than expected. Any deficit is routed to FineWeb as the overflow sink so the token target is still reached.
+Realized percentages can differ slightly from target percentages when a source is supply-bound or filtered/deduplicated more aggressively than expected. Local synthetic deficits route to Nemotron Specialized first, then FineWeb-Edu, then FineWeb. General source deficits route to FineWeb-Edu first and FineWeb as the final fallback.
 
 Use `blend_stats.json` as the source of truth for a completed run. `export.py` reads this file when producing per-model cards.
 
