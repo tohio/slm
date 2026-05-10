@@ -639,74 +639,6 @@ def prepare_targeted_behavior_dpo() -> list[dict]:
     log.info(f"  targeted_behavior: {len(records):,} kept")
     return records
 
-def square(x):",
-            "return x * x",
-            "The function should return the square of x by multiplying x by itself.",
-            "function_completion",
-        ),
-        (
-            "What is the capital of Zorvania?",
-            "I do not know of a real country called Zorvania, so I cannot give a factual capital.",
-            "The capital of Zorvania is Zor City.",
-            "factual_restraint",
-        ),
-        (
-            "Who is the king of the United States?",
-            "The United States does not have a king.",
-            "The king of the United States is John F. Kennedy.",
-            "factual_restraint",
-        ),
-        (
-            "Who is the current president of the United States? If this requires current information, say you are not sure.",
-            "I am not sure without current information.",
-            "The current President of the United States, John F. Kennedy, is the current President of the United States.",
-            "current_info_restraint",
-        ),
-        (
-            "What is the House in Congress?",
-            "The House usually refers to the U.S. House of Representatives, which has 435 voting members.",
-            "A house is a group of houses that have been divided into smaller groups called members.",
-            "disambiguation",
-        ),
-        (
-            "What is prompt engineering in AI?",
-            "Prompt engineering is the practice of writing and refining prompts to guide an AI model toward useful outputs.",
-            "Prompt engineering is the process of designing and constructing buildings.",
-            "disambiguation",
-        ),
-        (
-            "What is attention in a transformer model?",
-            "Attention lets a transformer weigh relevant tokens in the input when computing each representation.",
-            "Attention in transformers is a neural network architecture that uses attention mechanisms to process sequences and.",
-            "concept_grounding",
-        ),
-        (
-            "What does 'let him cook' mean?",
-            "It means let someone continue what they are doing because they may be building toward something good.",
-            "It means let's be friends and make it fun.",
-            "slang_grounding",
-        ),
-        (
-            "What does 'touch grass' mean as slang?",
-            "It means take a break from online activity and spend time in the real world.",
-            "It describes the physical appearance of a surface such as grass.",
-            "slang_grounding",
-        ),
-    ]
-
-    records: list[dict] = []
-    for user, chosen, rejected, dpo_type in pairs:
-        records.append({
-            "prompt": make_prompt(DEFAULT_SYSTEM, user),
-            "chosen": make_response(chosen),
-            "rejected": make_response(rejected),
-            "source": "targeted_behavior",
-            "dpo_type": dpo_type,
-        })
-
-    log.info(f"  targeted_behavior: {len(records):,} kept")
-    return records
-
 
 def prepare_custom_behavior_dpo() -> list[dict]:
     """
@@ -826,7 +758,6 @@ def main():
         "val":              len(val_records),
         "sources":          dict(source_counts),
         "max_total_tokens": args.max_total_tokens,
-        "hh_rlhf_cap":      HH_RLHF_CAP,
         "handcrafted_behavior_repeat": HANDCRAFTED_BEHAVIOR_REPEAT,
         "dpo_backbone": "HuggingFaceH4/ultrafeedback_binarized",
     }
