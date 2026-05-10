@@ -373,6 +373,25 @@ def _build_source(
         cc_extract_workers = max(1, workers - cc_download_workers)
         cc_in_flight = min(64, max(2, cc_download_workers * 2))
 
+        # Full runs have enough WARC segments to benefit from the dynamic
+        # worker split above. Mini runs usually process only a few segments,
+        # so clamp worker pools to the amount of actual segment work available.
+        # This avoids spawning dozens of idle workers for `curate-mini` while
+        # preserving the higher-throughput defaults for full curation.
+        if max_segments is not None:
+            cc_download_workers = min(
+                cc_download_workers,
+                max(1, max_segments),
+            )
+            cc_extract_workers = min(
+                cc_extract_workers,
+                max(1, max_segments * 2),
+            )
+            cc_in_flight = min(
+                cc_in_flight,
+                max(2, max_segments * 2),
+            )
+
         log.info(
             "Common Crawl worker config: "
             f"download_workers={cc_download_workers}, "
