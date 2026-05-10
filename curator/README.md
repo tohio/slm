@@ -23,7 +23,7 @@ nemotron_specialized  ─┤
 code × 7              ─┘
 ```
 
-Each source runs independently through filtering and deduplication. The blend stage reads deduped shards from each source up to its character budget, with any shortfall from supply-constrained sources routed to FineWeb as an overflow sink.
+Each source runs independently through filtering and deduplication. The blend stage reads deduped shards from each source up to its character budget, with shortfalls routed through source-aware overflow chains.
 
 ---
 
@@ -39,7 +39,7 @@ Each source runs independently through filtering and deduplication. The blend st
 | Wikipedia | 10% | finite | `wikimedia/wikipedia` EN |
 | pg19 | 2.5% | finite | public-domain long-form books |
 | peS2o | 5% | finite | academic/scientific prose; supply-bound at larger scales |
-| Nemotron CC Math | 5% | very large | `nvidia/Nemotron-CC-Math-v1`, preferred math source replacing Nemotron CC Math |
+| Nemotron CC Math | 5% | very large | `nvidia/Nemotron-CC-Math-v1`, math/STEM supplement replacing OpenWebMath |
 | StackExchange | 5% | finite/large | Q&A-style web text |
 | Synthetic arithmetic | 3% | generated locally | arithmetic formats: QA, bare equations, equation completion, word problems, comparisons, and simple multi-step arithmetic |
 | Synthetic task code | 5% | generated locally | targeted task-shaped code examples; Python 70%, Go 15%, Rust 10%, Bash 5% |
@@ -66,9 +66,35 @@ Percentages are the same at every size. Scaling up changes `corpus_tokens`, not 
 
 ### Cap-and-redistribute
 
-Several sources are supply-bound at large scales: peS2o (abstracts only) and jupyter run out at 350m+; Wikipedia, pg19, nemotron_cc_math, and stack_smol all become supply-bound at 1b; codesearchnet and conala upstream is small enough to bind even sooner. Each source writes up to its budget or until its supply is exhausted, whichever is smaller. The total shortfall is added to FineWeb's budget at the end of staging. FineWeb remains the final broad-web fallback after Nemotron Specialized and FineWeb-Edu overflow routing.
+Several sources are supply-bound at large scales: peS2o (abstracts only) and jupyter run out at 350m+; Wikipedia, pg19, nemotron_cc_math, and stack_smol all become supply-bound at 1b; codesearchnet and conala upstream is small enough to bind even sooner. Each source writes up to its budget or until its supply is exhausted, whichever is smaller. The total shortfall is added to the configured overflow chain. Local synthetic deficits route to Nemotron Specialized first, then FineWeb-Edu, then FineWeb. General deficits route to FineWeb-Edu first and FineWeb as the final fallback.
 
 This behavior is load-bearing at 1b scale; partially load-bearing at 125m/350m for the always-supply-bound sources (peS2o, jupyter).
+
+### NVIDIA/Nemotron sources are supplemental
+
+FineWeb and FineWeb-Edu remain the broad web base for this from-scratch
+training pipeline. NVIDIA/Nemotron datasets are used only to supplement
+specific high-signal gaps: math, code, and specialized synthetic overflow.
+They are not a replacement for the repo's core curation approach.
+
+Current use:
+
+```text
+Nemotron-CC-Math-v1:
+  math/STEM supplement replacing OpenWebMath
+
+Nemotron-Pretraining-Code-v2:
+  code supplement replacing part of the raw Stack/code share
+
+Nemotron-CC-Code-v1:
+  code-web/tutorial/docs-style supplement
+
+Nemotron-Pretraining-Specialized-v1.1:
+  specialized synthetic supplement and local synthetic overflow target
+
+Nemotron-CC-v2.1:
+  not active in this mix
+```
 
 ### Run-specific realized mix
 
@@ -107,7 +133,7 @@ curator/
 │   ├── pes2o.py               allenai/peS2o academic papers (streaming)
 │   ├── nemotron_cc_math.py    nvidia/Nemotron-CC-Math-v1 (streaming)
 │   ├── stackexchange.py       HuggingFaceH4 stack-exchange Q+A (streaming)
-│   ├── nemotron_specialized.py nvidia/Nemotron-Pretraining-Specialized-v1.1
+│   ├── nemotron_specialized.py  nvidia/Nemotron-Pretraining-Specialized-v1.1
 │   ├── synthetic_arithmetic.py generated arithmetic pretraining source
 │   ├── synthetic_task_code.py  generated task-shaped code examples
 │   ├── educational_qa_mcq.py   generated QA/MCQ educational examples
@@ -145,7 +171,62 @@ make download-fasttext-model
 ```
 
 One environment variable is required beyond the existing ones:
-- `HF_TOKEN` — required for gated datasets (FineWeb, the-stack-smol, the-stack-dedup). Accept Terms of Use on each dataset's HuggingFace page before first run.
+- `HF_TOKEN` — required for gated datasets (BigCode and selected NVIDIA/Nemotron datasets). Accept Terms of Use on each dataset's Hugging Face page before first run.
+
+**Accept dataset Terms of Use**
+
+Before the first curation run, accept the terms for any gated Hugging Face
+datasets used by the active mix. The current mix uses BigCode and selected
+NVIDIA/Nemotron datasets.
+
+Required access checks:
+- https://huggingface.co/datasets/bigcode/the-stack-dedup
+- https://huggingface.co/datasets/bigcode/the-stack-smol
+- https://huggingface.co/datasets/nvidia/Nemotron-CC-Math-v1
+- https://huggingface.co/datasets/nvidia/Nemotron-Pretraining-Specialized-v1.1
+- https://huggingface.co/datasets/nvidia/Nemotron-Pretraining-Code-v2
+- https://huggingface.co/datasets/nvidia/Nemotron-CC-Code-v1
+
+`nvidia/Nemotron-Pretraining-Code-v2` and
+`nvidia/Nemotron-CC-Code-v1` may remain pending until NVIDIA approves access.
+Do not run `make curate-mini` with the current mix until both are accepted, or
+the code source loaders will fail.
+
+After accepting terms, make sure the token is available on the machine running
+curation:
+
+```bash
+huggingface-cli login
+# or
+export HF_TOKEN=hf_...
+```
+
+If credentials are stored in `.env`, `curate.py` loads them. Standalone test
+snippets should explicitly load `.env` with:
+
+```python
+from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv(dotenv_path=Path(".env"), override=False)
+```
+
+Nemotron Specialized subset policy:
+
+```text
+Use:
+  - Nemotron-Pretraining-Code-Concepts
+  - Nemotron-Pretraining-Unconditional-Algorithmic
+  - Nemotron-Pretraining-Formal-Logic
+  - Nemotron-Pretraining-Economics
+
+Exclude by default:
+  - Nemotron-Pretraining-Multiple-Choice
+```
+
+The standalone Multiple-Choice config is excluded by default because it may
+introduce downstream DeepSeek-license obligations for distributed or hosted
+derivative models.
 
 **Minimal run — validate the pipeline before committing to a full run**
 
@@ -153,7 +234,7 @@ One environment variable is required beyond the existing ones:
 python curator/scripts/curate.py --target mini --mini
 ```
 
-Mini exercises every source at small scale (~100 docs to a few thousand per source) to validate end-to-end that all 17 source loaders, filter logic, dedup, and the mix layer work correctly. Total runtime 30–60 min.
+Mini exercises every source at small scale (~100 docs to a few thousand per source) to validate end-to-end that all 20 source loaders, filter logic, dedup, and the mix layer work correctly. Total runtime 30–60 min.
 
 Run each stage individually to inspect output between steps:
 
@@ -251,6 +332,9 @@ data/
 │   ├── synthetic_task_code/        generated task-code shards
 │   ├── educational_qa_mcq/         generated QA/MCQ shards
 │   ├── factual_restraint/          generated factual-restraint shards
+│   ├── nemotron_specialized/       streamed specialized synthetic shards
+│   ├── nemotron_code_v2/           streamed Nemotron code-v2 shards
+│   ├── nemotron_cc_code/           streamed Nemotron CC-code shards
 │   ├── codesearchnet/              CSN 6-language shards
 │   ├── stack_smol/                 stack-smol 30-language shards
 │   ├── stack_v1/                   stack-v1 4-language shards (content inline)
@@ -342,7 +426,7 @@ Three passes:
 
 **Pass 1 (parallel).** Each source streams its deduped shards to a per-source staging file (`blend_<source>.jsonl`), stopping when the source's character target is reached or its supply is exhausted. Deficit (target minus actual) is recorded per source.
 
-**Pass 2 (sequential).** If total deficit > 0, FineWeb appends additional content to its staging file to cover the shortfall. FineWeb is the overflow sink because its supply (15T tokens) exceeds any deficit we could realistically produce.
+**Pass 2 (sequential).** If total deficit > 0, source-aware overflow chains append additional content. Local synthetic deficits route to Nemotron Specialized first, then FineWeb-Edu, then FineWeb. General source deficits route to FineWeb-Edu first and FineWeb as the final fallback.
 
 **Pass 3 (shuffle + split).** Two shuffle strategies based on size, both producing globally-mixed train and a uniform-sample val:
 - **In-memory** — when total staging (scaled by ~5× for Python object overhead) fits in `SHUFFLE_RAM_BUDGET_GB` (default 12 GB). Read everything, shuffle once, write split.
@@ -391,7 +475,7 @@ Run close to `us-east-1` (AWS) or `us-east1` (GCP) to minimise Common Crawl egre
 ### Preemptible interruption handling
 
 - **Common Crawl** tracks progress per WARC segment in `cc_progress.json`.
-- **FineWeb / peS2o / open-web-math / StackExchange / the-stack-v1 / pg19** (streaming sources) track progress by counting completed shards and skipping that many records on restart.
+- **FineWeb / peS2o / nemotron_cc_math / StackExchange / the-stack-v1 / pg19** (streaming sources) track progress by counting completed shards and skipping that many records on restart.
 - **Filter / dedup / blend** skip files that already exist on disk.
 
 Restart the exact same command to resume. At most one segment or shard of work is lost per interruption.
@@ -412,7 +496,7 @@ MinHash dedup of large sources (stack_v1 has ~2,103 shards at 125m) opens many f
 
 ## Key Design Decisions
 
-**Why 20 concrete sources?** Distribution coverage. A model pretrained only on web scrape (even filtered) has characteristic weaknesses: poor factual recall on niche topics (→ Wikipedia), no long-range coherence over book-length spans (→ pg19), weak technical/academic prose (→ peS2o), weak math reasoning and math-page style (→ open-web-math), sparse clean elementary arithmetic mappings (→ synthetic_arithmetic), weak Q+A structure (→ StackExchange), weak educational/explanatory web signal (→ FineWeb-Edu), weak task-shaped code signal (→ synthetic_task_code), weak QA/MCQ answer-selection format (→ educational_qa_mcq), weak factual restraint/uncertainty behavior (→ factual_restraint), and weak code (→ 5 code sources covering raw bulk, curated functions, multi-language samples, notebook prose+code, and NL→code intent). Each source covers a specific gap.
+**Why 20 concrete sources?** Distribution coverage. A model pretrained only on web scrape (even filtered) has characteristic weaknesses: poor factual recall on niche topics (→ Wikipedia), no long-range coherence over book-length spans (→ pg19), weak technical/academic prose (→ peS2o), weak math reasoning and math-page style (→ nemotron_cc_math), sparse clean elementary arithmetic mappings (→ synthetic_arithmetic), weak Q+A structure (→ StackExchange), weak educational/explanatory web signal (→ FineWeb-Edu), weak task-shaped code signal (→ synthetic_task_code), weak QA/MCQ answer-selection format (→ educational_qa_mcq), weak factual restraint/uncertainty behavior (→ factual_restraint), and weak code (→ 5 code sources covering Nemotron code, raw bulk, curated functions, CC code pages, multi-language samples, notebook prose+code, and NL→code intent). Each source covers a specific gap.
 
 **Why scale-invariant percentages?** A reader scaling from 125m to 1b should change one number (`corpus_tokens`) and get proportionally more of everything. Per-scale mix tuning is an axis of complexity that serves no one; the supply-constrained case is handled by cap-and-redistribute, not per-scale knobs.
 

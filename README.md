@@ -111,6 +111,9 @@ slm/
 │   │   ├── synthetic_task_code.py    generated task-shaped code examples
 │   │   ├── educational_qa_mcq.py     generated QA/MCQ educational examples
 │   │   ├── factual_restraint.py      generated factual-restraint examples
+│   │   ├── nemotron_specialized.py   nvidia/Nemotron-Pretraining-Specialized-v1.1
+│   │   ├── nemotron_code_v2.py       nvidia/Nemotron-Pretraining-Code-v2
+│   │   ├── nemotron_cc_code.py       nvidia/Nemotron-CC-Code-v1
 │   │   ├── code_search_net.py
 │   │   ├── stack_smol.py
 │   │   ├── stack_v1.py
@@ -232,7 +235,7 @@ slm/
 - CUDA-capable GPU (for pretraining stages)
 - AWS account (S3 for data storage)
 - Weights & Biases account
-- HuggingFace account + token (several sources are gated: FineWeb, the-stack-smol, the-stack-dedup)
+- HuggingFace account + token (several sources are gated: BigCode and selected NVIDIA/Nemotron datasets)
 
 **Disk setup (separate data volume)**
 
@@ -279,10 +282,59 @@ make install-gpu     # training/eval/serving deps only (no curation deps)
 
 **Accept dataset Terms of Use**
 
-Before first run, visit and accept terms on these HuggingFace dataset pages (required for gated datasets used in curation):
-- https://huggingface.co/datasets/HuggingFaceFW/fineweb
-- https://huggingface.co/datasets/bigcode/the-stack-smol
+Before the first curation run, accept the terms for any gated Hugging Face
+datasets used by the active mix. The current mix uses BigCode and selected
+NVIDIA/Nemotron datasets.
+
+Required access checks:
 - https://huggingface.co/datasets/bigcode/the-stack-dedup
+- https://huggingface.co/datasets/bigcode/the-stack-smol
+- https://huggingface.co/datasets/nvidia/Nemotron-CC-Math-v1
+- https://huggingface.co/datasets/nvidia/Nemotron-Pretraining-Specialized-v1.1
+- https://huggingface.co/datasets/nvidia/Nemotron-Pretraining-Code-v2
+- https://huggingface.co/datasets/nvidia/Nemotron-CC-Code-v1
+
+`nvidia/Nemotron-Pretraining-Code-v2` and
+`nvidia/Nemotron-CC-Code-v1` may remain pending until NVIDIA approves access.
+Do not run `make curate-mini` with the current mix until both are accepted, or
+the code source loaders will fail.
+
+After accepting terms, make sure the token is available on the machine running
+curation:
+
+```bash
+huggingface-cli login
+# or
+export HF_TOKEN=hf_...
+```
+
+If credentials are stored in `.env`, `curate.py` loads them. Standalone test
+snippets should explicitly load `.env` with:
+
+```python
+from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv(dotenv_path=Path(".env"), override=False)
+```
+
+Nemotron Specialized subset policy:
+
+```text
+Use:
+  - Nemotron-Pretraining-Code-Concepts
+  - Nemotron-Pretraining-Unconditional-Algorithmic
+  - Nemotron-Pretraining-Formal-Logic
+  - Nemotron-Pretraining-Economics
+
+Exclude by default:
+  - Nemotron-Pretraining-Multiple-Choice
+```
+
+The standalone Multiple-Choice config is excluded by default because it may
+introduce downstream DeepSeek-license obligations for distributed or hosted
+derivative models.
+
 
 ---
 
@@ -297,7 +349,7 @@ make download-fasttext-model DATA_DIR=/data/slm/data   # language ID model (~1MB
 make download-kenlm-model    DATA_DIR=/data/slm/data   # perplexity model (~4GB)
 
 # ── Step 2: Validate curation pipeline ───────────────────────────────────────
-# Exercises every curation stage end-to-end on tiny data — all 17 sources.
+# Exercises every curation stage end-to-end on tiny data — all 20 sources.
 # All tests run here — catch issues before spending hours on the full run.
 make curate-mini && make test-curator
 make validate    && make test-validate
@@ -307,7 +359,7 @@ make tokenize-upload SIZE=mini              # push mini tokenized binaries to S3
 make tokenizer-upload                       # push tokenizer to S3 (shared across all sizes)
 
 # ── Step 3: Full curation ─────────────────────────────────────────────────────
-make curate SIZE=125m WORKERS=62    # Stage 1: 6.5B curation target; download, filter, dedup, blend, upload
+make curate SIZE=125m WORKERS=62    # Stage 1: 10B curation target; download, filter, dedup, blend, upload
 make validate                       # Stage 2: perplexity filter (applied to both splits)
 make validate-upload SIZE=125m      # Stage 2: push validated data to S3
 make tokenizer                      # Stage 3: train BPE tokenizer
@@ -371,7 +423,7 @@ Tests validate real pipeline outputs at each stage. Each test target is paired w
 **CPU curation instance:**
 
 ```bash
-make curate-mini   && make test-curator      # validate curation outputs (all 17 sources)
+make curate-mini   && make test-curator      # validate curation outputs (all 20 sources)
 make validate      && make test-validate     # validate validation outputs
 make tokenize      && make test-tokenizer    # validate tokenizer outputs
 
@@ -409,7 +461,7 @@ make test-unit            # all of the above
 
 | Target | Stage | Validates |
 |---|---|---|
-| `test-curator` | `curate-mini` | Raw shards exist for all 17 sources, filter quality, dedup correctness, blend output, stats |
+| `test-curator` | `curate-mini` | Raw shards exist for all 20 sources, filter quality, dedup correctness, blend output, stats |
 | `test-validate` | `validate` | Retention rate, subset correctness, quality of retained docs |
 | `test-tokenizer` | `tokenizer` | Special token IDs, roundtrip, fertility, chat template |
 | `test-data-pipeline` | all three above | Runs curator + validate + tokenizer tests |
@@ -511,7 +563,7 @@ make pretrain PRETRAIN_CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
 
 ### Source Mix
 
-20 concrete sources total — 12 non-code top-level sources plus 5 code sub-sources that share the 15% code budget. Scale-invariant percentages — the same mix applies at every size. Defined in `config/data_mix.py` and referenced by the curator, export, and notebooks — do not duplicate these numbers elsewhere.
+20 concrete sources total — 13 non-code top-level sources plus 7 code sub-sources that share the 15% code budget. Scale-invariant percentages — the same mix applies at every size. Defined in `config/data_mix.py` and referenced by the curator, export, and notebooks — do not duplicate these numbers elsewhere.
 
 | Source | Target Share | Notes |
 |---|---:|---|
@@ -529,10 +581,36 @@ make pretrain PRETRAIN_CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
 | Factual restraint | 0.5% | generated locally; uncertainty, private/unverifiable facts, no fake search/tool claims |
 | Code (total) | 15% | split across 7 code sub-sources (see curator/README.md) |
 
-When supply-constrained sources (peS2o, jupyter, and at 1b also Wikipedia / pg19 / nemotron_cc_math / stack_smol) fall short of their character budget, the deficit is automatically routed to FineWeb as an overflow sink. The mix shape is preserved; the token target is hit.
+When supply-constrained sources fall short of their character budget, deficits are routed by source type. Local synthetic deficits route to Nemotron Specialized first, then FineWeb-Edu, then FineWeb. General source deficits route to FineWeb-Edu first and FineWeb as the final fallback.
 
 
 Generated/template-like sources run exact dedup but bypass fuzzy MinHash dedup so useful near-duplicate training signal is not collapsed.
+
+### NVIDIA/Nemotron sources are supplemental
+
+FineWeb and FineWeb-Edu remain the broad web base for this from-scratch
+training pipeline. NVIDIA/Nemotron datasets are used only to supplement
+specific high-signal gaps: math, code, and specialized synthetic overflow.
+They are not a replacement for the repo's core curation approach.
+
+Current use:
+
+```text
+Nemotron-CC-Math-v1:
+  math/STEM supplement replacing OpenWebMath
+
+Nemotron-Pretraining-Code-v2:
+  code supplement replacing part of the raw Stack/code share
+
+Nemotron-CC-Code-v1:
+  code-web/tutorial/docs-style supplement
+
+Nemotron-Pretraining-Specialized-v1.1:
+  specialized synthetic supplement and local synthetic overflow target
+
+Nemotron-CC-v2.1:
+  not active in this mix
+```
 
 ### Run-specific realized mix
 
@@ -832,7 +910,7 @@ Required gated/source-access checks for the current mix:
 
 | Dataset | Purpose | Notes |
 |---|---|---|
-| `nvidia/Nemotron-CC-Math-v1` | math/STEM source replacing OpenWebMath | use the higher-quality `4plus` config by default |
+| `nvidia/Nemotron-CC-Math-v1` | math/STEM source replacing Nemotron CC Math | use the higher-quality `4plus` config by default |
 | `nvidia/Nemotron-Pretraining-Specialized-v1.1` | scalable specialized/synthetic source and local-synthetic overflow reservoir | use approved subsets only; exclude Multiple Choice by default |
 | `nvidia/Nemotron-Pretraining-Code-v2` | primary scalable code source in the code submix | may require NVIDIA dataset access approval |
 | `nvidia/Nemotron-CC-Code-v1` | CC-derived code/tutorial/docs-style source | may require NVIDIA dataset access approval |
@@ -899,7 +977,7 @@ targets.
 | Wikipedia | 10% | factual encyclopedia prose |
 | PG-19 | 2.5% | long-form public-domain text |
 | peS2o | 5% | academic/scientific prose |
-| Nemotron CC Math | 5% | math/STEM source replacing OpenWebMath |
+| Nemotron CC Math | 5% | math/STEM source replacing Nemotron CC Math |
 | StackExchange | 5% | Q&A-style explanatory text |
 | Synthetic arithmetic | 3% | local targeted arithmetic signal |
 | Synthetic task code | 5% | local targeted code-output behavior |
@@ -908,7 +986,7 @@ targets.
 | Nemotron Specialized | 5% | scalable specialized/synthetic reservoir |
 | Code total | 15% | split across the code submix |
 
-OpenWebMath is intentionally removed from the active mix. Nemotron CC Math is
+Nemotron CC Math is intentionally removed from the active mix. Nemotron CC Math is
 the preferred math source for this iteration.
 
 ### Code submix
@@ -985,7 +1063,7 @@ Current use:
 
 ```text
 Nemotron-CC-Math-v1:
-  math/STEM supplement replacing OpenWebMath
+  math/STEM supplement replacing Nemotron CC Math
 
 Nemotron-Pretraining-Code-v2:
   code supplement replacing part of the raw Stack/code share
