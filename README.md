@@ -568,7 +568,7 @@ See `curator/README.md` for full details on the mix, sub-source breakdowns, cap-
 
 ### Data Curation (CPU) — Stages 1–4a
 
-Runs on CPU instances. No GPU required. Hardware recommendations below, not floors — the pipeline streams everywhere and runs on less RAM with longer wall time.
+Runs on CPU instances. No GPU required. Measured/reference hardware is shown below. The pipeline streams everywhere and can run on smaller instances with longer wall time; see `curator/README.md` for practical curation sizing notes.
 
 | Target | Recommended vCPUs | RAM | Curation runtime |
 |---|---:|---:|---:|
@@ -579,9 +579,9 @@ Runs on CPU instances. No GPU required. Hardware recommendations below, not floo
 
 Full curation is strongly recommended on **16+ vCPU** machines. Smaller
 machines can run `curate-mini` and may complete full curation eventually, but
-download, extraction, validation, and deduplication stages are parallel by
-design and will be slow on 2–8 vCPU instances. For the measured 125M run,
-64 vCPU / 256 GiB was used.
+Common Crawl extraction, validation, and deduplication stages are parallel by
+design and will be slow on 2–8 vCPU instances. Hugging Face dataset downloads
+are streamed for reproducibility and readable logs. For the measured 125M run, 64 vCPU / 256 GiB was used.
 
 > **Measure your own throughput before committing.** Many variables dominate:
 > network peering between your cloud and Common Crawl's AWS `us-east-1` origin,
