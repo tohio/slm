@@ -470,3 +470,24 @@ One source worth flagging: peS2o overlaps with academic papers. If future evals 
 **Char-to-token ratio is approximate.** `CHARS_PER_TOKEN = 4.3` in `config/data_mix.py` is the measured average for the trained tokenizer on the 125m corpus (excluding code sources). Real ratios vary by domain: English prose ~4.5, code ~3.5, math ~3. The approximation is fine for target sizing; the completed 125M run showed that a 5.5B curation target produced about 5.12B retained/tokenized tokens after validation and tokenization. Recalibrate if the tokenizer is retrained on a substantially different mix, especially after adding symbol-heavy generated data.
 
 **wikipedia cold-cache overhead.** wikipedia's `wikimedia/wikipedia` 20231101.en config loads the full ~19GB dataset (~6.4M articles) before iteration starts, even though mini only uses 5000 articles and 125m/1b only use a fraction. Cold-cache runs spend 10–15 minutes on wikipedia alone; once cached, subsequent runs are instant. Could be migrated to streaming like pg19 was, if this overhead becomes disruptive.
+
+## Curation performance notes
+
+The curation pipeline is parallel where the work is CPU-heavy or structurally safe to parallelize.
+
+Common Crawl uses a dedicated parallel pipeline because WARC processing has two distinct bottlenecks:
+
+- network-bound HTTPS WARC downloads
+- CPU-bound WARC parsing, trafilatura extraction, and language detection
+
+The Common Crawl source therefore uses separate download and extraction worker pools. Worker counts are derived from the global curation worker count so high-CPU machines can keep both download and extraction busy.
+
+Most Hugging Face dataset sources are streamed sequentially during the download stage. This is intentional for now. Streaming one source at a time keeps stdout readable, avoids excessive concurrent Hugging Face Hub requests, and makes failures easier to debug. Data curation is an occasional batch process, not a continuously running service, so the pipeline prioritizes reproducibility and operational clarity over maximizing every possible download parallelism opportunity.
+
+Potential future optimizations:
+
+- Run non-Common-Crawl source downloads concurrently with per-source log files.
+- Add clean parent-process progress summaries for parallel source downloads.
+- Tune per-source download caps from measured filter/dedup retention.
+- Parallelize naturally partitioned sources such as CodeSearchNet by language.
+- Parallelize Stack sources by language or data directory.

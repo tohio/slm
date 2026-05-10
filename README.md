@@ -800,7 +800,7 @@ curl http://slm-service:8000/v1/chat/completions \
 
 This project is scoped as a complete end-to-end training pipeline and demonstration. In a larger production system:
 
-- **Data scale** — the curation pipeline would run on a distributed compute cluster over petabyte-scale crawl data rather than a single CPU instance.
+- **Data scale** — the curation pipeline is currently designed for a single multi-vCPU CPU node. In a larger production system, curation would run as a distributed job over larger crawl-scale datasets.
 - **Training scale** — multi-node training with FSDP across 8+ nodes for models beyond 1b.
 - **Continual learning** — a data flywheel feeding new curated data back into periodic pretraining runs.
 - **Reward modelling** — a trained reward model enabling online DPO for more sophisticated alignment.
