@@ -245,7 +245,7 @@ class SyntheticTaskCodeSource:
 "
                 f"{signature}
 "
-                f"    \"\"\"{ex['doc']}\"\"\"
+                f"    """{ex['doc']}"""
 
 "
                 f"Solution:
