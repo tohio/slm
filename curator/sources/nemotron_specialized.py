@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import hashlib
@@ -13,83 +12,62 @@ from curator.constants import CHARS_PER_TOKEN
 log = logging.getLogger(__name__)
 
 
-def _stable_id(source: str, idx: int, text: str) -> str:
-    return hashlib.sha256(f"{source}:{idx}:{text[:500]}".encode("utf-8")).hexdigest()[:16]
+APPROVED_SPECIALIZED_CONFIGS = (
+    "Nemotron-Pretraining-Code-Concepts",
+    "Nemotron-Pretraining-Unconditional-Algorithmic",
+    "Nemotron-Pretraining-Formal-Logic",
+    "Nemotron-Pretraining-Economics",
+)
+
+EXCLUDED_SPECIALIZED_CONFIGS = (
+    "Nemotron-Pretraining-Multiple-Choice",
+)
 
 
-def _text_from_record(record: dict, fields: tuple[str, ...]) -> str:
-    for field in fields:
-        value = record.get(field)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-
-    value = record.get("data")
-    if isinstance(value, dict):
-        for field in fields:
-            nested = value.get(field)
-            if isinstance(nested, str) and nested.strip():
-                return nested.strip()
-
-    return ""
+def _stable_id(source: str, config: str, idx: int, text: str) -> str:
+    return hashlib.sha256(
+        f"{source}:{config}:{idx}:{text[:500]}".encode("utf-8")
+    ).hexdigest()[:16]
 
 
-def _load_streaming_dataset(dataset_name: str, split: str, config: str | None = None):
-    if config:
-        try:
-            return load_dataset(dataset_name, config, split=split, streaming=True)
-        except Exception as exc:
-            log.warning(
-                "%s/%s: configured streaming load failed (%s); trying default config",
-                dataset_name,
-                config,
-                exc,
-            )
+class NemotronSpecializedSource:
+    """
+    NVIDIA Nemotron specialized synthetic/specialized pretraining source.
 
-    return load_dataset(dataset_name, split=split, streaming=True)
+    The dataset requires an explicit config name. We stream approved configs
+    sequentially and intentionally exclude the standalone Multiple-Choice config
+    by default because it may introduce downstream DeepSeek-license obligations
+    for distributed/hosted derivative models.
 
+    Formal Logic and Economics contain MCQ-style text, but they are separate
+    configs from the excluded Nemotron-Pretraining-Multiple-Choice config.
+    """
 
-class _StreamingHFJsonlSource:
-    SOURCE_TAG = "streaming_hf_source"
-    SHARD_PREFIX = "streaming_hf_source"
-    DATASET_NAME = ""
-    CONFIG_NAME: str | None = None
+    SOURCE_TAG = "nemotron_specialized"
+    SHARD_PREFIX = "nemotron_specialized"
+    DATASET_NAME = "nvidia/Nemotron-Pretraining-Specialized-v1.1"
     SPLIT = "train"
-    TEXT_FIELDS: tuple[str, ...] = ("text", "content")
-    KEEP_CATEGORIES: set[str] | None = None
     DEFAULT_DOCS = 100_000
+    TEXT_FIELDS = ("text", "content")
 
     def __init__(
         self,
         output_dir: Path,
         max_docs: int | None = None,
         shard_size: int = 10_000,
+        configs: tuple[str, ...] = APPROVED_SPECIALIZED_CONFIGS,
     ):
         self.output_dir = Path(output_dir)
         self.max_docs = max_docs or self.DEFAULT_DOCS
         self.shard_size = shard_size
+        self.configs = configs
         self.output_dir.mkdir(parents=True, exist_ok=True)
+
         self._docs_written = 0
         self._chars_written = 0
         self._docs_seen = 0
         self._docs_skipped = 0
-
-    def _keep_record(self, record: dict) -> bool:
-        if not self.KEEP_CATEGORIES:
-            return True
-
-        metadata = record.get("metadata")
-        category = None
-        if isinstance(metadata, dict):
-            category = metadata.get("category")
-        category = category or record.get("category") or record.get("subset")
-
-        return category in self.KEEP_CATEGORIES
-
-    def _metadata_for_record(self, record: dict) -> dict:
-        metadata = record.get("metadata")
-        if isinstance(metadata, dict):
-            return metadata
-        return {}
+        self._by_config: dict[str, int] = {}
 
     def download(self) -> list[Path]:
         existing = sorted(self.output_dir.glob(f"{self.SHARD_PREFIX}_*.jsonl"))
@@ -102,75 +80,96 @@ class _StreamingHFJsonlSource:
             self._load_existing_stats(existing)
             return existing
 
-        ds = _load_streaming_dataset(
-            self.DATASET_NAME,
-            split=self.SPLIT,
-            config=self.CONFIG_NAME,
-        )
-
         output_files: list[Path] = []
         records: list[dict] = []
 
         log.info(
-            "%s: streaming %s%s split=%s max_docs=%s",
+            "%s: streaming %s configs=%s max_docs=%s",
             self.SOURCE_TAG,
             self.DATASET_NAME,
-            f"/{self.CONFIG_NAME}" if self.CONFIG_NAME else "",
-            self.SPLIT,
+            ",".join(self.configs),
             f"{self.max_docs:,}",
         )
 
-        for record in ds:
-            self._docs_seen += 1
+        iterators = []
+        for config in self.configs:
+            ds = load_dataset(
+                self.DATASET_NAME,
+                config,
+                split=self.SPLIT,
+                streaming=True,
+            )
+            iterators.append((config, iter(ds)))
 
-            if not isinstance(record, dict) or not self._keep_record(record):
-                self._docs_skipped += 1
-                continue
+        # Round-robin so mini runs sample all approved configs instead of
+        # being monopolized by the first large config.
+        while self._docs_written < self.max_docs and iterators:
+            still_active = []
 
-            text = _text_from_record(record, self.TEXT_FIELDS)
-            if not text:
-                self._docs_skipped += 1
-                continue
+            for config, iterator in iterators:
+                if self._docs_written >= self.max_docs:
+                    still_active.append((config, iterator))
+                    continue
 
-            rec = {
-                "id": _stable_id(self.SOURCE_TAG, self._docs_written, text),
-                "source": self.SOURCE_TAG,
-                "text": text,
-            }
+                try:
+                    row = next(iterator)
+                except StopIteration:
+                    log.info("%s: config exhausted: %s", self.SOURCE_TAG, config)
+                    continue
 
-            metadata = self._metadata_for_record(record)
-            if metadata:
-                rec["metadata"] = metadata
+                self._docs_seen += 1
+                text = self._text_from_record(row)
+                if not text:
+                    self._docs_skipped += 1
+                    still_active.append((config, iterator))
+                    continue
 
-            for key in ("license", "language", "lang", "category", "subset", "path", "repo_name"):
-                value = record.get(key)
-                if value is not None:
-                    rec[key] = value
+                rec = {
+                    "id": _stable_id(self.SOURCE_TAG, config, self._docs_written, text),
+                    "source": self.SOURCE_TAG,
+                    "text": text,
+                    "nemotron_config": config,
+                }
 
-            records.append(rec)
-            self._docs_written += 1
-            self._chars_written += len(text)
+                for key in ("license", "metadata", "uuid"):
+                    value = row.get(key)
+                    if value is not None:
+                        rec[key] = value
 
-            if len(records) >= self.shard_size:
-                output_files.append(self._write_shard(records, len(output_files)))
-                records = []
+                records.append(rec)
+                self._docs_written += 1
+                self._chars_written += len(text)
+                self._by_config[config] = self._by_config.get(config, 0) + 1
 
-            if self._docs_written >= self.max_docs:
-                break
+                if len(records) >= self.shard_size:
+                    output_files.append(self._write_shard(records, len(output_files)))
+                    records = []
+
+                still_active.append((config, iterator))
+
+            iterators = still_active
 
         if records:
             output_files.append(self._write_shard(records, len(output_files)))
 
         log.info(
-            "%s: complete - docs=%s chars=%s skipped=%s shards=%s",
+            "%s: complete - docs=%s chars=%s skipped=%s shards=%s by_config=%s",
             self.SOURCE_TAG,
             f"{self._docs_written:,}",
             f"{self._chars_written:,}",
             f"{self._docs_skipped:,}",
             len(output_files),
+            self._by_config,
         )
 
         return output_files
+
+    def _text_from_record(self, record: dict) -> str:
+        for field in self.TEXT_FIELDS:
+            value = record.get(field)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
 
     def _write_shard(self, records: list[dict], shard_idx: int) -> Path:
         path = self.output_dir / f"{self.SHARD_PREFIX}_{shard_idx:04d}.jsonl"
@@ -187,6 +186,8 @@ class _StreamingHFJsonlSource:
     def _load_existing_stats(self, shards: list[Path]) -> None:
         docs = 0
         chars = 0
+        by_config: dict[str, int] = {}
+
         for shard in shards:
             with shard.open("r", encoding="utf-8") as f:
                 for line in f:
@@ -194,10 +195,15 @@ class _StreamingHFJsonlSource:
                         rec = json.loads(line)
                     except Exception:
                         continue
+
                     docs += 1
                     chars += len(str(rec.get("text", "")))
+                    config = rec.get("nemotron_config", "unknown")
+                    by_config[config] = by_config.get(config, 0) + 1
+
         self._docs_written = docs
         self._chars_written = chars
+        self._by_config = by_config
 
     def stats(self) -> dict:
         shards = sorted(self.output_dir.glob(f"{self.SHARD_PREFIX}_*.jsonl"))
@@ -207,7 +213,8 @@ class _StreamingHFJsonlSource:
         return {
             "source": self.SOURCE_TAG,
             "dataset": self.DATASET_NAME,
-            "config": self.CONFIG_NAME,
+            "configs": list(self.configs),
+            "excluded_configs": list(EXCLUDED_SPECIALIZED_CONFIGS),
             "split": self.SPLIT,
             "shards": len(shards),
             "documents": self._docs_written,
@@ -216,24 +223,6 @@ class _StreamingHFJsonlSource:
             "estimated_tokens": self._chars_written // CHARS_PER_TOKEN,
             "docs_seen": self._docs_seen,
             "docs_skipped": self._docs_skipped,
+            "by_config": self._by_config,
             "output_dir": str(self.output_dir),
         }
-
-
-
-class NemotronSpecializedSource(_StreamingHFJsonlSource):
-    SOURCE_TAG = "nemotron_specialized"
-    SHARD_PREFIX = "nemotron_specialized"
-    DATASET_NAME = "nvidia/Nemotron-Pretraining-Specialized-v1.1"
-    CONFIG_NAME = None
-    SPLIT = "train"
-    TEXT_FIELDS = ("text", "content")
-
-    # Exclude Multiple-Choice by default until the subset/license behavior is
-    # explicitly reviewed for distributed model artifacts.
-    KEEP_CATEGORIES = {
-        "Nemotron-Pretraining-Code-Concepts",
-        "Nemotron-Pretraining-Unconditional-Algorithmic",
-        "Nemotron-Pretraining-Formal-Logic",
-        "Nemotron-Pretraining-Economics",
-    }
