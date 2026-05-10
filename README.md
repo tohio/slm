@@ -511,23 +511,23 @@ make pretrain PRETRAIN_CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
 
 ### Source Mix
 
-17 concrete sources total — 12 non-code top-level sources plus 5 code sub-sources that share the 15% code budget. Scale-invariant percentages — the same mix applies at every size. Defined in `config/data_mix.py` and referenced by the curator, export, and notebooks — do not duplicate these numbers elsewhere.
+20 concrete sources total — 12 non-code top-level sources plus 5 code sub-sources that share the 15% code budget. Scale-invariant percentages — the same mix applies at every size. Defined in `config/data_mix.py` and referenced by the curator, export, and notebooks — do not duplicate these numbers elsewhere.
 
 | Source | Target Share | Notes |
 |---|---:|---|
 | Common Crawl | 5% | direct WARC via trafilatura |
-| FineWeb | 26.5% | `HuggingFaceFW/fineweb`, overflow sink |
-| FineWeb-Edu | 10% | `HuggingFaceFW/fineweb-edu`, educational/explanatory web text |
+| FineWeb | 10% | `HuggingFaceFW/fineweb`, overflow sink |
+| FineWeb-Edu | 26% | `HuggingFaceFW/fineweb-edu`, educational/explanatory web text |
 | Wikipedia | 10% | `wikimedia/wikipedia` EN |
 | pg19 | 2.5% | public-domain books pre-1919 |
 | peS2o | 5% | `allenai/peS2o` v2 — academic/scientific prose |
-| OpenWebMath | 10% | math-heavy web text |
+| Nemotron CC Math | 5% | math-heavy web text |
 | StackExchange | 5% | Q&A across dozens of sites |
 | Synthetic arithmetic | 3% | generated locally; arithmetic formats: QA, bare equations, equation completion, word problems, comparisons, and simple multi-step arithmetic |
 | Synthetic task code | 5% | generated locally; task-shaped code examples, Python 70% / Go 15% / Rust 10% / Bash 5% |
 | Educational QA/MCQ | 3% | generated locally; QA, MCQ, explanation, and cloze formats; benchmark datasets excluded |
 | Factual restraint | 0.5% | generated locally; uncertainty, private/unverifiable facts, no fake search/tool claims |
-| Code (total) | 15% | split across 5 code sub-sources (see curator/README.md) |
+| Code (total) | 15% | split across 7 code sub-sources (see curator/README.md) |
 
 When supply-constrained sources (peS2o, jupyter, and at 1b also Wikipedia / pg19 / open_web_math / stack_smol) fall short of their character budget, the deficit is automatically routed to FineWeb as an overflow sink. The mix shape is preserved; the token target is hit.
 
@@ -736,7 +736,7 @@ slang/context grounding.
 
 **Why per-variant eval targets?** `eval-base`, `eval-instruct`, and `eval-chat` evaluate the three checkpoints written by the pipeline (`results/slm-{size}/final`, `results/slm-{size}-chat-code/final`, `results/slm-{size}-dpo/final`). Running each one writes its own JSON output, which `export.py` then reads when building per-variant model cards on the Hub. A single combined `eval` target would either skip the base and instruct cards or require running them all in series at the end — splitting them out lets eval run inline with each pipeline stage.
 
-**Why 17 concrete data sources?** Distribution coverage. A model pretrained only on web scrape (even filtered) has characteristic weaknesses: poor factual recall on niche topics, no long-range coherence over book-length spans, weak technical/academic prose, weak math reasoning, weak Q+A structure, weak code. Each of the 17 concrete sources covers a specific gap — 12 non-code top-level sources for prose breadth, educational/explanatory text, arithmetic, QA/MCQ format, factual restraint, and task-code signal, plus 5 code sub-sources for code coverage from raw files (stack-v1) through curated function/notebook/intent corpora (CodeSearchNet, stack-smol, jupyter, CoNaLa). The `synthetic_arithmetic` source was added after inspecting the base model and curation data: OpenWebMath contributes math-heavy text, but simple arithmetic supervision was too sparse and noisy for reliable elementary arithmetic behavior. See [curator/README.md](curator/README.md) for the full mix and sub-source rationale.
+**Why 17 concrete data sources?** Distribution coverage. A model pretrained only on web scrape (even filtered) has characteristic weaknesses: poor factual recall on niche topics, no long-range coherence over book-length spans, weak technical/academic prose, weak math reasoning, weak Q+A structure, weak code. Each of the 20 concrete sources covers a specific gap — 12 non-code top-level sources for prose breadth, educational/explanatory text, arithmetic, QA/MCQ format, factual restraint, and task-code signal, plus 5 code sub-sources for code coverage from raw files (stack-v1) through curated function/notebook/intent corpora (CodeSearchNet, stack-smol, jupyter, CoNaLa). The `synthetic_arithmetic` source was added after inspecting the base model and curation data: OpenWebMath contributes math-heavy text, but simple arithmetic supervision was too sparse and noisy for reliable elementary arithmetic behavior. See [curator/README.md](curator/README.md) for the full mix and sub-source rationale.
 
 **Why scale-invariant mix percentages?** A reader scaling from 125m to 1b changes one number (`corpus_tokens`) and gets proportionally more of everything — no per-scale mix tuning. Supply variance is handled by cap-and-redistribute, not by per-scale knobs.
 

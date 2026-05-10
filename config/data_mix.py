@@ -96,12 +96,12 @@ DATA_MIX: dict[str, dict] = {
         "url":     "https://commoncrawl.org",
     },
     "fineweb": {
-        "pct":     26.0,
+        "pct":     10.0,
         "display": "FineWeb",
         "hub":     "HuggingFaceFW/fineweb",
     },
     "fineweb_edu": {
-        "pct":     10.0,
+        "pct":     26.0,
         "display": "FineWeb-Edu",
         "hub":     "HuggingFaceFW/fineweb-edu",
     },
@@ -120,10 +120,11 @@ DATA_MIX: dict[str, dict] = {
         "display": "peS2o (academic papers)",
         "hub":     "allenai/peS2o",
     },
-    "open_web_math": {
-        "pct":     10.0,
-        "display": "OpenWebMath",
-        "hub":     "open-web-math/open-web-math",
+    "nemotron_cc_math": {
+        "pct":     5.0,
+        "display": "Nemotron CC Math",
+        "hub":     "nvidia/Nemotron-CC-Math-v1",
+        "config":  "4plus",
     },
     "stackexchange": {
         "pct":     5.0,
@@ -143,12 +144,17 @@ DATA_MIX: dict[str, dict] = {
     "educational_qa_mcq": {
         "pct":     3.0,
         "display": "Educational QA/MCQ",
-        "url":     "generated locally from trusted educational/reference sources",
+        "url":     "generated locally by curator/sources/educational_qa_mcq.py",
     },
     "factual_restraint": {
         "pct":     0.5,
         "display": "Factual restraint",
         "url":     "generated locally by curator/sources/factual_restraint.py",
+    },
+    "nemotron_specialized": {
+        "pct":     5.0,
+        "display": "Nemotron Specialized",
+        "hub":     "nvidia/Nemotron-Pretraining-Specialized-v1.1",
     },
     "code": {
         "pct":     15.0,
@@ -162,22 +168,33 @@ DATA_MIX: dict[str, dict] = {
 
 # ── 2. Code sub-mix ────────────────────────────────────────────────────────────
 #
-# Percentages of the 15% code share (not of total tokens). stack_v1 is capped
-# at 50% so bulk raw code doesn't drown out the curated code sources.
+# Percentages of the 15% code share (not of total tokens). Nemotron Code v2
+# becomes the primary scalable code source while stack_v1 remains a reduced
+# raw-code diversity source.
 
 CODE_SUBMIX: dict[str, dict] = {
+    "nemotron_code_v2": {
+        "pct":     30.0,
+        "display": "Nemotron Pretraining Code v2",
+        "hub":     "nvidia/Nemotron-Pretraining-Code-v2",
+    },
     "stack_v1": {
-        "pct":     50.0,
-        "display": "The Stack v1 dedup (capped)",
+        "pct":     25.0,
+        "display": "The Stack v1 dedup",
         "hub":     "bigcode/the-stack-dedup",
     },
     "codesearchnet": {
-        "pct":     35.0,
+        "pct":     25.0,
         "display": "CodeSearchNet",
         "hub":     "code_search_net",
     },
-    "stack_smol": {
+    "nemotron_cc_code": {
         "pct":     10.0,
+        "display": "Nemotron CC Code",
+        "hub":     "nvidia/Nemotron-CC-Code-v1",
+    },
+    "stack_smol": {
+        "pct":     5.0,
         "display": "The Stack (smol)",
         "hub":     "bigcode/the-stack-smol",
     },
@@ -333,15 +350,18 @@ MINI_OVERRIDES: dict[str, int] = {
     "wikipedia":     5_000,
     "pg19":          50,
     "pes2o":         2_000,
-    "open_web_math": 3_000,
+    "nemotron_cc_math": 3_000,
     "stackexchange": 2_000,
     "synthetic_arithmetic": 2_000,
     "synthetic_task_code":   2_000,
     "educational_qa_mcq":    2_000,
     "factual_restraint":     1_000,
-    "codesearchnet": 5_000,
-    "stack_smol":    2_000,
+    "nemotron_specialized":  2_000,
+    "nemotron_code_v2":      5_000,
     "stack_v1":      3_000,
+    "codesearchnet": 5_000,
+    "nemotron_cc_code":      2_000,
+    "stack_smol":    2_000,
     "jupyter":       500,
     "conala":        500,
 }

@@ -1,6 +1,6 @@
 # curator
 
-Data curation pipeline for SLM pretraining. Downloads raw data from seventeen concrete sources (12 non-code top-level sources + 5 code sub-sources), applies quality filters, deduplicates, blends to target token ratios with cap-and-redistribute overflow handling, and uploads to S3.
+Data curation pipeline for SLM pretraining. Downloads raw data from twenty concrete sources (13 non-code top-level sources + 7 code sub-sources), applies quality filters, deduplicates, blends to target token ratios with cap-and-redistribute overflow handling, and uploads to S3.
 
 ---
 
@@ -13,13 +13,14 @@ fineweb_edu           ─┤
 wikipedia             ─┤
 pg19                  ─┤
 pes2o                 ─┼─► quality filter ─► dedup ─► blend ─► train.jsonl + val.jsonl ─► S3
-open_web_math         ─┤
+nemotron_cc_math      ─┤
 stackexchange         ─┤
 synthetic_arithmetic  ─┤
 synthetic_task_code   ─┤
 educational_qa_mcq    ─┤
 factual_restraint     ─┤
-code × 5              ─┘
+nemotron_specialized  ─┤
+code × 7              ─┘
 ```
 
 Each source runs independently through filtering and deduplication. The blend stage reads deduped shards from each source up to its character budget, with any shortfall from supply-constrained sources routed to FineWeb as an overflow sink.
@@ -28,33 +29,36 @@ Each source runs independently through filtering and deduplication. The blend st
 
 ## Data Sources
 
-12 top-level non-code sources plus 5 code sub-sources sharing the 15% code budget = 17 concrete source loaders total.
+13 top-level non-code sources plus 7 code sub-sources sharing the 15% code budget = 20 concrete source loaders total.
 
 | Source | Target Share | Supply | Notes |
 |---|---:|---|---|
 | Common Crawl | 5% | unlimited/time-bound | direct WARC download via HTTPS |
-| FineWeb | 26.5% | very large | `HuggingFaceFW/fineweb`, overflow sink |
-| FineWeb-Edu | 10% | large | `HuggingFaceFW/fineweb-edu`, educational/explanatory web text |
+| FineWeb | 10% | very large | `HuggingFaceFW/fineweb`, broad web fallback |
+| FineWeb-Edu | 26% | large | `HuggingFaceFW/fineweb-edu`, educational/explanatory web text |
 | Wikipedia | 10% | finite | `wikimedia/wikipedia` EN |
 | pg19 | 2.5% | finite | public-domain long-form books |
 | peS2o | 5% | finite | academic/scientific prose; supply-bound at larger scales |
-| OpenWebMath | 10% | finite/large | math-heavy web text |
+| Nemotron CC Math | 5% | very large | `nvidia/Nemotron-CC-Math-v1`, preferred math source replacing OpenWebMath |
 | StackExchange | 5% | finite/large | Q&A-style web text |
 | Synthetic arithmetic | 3% | generated locally | arithmetic formats: QA, bare equations, equation completion, word problems, comparisons, and simple multi-step arithmetic |
-| Synthetic task code | 5% | generated locally | task-shaped code examples; Python 70%, Go 15%, Rust 10%, Bash 5% |
-| Educational QA/MCQ | 3% | generated locally | QA, MCQ, explanation, and cloze formats; benchmark datasets excluded |
+| Synthetic task code | 5% | generated locally | targeted task-shaped code examples; Python 70%, Go 15%, Rust 10%, Bash 5% |
+| Educational QA/MCQ | 3% | generated locally | targeted QA, MCQ, explanation, and cloze formats; benchmark datasets excluded |
 | Factual restraint | 0.5% | generated locally | uncertainty, private/unverifiable facts, no fake search/tool claims |
-| **Code total** | **15%** | mixed | split across 5 code sub-sources |
+| Nemotron Specialized | 5% | large | `nvidia/Nemotron-Pretraining-Specialized-v1.1`, scalable specialized/synthetic reservoir |
+| **Code total** | **15%** | mixed | split across 7 code sub-sources |
 
 ### Code sub-mix (percentages of the 15% code share)
 
 | Code source | Sub-share | Languages | Notes |
-|---|---|---|---|
-| the-stack-dedup (v1) | 50% | python, go, rust, shell | `bigcode/the-stack-dedup` — bulk raw code, content inline in parquet shards; fills remaining real-code budget |
-| CodeSearchNet | 35% | Python, Java, JavaScript, PHP, Ruby, Go | `code_search_net` — supply-bound at 350m+ (~2M docs upstream) |
-| the-stack-smol | 10% | 30 languages | `bigcode/the-stack-smol` — diverse small sample |
+|---|---:|---|---|
+| Nemotron Pretraining Code v2 | 30% | mixed | `nvidia/Nemotron-Pretraining-Code-v2` — primary scalable code source |
+| the-stack-dedup (v1) | 25% | python, go, rust, shell | `bigcode/the-stack-dedup` — reduced raw-code diversity source |
+| CodeSearchNet | 25% | Python, Java, JavaScript, PHP, Ruby, Go | `code_search_net` — curated function/docstring code signal |
+| Nemotron CC Code | 10% | mixed | `nvidia/Nemotron-CC-Code-v1` — CC-derived code/tutorial/docs-style content |
+| the-stack-smol | 5% | 30 languages | `bigcode/the-stack-smol` — small diversity slice |
 | Jupyter notebooks | 4% | mostly Python | `bigcode/jupyter-parsed` — code+prose, supply-bound at 125m+ |
-| CoNaLa | 1% | Python | `neulab/conala` mined — supply-bound at 350m+ (~600K docs upstream) |
+| CoNaLa | 1% | Python | `neulab/conala` mined — NL->code intent pairs |
 
 ### Scale-invariant percentages
 
@@ -62,7 +66,7 @@ Percentages are the same at every size. Scaling up changes `corpus_tokens`, not 
 
 ### Cap-and-redistribute
 
-Several sources are supply-bound at large scales: peS2o (abstracts only) and jupyter run out at 350m+; Wikipedia, pg19, open_web_math, and stack_smol all become supply-bound at 1b; codesearchnet and conala upstream is small enough to bind even sooner. Each source writes up to its budget or until its supply is exhausted, whichever is smaller. The total shortfall is added to FineWeb's budget at the end of staging. FineWeb has effectively unlimited supply (15T tokens) so this always closes the gap.
+Several sources are supply-bound at large scales: peS2o (abstracts only) and jupyter run out at 350m+; Wikipedia, pg19, open_web_math, and stack_smol all become supply-bound at 1b; codesearchnet and conala upstream is small enough to bind even sooner. Each source writes up to its budget or until its supply is exhausted, whichever is smaller. The total shortfall is added to FineWeb's budget at the end of staging. FineWeb remains the final broad-web fallback, but later patches will route deficits through higher-signal overflow sources first.
 
 This behavior is load-bearing at 1b scale; partially load-bearing at 125m/350m for the always-supply-bound sources (peS2o, jupyter).
 
@@ -70,7 +74,7 @@ This behavior is load-bearing at 1b scale; partially load-bearing at 125m/350m f
 
 The source mix above is the current pretraining target mix. The actual realized mix for each curation run is written to `data/curated/blend_stats.json` at the end of the blend stage.
 
-Realized percentages can differ slightly from target percentages when a source is supply-bound or filtered/deduplicated more aggressively than expected. Any deficit is routed to FineWeb as the overflow sink so the token target is still reached.
+Realized percentages can differ slightly from target percentages when a source is supply-bound or filtered/deduplicated more aggressively than expected. Any deficit is routed through the configured overflow policy so the token target is still reached.
 
 Use `blend_stats.json` as the source of truth for a completed run. `export.py` reads this file when producing per-model cards.
 
@@ -101,13 +105,16 @@ curator/
 │   ├── wikipedia.py           wikimedia/wikipedia EN
 │   ├── pg19.py                pg19 public-domain books
 │   ├── pes2o.py               allenai/peS2o academic papers (streaming)
-│   ├── open_web_math.py       open-web-math (streaming)
+│   ├── nemotron_cc_math.py    nvidia/Nemotron-CC-Math-v1 (streaming)
 │   ├── stackexchange.py       HuggingFaceH4 stack-exchange Q+A (streaming)
+│   ├── nemotron_specialized.py nvidia/Nemotron-Pretraining-Specialized-v1.1
 │   ├── synthetic_arithmetic.py generated arithmetic pretraining source
 │   ├── synthetic_task_code.py  generated task-shaped code examples
 │   ├── educational_qa_mcq.py   generated QA/MCQ educational examples
 │   ├── factual_restraint.py    generated factual-restraint examples
+│   ├── nemotron_code_v2.py    nvidia/Nemotron-Pretraining-Code-v2
 │   ├── code_search_net.py     CodeSearchNet — 6 languages
+│   ├── nemotron_cc_code.py    nvidia/Nemotron-CC-Code-v1
 │   ├── stack_smol.py          bigcode/the-stack-smol — 30 languages
 │   ├── stack_v1.py            bigcode/the-stack-dedup (inline content)
 │   ├── stack_v2.py            DISABLED — see file header
