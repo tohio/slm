@@ -77,3 +77,6 @@ htmlcov/
 *.bak
 *~.todo
 #docs/screenshots/*.png
+
+# Local-only legacy DPO source helpers
+misc/dpo/prepare_dpo_legacy_sources.py

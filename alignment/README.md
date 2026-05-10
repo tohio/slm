@@ -12,7 +12,7 @@ Target library versions: **trl 0.29.x**, **transformers 5.5.x**. See `requiremen
 results/slm-{size}-chat-code/final   (SFT model)
         │
         ▼
-DPO training (hh-rlhf + orca + argilla)
+DPO training (UltraFeedback binarized + local targeted preference pairs)
         │
         ▼
 results/slm-{size}-dpo/final         (aligned model)
@@ -24,11 +24,11 @@ results/slm-{size}-dpo/final         (aligned model)
 
 | Dataset | Upstream | After cap + length filter | Signal |
 |---|---|---|---|
-| `Anthropic/hh-rlhf` | ~170k pairs | ≤50k (shuffled, then capped) | Human preference — helpfulness + harmlessness |
-| `Intel/orca_dpo_pairs` | ~12k pairs | all kept | Synthetic — GPT-4 vs GPT-3.5 on reasoning tasks |
-| `argilla/dpo-mix-7k` | ~7k pairs | all kept | Curated high-quality mix |
+| `HuggingFaceH4/ultrafeedback_binarized` | ~170k pairs | ≤50k (shuffled, then capped) | Human preference — helpfulness + harmlessness |
+| `local targeted preference pairs` | ~12k pairs | all kept | Synthetic — GPT-4 vs GPT-3.5 on reasoning tasks |
+| `local targeted preference pairs` | ~7k pairs | all kept | Curated high-quality mix |
 
-`prepare_dpo.py` caps hh-rlhf at 50k for blend balance with the smaller sources. The cap is applied **after** a seeded shuffle, so the subset is representative and not a biased head-slice of the upstream ordering.
+`prepare_dpo.py` uses UltraFeedback binarized as the external preference backbone and appends local custom preference pairs.
 
 After blending, a length filter drops any pair where `len(prompt) + max(len(chosen), len(rejected))` exceeds `MAX_TOTAL_TOKENS` (default 2048). See *Length filtering* below.
 
@@ -57,7 +57,7 @@ make prepare-dpo
 python alignment/data/prepare_dpo.py
 
 # Single source
-python alignment/data/prepare_dpo.py --source hh-rlhf
+python alignment/data/prepare_dpo.py --source ultrafeedback
 python alignment/data/prepare_dpo.py --source orca
 python alignment/data/prepare_dpo.py --source argilla
 
@@ -133,7 +133,7 @@ Each record in `data/dpo/train.jsonl` uses the trl conversational format — pro
     "rejected": [
         {"role": "assistant", "content": "I'm not sure, maybe London?"}
     ],
-    "source": "hh-rlhf | orca | argilla"
+    "source": "ultrafeedback_binarized | handcrafted_behavior | targeted_behavior"
 }
 ```
 
@@ -169,12 +169,42 @@ Because HF Trainer always keeps the best checkpoint in addition to the N most re
 
 **Why 1 epoch?** DPO over-optimizes quickly — after one epoch the reward margin typically saturates and further training degrades model quality. Most production DPO runs use 1–2 epochs.
 
-**Why cap hh-rlhf at 50k?** hh-rlhf is ~170k pairs upstream; blending it at full size would drown out orca (~12k) and argilla (~7k), losing the signal diversity the blend is meant to provide. 50k keeps hh-rlhf as the dominant source (~73% of the mix) while still letting the other two contribute meaningfully.
+**Why UltraFeedback binarized?** UltraFeedback binarized is already structured for DPO-style preference training and provides a broad general preference backbone without maintaining a multi-source DPO blend.
 
 **Why both pre-filter and trl's max_prompt_length?** The pre-filter guarantees exact control using the real tokenizer. trl's own `max_prompt_length` is a training-time safety net — any pair that somehow slipped past the pre-filter still gets truncated rather than crashing the trainer. Together they ensure clean training batches on 0.29, and when we upgrade to trl 1.0 (which removes `max_prompt_length`) the pre-filter covers the full responsibility without any config change.
 
-**Why blend three sources?** Each dataset provides a different alignment signal. hh-rlhf provides broad human preference coverage. Orca provides high-quality reasoning preference signal. Argilla provides a carefully curated quality baseline. The blend reduces dataset-specific biases.
+**Why add local targeted preference pairs?** UltraFeedback provides broad helpfulness and preference signal, while local `handcrafted_behavior` and `targeted_behavior` pairs reinforce project-specific failures: factual restraint, concise exact answers, code-output behavior, disambiguation, current-information restraint, and slang/context grounding.
 
 **Why conversational format for prompt/chosen/rejected?** Plain string format requires manually formatting the chat template in `prepare_dpo.py`, which duplicates the template and can drift from `train_tokenizer.py`. The conversational format delegates formatting to `DPOTrainer` via `apply_chat_template()` — the same code path as SFT and inference, guaranteeing consistency.
 
 **Why start from chat-code?** DPO learns preference signal on top of the SFT distribution. Starting from a well-trained SFT model with both chat and code capability ensures the alignment generalizes across both domains.
+
+## Current DPO data policy
+
+DPO uses an external preference backbone plus local custom preference datasets.
+
+External backbone:
+
+- `HuggingFaceH4/ultrafeedback_binarized`
+
+Local custom datasets generated in `alignment/data/prepare_dpo.py`:
+
+- `handcrafted_behavior`
+- `targeted_behavior`
+
+`handcrafted_behavior` focuses on factual restraint and unverifiable private
+facts. `targeted_behavior` focuses on concise exact answers, actual code output
+over prose about code, current-information restraint, disambiguation, and
+slang/context grounding.
+
+The output format remains the conversational format expected by TRL's
+`DPOTrainer`:
+
+```json
+{
+  "prompt": [{"role": "system", "content": "..."}, {"role": "user", "content": "..."}],
+  "chosen": [{"role": "assistant", "content": "preferred response"}],
+  "rejected": [{"role": "assistant", "content": "rejected response"}],
+  "source": "ultrafeedback_binarized | handcrafted_behavior | targeted_behavior"
+}
+```

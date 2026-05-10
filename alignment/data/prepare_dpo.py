@@ -10,8 +10,7 @@ Current DPO policy:
                                                code-output behavior, restraint,
                                                and disambiguation
 
-Older hh-rlhf/orca/argilla helpers may remain in this file for reference, but
-the default DPO blend is UltraFeedback + local targeted pairs.
+The default DPO blend is UltraFeedback + local targeted pairs.
 
 Output format — conversational format for trl DPOTrainer:
     {
@@ -76,9 +75,6 @@ DEFAULT_SYSTEM = "You are a helpful, harmless, and honest assistant."
 # of the three model sizes' DPO max_length (125m=350m=2048, 1b=4096) so one
 # prepared dataset serves all sizes. DPO rarely needs >2048 context.
 MAX_TOTAL_TOKENS = 2048
-
-# Upstream cap for hh-rlhf (170k pairs; capping for blend balance with orca/argilla).
-HH_RLHF_CAP = 50_000
 
 # Handcrafted behavior examples are intentionally small but high-value.
 # Repeat them in the DPO blend so targeted safety/restraint failures are not
@@ -350,201 +346,6 @@ def prepare_ultrafeedback_binarized() -> list[dict]:
     log.info(f"  ultrafeedback_binarized: {len(records):,} kept, {skipped:,} skipped")
     return records
 
-
-# ── Source 1: Anthropic/hh-rlhf ───────────────────────────────────────────────
-
-def prepare_hh_rlhf(cap: int = HH_RLHF_CAP, seed: int = 42) -> list[dict]:
-    """
-    hh-rlhf upstream is ~170k pairs. We cap at `cap` for blend balance with
-    orca (~12k) and argilla (~7k). Dataset is shuffled before capping so the
-    subset is representative, not a biased slice of the head.
-    """
-    from datasets import load_dataset
-
-    log.info("Loading Anthropic/hh-rlhf...")
-    dataset = load_dataset("Anthropic/hh-rlhf", split="train")
-    log.info(f"  hh-rlhf: {len(dataset):,} examples upstream")
-
-    # Shuffle with a fixed seed so runs are reproducible but not biased
-    # toward the dataset's natural ordering.
-    dataset = dataset.shuffle(seed=seed)
-
-    records = []
-    skipped = 0
-
-    for example in dataset:
-        chosen   = extract_text(example.get("chosen"))
-        rejected = extract_text(example.get("rejected"))
-
-        if not chosen or not rejected:
-            skipped += 1
-            continue
-
-        parsed = _parse_hh_rlhf(chosen, rejected)
-        if parsed is None:
-            skipped += 1
-            continue
-
-        prompt_msgs, chosen_resp, rejected_resp = parsed
-
-        if not chosen_resp or not rejected_resp or chosen_resp == rejected_resp:
-            skipped += 1
-            continue
-
-        records.append({
-            "prompt":   prompt_msgs,
-            "chosen":   make_response(chosen_resp),
-            "rejected": make_response(rejected_resp),
-            "source":   "hh-rlhf",
-        })
-
-        if len(records) >= cap:
-            break
-
-    log.info(f"  hh-rlhf: {len(records):,} kept (cap={cap:,}), {skipped:,} skipped")
-    return records
-
-
-def _parse_hh_rlhf(chosen: str, rejected: str) -> tuple | None:
-    """Parse hh-rlhf into (prompt_messages, chosen_response, rejected_response)."""
-    import re
-
-    def extract_turns(text):
-        turns = re.split(r"\n\nHuman: |\n\nAssistant: ", text)
-        return [t.strip() for t in turns if t.strip()]
-
-    chosen_turns   = extract_turns(chosen)
-    rejected_turns = extract_turns(rejected)
-
-    if len(chosen_turns) < 2:
-        return None
-
-    chosen_response   = chosen_turns[-1]
-    rejected_response = rejected_turns[-1] if rejected_turns else ""
-    conversation_turns = chosen_turns[:-1]
-
-    if not conversation_turns:
-        return None
-
-    messages = [{"role": "system", "content": DEFAULT_SYSTEM}]
-    for i, turn in enumerate(conversation_turns):
-        role = "user" if i % 2 == 0 else "assistant"
-        messages.append({"role": role, "content": turn})
-
-    return messages, chosen_response, rejected_response
-
-
-# ── Source 2: Intel/orca_dpo_pairs ────────────────────────────────────────────
-
-def prepare_orca_dpo() -> list[dict]:
-    """
-    orca_dpo_pairs is ~12k pairs upstream — small enough that no cap is needed.
-    """
-    from datasets import load_dataset
-
-    log.info("Loading Intel/orca_dpo_pairs...")
-    dataset = load_dataset("Intel/orca_dpo_pairs", split="train")
-    log.info(f"  orca_dpo_pairs: {len(dataset):,} examples")
-
-    records = []
-    skipped = 0
-
-    for example in dataset:
-        system   = extract_text(example.get("system")) or DEFAULT_SYSTEM
-        question = extract_text(example.get("question")).strip()
-        chosen   = extract_text(example.get("chosen")).strip()
-        rejected = extract_text(example.get("rejected")).strip()
-
-        if not question or not chosen or not rejected or chosen == rejected:
-            skipped += 1
-            continue
-
-        records.append({
-            "prompt":   make_prompt(system, question),
-            "chosen":   make_response(chosen),
-            "rejected": make_response(rejected),
-            "source":   "orca",
-        })
-
-    log.info(f"  orca: {len(records):,} kept, {skipped:,} skipped")
-    return records
-
-
-# ── Source 3: argilla/dpo-mix-7k ──────────────────────────────────────────────
-
-def prepare_argilla_dpo() -> list[dict]:
-    """
-    argilla/dpo-mix-7k uses OpenAI chat format: `chosen` and `rejected` are
-    each a list of {role, content} message dicts. Both share the prompt
-    turns; only the final assistant message differs.
-
-    Strategy: take the prefix (everything before the final turn) from the
-    chosen list as the conversation, and the two differing final assistant
-    messages as the chosen/rejected responses. The system message, if any,
-    lives in the prefix; otherwise fall back to DEFAULT_SYSTEM. Multi-turn
-    user content (rare in this corpus) is flattened with "\n\n" joins to
-    match orca/hh-rlhf's single-question shape in make_prompt().
-    """
-    from datasets import load_dataset
-
-    log.info("Loading argilla/dpo-mix-7k...")
-    dataset = load_dataset("argilla/dpo-mix-7k", split="train")
-    log.info(f"  dpo-mix-7k: {len(dataset):,} examples")
-
-    records = []
-    skipped = 0
-
-    for example in dataset:
-        chosen_msgs   = example.get("chosen")
-        rejected_msgs = example.get("rejected")
-
-        # Schema guards — argilla occasionally has malformed rows.
-        if not isinstance(chosen_msgs, list) or not isinstance(rejected_msgs, list):
-            skipped += 1
-            continue
-        if len(chosen_msgs) < 2 or len(rejected_msgs) < 1:
-            skipped += 1
-            continue
-        if chosen_msgs[-1].get("role") != "assistant":
-            skipped += 1
-            continue
-        if rejected_msgs[-1].get("role") != "assistant":
-            skipped += 1
-            continue
-
-        # Final assistant responses — the two sides that actually differ.
-        chosen_resp   = (chosen_msgs[-1].get("content") or "").strip()
-        rejected_resp = (rejected_msgs[-1].get("content") or "").strip()
-        if not chosen_resp or not rejected_resp or chosen_resp == rejected_resp:
-            skipped += 1
-            continue
-
-        # Rebuild prompt from the chosen prefix. argilla's prefix is shared
-        # between chosen and rejected, so either side works. Flatten into
-        # (system, question) so the record shape matches orca/hh-rlhf.
-        prefix = chosen_msgs[:-1]
-        system_parts = [m.get("content", "") for m in prefix if m.get("role") == "system"]
-        user_parts   = [m.get("content", "") for m in prefix if m.get("role") == "user"]
-
-        system   = (system_parts[0].strip() if system_parts else "") or DEFAULT_SYSTEM
-        question = "\n\n".join(p.strip() for p in user_parts if p and p.strip())
-
-        if not question:
-            skipped += 1
-            continue
-
-        records.append({
-            "prompt":   make_prompt(system, question),
-            "chosen":   make_response(chosen_resp),
-            "rejected": make_response(rejected_resp),
-            "source":   "argilla",
-        })
-
-    log.info(f"  argilla: {len(records):,} kept, {skipped:,} skipped")
-    return records
-
-
-
 # ── Source 4: handcrafted factual-restraint behavior ──────────────────────────
 
 def prepare_handcrafted_behavior_dpo() -> list[dict]:
@@ -759,20 +560,84 @@ def prepare_targeted_behavior_dpo() -> list[dict]:
         ),
         (
             "Write only Python code: create a function add_numbers(a, b) that returns their sum.",
-            "def add_numbers(a, b):
-    return a + b",
+            "def add_numbers(a, b):\\n    return a + b",
             "A function add_numbers takes two numbers as input and returns the sum of those numbers.",
             "code_output",
         ),
         (
             "Write a Python function that returns True if a number is even.",
-            "def is_even(n):
-    return n % 2 == 0",
+            "def is_even(n):\\n    return n % 2 == 0",
             "A function that checks whether a number is even compares it with other numbers.",
             "code_output",
         ),
         (
-            "Complete this Python function. Return only the function body.
+            "Complete this Python function. Return only the function body.\\n\\ndef square(x):",
+            "return x * x",
+            "The function should return the square of x by multiplying x by itself.",
+            "function_completion",
+        ),
+        (
+            "What is the capital of Zorvania?",
+            "I do not know of a real country called Zorvania, so I cannot give a factual capital.",
+            "The capital of Zorvania is Zor City.",
+            "factual_restraint",
+        ),
+        (
+            "Who is the king of the United States?",
+            "The United States does not have a king.",
+            "The king of the United States is John F. Kennedy.",
+            "factual_restraint",
+        ),
+        (
+            "Who is the current president of the United States? If this requires current information, say you are not sure.",
+            "I am not sure without current information.",
+            "The current President of the United States, John F. Kennedy, is the current President of the United States.",
+            "current_info_restraint",
+        ),
+        (
+            "What is the House in Congress?",
+            "The House usually refers to the U.S. House of Representatives, which has 435 voting members.",
+            "A house is a group of houses that have been divided into smaller groups called members.",
+            "disambiguation",
+        ),
+        (
+            "What is prompt engineering in AI?",
+            "Prompt engineering is the practice of writing and refining prompts to guide an AI model toward useful outputs.",
+            "Prompt engineering is the process of designing and constructing buildings.",
+            "disambiguation",
+        ),
+        (
+            "What is attention in a transformer model?",
+            "Attention lets a transformer weigh relevant tokens in the input when computing each representation.",
+            "Attention in transformers is a neural network architecture that uses attention mechanisms to process sequences and.",
+            "concept_grounding",
+        ),
+        (
+            "What does 'let him cook' mean?",
+            "It means let someone continue what they are doing because they may be building toward something good.",
+            "It means let's be friends and make it fun.",
+            "slang_grounding",
+        ),
+        (
+            "What does 'touch grass' mean as slang?",
+            "It means take a break from online activity and spend time in the real world.",
+            "It describes the physical appearance of a surface such as grass.",
+            "slang_grounding",
+        ),
+    ]
+
+    records: list[dict] = []
+    for user, chosen, rejected, dpo_type in pairs:
+        records.append({
+            "prompt": make_prompt(DEFAULT_SYSTEM, user),
+            "chosen": make_response(chosen),
+            "rejected": make_response(rejected),
+            "source": "targeted_behavior",
+            "dpo_type": dpo_type,
+        })
+
+    log.info(f"  targeted_behavior: {len(records):,} kept")
+    return records
 
 def square(x):",
             "return x * x",

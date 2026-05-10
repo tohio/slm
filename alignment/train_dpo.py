@@ -20,7 +20,7 @@ where:
     β     = temperature controlling deviation from reference policy
 
 Base model: slm-{size}-chat-code (after both SFT stages)
-Dataset:    Blended hh-rlhf + orca_dpo_pairs + dpo-mix-7k
+Dataset:    UltraFeedback binarized + local handcrafted/targeted preference pairs
 
 Eval batching:
     `training.eval_micro_batch_size` controls per-device eval batch size
