@@ -113,6 +113,22 @@ def _init_extract_worker() -> None:
     """
     global _ft_model
     import fasttext
+
+    # Common Crawl contains many malformed, empty, non-HTML, wrongly encoded,
+    # or otherwise junk pages. trafilatura/lxml log those as parser errors even
+    # though they are expected record-level rejects. Suppress only third-party
+    # extractor/parser noise; keep this module's pipeline logs visible.
+    for logger_name in (
+        "trafilatura",
+        "trafilatura.core",
+        "trafilatura.utils",
+        "trafilatura.metadata",
+        "courlan",
+        "htmldate",
+        "lxml",
+    ):
+        logging.getLogger(logger_name).setLevel(logging.CRITICAL)
+
     # Suppress fasttext's noisy stderr about newlines in input
     fasttext.FastText.eprint = lambda *args, **kwargs: None
     try:
