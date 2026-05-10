@@ -447,7 +447,7 @@ If you double the GPUs, halve `gradient_accumulation_steps` to keep the global b
 
 The committed configs are written for 1 GPU. For multi-GPU pretraining, scale these values:
 
-**125m** — global batch 32 sequences, 6.5B curation target × 2 epochs:
+**125m** — global batch 32 sequences, 10B curation target × 2 epochs:
 
 | GPUs | gradient_accumulation_steps | max_steps |
 |---|---|---|
@@ -455,7 +455,7 @@ The committed configs are written for 1 GPU. For multi-GPU pretraining, scale th
 | 4 | 2 | _regenerate with `make config-gen`_ |
 | 8 | 1 | _regenerate with `make config-gen`_ |
 
-**350m** — global batch 128 sequences, 16.5B curation target × 2 epochs:
+**350m** — global batch 128 sequences, 25B curation target × 2 epochs:
 
 | GPUs | gradient_accumulation_steps | max_steps |
 |---|---|---|
@@ -463,7 +463,7 @@ The committed configs are written for 1 GPU. For multi-GPU pretraining, scale th
 | 4 | 4 | _regenerate with `make config-gen`_ |
 | 8 | 2 | _regenerate with `make config-gen`_ |
 
-**1b** — global batch 128 sequences, 50B curation target × 1 epoch:
+**1b** — global batch 128 sequences, 75B curation target × 1 epoch:
 
 | GPUs | gradient_accumulation_steps | max_steps |
 |---|---|---|
@@ -546,13 +546,13 @@ Use `blend_stats.json` as the source of truth for a completed run. `export.py` r
 
 | Model | Curation target | Expected retained/tokenized | Epochs | Consumed target |
 |---|---:|---:|---:|---:|
-| `slm-125m` | 6.5B | ~6.0B | 2 | 13B |
-| `slm-350m` | 16.5B | ~15B | 2 | 33B |
-| `slm-1b` | 50B | 45B+ | 1 | 50B |
+| `slm-125m` | 10B | ~9B+ | 2 | 20B |
+| `slm-350m` | 25B | ~23B+ | 2 | 50B |
+| `slm-1b` | 75B | ~69B+ | 1 | 75B |
 
 `corpus_tokens` is the curator-side target, not a guaranteed final retained/tokenized count. Filtering, validation, deduplication, source availability, and tokenization reduce the final retained corpus. The revised targets include a retention buffer based on the completed 125M run, where a 5.5B curation target produced about 5.12B retained/tokenized tokens.
 
-Why 1b uses 1 epoch: at a 50B curation target, one epoch gives the 1B model a materially larger fresh-token budget while avoiding an immediate second pass over finite sources. 125m and 350m retain 2 epochs because their smaller corpus targets are intended for cheaper iteration and validation. 
+Why 1b uses 1 epoch: at a 75B curation target, one epoch gives the 1B model a materially larger fresh-token budget while avoiding an immediate second pass over finite sources. 125m and 350m retain 2 epochs because their smaller corpus targets are intended for cheaper iteration and validation. 
 
 ### Train / val split
 
@@ -742,9 +742,9 @@ slang/context grounding.
 
 **Why `rope_theta=500000` across all sizes?** RoPE's base period is the slow axis of the position encoding — larger values give the model room to extrapolate to longer contexts than it was trained on. Using 500000 uniformly across 125m, 350m, and 1b means any size can be length-extended later (via YaRN, dynamic scaling, or similar) without retraining from scratch. The tradeoff at 2048 context (125m, 350m) is negligible — large base values don't hurt in-context quality at short sequence lengths, and consistency across sizes is worth more than micro-optimising each tier. Llama 3 and Qwen follow this same pre-stretched-base pattern.
 
-**Why different epoch counts per scale?** Corpus size versus per-source supply. At 125m (6.5B curation target), 2 epochs is used for cheaper iteration; at 1b (50B curation target), 1 epoch gives substantially more fresh-token exposure and avoids an immediate second pass over finite sources. Modern small-model training (Llama, Phi, Qwen) follows the single-epoch pattern at scale — fresh tokens outperform repeated ones.
+**Why different epoch counts per scale?** Corpus size versus per-source supply. At 125m (10B curation target), 2 epochs is used for cheaper iteration; at 1b (75B curation target), 1 epoch gives substantially more fresh-token exposure and avoids an immediate second pass over finite sources. Modern small-model training (Llama, Phi, Qwen) follows the single-epoch pattern at scale — fresh tokens outperform repeated ones.
 
-**Why streaming-first curation?** At 1b with a 50B curation target, materializing sources in memory is infeasible on reasonable hardware. FineWeb and stack-v1 require streaming; the other sources use it for consistency. RAM is not the load-bearing scaling axis — vCPU count and network throughput are. This means readers on modest hardware (32 GB RAM) can still run 1b, just slower.
+**Why streaming-first curation?** At 1b with a 75B curation target, materializing sources in memory is infeasible on reasonable hardware. FineWeb and stack-v1 require streaming; the other sources use it for consistency. RAM is not the load-bearing scaling axis — vCPU count and network throughput are. This means readers on modest hardware (32 GB RAM) can still run 1b, just slower.
 
 **Why cap-and-redistribute?** Several sources have finite supply at large scales — peS2o (abstracts only) and jupyter are supply-bound at 350m+; Wikipedia, pg19, open_web_math, and stack_smol become supply-bound at 1b. Rather than add per-scale knobs or accept repetition, the deficit routes to FineWeb — which has 15T tokens of headroom — preserving mix shape and hitting the token target.
 

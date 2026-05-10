@@ -79,13 +79,13 @@ Use `blend_stats.json` as the source of truth for a completed run. `export.py` r
 | Model | Curation target | Expected retained/tokenized | Epochs | Consumed target |
 |---|---:|---:|---:|---:|
 | `mini` | 1M | mini only | 1 | 1M |
-| `slm-125m` | 6.5B | ~6.0B | 2 | 13B |
-| `slm-350m` | 16.5B | ~15B | 2 | 33B |
-| `slm-1b` | 50B | 45B+ | 1 | 50B |
+| `slm-125m` | 10B | ~9B+ | 2 | 20B |
+| `slm-350m` | 25B | ~23B+ | 2 | 50B |
+| `slm-1b` | 75B | ~69B+ | 1 | 75B |
 
 `corpus_tokens` / curation target is the curator-side target, not a guaranteed final retained token count. Filtering, validation, deduplication, source availability, and tokenization reduce the final retained/tokenized corpus. The targets include a retention buffer based on the completed 125M run, where a 5.5B curation target produced about 5.12B retained/tokenized tokens.
 
-Why 1b uses 1 epoch: at a 50B curation target, one epoch already gives the 1B model a materially larger fresh-token budget than the smaller sizes while avoiding an immediate second pass over finite sources. 125m and 350m retain 2 epochs because their smaller corpus targets are intended for cheaper iteration and validation.
+Why 1b uses 1 epoch: at a 75B curation target, one epoch already gives the 1B model a materially larger fresh-token budget than the smaller sizes while avoiding an immediate second pass over finite sources. 125m and 350m retain 2 epochs because their smaller corpus targets are intended for cheaper iteration and validation.
 
 ---
 
@@ -160,13 +160,13 @@ python curator/scripts/curate.py --target mini --mini --stage blend
 **Full pipeline**
 
 ```bash
-# 125m dataset (6.5B curation target; ~6.0B expected retained/tokenized)
+# 125m dataset (10B curation target; ~9B+ expected retained/tokenized)
 python curator/scripts/curate.py --target 125m
 
-# 350m dataset (16.5B curation target; ~15B expected retained/tokenized)
+# 350m dataset (25B curation target; ~23B+ expected retained/tokenized)
 python curator/scripts/curate.py --target 350m --workers 32
 
-# 1b dataset (50B curation target; 45B+ expected retained/tokenized)
+# 1b dataset (75B curation target; ~69B+ expected retained/tokenized)
 python curator/scripts/curate.py --target 1b --workers 64
 ```
 
@@ -419,7 +419,7 @@ MinHash dedup of large sources (stack_v1 has ~2,103 shards at 125m) opens many f
 
 **Why HTTPS for Common Crawl instead of S3?** Direct S3 access to the `commoncrawl` bucket fails on EC2 instances with IAM roles attached — the role credentials are rejected by the bucket policy. HTTPS via `data.commoncrawl.org` works reliably regardless of instance credentials.
 
-**Why streaming-first code?** At 1b scale with 50B curation targets, materializing any large source in memory is infeasible on reasonable hardware. FineWeb, stack-v1, and pg19 use streaming because their on-HF layouts (large volume or many small parquet files) make full-dataset downloads impractical. The other sources use streaming for consistency so the pipeline works uniformly across hardware sizes. RAM is not the load-bearing scaling axis here — vCPU count and network throughput are.
+**Why streaming-first code?** At 1b scale with 75B curation targets, materializing any large source in memory is infeasible on reasonable hardware. FineWeb, stack-v1, and pg19 use streaming because their on-HF layouts (large volume or many small parquet files) make full-dataset downloads impractical. The other sources use streaming for consistency so the pipeline works uniformly across hardware sizes. RAM is not the load-bearing scaling axis here — vCPU count and network throughput are.
 
 **Why datatrove for dedup instead of datasketch?** datasketch's `MinHashLSH` is in-memory. At 350m it requires ~32GB; at 1b it requires ~85GB and may not fit on a single instance. datatrove's disk-based pipeline keeps RAM bounded by shard size regardless of corpus size — the same pattern used by FineWeb and RedPajama at trillion-token scale.
 
