@@ -116,6 +116,10 @@ from curator.sources.stack_smol import StackSmolSource
 from curator.sources.stack_v1 import StackV1Source
 from curator.sources.jupyter import JupyterSource
 from curator.sources.conala import ConalaSource
+from curator.sources.nemotron_cc_math import NemotronCCMathSource
+from curator.sources.nemotron_specialized import NemotronSpecializedSource
+from curator.sources.nemotron_code_v2 import NemotronCodeV2Source
+from curator.sources.nemotron_cc_code import NemotronCCCodeSource
 
 from curator.scripts.upload_s3 import (
     upload_directory, download_prefix, get_bucket_and_prefix,
@@ -420,6 +424,12 @@ def _build_source(
         return PeS2oSource(output_dir=raw_dir, max_docs=cap)
     if name == "open_web_math":
         return OpenWebMathSource(output_dir=raw_dir, max_docs=cap)
+    if name == "nemotron_cc_math":
+        return NemotronCCMathSource(output_dir=raw_dir, max_docs=cap)
+
+    if name == "nemotron_specialized":
+        return NemotronSpecializedSource(output_dir=raw_dir, max_docs=cap)
+
     if name == "stackexchange":
         return StackExchangeSource(output_dir=raw_dir, max_docs=cap)
     if name == "synthetic_arithmetic":
@@ -434,6 +444,12 @@ def _build_source(
         return CodeSearchNetSource(output_dir=raw_dir, max_docs=cap)
     if name == "stack_smol":
         return StackSmolSource(output_dir=raw_dir, max_docs=cap)
+    if name == "nemotron_code_v2":
+        return NemotronCodeV2Source(output_dir=raw_dir, max_docs=cap)
+
+    if name == "nemotron_cc_code":
+        return NemotronCCCodeSource(output_dir=raw_dir, max_docs=cap)
+
     if name == "stack_v1":
         return StackV1Source(output_dir=raw_dir, max_docs=cap)
     if name == "jupyter":
