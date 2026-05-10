@@ -75,9 +75,9 @@ This behavior is load-bearing at 1b scale; partially load-bearing at 125m/350m f
 FineWeb and FineWeb-Edu remain the broad web base for this from-scratch
 training pipeline. NVIDIA/Nemotron datasets are used only to supplement
 specific high-signal gaps: math, code, and specialized synthetic overflow.
-They are not a replacement for the repo's core curation approach.
+They do not replace FineWeb and FineWeb-Edu as the broad web base.
 
-Current use:
+Use:
 
 ```text
 Nemotron-CC-Math-v1:
@@ -98,7 +98,7 @@ Nemotron-CC-v2.1:
 
 ### Run-specific realized mix
 
-The source mix above is the current pretraining target mix. The actual realized mix for each curation run is written to `data/curated/blend_stats.json` at the end of the blend stage.
+The source mix above defines the pretraining target mix. The actual realized mix for each curation run is written to `data/curated/blend_stats.json` at the end of the blend stage.
 
 Realized percentages can differ slightly from target percentages when a source is supply-bound or filtered/deduplicated more aggressively than expected. Local synthetic deficits route to Nemotron Specialized first, then FineWeb-Edu, then FineWeb. General source deficits route to FineWeb-Edu first and FineWeb as the final fallback.
 
@@ -113,7 +113,7 @@ Use `blend_stats.json` as the source of truth for a completed run. `export.py` r
 | `slm-350m` | 25B | ~23B+ | 2 | 50B |
 | `slm-1b` | 75B | ~69B+ | 1 | 75B |
 
-`corpus_tokens` / curation target is the curator-side target, not a guaranteed final retained token count. Filtering, validation, deduplication, source availability, and tokenization reduce the final retained/tokenized corpus. The targets include a retention buffer based on the completed 125M run, where a 5.5B curation target produced about 5.12B retained/tokenized tokens.
+`corpus_tokens` / curation target is the curator-side target, not a guaranteed final retained token count. Filtering, validation, deduplication, source availability, and tokenization reduce the final retained/tokenized corpus. The targets include a retention buffer because filtering, validation, deduplication, source availability, and tokenization reduce the final usable corpus.
 
 Why 1b uses 1 epoch: at a 75B curation target, one epoch already gives the 1B model a materially larger fresh-token budget than the smaller sizes while avoiding an immediate second pass over finite sources. 125m and 350m retain 2 epochs because their smaller corpus targets are intended for cheaper iteration and validation.
 
@@ -126,7 +126,7 @@ curator/
 ├── constants.py             Re-exports CHARS_PER_TOKEN etc. from config/data_mix.py
 ├── sources/
 │   ├── common_crawl.py        Common Crawl WARCs via HTTPS + trafilatura
-│   ├── fineweb.py             HuggingFaceFW/fineweb (streaming, overflow sink)
+│   ├── fineweb.py             HuggingFaceFW/fineweb (streaming, final fallback)
 │   ├── fineweb_edu.py         HuggingFaceFW/fineweb-edu educational web text
 │   ├── wikipedia.py           wikimedia/wikipedia EN
 │   ├── pg19.py                pg19 public-domain books
@@ -176,7 +176,7 @@ One environment variable is required beyond the existing ones:
 **Accept dataset Terms of Use**
 
 Before the first curation run, accept the terms for any gated Hugging Face
-datasets used by the active mix. The current mix uses BigCode and selected
+datasets used by the active mix. The active mix uses BigCode and selected
 NVIDIA/Nemotron datasets.
 
 Required access checks:
@@ -187,10 +187,7 @@ Required access checks:
 - https://huggingface.co/datasets/nvidia/Nemotron-Pretraining-Code-v2
 - https://huggingface.co/datasets/nvidia/Nemotron-CC-Code-v1
 
-`nvidia/Nemotron-Pretraining-Code-v2` and
-`nvidia/Nemotron-CC-Code-v1` may remain pending until NVIDIA approves access.
-Do not run `make curate-mini` with the current mix until both are accepted, or
-the code source loaders will fail.
+Accept the required gated dataset terms before running curation.
 
 After accepting terms, make sure the token is available on the machine running
 curation:
@@ -270,7 +267,7 @@ python curator/scripts/curate.py --target 125m --stage upload
 
 **Human sample inspection**
 
-After the first successful mini curation run, inspect actual records from each source before scaling to a full dataset. This is a one-time human data-verification step: the goal is to see whether the data itself is readable, complete, useful, and aligned with the signal expected from that source.
+After mini curation, inspect actual records from each source before scaling to a full dataset. Confirm that the data is readable, complete, useful, and aligned with the expected signal for that source.
 
 ```bash
 python curator/scripts/sample_source.py --stage filtered --source wikipedia --limit 10 --max-chars 2500
@@ -294,7 +291,7 @@ Review samples manually:
 - Did filtering or validation remove useful formatting?
 - Are generated/template-like sources producing direct, verified examples rather than vague prose?
 
-Quality filters can remove obvious junk, but they do not prove that a source teaches the model the behavior we want. Once the source outputs are verified, this does not need to be repeated unless sources, filters, validation, or extraction logic change.
+Quality filters can remove obvious junk, but they do not prove that a source teaches the model the behavior we want. Repeat sample inspection when sources, filters, validation, or extraction logic change.
 
 **S3 upload**
 
@@ -430,7 +427,7 @@ Three passes:
 
 **Pass 3 (shuffle + split).** Two shuffle strategies based on size, both producing globally-mixed train and a uniform-sample val:
 - **In-memory** — when total staging (scaled by ~5× for Python object overhead) fits in `SHUFFLE_RAM_BUDGET_GB` (default 12 GB). Read everything, shuffle once, write split.
-- **Weighted-interleave + reservoir sample** — when staging exceeds the RAM budget. Open all staging files at once; at each step pick a source weighted by remaining lines and read one line. Each line either enters a reservoir (val sample, uniform across the corpus by Vitter's Algorithm R) or a chunk buffer (train, written to disk in shuffled chunks). Train chunks are then concatenated in shuffled order. The earlier "tail-slice the chunk concat for val" approach was replaced because it produced source-pure regions in train (first 100k lines all FineWeb) and a non-uniform val sample.
+- **Weighted-interleave + reservoir sample** — when staging exceeds the RAM budget. Open all staging files at once; at each step pick a source weighted by remaining lines and read one line. Each line either enters a reservoir (val sample, uniform across the corpus by Vitter's Algorithm R) or a chunk buffer (train, written to disk in shuffled chunks). Train chunks are then concatenated in shuffled order. Reservoir sampling during blend keeps the validation split uniform across the corpus.
 
 Characters-to-tokens conversion uses `CHARS_PER_TOKEN = 4.3` from `config/data_mix.py` — measured from the 32k-vocab tokenizer trained on the 125m corpus. Recalibrate there if the tokenizer is retrained on a substantially different corpus.
 
@@ -741,9 +738,9 @@ small QA/MCQ source.
 FineWeb and FineWeb-Edu remain the broad web base for this from-scratch
 training pipeline. NVIDIA/Nemotron datasets are used only to supplement
 specific high-signal gaps: math, code, and specialized synthetic overflow.
-They are not a replacement for the repo's core curation approach.
+They do not replace FineWeb and FineWeb-Edu as the broad web base.
 
-Current use:
+Use:
 
 ```text
 Nemotron-CC-Math-v1:

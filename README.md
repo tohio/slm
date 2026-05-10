@@ -283,7 +283,7 @@ make install-gpu     # training/eval/serving deps only (no curation deps)
 **Accept dataset Terms of Use**
 
 Before the first curation run, accept the terms for any gated Hugging Face
-datasets used by the active mix. The current mix uses BigCode and selected
+datasets used by the active mix. The active mix uses BigCode and selected
 NVIDIA/Nemotron datasets.
 
 Required access checks:
@@ -294,10 +294,7 @@ Required access checks:
 - https://huggingface.co/datasets/nvidia/Nemotron-Pretraining-Code-v2
 - https://huggingface.co/datasets/nvidia/Nemotron-CC-Code-v1
 
-`nvidia/Nemotron-Pretraining-Code-v2` and
-`nvidia/Nemotron-CC-Code-v1` may remain pending until NVIDIA approves access.
-Do not run `make curate-mini` with the current mix until both are accepted, or
-the code source loaders will fail.
+Accept the required gated dataset terms before running curation.
 
 After accepting terms, make sure the token is available on the machine running
 curation:
@@ -568,7 +565,7 @@ make pretrain PRETRAIN_CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
 | Source | Target Share | Notes |
 |---|---:|---|
 | Common Crawl | 5% | direct WARC via trafilatura |
-| FineWeb | 10% | `HuggingFaceFW/fineweb`, overflow sink |
+| FineWeb | 10% | `HuggingFaceFW/fineweb`, broad web and final fallback |
 | FineWeb-Edu | 26% | `HuggingFaceFW/fineweb-edu`, educational/explanatory web text |
 | Wikipedia | 10% | `wikimedia/wikipedia` EN |
 | pg19 | 2.5% | public-domain books pre-1919 |
@@ -591,9 +588,9 @@ Generated/template-like sources run exact dedup but bypass fuzzy MinHash dedup s
 FineWeb and FineWeb-Edu remain the broad web base for this from-scratch
 training pipeline. NVIDIA/Nemotron datasets are used only to supplement
 specific high-signal gaps: math, code, and specialized synthetic overflow.
-They are not a replacement for the repo's core curation approach.
+They do not replace FineWeb and FineWeb-Edu as the broad web base.
 
-Current use:
+Use:
 
 ```text
 Nemotron-CC-Math-v1:
@@ -614,7 +611,7 @@ Nemotron-CC-v2.1:
 
 ### Run-specific realized mix
 
-The source mix above is the current pretraining target mix. The actual realized mix for each curation run is written to `data/curated/blend_stats.json` at the end of the blend stage.
+The source mix above defines the pretraining target mix. The actual realized mix for each curation run is written to `data/curated/blend_stats.json` at the end of the blend stage.
 
 Realized percentages can differ slightly from target percentages when a source is supply-bound or filtered/deduplicated more aggressively than expected. Local synthetic deficits route to Nemotron Specialized first, then FineWeb-Edu, then FineWeb. General source deficits route to FineWeb-Edu first and FineWeb as the final fallback.
 
@@ -628,7 +625,7 @@ Use `blend_stats.json` as the source of truth for a completed run. `export.py` r
 | `slm-350m` | 25B | ~23B+ | 2 | 50B |
 | `slm-1b` | 75B | ~69B+ | 1 | 75B |
 
-`corpus_tokens` is the curator-side target, not a guaranteed final retained/tokenized count. Filtering, validation, deduplication, source availability, and tokenization reduce the final retained corpus. The revised targets include a retention buffer based on the completed 125M run, where a 5.5B curation target produced about 5.12B retained/tokenized tokens.
+`corpus_tokens` is the curator-side target, not a guaranteed final retained/tokenized count. Filtering, validation, deduplication, source availability, and tokenization reduce the final retained corpus. The targets include a retention buffer because filtering, validation, deduplication, source availability, and tokenization reduce the final usable corpus.
 
 Why 1b uses 1 epoch: at a 75B curation target, one epoch gives the 1B model a materially larger fresh-token budget while avoiding an immediate second pass over finite sources. 125m and 350m retain 2 epochs because their smaller corpus targets are intended for cheaper iteration and validation. 
 
@@ -661,12 +658,7 @@ Common Crawl extraction, validation, and deduplication stages are parallel by
 design and will be slow on 2–8 vCPU instances. Hugging Face dataset downloads
 are streamed for reproducibility and readable logs. For the measured 125M run, 64 vCPU / 256 GiB was used.
 
-> **Measure your own throughput before committing.** Many variables dominate:
-> network peering between your cloud and Common Crawl's AWS `us-east-1` origin,
-> per-WARC CloudFront throughput at your time of day, disk IOPS, CPU generation,
-> and CC's own throttling behavior. Cross-cloud (Nebius → AWS, GCP → AWS) runs
-> can be 2–3× faster or slower than same-region runs. Before committing to a
-> full run, time a `curate-mini` or `curate SIZE=125m` run to calibrate.
+> Curation throughput varies by network path, disk I/O, CPU generation, and Common Crawl availability. Run `curate-mini` first to estimate local throughput.
 
 Run close to `us-east-1` (AWS) or `us-east1` (GCP) to minimise Common Crawl egress latency. Attach a persistent disk (500GB+) for `DATA_DIR` — the pipeline is fully resumable at every stage.
 
@@ -1057,9 +1049,9 @@ small QA/MCQ source.
 FineWeb and FineWeb-Edu remain the broad web base for this from-scratch
 training pipeline. NVIDIA/Nemotron datasets are used only to supplement
 specific high-signal gaps: math, code, and specialized synthetic overflow.
-They are not a replacement for the repo's core curation approach.
+They do not replace FineWeb and FineWeb-Edu as the broad web base.
 
-Current use:
+Use:
 
 ```text
 Nemotron-CC-Math-v1:
