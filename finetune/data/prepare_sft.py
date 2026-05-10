@@ -33,6 +33,9 @@ Stage 2 — Code SFT:
     Obvious prose-only / explanation-only examples are dropped so this stage
     teaches the model to emit code when code is requested.
 
+    Custom simple-code examples are appended to reinforce basic Python,
+    write-only-code behavior, and function-completion behavior.
+
 Output format — one conversation per line:
     {
         "conversations": [
@@ -431,6 +434,81 @@ def normalize_code_solution(solution: str, sft_type: str) -> tuple[str, bool]:
     return solution, False
 
 
+
+# ── Handcrafted simple code-generation examples ───────────────────────────────
+#
+# These examples directly target the observed failure mode:
+#   write code -> the model describes code instead of emitting code.
+#
+# Magicoder remains the backbone. This set is intentionally small, simple, and
+# high-signal so basic Python/code-output behavior is repeatedly reinforced.
+HANDCRAFTED_SIMPLE_CODE_GENERATION = [
+    {
+        "prompt": "Write only Python code: create a function add_numbers(a, b) that returns their sum.",
+        "answer": "def add_numbers(a, b):\n    return a + b",
+    },
+    {
+        "prompt": "Write a Python function that adds two numbers.",
+        "answer": "def add_numbers(a, b):\n    return a + b",
+    },
+    {
+        "prompt": "Create a Python function called is_even that returns True if n is even.",
+        "answer": "def is_even(n):\n    return n % 2 == 0",
+    },
+    {
+        "prompt": "Write only Python code: create a function square(x) that returns x squared.",
+        "answer": "def square(x):\n    return x * x",
+    },
+    {
+        "prompt": "Write a Python function that returns the first item in a list.",
+        "answer": "def first_item(items):\n    return items[0]",
+    },
+    {
+        "prompt": "Write a Python function that returns the last item in a list.",
+        "answer": "def last_item(items):\n    return items[-1]",
+    },
+    {
+        "prompt": "Write a Python function that reverses a string.",
+        "answer": "def reverse_string(text):\n    return text[::-1]",
+    },
+    {
+        "prompt": "Write a Python function that counts the number of words in a string.",
+        "answer": "def count_words(text):\n    return len(text.split())",
+    },
+    {
+        "prompt": "Write a Python function that returns the maximum number in a list.",
+        "answer": "def max_number(numbers):\n    return max(numbers)",
+    },
+    {
+        "prompt": "Write a Python function that filters even numbers from a list.",
+        "answer": "def filter_even(numbers):\n    return [n for n in numbers if n % 2 == 0]",
+    },
+    {
+        "prompt": "Write only Python code: create a function safe_divide(a, b) that returns 0 if b is 0.",
+        "answer": "def safe_divide(a, b):\n    if b == 0:\n        return 0\n    return a / b",
+    },
+    {
+        "prompt": "Write a Python function that removes duplicates from a list while preserving order.",
+        "answer": "def remove_duplicates(items):\n    seen = set()\n    result = []\n    for item in items:\n        if item not in seen:\n            seen.add(item)\n            result.append(item)\n    return result",
+    },
+    {
+        "prompt": "Write a Python function that returns True if a string is a palindrome.",
+        "answer": "def is_palindrome(text):\n    return text == text[::-1]",
+    },
+    {
+        "prompt": "Write a Python function that clamps a value between low and high.",
+        "answer": "def clamp(value, low, high):\n    return max(low, min(value, high))",
+    },
+    {
+        "prompt": "Write only Python code: create a function celsius_to_fahrenheit(c).",
+        "answer": "def celsius_to_fahrenheit(c):\n    return (c * 9 / 5) + 32",
+    },
+]
+
+# Repeat simple code-generation examples so the add-on is loud enough relative
+# to Magicoder's broader instruction distribution.
+HANDCRAFTED_SIMPLE_CODE_GENERATION_REPEAT = 100
+
 # ── Handcrafted function-completion examples ─────────────────────────────────
 
 HANDCRAFTED_FUNCTION_COMPLETIONS = [
@@ -526,6 +604,35 @@ HANDCRAFTED_FUNCTION_COMPLETIONS = [
     },
 ]
 
+
+
+def build_handcrafted_simple_code_generation_records() -> list[dict]:
+    records = []
+
+    prompt_variants = [
+        "{prompt}",
+        "{prompt}\nDo not explain.",
+        "{prompt}\nReturn only the code.",
+    ]
+
+    for example in HANDCRAFTED_SIMPLE_CODE_GENERATION:
+        prompt = example["prompt"].strip()
+        answer = example["answer"].strip()
+
+        for variant in prompt_variants:
+            records.append({
+                "conversations": [
+                    {"role": "system", "content": CODE_SYSTEM},
+                    {"role": "user", "content": variant.format(prompt=prompt)},
+                    {"role": "assistant", "content": answer},
+                ],
+                "source": "handcrafted_simple_code",
+                "sft_type": "code_generation",
+                "normalized": False,
+                "simple_code_variant": True,
+            })
+
+    return records
 
 def build_handcrafted_function_completion_records() -> list[dict]:
     """Return body-only examples for HumanEval-style behavior.
@@ -1020,6 +1127,19 @@ def prepare_code(val_fraction: float) -> None:
             "sft_type": sft_type,
             "normalized": normalized,
         })
+
+    simple_code_base = build_handcrafted_simple_code_generation_records()
+    simple_code_records = (
+        simple_code_base * HANDCRAFTED_SIMPLE_CODE_GENERATION_REPEAT
+    )
+    records.extend(simple_code_records)
+    type_counts["code_generation"] += len(simple_code_records)
+    log.info(
+        f"Added handcrafted simple-code examples: "
+        f"{len(simple_code_records):,} "
+        f"({len(simple_code_base):,} unique × "
+        f"{HANDCRAFTED_SIMPLE_CODE_GENERATION_REPEAT})"
+    )
 
     handcrafted_records = build_handcrafted_function_completion_records()
     records.extend(handcrafted_records)
