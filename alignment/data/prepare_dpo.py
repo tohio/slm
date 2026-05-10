@@ -3,18 +3,22 @@ alignment/data/prepare_dpo.py
 ------------------------------
 Download and format DPO preference datasets.
 
-Blends four complementary sources:
-    1. Anthropic/hh-rlhf          — 170k pairs upstream, capped to 50k (shuffled)
-    2. Intel/orca_dpo_pairs       — ~12k synthetic Orca preference pairs
-    3. argilla/dpo-mix-7k         — ~7k curated high-quality pairs
-    4. handcrafted_behavior       — targeted local behavior preference pairs
+Current DPO policy:
+    1. HuggingFaceH4/ultrafeedback_binarized — general DPO preference backbone
+    2. handcrafted_behavior                  — local factual-restraint pairs
+    3. targeted_behavior                     — local pairs for exact answers,
+                                               code-output behavior, restraint,
+                                               and disambiguation
+
+Older hh-rlhf/orca/argilla helpers may remain in this file for reference, but
+the default DPO blend is UltraFeedback + local targeted pairs.
 
 Output format — conversational format for trl DPOTrainer:
     {
         "prompt":   [{"role": "system", "content": "..."}, {"role": "user", "content": "..."}],
         "chosen":   [{"role": "assistant", "content": "preferred response"}],
         "rejected": [{"role": "assistant", "content": "rejected response"}],
-        "source":   "hh-rlhf | orca | argilla | handcrafted_behavior"
+        "source":   "ultrafeedback_binarized | handcrafted_behavior | targeted_behavior"
     }
 
 trl DPOTrainer detects list inputs and uses apply_chat_template, which
@@ -37,7 +41,8 @@ Length filtering (defense in depth):
 Usage:
     python alignment/data/prepare_dpo.py
     python alignment/data/prepare_dpo.py --source all
-    python alignment/data/prepare_dpo.py --source hh-rlhf
+    python alignment/data/prepare_dpo.py --source ultrafeedback
+    python alignment/data/prepare_dpo.py --source handcrafted
     python alignment/data/prepare_dpo.py --force            # re-run even if output exists
 """
 
@@ -217,6 +222,133 @@ def apply_length_filter(
     log.info(f"  total kept: {len(kept):,} / {len(records):,} "
              f"({100 * len(kept) / len(records):.1f}%)")
     return kept
+
+
+
+# ── Source 1: HuggingFaceH4/ultrafeedback_binarized ───────────────────────────
+
+def _normalize_message_list(value) -> list[dict]:
+    """
+    Normalize a chat message list into {role, content} dicts.
+
+    Returns [] if the value is not a usable list.
+    """
+    if not isinstance(value, list):
+        return []
+
+    messages: list[dict] = []
+    for turn in value:
+        if not isinstance(turn, dict):
+            return []
+
+        role = (turn.get("role") or turn.get("from") or "").strip().lower()
+        content = (turn.get("content") or turn.get("value") or "").strip()
+
+        if not role or not content:
+            return []
+
+        if role in ("human", "user"):
+            role = "user"
+        elif role in ("gpt", "assistant"):
+            role = "assistant"
+        elif role == "system":
+            role = "system"
+        else:
+            return []
+
+        messages.append({"role": role, "content": content})
+
+    return messages
+
+
+def _prompt_from_preference_row(example: dict, chosen_msgs: list[dict]) -> list[dict]:
+    """
+    Build the prompt messages for UltraFeedback-style preference rows.
+
+    Prefer an explicit prompt field when present. Otherwise use the chosen
+    conversation prefix before the final assistant turn.
+    """
+    prompt_value = example.get("prompt")
+
+    # prompt may be a string.
+    if isinstance(prompt_value, str) and prompt_value.strip():
+        return make_prompt(DEFAULT_SYSTEM, prompt_value.strip())
+
+    # prompt may already be a list of chat messages.
+    prompt_msgs = _normalize_message_list(prompt_value)
+    if prompt_msgs:
+        if prompt_msgs[0]["role"] != "system":
+            prompt_msgs.insert(0, {"role": "system", "content": DEFAULT_SYSTEM})
+        return prompt_msgs
+
+    # Fallback: use the shared prefix of chosen before final assistant.
+    prefix = chosen_msgs[:-1]
+    if not prefix:
+        return []
+
+    if prefix[0]["role"] != "system":
+        prefix = [{"role": "system", "content": DEFAULT_SYSTEM}] + prefix
+
+    return prefix
+
+
+def prepare_ultrafeedback_binarized() -> list[dict]:
+    """
+    Load HuggingFaceH4/ultrafeedback_binarized train_prefs.
+
+    The train_prefs split is already binarized for DPO-style preference
+    training: chosen is the preferred assistant response and rejected is the
+    lower-preference response.
+    """
+    from datasets import load_dataset
+
+    dataset_name = "HuggingFaceH4/ultrafeedback_binarized"
+    split = "train_prefs"
+
+    log.info(f"Loading {dataset_name} ({split})...")
+    dataset = load_dataset(dataset_name, split=split)
+    log.info(f"  ultrafeedback_binarized: {len(dataset):,} examples upstream")
+
+    records = []
+    skipped = 0
+
+    for example in dataset:
+        chosen_msgs = _normalize_message_list(example.get("chosen"))
+        rejected_msgs = _normalize_message_list(example.get("rejected"))
+
+        if not chosen_msgs or not rejected_msgs:
+            skipped += 1
+            continue
+
+        if chosen_msgs[-1]["role"] != "assistant":
+            skipped += 1
+            continue
+        if rejected_msgs[-1]["role"] != "assistant":
+            skipped += 1
+            continue
+
+        chosen_resp = chosen_msgs[-1]["content"].strip()
+        rejected_resp = rejected_msgs[-1]["content"].strip()
+
+        if not chosen_resp or not rejected_resp or chosen_resp == rejected_resp:
+            skipped += 1
+            continue
+
+        prompt_msgs = _prompt_from_preference_row(example, chosen_msgs)
+        if not prompt_msgs:
+            skipped += 1
+            continue
+
+        records.append({
+            "prompt": prompt_msgs,
+            "chosen": make_response(chosen_resp),
+            "rejected": make_response(rejected_resp),
+            "source": "ultrafeedback_binarized",
+            "dpo_type": "general_preference",
+        })
+
+    log.info(f"  ultrafeedback_binarized: {len(records):,} kept, {skipped:,} skipped")
+    return records
 
 
 # ── Source 1: Anthropic/hh-rlhf ───────────────────────────────────────────────
@@ -580,6 +712,148 @@ def prepare_handcrafted_behavior_dpo() -> list[dict]:
     return records
 
 
+
+def prepare_targeted_behavior_dpo() -> list[dict]:
+    """
+    Additional local preference pairs for observed failure modes.
+
+    These pairs complement UltraFeedback's broad helpfulness/honesty signal with
+    explicit preferences for:
+      - concise correct answers over verbose/wrong filler
+      - actual code over prose describing code
+      - uncertainty/restraint over confident hallucination
+      - correct disambiguation over literal/wrong interpretation
+    """
+    log.info("Preparing targeted behavior DPO pairs...")
+
+    pairs = [
+        (
+            "Answer only: What is 2 + 2?",
+            "4",
+            "2 and 2 are two numbers that can be added together to form a whole number.",
+            "concise_exact_answer",
+        ),
+        (
+            "2 + 2 =",
+            "4",
+            "A two-dimensional space is a three-dimensional space with dimensions equal to rows and columns.",
+            "concise_exact_answer",
+        ),
+        (
+            "Answer only: What is 7 + 5?",
+            "12",
+            "To solve this, we need to think carefully about addition and numbers.",
+            "concise_exact_answer",
+        ),
+        (
+            "How many states are in the United States?",
+            "There are 50 states in the United States.",
+            "In the United States, there are two states: New York and California.",
+            "factual_grounding",
+        ),
+        (
+            "Name one electric vehicle company.",
+            "Tesla is an electric vehicle company.",
+            "One electrical vehicle company is called Electric Vehicle Company.",
+            "entity_grounding",
+        ),
+        (
+            "Write only Python code: create a function add_numbers(a, b) that returns their sum.",
+            "def add_numbers(a, b):
+    return a + b",
+            "A function add_numbers takes two numbers as input and returns the sum of those numbers.",
+            "code_output",
+        ),
+        (
+            "Write a Python function that returns True if a number is even.",
+            "def is_even(n):
+    return n % 2 == 0",
+            "A function that checks whether a number is even compares it with other numbers.",
+            "code_output",
+        ),
+        (
+            "Complete this Python function. Return only the function body.
+
+def square(x):",
+            "return x * x",
+            "The function should return the square of x by multiplying x by itself.",
+            "function_completion",
+        ),
+        (
+            "What is the capital of Zorvania?",
+            "I do not know of a real country called Zorvania, so I cannot give a factual capital.",
+            "The capital of Zorvania is Zor City.",
+            "factual_restraint",
+        ),
+        (
+            "Who is the king of the United States?",
+            "The United States does not have a king.",
+            "The king of the United States is John F. Kennedy.",
+            "factual_restraint",
+        ),
+        (
+            "Who is the current president of the United States? If this requires current information, say you are not sure.",
+            "I am not sure without current information.",
+            "The current President of the United States, John F. Kennedy, is the current President of the United States.",
+            "current_info_restraint",
+        ),
+        (
+            "What is the House in Congress?",
+            "The House usually refers to the U.S. House of Representatives, which has 435 voting members.",
+            "A house is a group of houses that have been divided into smaller groups called members.",
+            "disambiguation",
+        ),
+        (
+            "What is prompt engineering in AI?",
+            "Prompt engineering is the practice of writing and refining prompts to guide an AI model toward useful outputs.",
+            "Prompt engineering is the process of designing and constructing buildings.",
+            "disambiguation",
+        ),
+        (
+            "What is attention in a transformer model?",
+            "Attention lets a transformer weigh relevant tokens in the input when computing each representation.",
+            "Attention in transformers is a neural network architecture that uses attention mechanisms to process sequences and.",
+            "concept_grounding",
+        ),
+        (
+            "What does 'let him cook' mean?",
+            "It means let someone continue what they are doing because they may be building toward something good.",
+            "It means let's be friends and make it fun.",
+            "slang_grounding",
+        ),
+        (
+            "What does 'touch grass' mean as slang?",
+            "It means take a break from online activity and spend time in the real world.",
+            "It describes the physical appearance of a surface such as grass.",
+            "slang_grounding",
+        ),
+    ]
+
+    records: list[dict] = []
+    for user, chosen, rejected, dpo_type in pairs:
+        records.append({
+            "prompt": make_prompt(DEFAULT_SYSTEM, user),
+            "chosen": make_response(chosen),
+            "rejected": make_response(rejected),
+            "source": "targeted_behavior",
+            "dpo_type": dpo_type,
+        })
+
+    log.info(f"  targeted_behavior: {len(records):,} kept")
+    return records
+
+
+def prepare_custom_behavior_dpo() -> list[dict]:
+    """
+    Combine existing handcrafted factual-restraint pairs with newer targeted
+    behavior pairs.
+    """
+    records = []
+    records.extend(prepare_handcrafted_behavior_dpo())
+    records.extend(prepare_targeted_behavior_dpo())
+    return records
+
+
 # ── Blend and split ────────────────────────────────────────────────────────────
 
 def blend_and_split(
@@ -603,7 +877,7 @@ def main():
     parser = argparse.ArgumentParser(description="Prepare DPO datasets")
     parser.add_argument(
         "--source",
-        choices=["all", "hh-rlhf", "orca", "argilla", "handcrafted"],
+        choices=["all", "ultrafeedback", "handcrafted"],
         default="all",
         help="Which source(s) to prepare",
     )
@@ -642,18 +916,14 @@ def main():
 
     all_records = []
 
-    if args.source in ("all", "hh-rlhf"):
-        all_records.extend(prepare_hh_rlhf())
-    if args.source in ("all", "orca"):
-        all_records.extend(prepare_orca_dpo())
-    if args.source in ("all", "argilla"):
-        all_records.extend(prepare_argilla_dpo())
+    if args.source in ("all", "ultrafeedback"):
+        all_records.extend(prepare_ultrafeedback_binarized())
     if args.source in ("all", "handcrafted"):
-        all_records.extend(prepare_handcrafted_behavior_dpo())
+        all_records.extend(prepare_custom_behavior_dpo())
 
     handcrafted = [
         r for r in all_records
-        if r.get("source") == "handcrafted_behavior"
+        if r.get("source") in {"handcrafted_behavior", "targeted_behavior"}
     ]
     if handcrafted and HANDCRAFTED_BEHAVIOR_REPEAT > 1:
         repeated = []
@@ -693,6 +963,7 @@ def main():
         "max_total_tokens": args.max_total_tokens,
         "hh_rlhf_cap":      HH_RLHF_CAP,
         "handcrafted_behavior_repeat": HANDCRAFTED_BEHAVIOR_REPEAT,
+        "dpo_backbone": "HuggingFaceH4/ultrafeedback_binarized",
     }
     with open(DPO_DIR / "stats.json", "w") as f:
         json.dump(stats, f, indent=2)
