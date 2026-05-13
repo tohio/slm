@@ -239,11 +239,13 @@ class SyntheticTaskCodeSource:
 
         if task_type == "docstring_to_code":
             signature = ex["code"].splitlines()[0]
+            doc = ex["doc"]
+            code = ex["code"]
             return (
-                f"Python function:\n\n"
+                "Python function:\n\n"
                 f"{signature}\n"
-                f"    """{ex['doc']}"""\n\n"
-                f"Solution:\n{ex['code']}\n"
+                f'    """{doc}"""\n\n'
+                f"Solution:\n{code}\n"
             )
 
         if task_type == "signature_to_function":
