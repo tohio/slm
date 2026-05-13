@@ -1,6 +1,6 @@
 # curator
 
-Data curation pipeline for SLM pretraining. Downloads raw data from twenty concrete sources (13 non-code top-level sources + 7 code sub-sources), applies quality filters, deduplicates, blends to target token ratios with cap-and-redistribute overflow handling, and uploads to S3.
+Data curation pipeline for SLM pretraining. Downloads raw data from eighteen concrete sources (13 non-code top-level sources + 5 code sub-sources), applies quality filters, deduplicates, blends to target token ratios with cap-and-redistribute overflow handling, and uploads to S3.
 
 ---
 
@@ -20,7 +20,7 @@ synthetic_task_code   ─┤
 educational_qa_mcq    ─┤
 factual_restraint     ─┤
 nemotron_specialized  ─┤
-code × 7              ─┘
+code × 5              ─┘
 ```
 
 Each source runs independently through filtering and deduplication. The blend stage reads deduped shards from each source up to its character budget, with shortfalls routed through source-aware overflow chains.
@@ -29,7 +29,7 @@ Each source runs independently through filtering and deduplication. The blend st
 
 ## Data Sources
 
-13 top-level non-code sources plus 7 code sub-sources sharing the 15% code budget = 20 concrete source loaders total.
+13 top-level non-code sources plus 5 code sub-sources sharing the 15% code budget = 18 concrete source loaders total.
 
 | Source | Target Share | Supply | Notes |
 |---|---:|---|---|
@@ -46,19 +46,17 @@ Each source runs independently through filtering and deduplication. The blend st
 | Educational QA/MCQ | 3% | generated locally | targeted QA, MCQ, explanation, and cloze formats; benchmark datasets excluded |
 | Factual restraint | 0.5% | generated locally | uncertainty, private/unverifiable facts, no fake search/tool claims |
 | Nemotron Specialized | 5% | large | `nvidia/Nemotron-Pretraining-Specialized-v1.1`, scalable specialized/synthetic reservoir |
-| **Code total** | **15%** | mixed | split across 7 code sub-sources |
+| **Code total** | **15%** | mixed | split across 5 code sub-sources |
 
 ### Code sub-mix (percentages of the 15% code share)
 
 | Code source | Sub-share | Languages | Notes |
 |---|---:|---|---|
-| Nemotron Pretraining Code v2 | 30% | mixed | `nvidia/Nemotron-Pretraining-Code-v2` — primary scalable code source |
-| the-stack-dedup (v1) | 25% | python, go, rust, shell | `bigcode/the-stack-dedup` — reduced raw-code diversity source |
-| CodeSearchNet | 25% | Python, Java, JavaScript, PHP, Ruby, Go | `code_search_net` — curated function/docstring code signal |
-| Nemotron CC Code | 10% | mixed | `nvidia/Nemotron-CC-Code-v1` — CC-derived code/tutorial/docs-style content |
-| the-stack-smol | 5% | 30 languages | `bigcode/the-stack-smol` — small diversity slice |
-| Jupyter notebooks | 4% | mostly Python | `bigcode/jupyter-parsed` — code+prose, supply-bound at 125m+ |
-| CoNaLa | 1% | Python | `neulab/conala` mined — NL->code intent pairs |
+| the-stack-dedup (v1) | 40% | python, go, rust, shell | `bigcode/the-stack-dedup` — raw-code diversity source |
+| CodeSearchNet | 30% | Python, Java, JavaScript, PHP, Ruby, Go | `code_search_net` — curated function/docstring code signal |
+| the-stack-smol | 15% | selected languages | `bigcode/the-stack-smol` — small diversity slice |
+| Jupyter notebooks | 10% | mostly Python | `bigcode/jupyter-parsed` — code+prose |
+| CoNaLa | 5% | Python | `neulab/conala` mined — NL-to-code intent pairs |
 
 ### Scale-invariant percentages
 
@@ -74,7 +72,7 @@ This behavior is load-bearing at 1b scale; partially load-bearing at 125m/350m f
 
 FineWeb and FineWeb-Edu remain the broad web base for this from-scratch
 training pipeline. NVIDIA/Nemotron datasets are used only to supplement
-specific high-signal gaps: math, code, and specialized synthetic overflow.
+specific high-signal gaps: math and specialized synthetic overflow.
 They do not replace FineWeb and FineWeb-Edu as the broad web base.
 
 Use:
@@ -138,9 +136,7 @@ curator/
 │   ├── synthetic_task_code.py  generated task-shaped code examples
 │   ├── educational_qa_mcq.py   generated QA/MCQ educational examples
 │   ├── factual_restraint.py    generated factual-restraint examples
-│   ├── nemotron_code_v2.py    nvidia/Nemotron-Pretraining-Code-v2
 │   ├── code_search_net.py     CodeSearchNet — 6 languages
-│   ├── nemotron_cc_code.py    nvidia/Nemotron-CC-Code-v1
 │   ├── stack_smol.py          bigcode/the-stack-smol — 30 languages
 │   ├── stack_v1.py            bigcode/the-stack-dedup (inline content)
 │   ├── stack_v2.py            DISABLED — see file header
@@ -184,8 +180,6 @@ Required access checks:
 - https://huggingface.co/datasets/bigcode/the-stack-smol
 - https://huggingface.co/datasets/nvidia/Nemotron-CC-Math-v1
 - https://huggingface.co/datasets/nvidia/Nemotron-Pretraining-Specialized-v1.1
-- https://huggingface.co/datasets/nvidia/Nemotron-Pretraining-Code-v2
-- https://huggingface.co/datasets/nvidia/Nemotron-CC-Code-v1
 
 Accept the required gated dataset terms before running curation.
 
@@ -231,7 +225,7 @@ derivative models.
 python curator/scripts/curate.py --target mini --mini
 ```
 
-Mini exercises every source at small scale (~100 docs to a few thousand per source) to validate end-to-end that all 20 source loaders, filter logic, dedup, and the mix layer work correctly. Total runtime 30–60 min.
+Mini exercises every source at small scale (~100 docs to a few thousand per source) to validate end-to-end that all 18 source loaders, filter logic, dedup, and the mix layer work correctly. Total runtime 30–60 min.
 
 Run each stage individually to inspect output between steps:
 
@@ -330,8 +324,6 @@ data/
 │   ├── educational_qa_mcq/         generated QA/MCQ shards
 │   ├── factual_restraint/          generated factual-restraint shards
 │   ├── nemotron_specialized/       streamed specialized synthetic shards
-│   ├── nemotron_code_v2/           streamed Nemotron code-v2 shards
-│   ├── nemotron_cc_code/           streamed Nemotron CC-code shards
 │   ├── codesearchnet/              CSN 6-language shards
 │   ├── stack_smol/                 stack-smol 30-language shards
 │   ├── stack_v1/                   stack-v1 4-language shards (content inline)
@@ -676,13 +668,11 @@ The code share remains 15% of the corpus. Within that code share:
 
 | Code source | Sub-share | Role |
 |---|---:|---|
-| Nemotron Pretraining Code v2 | 30% | primary scalable code source |
-| the-stack-dedup v1 | 25% | reduced raw-code diversity source |
-| CodeSearchNet | 25% | function/docstring code signal |
-| Nemotron CC Code | 10% | code/tutorial/docs-style web code |
-| the-stack-smol | 5% | small broad-language diversity slice |
-| Jupyter | 4% | code-plus-prose notebook signal |
-| CoNaLa | 1% | NL-to-code intent pairs |
+| the-stack-dedup v1 | 40% | raw-code diversity source |
+| CodeSearchNet | 30% | function/docstring code signal |
+| the-stack-smol | 15% | small broad-language diversity slice |
+| Jupyter | 10% | code-plus-prose notebook signal |
+| CoNaLa | 5% | NL-to-code intent pairs |
 
 ### Overflow policy
 
@@ -737,7 +727,7 @@ small QA/MCQ source.
 
 FineWeb and FineWeb-Edu remain the broad web base for this from-scratch
 training pipeline. NVIDIA/Nemotron datasets are used only to supplement
-specific high-signal gaps: math, code, and specialized synthetic overflow.
+specific high-signal gaps: math and specialized synthetic overflow.
 They do not replace FineWeb and FineWeb-Edu as the broad web base.
 
 Use:

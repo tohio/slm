@@ -291,8 +291,6 @@ Required access checks:
 - https://huggingface.co/datasets/bigcode/the-stack-smol
 - https://huggingface.co/datasets/nvidia/Nemotron-CC-Math-v1
 - https://huggingface.co/datasets/nvidia/Nemotron-Pretraining-Specialized-v1.1
-- https://huggingface.co/datasets/nvidia/Nemotron-Pretraining-Code-v2
-- https://huggingface.co/datasets/nvidia/Nemotron-CC-Code-v1
 
 
 ---
@@ -308,7 +306,7 @@ make download-fasttext-model DATA_DIR=/data/slm/data   # language ID model (~1MB
 make download-kenlm-model    DATA_DIR=/data/slm/data   # perplexity model (~4GB)
 
 # ── Step 2: Validate curation pipeline ───────────────────────────────────────
-# Exercises every curation stage end-to-end on tiny data — all 20 sources.
+# Exercises every curation stage end-to-end on tiny data — all 18 sources.
 # All tests run here — catch issues before spending hours on the full run.
 make curate-mini && make test-curator
 make validate    && make test-validate
@@ -382,7 +380,7 @@ Tests validate real pipeline outputs at each stage. Each test target is paired w
 **CPU curation instance:**
 
 ```bash
-make curate-mini   && make test-curator      # validate curation outputs (all 20 sources)
+make curate-mini   && make test-curator      # validate curation outputs (all 18 sources)
 make validate      && make test-validate     # validate validation outputs
 make tokenize      && make test-tokenizer    # validate tokenizer outputs
 
@@ -420,7 +418,7 @@ make test-unit            # all of the above
 
 | Target | Stage | Validates |
 |---|---|---|
-| `test-curator` | `curate-mini` | Raw shards exist for all 20 sources, filter quality, dedup correctness, blend output, stats |
+| `test-curator` | `curate-mini` | Raw shards exist for all 18 sources, filter quality, dedup correctness, blend output, stats |
 | `test-validate` | `validate` | Retention rate, subset correctness, quality of retained docs |
 | `test-tokenizer` | `tokenizer` | Special token IDs, roundtrip, fertility, chat template |
 | `test-data-pipeline` | all three above | Runs curator + validate + tokenizer tests |
@@ -522,7 +520,7 @@ make pretrain PRETRAIN_CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
 
 ### Source Mix
 
-20 concrete sources total — 13 non-code top-level sources plus 7 code sub-sources that share the 15% code budget. Scale-invariant percentages — the same mix applies at every size. Defined in `config/data_mix.py` and referenced by the curator, export, and notebooks — do not duplicate these numbers elsewhere.
+18 concrete sources total — 13 non-code top-level sources plus 5 code sub-sources that share the 15% code budget. Scale-invariant percentages — the same mix applies at every size. Defined in `config/data_mix.py` and referenced by the curator, export, and notebooks — do not duplicate these numbers elsewhere.
 
 | Source | Target Share | Notes |
 |---|---:|---|
@@ -538,13 +536,13 @@ make pretrain PRETRAIN_CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
 | Synthetic task code | 5% | generated locally; task-shaped code examples, Python 70% / Go 15% / Rust 10% / Bash 5% |
 | Educational QA/MCQ | 3% | generated locally; QA, MCQ, explanation, and cloze formats; benchmark datasets excluded |
 | Factual restraint | 0.5% | generated locally; uncertainty, private/unverifiable facts, no fake search/tool claims |
-| Code (total) | 15% | split across 7 code sub-sources (see curator/README.md) |
+| Code (total) | 15% | split across 5 code sub-sources (see curator/README.md) |
 
 When supply-constrained sources fall short of their character budget, deficits are routed by source type. Local synthetic deficits route to Nemotron Specialized first, then FineWeb-Edu, then FineWeb. General source deficits route to FineWeb-Edu first and FineWeb as the final fallback.
 
 Generated/template-like sources run exact dedup but bypass fuzzy MinHash dedup so useful near-duplicate training signal is not collapsed.
 
-NVIDIA/Nemotron sources are supplemental math, code, and specialized-data sources; FineWeb and FineWeb-Edu remain the broad web base.
+NVIDIA/Nemotron sources are supplemental math and specialized-data sources; FineWeb and FineWeb-Edu remain the broad web base.
 
 ### Run-specific realized mix
 
