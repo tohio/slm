@@ -45,6 +45,11 @@ from curator.constants import CHARS_PER_TOKEN
 
 log = logging.getLogger(__name__)
 
+# Raw character buffer for PG-19. The blend stage consumes only the target
+# character budget, so the source only needs enough raw text to survive
+# filtering/dedup with headroom.
+PG19_CHAR_OVERFETCH_FACTOR = 1.30
+
 
 class PG19Source:
     """
@@ -72,17 +77,27 @@ class PG19Source:
         self,
         output_dir: Path,
         min_length: int = 10_000,
-        shard_size: int = 1_000,
+        shard_size: int = 250,
         max_docs: int | None = None,
+        max_chars: int | None = None,
     ):
         self.output_dir = Path(output_dir)
         self.min_length = min_length
         self.shard_size = shard_size
         self.max_docs = max_docs
+        self.max_chars = max_chars
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def download(self) -> list[Path]:
         """Stream pg19 and write to sharded JSONL files."""
+        existing = sorted(self.output_dir.glob("pg19_*.jsonl"))
+        if existing:
+            log.info(
+                "pg19: found %d existing shard(s); skipping download",
+                len(existing),
+            )
+            return existing
+
         log.info(f"Streaming {self.DATASET_NAME} from HuggingFace...")
         dataset = load_dataset(
             self.DATASET_NAME,
@@ -93,11 +108,14 @@ class PG19Source:
 
         if self.max_docs:
             log.info(f"pg19: capped at {self.max_docs:,} books")
+        if self.max_chars:
+            log.info(f"pg19: capped at {self.max_chars:,} raw chars")
 
         output_files: list[Path] = []
         shard_idx = 0
         buffer: list[dict] = []
         total_written = 0
+        total_chars_written = 0
         total_skipped = 0
         stop = False
 
@@ -125,28 +143,36 @@ class PG19Source:
                 output_files.append(path)
                 shard_idx += 1
                 total_written += len(buffer)
+                total_chars_written += sum(len(r.get("text", "")) for r in buffer)
                 buffer = []
 
-            if self.max_docs is not None:
-                if total_written + len(buffer) >= self.max_docs:
-                    trim_to = max(0, self.max_docs - total_written)
-                    buffer = buffer[:trim_to]
-                    stop = True
-                    break
+            buffered_chars = sum(len(r.get("text", "")) for r in buffer)
+
+            if self.max_docs is not None and total_written + len(buffer) >= self.max_docs:
+                trim_to = max(0, self.max_docs - total_written)
+                buffer = buffer[:trim_to]
+                stop = True
+                break
+
+            if self.max_chars is not None and total_chars_written + buffered_chars >= self.max_chars:
+                stop = True
+                break
 
         if buffer:
             path = self._write_shard(buffer, shard_idx)
             output_files.append(path)
             total_written += len(buffer)
+            total_chars_written += sum(len(r.get("text", "")) for r in buffer)
 
         pbar.close()
 
         log.info(
             f"pg19 complete — "
             f"written: {total_written:,}, "
+            f"chars: {total_chars_written:,}, "
             f"skipped: {total_skipped:,} (< {self.min_length} chars), "
             f"shards: {len(output_files)}"
-            f"{' (stopped at max_docs cap)' if stop else ''}"
+            f"{' (stopped at cap)' if stop else ''}"
         )
         return output_files
 
@@ -180,4 +206,7 @@ class PG19Source:
             "total_chars": total_chars,
             "avg_chars_per_book": total_chars // max(total_books, 1),
             "estimated_tokens": total_chars // CHARS_PER_TOKEN,
+            "max_docs": self.max_docs,
+            "max_chars": self.max_chars,
+            "char_overfetch_factor": PG19_CHAR_OVERFETCH_FACTOR,
         }

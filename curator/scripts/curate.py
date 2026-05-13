@@ -202,7 +202,7 @@ DEFAULT_OVERFLOW_CHAIN = (
 # Buffer sizing rationale:
 #   fineweb       — also OVERFLOW_SINK; needs extra to absorb other deficits
 #   wikipedia     — very clean upstream, lower attrition expected
-#   pg19          — small absolute count, want safety margin
+#   pg19          — char-capped in _derive_max_chars; docs cap is safety only
 #   pes2o         — abstracts only (~1.4K chars), supply-bound at 350m+
 #   open_web_math — math notation challenges, harsher attrition
 #   stackexchange — mostly well-formed, moderate attrition
@@ -241,7 +241,7 @@ _DOWNLOAD_INFLATION: dict[str, float] = {
     "fineweb":       5.0,
     "fineweb_edu":   5.0,
     "wikipedia":     3.0,
-    "pg19":          5.0,
+    "pg19":          1.5,
     "pes2o":         5.0,
     "open_web_math": 5.0,
     "stackexchange": 5.0,
@@ -298,6 +298,25 @@ def _derive_max_docs(name: str, target: str) -> int | None:
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
+
+
+def _derive_max_chars(name: str, target: str) -> int | None:
+    """
+    Derive a per-source raw character cap from the target token budget.
+
+    PG-19 books are very large. A docs-only cap can download several times
+    more text than blend can use, so PG-19 gets a character cap with a
+    modest buffer. Other sources continue using max_docs caps.
+    """
+    if name != "pg19":
+        return None
+
+    target_tokens = TARGET_CONFIGS[target]["total_tokens"]
+    if name not in _TOP_LEVEL_SHARE:
+        return None
+
+    target_chars = int(target_tokens * _TOP_LEVEL_SHARE[name] * CHARS_PER_TOKEN)
+    return int(target_chars * 1.30)
 
 def compute_cc_segments(total_tokens: int) -> int:
     """
@@ -440,7 +459,13 @@ def _build_source(
     if name == "wikipedia":
         return WikipediaSource(output_dir=raw_dir, max_docs=cap)
     if name == "pg19":
-        return PG19Source(output_dir=raw_dir, max_docs=cap)
+        char_cap = None if mini else _derive_max_chars(name, target)
+        if char_cap is not None:
+            log.info(
+                f"pg19 char cap derived from {target}: {char_cap:,} chars "
+                f"(target share with 1.30× buffer)"
+            )
+        return PG19Source(output_dir=raw_dir, max_docs=cap, max_chars=char_cap)
     if name == "pes2o":
         return PeS2oSource(output_dir=raw_dir, max_docs=cap)
     if name == "open_web_math":
