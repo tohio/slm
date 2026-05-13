@@ -85,12 +85,7 @@ class StackSmolSource:
         max_docs: int | None = None,
     ):
         self.output_dir = Path(output_dir)
-        base_languages = languages or LANGUAGES
-        self.languages = [
-            lang
-            for lang in base_languages
-            if str(lang).lower() not in EXCLUDED_STACK_SMOL_LANGUAGES
-        ]
+        self.languages = [lang for lang in (languages) if str(lang).lower() not in EXCLUDED_STACK_SMOL_LANGUAGES]
         self.min_length = min_length
         self.shard_size = shard_size
         self.max_docs = max_docs
