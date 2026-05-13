@@ -169,7 +169,7 @@ class StackExchangeSource:
 
         if self.max_docs:
             log.info(
-                f"StackExchange: capped at {self.max_docs:,} documents (mini run)"
+                f"StackExchange: capped at {self.max_docs:,} documents"
             )
 
         output_files: list[Path] = []

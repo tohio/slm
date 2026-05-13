@@ -103,7 +103,7 @@ class FineWebSource:
         )
 
         if self.max_docs:
-            log.info(f"FineWeb: capped at {self.max_docs:,} documents (mini run)")
+            log.info(f"FineWeb: capped at {self.max_docs:,} documents")
 
         output_files: list[Path] = []
         buffer: list[dict] = []

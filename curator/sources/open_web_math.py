@@ -93,7 +93,7 @@ class OpenWebMathSource:
 
         if self.max_docs:
             log.info(
-                f"open-web-math: capped at {self.max_docs:,} documents (mini run)"
+                f"open-web-math: capped at {self.max_docs:,} documents"
             )
 
         output_files: list[Path] = []

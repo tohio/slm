@@ -84,7 +84,7 @@ class ConalaSource:
         log.info(f"CoNaLa: {len(dataset):,} pairs loaded")
 
         if self.max_docs:
-            log.info(f"CoNaLa: capped at {self.max_docs:,} pairs (mini run)")
+            log.info(f"CoNaLa: capped at {self.max_docs:,} pairs")
 
         output_files: list[Path] = []
         shard_idx = 0

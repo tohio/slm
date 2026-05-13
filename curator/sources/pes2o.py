@@ -111,7 +111,7 @@ class PeS2oSource:
         )
 
         if self.max_docs:
-            log.info(f"peS2o: capped at {self.max_docs:,} documents (mini run)")
+            log.info(f"peS2o: capped at {self.max_docs:,} documents")
 
         output_files: list[Path] = []
         buffer: list[dict] = []

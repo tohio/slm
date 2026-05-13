@@ -99,7 +99,7 @@ class StackV1Source:
         log.info(f"Loading {self.DATASET_NAME} per-language...")
         log.info(f"  Languages: {self.languages}")
         if self.max_docs:
-            log.info(f"the-stack-v1: capped at {self.max_docs:,} files (mini run)")
+            log.info(f"the-stack-v1: capped at {self.max_docs:,} files")
 
         output_files: list[Path] = []
         buffer: list[dict] = []

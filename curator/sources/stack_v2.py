@@ -182,7 +182,7 @@ class StackV2Source:
             )
 
         if self.max_docs:
-            log.info(f"the-stack-v2: capped at {self.max_docs:,} files (mini run)")
+            log.info(f"the-stack-v2: capped at {self.max_docs:,} files")
 
         output_files: list[Path] = []
         buffer: list[dict] = []

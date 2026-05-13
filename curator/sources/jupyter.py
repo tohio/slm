@@ -80,7 +80,7 @@ class JupyterSource:
         log.info(f"Jupyter: {len(dataset):,} notebooks loaded")
 
         if self.max_docs:
-            log.info(f"Jupyter: capped at {self.max_docs:,} notebooks (mini run)")
+            log.info(f"Jupyter: capped at {self.max_docs:,} notebooks")
 
         output_files: list[Path] = []
         shard_idx = 0

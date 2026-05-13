@@ -80,7 +80,7 @@ class WikipediaSource:
         log.info(f"Wikipedia: {len(dataset):,} articles loaded")
 
         if self.max_docs:
-            log.info(f"Wikipedia: capped at {self.max_docs:,} articles (mini run)")
+            log.info(f"Wikipedia: capped at {self.max_docs:,} articles")
 
         output_files: list[Path] = []
         shard_idx = 0

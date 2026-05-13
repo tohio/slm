@@ -92,7 +92,7 @@ class PG19Source:
         )
 
         if self.max_docs:
-            log.info(f"pg19: capped at {self.max_docs:,} books (mini run)")
+            log.info(f"pg19: capped at {self.max_docs:,} books")
 
         output_files: list[Path] = []
         shard_idx = 0
