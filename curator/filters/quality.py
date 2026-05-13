@@ -62,6 +62,7 @@ CODE_SOURCES: frozenset[str] = frozenset({
     "synthetic_task_code",
     "educational_qa_mcq",
     "factual_restraint",
+    "nemotron_specialized",
 
     # Code and code-adjacent sources.
     "codesearchnet",
