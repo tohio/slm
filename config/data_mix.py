@@ -173,40 +173,30 @@ DATA_MIX: dict[str, dict] = {
 # raw-code diversity source.
 
 CODE_SUBMIX: dict[str, dict] = {
-    "nemotron_code_v2": {
-        "pct":     30.0,
-        "display": "Nemotron Pretraining Code v2",
-        "hub":     "nvidia/Nemotron-Pretraining-Code-v2",
-    },
     "stack_v1": {
-        "pct":     25.0,
-        "display": "The Stack v1 dedup",
-        "hub":     "bigcode/the-stack-dedup",
+        "pct": 40.0,
+        "display": 'The Stack v1 dedup',
+        "hub": 'bigcode/the-stack-dedup',
     },
     "codesearchnet": {
-        "pct":     25.0,
-        "display": "CodeSearchNet",
-        "hub":     "code_search_net",
-    },
-    "nemotron_cc_code": {
-        "pct":     10.0,
-        "display": "Nemotron CC Code",
-        "hub":     "nvidia/Nemotron-CC-Code-v1",
+        "pct": 30.0,
+        "display": 'CodeSearchNet',
+        "hub": 'code_search_net',
     },
     "stack_smol": {
-        "pct":     5.0,
-        "display": "The Stack (smol)",
-        "hub":     "bigcode/the-stack-smol",
+        "pct": 15.0,
+        "display": 'The Stack (smol)',
+        "hub": 'bigcode/the-stack-smol',
     },
     "jupyter": {
-        "pct":     4.0,
-        "display": "Jupyter notebooks",
-        "hub":     "bigcode/jupyter-parsed",
+        "pct": 10.0,
+        "display": 'Jupyter notebooks',
+        "hub": 'bigcode/jupyter-parsed',
     },
     "conala": {
-        "pct":     1.0,
-        "display": "CoNaLa",
-        "hub":     "neulab/conala",
+        "pct": 5.0,
+        "display": 'CoNaLa',
+        "hub": 'neulab/conala',
     },
 }
 
