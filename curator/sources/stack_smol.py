@@ -53,10 +53,6 @@ from curator.constants import CHARS_PER_TOKEN
 
 log = logging.getLogger(__name__)
 
-# These Stack-Smol language configs correspond to Hugging Face unsafe-file
-# warnings for their data.json files. Keep stack_smol active, but exclude the
-# affected configs from the active language set.
-EXCLUDED_STACK_SMOL_LANGUAGES = {"powershell", "dockerfile", "batchfile"}
 
 
 class StackSmolSource:
@@ -85,7 +81,7 @@ class StackSmolSource:
         max_docs: int | None = None,
     ):
         self.output_dir = Path(output_dir)
-        self.languages = [lang for lang in (languages) if str(lang).lower() not in EXCLUDED_STACK_SMOL_LANGUAGES]
+        self.languages = languages
         self.min_length = min_length
         self.shard_size = shard_size
         self.max_docs = max_docs
