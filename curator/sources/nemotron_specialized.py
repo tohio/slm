@@ -23,6 +23,11 @@ EXCLUDED_SPECIALIZED_CONFIGS = (
     "Nemotron-Pretraining-Multiple-Choice",
 )
 
+# Raw overfetch buffer for capped runs. Filtering can remove a small fraction
+# of specialized algorithmic/code records, so capped downloads fetch extra raw
+# candidates while filter/dedup/blend enforce the final usable budget.
+OVERFETCH_FACTOR = 1.20
+
 
 def _stable_id(source: str, config: str, idx: int, text: str) -> str:
     return hashlib.sha256(
@@ -58,10 +63,22 @@ class NemotronSpecializedSource:
         configs: tuple[str, ...] = APPROVED_SPECIALIZED_CONFIGS,
     ):
         self.output_dir = Path(output_dir)
-        self.max_docs = max_docs or self.DEFAULT_DOCS
+        self.requested_max_docs = max_docs
+        self.raw_max_docs = (
+            int(max_docs * OVERFETCH_FACTOR) if max_docs is not None else None
+        )
+        self.max_docs = self.raw_max_docs or self.DEFAULT_DOCS
         self.shard_size = shard_size
         self.configs = configs
         self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        if self.requested_max_docs is not None and self.raw_max_docs != self.requested_max_docs:
+            log.info(
+                "Nemotron Specialized overfetch enabled: requested=%s, raw_cap=%s, factor=%.2f",
+                f"{self.requested_max_docs:,}",
+                f"{self.raw_max_docs:,}",
+                OVERFETCH_FACTOR,
+            )
 
         self._docs_written = 0
         self._chars_written = 0
@@ -84,10 +101,11 @@ class NemotronSpecializedSource:
         records: list[dict] = []
 
         log.info(
-            "%s: streaming %s configs=%s max_docs=%s",
+            "%s: streaming %s configs=%s requested_max_docs=%s raw_max_docs=%s",
             self.SOURCE_TAG,
             self.DATASET_NAME,
             ",".join(self.configs),
+            f"{self.requested_max_docs:,}" if self.requested_max_docs is not None else "default",
             f"{self.max_docs:,}",
         )
 
@@ -223,6 +241,10 @@ class NemotronSpecializedSource:
             "estimated_tokens": self._chars_written // CHARS_PER_TOKEN,
             "docs_seen": self._docs_seen,
             "docs_skipped": self._docs_skipped,
+            "requested_max_docs": self.requested_max_docs,
+            "raw_max_docs": self.raw_max_docs,
+            "effective_max_docs": self.max_docs,
+            "overfetch_factor": OVERFETCH_FACTOR,
             "by_config": self._by_config,
             "output_dir": str(self.output_dir),
         }
