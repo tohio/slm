@@ -14,7 +14,7 @@ The pipeline is modular and independently runnable at each stage. Every design d
 
 **Models:** `tohio/slm-125m` · `tohio/slm-125m-instruct` · `tohio/slm-125m-chat` · `tohio/slm-350m` · `tohio/slm-350m-instruct` · `tohio/slm-350m-chat` · `tohio/slm-1b` · `tohio/slm-1b-instruct` · `tohio/slm-1b-chat`
 
-![Architecture](docs/architecture.svg)
+![Architecture](docs/architecture.png)
 
 ---
 
