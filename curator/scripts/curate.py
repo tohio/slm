@@ -416,13 +416,17 @@ def _derive_max_chars(name: str, target: str) -> int | None:
     more text than blend can use, so PG-19 gets a character cap with a
     modest buffer. Other sources continue using max_docs caps.
     """
-    if name != "pg19":
-        return None
-
     target_chars = _source_target_chars(name, target)
     if target_chars is None:
         return None
-    return int(target_chars * 1.30)
+
+    if name == "pg19":
+        return int(target_chars * 1.30)
+
+    if name in LOCAL_SYNTHETIC_SOURCES:
+        return int(target_chars * 2.00)
+
+    return None
 
 def compute_cc_segments(total_tokens: int) -> int:
     """
@@ -580,13 +584,13 @@ def _build_source(
     if name == "stackexchange":
         return StackExchangeSource(output_dir=raw_dir, max_docs=cap)
     if name == "synthetic_arithmetic":
-        return SyntheticArithmeticSource(output_dir=raw_dir, max_docs=cap)
+        return SyntheticArithmeticSource(output_dir=raw_dir, max_docs=cap, max_chars=_derive_max_chars(name, target))
     if name == "synthetic_task_code":
-        return SyntheticTaskCodeSource(output_dir=raw_dir, max_docs=cap)
+        return SyntheticTaskCodeSource(output_dir=raw_dir, max_docs=cap, max_chars=_derive_max_chars(name, target))
     if name == "educational_qa_mcq":
-        return EducationalQAMCQSource(output_dir=raw_dir, max_docs=cap)
+        return EducationalQAMCQSource(output_dir=raw_dir, max_docs=cap, max_chars=_derive_max_chars(name, target))
     if name == "factual_restraint":
-        return FactualRestraintSource(output_dir=raw_dir, max_docs=cap)
+        return FactualRestraintSource(output_dir=raw_dir, max_docs=cap, max_chars=_derive_max_chars(name, target))
     if name == "codesearchnet":
         return CodeSearchNetSource(output_dir=raw_dir, max_docs=cap)
     if name == "stack_smol":
