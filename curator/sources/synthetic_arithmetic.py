@@ -12,7 +12,7 @@ class SyntheticArithmeticSource(GroqSyntheticSource):
     SOURCE_TAG = "synthetic_arithmetic"
     SHARD_PREFIX = "synthetic_arithmetic"
     DEFAULT_DOCS = 100_000
-    DEFAULT_BATCH_SIZE = 128
+    DEFAULT_BATCH_SIZE = 32
 
     FORMATS = [
         "qa_arithmetic",
