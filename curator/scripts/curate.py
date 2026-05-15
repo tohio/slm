@@ -97,6 +97,11 @@ from config import (
     SUPPLEMENTAL_CHAR_CAPS,
 )
 
+from config.data_mix import (
+    SYNTHETIC_AVG_CHARS_PER_DOC,
+    SYNTHETIC_DOC_INFLATION,
+)
+
 from config.paths import (
     data_run_dir, raw_dir, filtered_dir, dedup_scratch_dir, curated_dir,
 )
@@ -327,10 +332,6 @@ _AVG_CHARS_PER_DOC: dict[str, int] = {
     "nemotron_specialized": 2_200,
     "open_web_math": 8_000,
     "stackexchange": 1_700,
-    "synthetic_arithmetic": 1_500,
-    "synthetic_task_code":   1_200,
-    "educational_qa_mcq":    1_000,
-    "factual_restraint":       400,
     "stack_v1":      5_500,
     "stack_smol":    10_000,
     "jupyter":       11_000,
@@ -346,10 +347,6 @@ _DOWNLOAD_INFLATION: dict[str, float] = {
     "nemotron_specialized": 1.6,
     "open_web_math": 5.0,
     "stackexchange": 5.0,
-    "synthetic_arithmetic": 1.5,
-    "synthetic_task_code":   1.5,
-    "educational_qa_mcq":    1.5,
-    "factual_restraint":     1.2,
     "stack_v1":      5.0,
     "stack_smol":    5.0,
     "jupyter":       5.0,
@@ -394,15 +391,19 @@ def _derive_max_docs(name: str, target: str) -> int | None:
     Then in both cases:
         max_docs = (target_chars / avg_chars_per_doc) × inflation
     """
-    if name not in _AVG_CHARS_PER_DOC:
+    if name in LOCAL_SYNTHETIC_SOURCES:
+        avg_chars = SYNTHETIC_AVG_CHARS_PER_DOC[name]
+        inflation = SYNTHETIC_DOC_INFLATION
+    elif name in _AVG_CHARS_PER_DOC:
+        avg_chars = _AVG_CHARS_PER_DOC[name]
+        inflation = _DOWNLOAD_INFLATION[name]
+    else:
         return None
 
-    avg_chars = _AVG_CHARS_PER_DOC[name]
-    inflation = _DOWNLOAD_INFLATION[name]
     target_chars = _source_target_chars(name, target)
     if target_chars is None:
         return None
-    return int((target_chars / avg_chars) * inflation)
+    return max(1, int((target_chars / avg_chars) * inflation))
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -498,10 +499,17 @@ def _build_source(
     else:
         cap = _derive_max_docs(name, target)
         if cap is not None:
+            if name in LOCAL_SYNTHETIC_SOURCES:
+                avg_for_log = SYNTHETIC_AVG_CHARS_PER_DOC.get(name, 0)
+                inflation_for_log = SYNTHETIC_DOC_INFLATION
+            else:
+                avg_for_log = _AVG_CHARS_PER_DOC.get(name, 0)
+                inflation_for_log = _DOWNLOAD_INFLATION.get(name, 0)
+
             log.info(
                 f"{name} cap derived from {target}: {cap:,} docs "
-                f"(avg {_AVG_CHARS_PER_DOC.get(name, 0):,} chars/doc, "
-                f"{_DOWNLOAD_INFLATION.get(name, 0)}× inflation)"
+                f"(avg {avg_for_log:,} chars/doc, "
+                f"{inflation_for_log}× inflation)"
             )
 
     # CC has different 'cap' semantics: max_segments, and needs crawls + workers.

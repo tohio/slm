@@ -216,6 +216,32 @@ SUPPLEMENTAL_CHAR_CAPS: dict[str, dict[str, int]] = {
 }
 
 
+# Source-specific average record sizes for Groq-backed synthetic generation.
+#
+# These are planning estimates used to convert a target character budget into
+# a max_docs value. They must reflect actual post-prompt record sizes, not a
+# generic corpus document length. Mini validation showed the Groq synthetic
+# records are intentionally short:
+#   synthetic_arithmetic   ~80-100 chars/doc
+#   synthetic_task_code    ~280-350 chars/doc
+#   educational_qa_mcq     ~300-350 chars/doc
+#   factual_restraint      ~110-130 chars/doc
+#
+# Keep the values conservative enough to slightly over-request documents, then
+# stop generation by max_chars once the target budget is reached.
+SYNTHETIC_AVG_CHARS_PER_DOC: dict[str, int] = {
+    "synthetic_arithmetic": 90,
+    "synthetic_task_code": 300,
+    "educational_qa_mcq": 325,
+    "factual_restraint": 120,
+}
+
+# Extra document request headroom for records rejected by source validators,
+# quality filtering, and exact dedup. The max_chars budget remains the primary
+# stop condition, so this does not force extra retained data beyond the target.
+SYNTHETIC_DOC_INFLATION: float = 1.5
+
+
 # ── 4. Overflow sink ───────────────────────────────────────────────────────────
 #
 # When supply-constrained sources (Wikipedia, pg19, etc.) fall short of their
@@ -496,6 +522,17 @@ def validate() -> None:
     assert OVERFLOW_SINK in DATA_MIX, (
         f"OVERFLOW_SINK={OVERFLOW_SINK!r} not present in DATA_MIX"
     )
+
+    assert SYNTHETIC_DOC_INFLATION > 0, (
+        f"SYNTHETIC_DOC_INFLATION must be > 0, got {SYNTHETIC_DOC_INFLATION}"
+    )
+    for source_name, avg_chars in SYNTHETIC_AVG_CHARS_PER_DOC.items():
+        assert source_name in DATA_MIX, (
+            f"SYNTHETIC_AVG_CHARS_PER_DOC references unknown source: {source_name}"
+        )
+        assert avg_chars > 0, (
+            f"SYNTHETIC_AVG_CHARS_PER_DOC[{source_name!r}] must be > 0, got {avg_chars}"
+        )
 
     overlap = set(CODE_SUBMIX) & set(DATA_MIX)
     assert not overlap, (
