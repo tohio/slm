@@ -230,7 +230,7 @@ SUPPLEMENTAL_CHAR_CAPS: dict[str, dict[str, int]] = {
 # Keep the values conservative enough to slightly over-request documents, then
 # stop generation by max_chars once the target budget is reached.
 SYNTHETIC_AVG_CHARS_PER_DOC: dict[str, int] = {
-    "synthetic_arithmetic": 90,
+    "synthetic_arithmetic": 65,
     "synthetic_task_code": 300,
     "educational_qa_mcq": 325,
     "factual_restraint": 120,
