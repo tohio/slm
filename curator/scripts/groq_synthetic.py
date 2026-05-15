@@ -111,10 +111,12 @@ class GroqSyntheticSource:
     SYSTEM_PROMPT = (
         "You generate high-quality synthetic pretraining records. "
         "Return only valid JSON. Do not include markdown fences, assistant chatter, "
-        "or explanatory text outside the JSON payload. Use real newlines inside text "
-        "fields, not escaped literal \\n sequences. If generating code, the code and "
-        "tests must be syntactically valid for the stated language."
-    )
+        "or explanatory text outside the JSON payload. Because the response must be "
+        "valid JSON, newline characters inside JSON string values must be escaped as "
+        "\\\\n. Do not place raw newline characters inside quoted JSON strings. "
+        "If generating code, the code and tests must be syntactically valid for the "
+        "stated language."
+        )
 
     def __init__(
         self,
