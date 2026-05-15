@@ -182,7 +182,8 @@ Specs:
                             "difficulty": {"type": "string"},
                             "metadata": {
                                 "type": "object",
-                                "additionalProperties": True,
+                                "additionalProperties": False,
+                                "properties": {},
                             },
                         },
                     },
