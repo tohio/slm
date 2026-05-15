@@ -161,7 +161,6 @@ Specs:
             "properties": {
                 "records": {
                     "type": "array",
-                    **({"minItems": batch_count, "maxItems": batch_count} if batch_count else {}),
                     "items": {
                         "type": "object",
                         "additionalProperties": False,
