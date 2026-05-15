@@ -81,6 +81,7 @@ class GroqSyntheticSource:
     DEFAULT_DOCS = 100_000
     DEFAULT_BATCH_SIZE = 10
     DEFAULT_SHARD_SIZE = 5_000
+    MAX_CONSECUTIVE_FAILED_BATCHES = 3
     SYSTEM_PROMPT = (
         "You generate high-quality synthetic pretraining records. "
         "Return only valid JSON. Do not include markdown fences."
@@ -138,6 +139,7 @@ class GroqSyntheticSource:
         written_docs = 0
         written_chars = 0
         next_idx = 0
+        consecutive_failed_batches = 0
 
         log.info(
             "%s: generating via Groq model=%s max_docs=%s max_chars=%s batch_size=%s output=%s",
@@ -162,7 +164,16 @@ class GroqSyntheticSource:
 
             if not rows:
                 self.failed_batches += 1
+                consecutive_failed_batches += 1
+                if consecutive_failed_batches >= self.MAX_CONSECUTIVE_FAILED_BATCHES:
+                    raise RuntimeError(
+                        f"{self.SOURCE_TAG}: Groq generation produced no records after "
+                        f"{consecutive_failed_batches} consecutive failed batch(es). "
+                        "Check GROQ_API_KEY, model access, account status, and network/IP restrictions."
+                    )
                 continue
+
+            consecutive_failed_batches = 0
 
             for row in rows:
                 record = self._normalise_record(row=row, idx=next_idx)
@@ -243,6 +254,7 @@ class GroqSyntheticSource:
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
+                "User-Agent": "slm-curator/0.1 (+https://api.groq.com)",
             },
             method="POST",
         )
