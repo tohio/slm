@@ -55,7 +55,7 @@ class EducationalQAMCQSource(GroqSyntheticSource):
             "subject": row.get("subject", "unknown"),
             "qa_type": row.get("qa_type", "unknown"),
             "difficulty": row.get("difficulty", "unknown"),
-            "prompt_template": "educational_qa_mcq_groq_v2",
+            "prompt_template": "educational_qa_mcq_groq_v3",
             "benchmark_excluded": True,
         }
 
@@ -77,6 +77,13 @@ Purpose:
 - Teach stable educational facts, concepts, and reasoning.
 - Prefer clear explanations over trivia.
 
+Critical JSON rules:
+- Do not return a "text" field.
+- Return separate "question", "answer", and "explanation" fields.
+- Each field value must be a single-line JSON string.
+- Do not put newline characters inside any JSON string value.
+- The Python adapter will build the final multiline training text.
+
 Allowed subjects:
 - arithmetic and math concepts
 - basic science
@@ -87,10 +94,7 @@ Allowed subjects:
 - cause/effect reasoning
 
 Rules:
-- Each record must contain:
-  Question:
-  Answer:
-  Explanation:
+- Each record must contain one question, one answer, and one explanation.
 - The explanation must teach the reasoning, not merely restate the answer.
 - Use stable, non-current, non-controversial facts.
 - Avoid trivial life-routine filler.
@@ -105,7 +109,9 @@ Return JSON using exactly this shape:
 {{
   "records": [
     {{
-      "text": "Question: .\\nAnswer: .\\nExplanation: .",
+      "question": "Why do plants need sunlight?",
+      "answer": "Plants use sunlight as an energy source for photosynthesis.",
+      "explanation": "During photosynthesis, plants use light energy to turn carbon dioxide and water into sugars they can use for growth.",
       "subject": "science",
       "qa_type": "short_qa",
       "difficulty": "middle",
@@ -117,6 +123,32 @@ Return JSON using exactly this shape:
 Specs:
 {specs_json}
 """.strip()
+
+    def _normalise_record(self, row: dict[str, Any], idx: int) -> dict[str, Any] | None:
+        question = row.get("question")
+        answer = row.get("answer")
+        explanation = row.get("explanation")
+
+        if isinstance(question, str) and isinstance(answer, str) and isinstance(explanation, str):
+            question = self._clean_single_line(question)
+            answer = self._clean_single_line(answer)
+            explanation = self._clean_single_line(explanation)
+            if not question or not answer or not explanation:
+                return None
+
+            row = dict(row)
+            row["text"] = (
+                f"Question: {question}\n"
+                f"Answer: {answer}\n"
+                f"Explanation: {explanation}"
+            )
+
+        return super()._normalise_record(row=row, idx=idx)
+
+    def _clean_single_line(self, value: str) -> str:
+        value = self._clean_generated_text(value)
+        value = " ".join(value.split())
+        return value.strip()
 
     def _quality_ok(self, text: str, metadata: dict[str, Any]) -> bool:
         if not super()._quality_ok(text=text, metadata=metadata):

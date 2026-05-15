@@ -60,7 +60,7 @@ class SyntheticTaskCodeSource(GroqSyntheticSource):
             "task_type": row.get("task_type", "unknown"),
             "difficulty": row.get("difficulty", "unknown"),
             "topic": row.get("topic", "unknown"),
-            "prompt_template": "synthetic_task_code_groq_v2",
+            "prompt_template": "synthetic_task_code_groq_v3",
             "benchmark_excluded": True,
         }
 
@@ -83,6 +83,13 @@ Purpose:
 - Create clean task -> implementation -> tests examples for a small language model.
 - Prefer boring, correct, simple utility functions over clever or production-hard tasks.
 
+Critical JSON rules:
+- Do not return a "text" field.
+- Return a single-line "task" field.
+- Return a "solution_lines" field as a JSON array of single-line strings.
+- Do not put newline characters inside any JSON string value.
+- The Python adapter will join solution_lines with newlines and build final training text.
+
 Allowed task families:
 - list transformations
 - dictionary transformations
@@ -96,17 +103,9 @@ Allowed task families:
 Hard rules:
 - Python only.
 - Use only the Python standard library.
-- Each record text must have exactly this structure:
-  Task: <one simple Python utility task>
-
-  Solution:
-  <complete Python code>
-
-  # Tests
-  <2-4 assert statements>
 - Every solution must define at least one function.
-- Every solution must include at least one assert test.
-- Every solution must be syntactically valid Python.
+- Every solution must include at least one assert test in solution_lines.
+- Every solution must be syntactically valid Python when solution_lines are joined with newlines.
 - Do not use pass, TODO, ellipses, placeholders, or comment-only solutions.
 - Do not generate bug-fix tasks.
 - Do not generate security/auth/password/encryption/sanitization tasks.
@@ -120,9 +119,17 @@ Return JSON using exactly this shape:
 {{
   "records": [
     {{
-      "text": "Task: .\\n\\nSolution:\\n.\\n\\n# Tests\\n.",
+      "task": "Write a Python function that returns the even numbers from a list while preserving order.",
+      "solution_lines": [
+        "def extract_evens(numbers):",
+        "    return [n for n in numbers if n % 2 == 0]",
+        "",
+        "# Tests",
+        "assert extract_evens([1, 2, 3, 4]) == [2, 4]",
+        "assert extract_evens([1, 3, 5]) == []"
+      ],
       "language": "python",
-      "task_type": "prompt_to_function",
+      "task_type": "collection_transform",
       "difficulty": "easy",
       "topic": "lists",
       "metadata": {{}}
@@ -133,6 +140,48 @@ Return JSON using exactly this shape:
 Specs:
 {specs_json}
 """.strip()
+
+    def _normalise_record(self, row: dict[str, Any], idx: int) -> dict[str, Any] | None:
+        task = row.get("task")
+        solution_lines = row.get("solution_lines")
+        if solution_lines is None:
+            solution_lines = row.get("solution")
+
+        if isinstance(task, str):
+            task = self._clean_single_line(task)
+        else:
+            task = ""
+
+        solution = self._normalise_solution(solution_lines)
+
+        if task and solution:
+            row = dict(row)
+            row["text"] = f"Task: {task}\n\nSolution:\n{solution}"
+            row["language"] = "python"
+
+        return super()._normalise_record(row=row, idx=idx)
+
+    def _clean_single_line(self, value: str) -> str:
+        value = self._clean_generated_text(value)
+        value = " ".join(value.split())
+        return value.strip()
+
+    def _normalise_solution(self, value: Any) -> str:
+        if isinstance(value, list):
+            lines = []
+            for item in value:
+                if not isinstance(item, str):
+                    return ""
+                line = self._clean_generated_text(item)
+                line = line.replace("\r", "").replace("\n", " ")
+                lines.append(line.rstrip())
+            return "\n".join(lines).strip()
+
+        if isinstance(value, str):
+            value = self._clean_generated_text(value)
+            return value.strip()
+
+        return ""
 
     def _quality_ok(self, text: str, metadata: dict[str, Any]) -> bool:
         if not super()._quality_ok(text=text, metadata=metadata):

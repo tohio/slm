@@ -12,9 +12,6 @@ class SyntheticArithmeticSource(GroqSyntheticSource):
     SOURCE_TAG = "synthetic_arithmetic"
     SHARD_PREFIX = "synthetic_arithmetic"
     DEFAULT_DOCS = 100_000
-
-    # Arithmetic records are intentionally short. Full 125m generation needs a
-    # larger batch size than the generic Groq default to avoid excessive API calls.
     DEFAULT_BATCH_SIZE = 128
 
     FORMATS = [
@@ -46,7 +43,7 @@ class SyntheticArithmeticSource(GroqSyntheticSource):
             "category": "arithmetic",
             "format": row.get("format", "unknown"),
             "difficulty": row.get("difficulty", "unknown"),
-            "prompt_template": "synthetic_arithmetic_groq_v2",
+            "prompt_template": "synthetic_arithmetic_groq_v3",
             "benchmark_excluded": True,
         }
 
@@ -74,12 +71,16 @@ Purpose:
 - Reinforce concise arithmetic question-answer behavior.
 - Keep records simple, correct, and easy to verify.
 
+Critical JSON rules:
+- Do not return a "text" field.
+- Return separate "question" and "answer" fields.
+- The "question" and "answer" values must be single-line JSON strings.
+- Do not put newline characters inside any JSON string value.
+- The Python adapter will build the final multiline training text.
+
 Rules:
-- Each record must contain exactly one Question and exactly one Answer.
-- Use this exact text structure:
-  Question: <one arithmetic question>
-  Answer: <short numeric answer or yes/no answer>
-- Include the final answer explicitly.
+- Each record must contain exactly one arithmetic question and one short answer.
+- Include the final answer explicitly in the "answer" field.
 - Use original numbers and wording.
 - Allowed:
   - single-step addition, subtraction, multiplication, division
@@ -91,14 +92,15 @@ Rules:
 - Do not use blanks like "__".
 - Do not create trick equations, ambiguous equations, or malformed equations.
 - Do not use long GSM8K-style reasoning chains or benchmark-style wording.
-- Do not include explanations unless the format explicitly asks for a very short one.
+- Do not include explanations.
 - Return JSON only. No markdown fences. No assistant chatter.
 
 Return JSON using exactly this shape:
 {{
   "records": [
     {{
-      "text": "Question: .\\nAnswer: .",
+      "question": "2 + 3 =",
+      "answer": "5",
       "format": "qa_arithmetic",
       "difficulty": "single_step",
       "metadata": {{}}
@@ -109,6 +111,26 @@ Return JSON using exactly this shape:
 Specs:
 {specs_json}
 """.strip()
+
+    def _normalise_record(self, row: dict[str, Any], idx: int) -> dict[str, Any] | None:
+        question = row.get("question")
+        answer = row.get("answer")
+
+        if isinstance(question, str) and isinstance(answer, str):
+            question = self._clean_single_line(question)
+            answer = self._clean_single_line(answer)
+            if not question or not answer:
+                return None
+
+            row = dict(row)
+            row["text"] = f"Question: {question}\nAnswer: {answer}"
+
+        return super()._normalise_record(row=row, idx=idx)
+
+    def _clean_single_line(self, value: str) -> str:
+        value = self._clean_generated_text(value)
+        value = " ".join(value.split())
+        return value.strip()
 
     def _quality_ok(self, text: str, metadata: dict[str, Any]) -> bool:
         if not super()._quality_ok(text=text, metadata=metadata):
@@ -122,7 +144,17 @@ Specs:
             return False
 
         lowered = text.lower()
-        if "explain" in lowered and "explanation:" in lowered:
+        if "explanation:" in lowered:
+            return False
+        if "explain" in lowered:
+            return False
+
+        question = text.split("Question:", 1)[1].split("Answer:", 1)[0].strip()
+        answer = text.split("Answer:", 1)[1].strip()
+
+        if not question or not answer:
+            return False
+        if len(answer) > 40:
             return False
 
         return True

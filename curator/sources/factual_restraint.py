@@ -45,7 +45,7 @@ class FactualRestraintSource(GroqSyntheticSource):
             "category": "factual_restraint",
             "kind": row.get("kind", "unknown"),
             "difficulty": row.get("difficulty", "unknown"),
-            "prompt_template": "factual_restraint_groq_v2",
+            "prompt_template": "factual_restraint_groq_v3",
             "benchmark_excluded": True,
         }
 
@@ -66,6 +66,13 @@ Purpose:
 - Teach the model not to hallucinate when facts are unavailable, private, current, or source-dependent.
 - Keep answers concise and helpful, not over-refusal-heavy.
 
+Critical JSON rules:
+- Do not return a "text" field.
+- Return separate "question" and "answer" fields.
+- Each field value must be a single-line JSON string.
+- Do not put newline characters inside any JSON string value.
+- The Python adapter will build the final multiline training text.
+
 Balanced categories:
 - live/current data unavailable
 - private personal data
@@ -77,9 +84,6 @@ Balanced categories:
 - invented citation avoidance
 
 Rules:
-- Each record must contain exactly:
-  Question:
-  Answer:
 - The answer should avoid guessing and should not invent facts.
 - Do not claim to browse, search, verify, access tools, access databases, or check live systems.
 - Do not include real private personal data.
@@ -92,8 +96,9 @@ Return JSON using exactly this shape:
 {{
   "records": [
     {{
-      "text": "Question: .\\nAnswer: .",
-      "kind": "unknown_or_insufficient_info",
+      "question": "What is the current private salary of a specific non-public person?",
+      "answer": "I do not have access to private salary information. A reliable authorized source would be needed to answer.",
+      "kind": "unverifiable_private_fact",
       "difficulty": "simple",
       "metadata": {{}}
     }}
@@ -103,6 +108,26 @@ Return JSON using exactly this shape:
 Specs:
 {specs_json}
 """.strip()
+
+    def _normalise_record(self, row: dict[str, Any], idx: int) -> dict[str, Any] | None:
+        question = row.get("question")
+        answer = row.get("answer")
+
+        if isinstance(question, str) and isinstance(answer, str):
+            question = self._clean_single_line(question)
+            answer = self._clean_single_line(answer)
+            if not question or not answer:
+                return None
+
+            row = dict(row)
+            row["text"] = f"Question: {question}\nAnswer: {answer}"
+
+        return super()._normalise_record(row=row, idx=idx)
+
+    def _clean_single_line(self, value: str) -> str:
+        value = self._clean_generated_text(value)
+        value = " ".join(value.split())
+        return value.strip()
 
     def _quality_ok(self, text: str, metadata: dict[str, Any]) -> bool:
         if not super()._quality_ok(text=text, metadata=metadata):
