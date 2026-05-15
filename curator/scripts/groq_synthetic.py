@@ -35,13 +35,17 @@ from curator.constants import CHARS_PER_TOKEN
 log = logging.getLogger(__name__)
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-DEFAULT_GROQ_MODEL = os.environ.get("SYNTHETIC_GROQ_MODEL", "llama-3.1-8b-instant")
-DEFAULT_TEMPERATURE = float(os.environ.get("SYNTHETIC_GROQ_TEMPERATURE", "0.8"))
-DEFAULT_MAX_TOKENS = int(os.environ.get("SYNTHETIC_GROQ_MAX_TOKENS", "4096"))
 
 
 def _load_dotenv_if_present() -> None:
-    env_path = Path(".env")
+    """
+    Load repo-local .env without requiring the caller to export variables.
+
+    This intentionally avoids adding a runtime dependency on python-dotenv.
+    Values already present in the shell win over .env values.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    env_path = repo_root / ".env"
     if not env_path.exists():
         return
 
@@ -49,8 +53,19 @@ def _load_dotenv_if_present() -> None:
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+            if "=" not in line:
+                continue
         key, value = line.split("=", 1)
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+_load_dotenv_if_present()
+
+DEFAULT_GROQ_MODEL = os.environ.get("SYNTHETIC_GROQ_MODEL", "llama-3.1-8b-instant")
+DEFAULT_TEMPERATURE = float(os.environ.get("SYNTHETIC_GROQ_TEMPERATURE", "0.8"))
+DEFAULT_MAX_TOKENS = int(os.environ.get("SYNTHETIC_GROQ_MAX_TOKENS", "4096"))
 
 
 def _env_model_for_source(source_tag: str) -> str:
@@ -111,7 +126,6 @@ class GroqSyntheticSource:
             )
             return existing_shards
 
-        _load_dotenv_if_present()
         if not os.environ.get("GROQ_API_KEY"):
             raise RuntimeError(
                 "GROQ_API_KEY is required for Groq-backed synthetic source "
