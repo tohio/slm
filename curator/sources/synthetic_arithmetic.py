@@ -12,7 +12,10 @@ class SyntheticArithmeticSource(GroqSyntheticSource):
     SOURCE_TAG = "synthetic_arithmetic"
     SHARD_PREFIX = "synthetic_arithmetic"
     DEFAULT_DOCS = 100_000
-    DEFAULT_BATCH_SIZE = 16
+
+    # Arithmetic records are intentionally short. Full 125m generation needs a
+    # larger batch size than the generic Groq default to avoid excessive API calls.
+    DEFAULT_BATCH_SIZE = 128
 
     FORMATS = [
         "qa_arithmetic",
@@ -54,7 +57,13 @@ class SyntheticArithmeticSource(GroqSyntheticSource):
                 "id": start_index + offset,
                 "format": rng.choice(self.FORMATS),
                 "difficulty": rng.choice(["single_step", "single_step", "two_step_clear"]),
-                "range": rng.choice(["0-20", "0-100", "small integers", "multiplication table", "division exact"]),
+                "range": rng.choice([
+                    "0-20",
+                    "0-100",
+                    "small integers",
+                    "multiplication table",
+                    "division exact",
+                ]),
             })
 
         specs_json = json.dumps(specs, indent=2)

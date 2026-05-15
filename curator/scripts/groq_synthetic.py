@@ -17,7 +17,6 @@ run-scoped raw/filtered/dedup directories to force fresh generation.
 from __future__ import annotations
 
 import hashlib
-import ast
 import json
 import logging
 import os
@@ -68,10 +67,35 @@ DEFAULT_GROQ_MODEL = os.environ.get("SYNTHETIC_GROQ_MODEL", "llama-3.1-8b-instan
 DEFAULT_TEMPERATURE = float(os.environ.get("SYNTHETIC_GROQ_TEMPERATURE", "0.8"))
 DEFAULT_MAX_TOKENS = int(os.environ.get("SYNTHETIC_GROQ_MAX_TOKENS", "4096"))
 
+# Request pacing. This is proactive protection so long full-corpus synthetic
+# runs do not hammer the API as fast as the loop can issue requests.
+#
+# Example:
+#   GROQ_MIN_REQUEST_INTERVAL_SECONDS=0.5  -> at most ~120 requests/minute
+#   GROQ_MIN_REQUEST_INTERVAL_SECONDS=1.0  -> at most ~60 requests/minute
+DEFAULT_MIN_REQUEST_INTERVAL_SECONDS = float(
+    os.environ.get("GROQ_MIN_REQUEST_INTERVAL_SECONDS", "0.5")
+)
+
+# Retry behavior for HTTP 429 and transient HTTP failures.
+DEFAULT_MAX_RETRIES = int(os.environ.get("GROQ_MAX_RETRIES", "6"))
+DEFAULT_RETRY_BASE_SECONDS = float(os.environ.get("GROQ_RETRY_BASE_SECONDS", "2"))
+DEFAULT_RETRY_MAX_SECONDS = float(os.environ.get("GROQ_RETRY_MAX_SECONDS", "60"))
+
 
 def _env_model_for_source(source_tag: str) -> str:
     key = "GROQ_MODEL_" + source_tag.upper()
     return os.environ.get(key) or DEFAULT_GROQ_MODEL
+
+
+class GroqHTTPError(RuntimeError):
+    """HTTP error from Groq with status and optional Retry-After metadata."""
+
+    def __init__(self, status: int, detail: str, retry_after: float | None = None):
+        self.status = status
+        self.detail = detail
+        self.retry_after = retry_after
+        super().__init__(f"Groq HTTP {status}: {detail[:1000]}")
 
 
 class GroqSyntheticSource:
@@ -83,6 +107,7 @@ class GroqSyntheticSource:
     DEFAULT_BATCH_SIZE = 10
     DEFAULT_SHARD_SIZE = 5_000
     MAX_CONSECUTIVE_FAILED_BATCHES = 3
+    PROGRESS_EVERY_DOCS = 10_000
     SYSTEM_PROMPT = (
         "You generate high-quality synthetic pretraining records. "
         "Return only valid JSON. Do not include markdown fences, assistant chatter, "
@@ -102,6 +127,10 @@ class GroqSyntheticSource:
         batch_size: int | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        min_request_interval_seconds: float | None = None,
+        max_retries: int | None = None,
+        retry_base_seconds: float | None = None,
+        retry_max_seconds: float | None = None,
     ):
         self.output_dir = Path(output_dir)
         self.max_docs = max_docs or self.DEFAULT_DOCS
@@ -113,11 +142,26 @@ class GroqSyntheticSource:
         self.temperature = DEFAULT_TEMPERATURE if temperature is None else temperature
         self.max_tokens = DEFAULT_MAX_TOKENS if max_tokens is None else max_tokens
 
+        self.min_request_interval_seconds = (
+            DEFAULT_MIN_REQUEST_INTERVAL_SECONDS
+            if min_request_interval_seconds is None
+            else min_request_interval_seconds
+        )
+        self.max_retries = DEFAULT_MAX_RETRIES if max_retries is None else max_retries
+        self.retry_base_seconds = (
+            DEFAULT_RETRY_BASE_SECONDS if retry_base_seconds is None else retry_base_seconds
+        )
+        self.retry_max_seconds = (
+            DEFAULT_RETRY_MAX_SECONDS if retry_max_seconds is None else retry_max_seconds
+        )
+        self._last_request_at = 0.0
+
         self.api_calls = 0
         self.prompt_tokens = 0
         self.completion_tokens = 0
         self.failed_batches = 0
         self.retries = 0
+        self.rate_limit_retries = 0
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def download(self) -> list[Path]:
@@ -131,6 +175,7 @@ class GroqSyntheticSource:
             )
             return existing_shards
 
+        _load_dotenv_if_present()
         if not os.environ.get("GROQ_API_KEY"):
             raise RuntimeError(
                 "GROQ_API_KEY is required for Groq-backed synthetic source "
@@ -146,12 +191,15 @@ class GroqSyntheticSource:
         consecutive_failed_batches = 0
 
         log.info(
-            "%s: generating via Groq model=%s max_docs=%s max_chars=%s batch_size=%s output=%s",
+            "%s: generating via Groq model=%s max_docs=%s max_chars=%s "
+            "batch_size=%s min_request_interval=%ss max_retries=%s output=%s",
             self.SOURCE_TAG,
             self.model,
             f"{self.max_docs:,}" if self.max_docs is not None else "None",
             f"{self.max_chars:,}" if self.max_chars is not None else "None",
             self.batch_size,
+            self.min_request_interval_seconds,
+            self.max_retries,
             self.output_dir,
         )
 
@@ -161,9 +209,17 @@ class GroqSyntheticSource:
             if self.max_chars is not None and written_chars >= self.max_chars:
                 break
 
-            remaining_docs = self.max_docs - written_docs if self.max_docs is not None else self.batch_size
+            remaining_docs = (
+                self.max_docs - written_docs
+                if self.max_docs is not None
+                else self.batch_size
+            )
             batch_count = max(1, min(self.batch_size, remaining_docs))
-            prompt = self._build_prompt(batch_count=batch_count, start_index=next_idx, rng=rng)
+            prompt = self._build_prompt(
+                batch_count=batch_count,
+                start_index=next_idx,
+                rng=rng,
+            )
             rows = self._generate_batch(prompt=prompt, requested=batch_count)
 
             if not rows:
@@ -173,7 +229,8 @@ class GroqSyntheticSource:
                     raise RuntimeError(
                         f"{self.SOURCE_TAG}: Groq generation produced no records after "
                         f"{consecutive_failed_batches} consecutive failed batch(es). "
-                        "Check GROQ_API_KEY, model access, account status, and network/IP restrictions."
+                        "Check GROQ_API_KEY, model access, account status, network/IP "
+                        "restrictions, throttling, and prompt validity."
                     )
                 continue
 
@@ -190,6 +247,19 @@ class GroqSyntheticSource:
                 written_docs += 1
                 written_chars += len(text)
 
+                if written_docs % self.PROGRESS_EVERY_DOCS == 0:
+                    log.info(
+                        "%s progress — docs=%s chars=%s api_calls=%s "
+                        "failed_batches=%s retries=%s rate_limit_retries=%s",
+                        self.SOURCE_TAG,
+                        f"{written_docs:,}",
+                        f"{written_chars:,}",
+                        self.api_calls,
+                        self.failed_batches,
+                        self.retries,
+                        self.rate_limit_retries,
+                    )
+
                 if len(buffer) >= self.shard_size:
                     output_files.append(self._write_shard(buffer, len(output_files)))
                     buffer = []
@@ -203,7 +273,9 @@ class GroqSyntheticSource:
             output_files.append(self._write_shard(buffer, len(output_files)))
 
         log.info(
-            "%s complete — docs=%s chars=%s shards=%s api_calls=%s prompt_tokens=%s completion_tokens=%s failed_batches=%s retries=%s",
+            "%s complete — docs=%s chars=%s shards=%s api_calls=%s "
+            "prompt_tokens=%s completion_tokens=%s failed_batches=%s "
+            "retries=%s rate_limit_retries=%s",
             self.SOURCE_TAG,
             f"{written_docs:,}",
             f"{written_chars:,}",
@@ -213,13 +285,16 @@ class GroqSyntheticSource:
             self.completion_tokens,
             self.failed_batches,
             self.retries,
+            self.rate_limit_retries,
         )
         log.info("%s stats: %s", self.SOURCE_TAG, self.stats(output_files))
         return output_files
 
     def _generate_batch(self, prompt: str, requested: int) -> list[dict[str, Any]]:
         attempts = 0
-        while attempts < 4:
+        last_error: Exception | None = None
+
+        while attempts < self.max_retries:
             attempts += 1
             try:
                 response = self._call_groq(prompt)
@@ -231,17 +306,82 @@ class GroqSyntheticSource:
                 rows = self._parse_records(content)
                 if rows:
                     return rows[:requested]
-                self.failed_batches += 1
-            except Exception as exc:
-                self.failed_batches += 1
-                if attempts >= 4:
-                    log.warning("%s: Groq generation failed after retries: %s", self.SOURCE_TAG, exc)
+
+                # Empty/invalid model output is a failed batch, but retrying the
+                # same prompt often helps if the model emitted malformed JSON.
+                last_error = RuntimeError("Groq response did not contain parseable records")
+
+            except GroqHTTPError as exc:
+                last_error = exc
+                if not self._should_retry_http(exc.status):
+                    log.warning(
+                        "%s: non-retryable Groq HTTP error: %s",
+                        self.SOURCE_TAG,
+                        exc,
+                    )
                     return []
+
+                sleep_seconds = self._retry_sleep_seconds(
+                    attempt=attempts,
+                    retry_after=exc.retry_after,
+                )
+                if exc.status == 429:
+                    self.rate_limit_retries += 1
+                    log.warning(
+                        "%s: Groq rate limited HTTP 429; sleeping %.1fs "
+                        "(attempt %s/%s)",
+                        self.SOURCE_TAG,
+                        sleep_seconds,
+                        attempts,
+                        self.max_retries,
+                    )
+                else:
+                    log.warning(
+                        "%s: retryable Groq HTTP %s; sleeping %.1fs "
+                        "(attempt %s/%s)",
+                        self.SOURCE_TAG,
+                        exc.status,
+                        sleep_seconds,
+                        attempts,
+                        self.max_retries,
+                    )
+
+                if attempts >= self.max_retries:
+                    break
+
                 self.retries += 1
-                time.sleep(min(2**attempts, 20))
+                time.sleep(sleep_seconds)
+                continue
+
+            except Exception as exc:
+                last_error = exc
+
+            if attempts >= self.max_retries:
+                break
+
+            self.retries += 1
+            sleep_seconds = self._retry_sleep_seconds(attempt=attempts)
+            log.warning(
+                "%s: Groq generation retry after error/empty response: %s; "
+                "sleeping %.1fs (attempt %s/%s)",
+                self.SOURCE_TAG,
+                last_error,
+                sleep_seconds,
+                attempts,
+                self.max_retries,
+            )
+            time.sleep(sleep_seconds)
+
+        log.warning(
+            "%s: Groq generation failed after retries: %s",
+            self.SOURCE_TAG,
+            last_error,
+        )
         return []
 
     def _call_groq(self, prompt: str) -> dict[str, Any]:
+        self._pace_request()
+
         api_key = os.environ["GROQ_API_KEY"]
         payload = {
             "model": self.model,
@@ -268,7 +408,12 @@ class GroqSyntheticSource:
                 body = resp.read()
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"Groq HTTP {exc.code}: {detail[:1000]}") from exc
+            retry_after = self._parse_retry_after(exc.headers.get("Retry-After"))
+            raise GroqHTTPError(
+                status=exc.code,
+                detail=detail,
+                retry_after=retry_after,
+            ) from exc
 
         self.api_calls += 1
         parsed = json.loads(body)
@@ -276,6 +421,49 @@ class GroqSyntheticSource:
         self.prompt_tokens += int(usage.get("prompt_tokens") or 0)
         self.completion_tokens += int(usage.get("completion_tokens") or 0)
         return parsed
+
+    def _pace_request(self) -> None:
+        """Sleep before requests to keep a minimum interval between API calls."""
+        interval = max(0.0, float(self.min_request_interval_seconds))
+        if interval <= 0:
+            self._last_request_at = time.monotonic()
+            return
+
+        now = time.monotonic()
+        elapsed = now - self._last_request_at
+        sleep_for = interval - elapsed
+        if self._last_request_at > 0 and sleep_for > 0:
+            time.sleep(sleep_for)
+
+        self._last_request_at = time.monotonic()
+
+    def _retry_sleep_seconds(
+        self,
+        attempt: int,
+        retry_after: float | None = None,
+    ) -> float:
+        """Compute bounded retry sleep, honoring Retry-After when provided."""
+        if retry_after is not None and retry_after > 0:
+            return min(float(retry_after), self.retry_max_seconds)
+
+        # Exponential backoff with small jitter to avoid synchronized retries.
+        base = max(0.1, float(self.retry_base_seconds))
+        sleep_seconds = min(base * (2 ** max(0, attempt - 1)), self.retry_max_seconds)
+        jitter = random.uniform(0, min(1.0, sleep_seconds * 0.10))
+        return min(sleep_seconds + jitter, self.retry_max_seconds)
+
+    def _parse_retry_after(self, value: str | None) -> float | None:
+        """Parse Retry-After seconds. Date-form Retry-After is ignored."""
+        if not value:
+            return None
+        try:
+            return max(0.0, float(value.strip()))
+        except ValueError:
+            return None
+
+    def _should_retry_http(self, status: int) -> bool:
+        """Return True for rate-limit/transient HTTP errors."""
+        return status in {408, 409, 425, 429, 500, 502, 503, 504}
 
     def _parse_records(self, content: str) -> list[dict[str, Any]]:
         text = content.strip()
@@ -378,89 +566,6 @@ class GroqSyntheticSource:
 
         return True
 
-    def _task_code_quality_ok(self, text: str, metadata: dict[str, Any]) -> bool:
-        """Reject incomplete task-code records and keep only syntax-checked Python for now."""
-        marker = "Solution:"
-        if marker not in text:
-            return False
-
-        solution = text.split(marker, 1)[1].strip()
-        if not solution:
-            return False
-
-        language = str(metadata.get("language", "")).lower()
-
-        # Until we add language-specific validators for Go/Rust/Bash/etc.,
-        # keep this Groq supplement to Python only. Bad non-Python synthetic
-        # code is worse than a smaller but cleaner source.
-        if language != "python":
-            return False
-
-        # Avoid plausible-but-wrong synthetic code in areas where syntax checks
-        # are not enough to prove correctness. Keep this supplement focused on
-        # simple utility functions, transformations, parsing, aggregation, and
-        # tests rather than bug-fix/security/Unicode edge cases.
-        risky_fragments = [
-            "fix the bug",
-            "fix this",
-            "bug",
-            "race condition",
-            "unicode",
-            "combining character",
-            "email validation",
-            "validate email",
-            "security",
-            "authentication",
-            "password",
-            "cryptographic",
-            "encryption",
-            "sanitize",
-        ]
-        lowered = text.lower()
-        if any(fragment in lowered for fragment in risky_fragments):
-            return False
-
-        # The generated records often include comments and assert-based tests.
-        # ast.parse handles those fine and catches broken parentheses/brackets,
-        # such as: assert count_elements(["a", "a", "b"] == {"a": 2})
-        try:
-            ast.parse(solution)
-        except SyntaxError:
-            log.debug(
-                "%s: rejected invalid Python synthetic task-code record: %r",
-                self.SOURCE_TAG,
-                text[:240],
-            )
-            return False
-
-        return True
-
-    def _educational_qa_quality_ok(self, text: str, metadata: dict[str, Any]) -> bool:
-        """Reject trivial or needlessly ambiguous educational QA examples."""
-        lowered = text.lower()
-
-        # Keep these examples educational rather than generic life-routine filler.
-        trivial_fragments = [
-            "first thing you should do when you wake up",
-            "get out of bed",
-        ]
-        if any(fragment in lowered for fragment in trivial_fragments):
-            return False
-
-        # Avoid controversial/measurement-dependent facts unless the prompt is
-        # explicitly about ambiguity. This exact pattern appeared in inspection.
-        ambiguous_fragments = [
-            "which river is longer, the nile or the amazon",
-            "answer: the nile",
-        ]
-        if all(fragment in lowered for fragment in ambiguous_fragments):
-            return False
-
-        if "Question:" not in text or "Answer:" not in text:
-            return False
-
-        return True
-
     def _write_shard(self, records: list[dict[str, Any]], shard_idx: int) -> Path:
         path = self.output_dir / f"{self.SHARD_PREFIX}_{shard_idx:05d}.jsonl"
         with path.open("wb") as f:
@@ -495,6 +600,8 @@ class GroqSyntheticSource:
             "completion_tokens": self.completion_tokens,
             "failed_batches": self.failed_batches,
             "retries": self.retries,
+            "rate_limit_retries": self.rate_limit_retries,
+            "min_request_interval_seconds": self.min_request_interval_seconds,
             "output_dir": str(self.output_dir),
         }
 

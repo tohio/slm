@@ -629,7 +629,9 @@ def stage_download(
     n_workers = workers or default_workers()
     log.info(f"=== Stage 1: Download (target={target}, mini={mini}) ===")
 
-    if not mini:
+    selected_sources = sources or list(ALL_SOURCES)
+
+    if not mini and "common_crawl" in selected_sources:
         cc_segments = compute_cc_segments(TARGET_CONFIGS[target]["total_tokens"])
         log.info(
             f"Common Crawl: computed {cc_segments} segments from "
@@ -637,8 +639,6 @@ def stage_download(
             f"{_TOP_LEVEL_SHARE['common_crawl']:.2%} × {CHARS_PER_TOKEN} chars/tok "
             f"÷ {CC_CHARS_PER_SEGMENT:,} chars/segment"
         )
-
-    selected_sources = sources or list(ALL_SOURCES)
 
     for name in selected_sources:
         log.info(f"Downloading {name}...")
