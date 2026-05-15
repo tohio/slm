@@ -60,7 +60,7 @@ class SyntheticTaskCodeSource(GroqSyntheticSource):
             "task_type": row.get("task_type", "unknown"),
             "difficulty": row.get("difficulty", "unknown"),
             "topic": row.get("topic", "unknown"),
-            "prompt_template": "synthetic_task_code_groq_v4_jsonl",
+            "prompt_template": "synthetic_task_code_groq_v5_schema",
             "benchmark_excluded": True,
         }
 
@@ -79,22 +79,13 @@ class SyntheticTaskCodeSource(GroqSyntheticSource):
         return f"""
 Generate unique Python-only synthetic coding pretraining records.
 
-Purpose:
-- Create clean task -> implementation -> tests examples for a small language model.
-- Prefer boring, correct, simple utility functions over clever or production-hard tasks.
-
-Critical output rules:
-- Return JSONL only.
-- Return exactly one compact JSON object per line.
-- Do not return an outer object.
-- Do not return a "records" array.
-- Do not return markdown fences.
-- Do not return assistant chatter.
-- Do not return a "text" field.
-- Return a single-line "task" field.
-- Return a "solution_lines" field as a JSON array of single-line strings.
-- Do not put newline characters inside any JSON string value.
-- The Python adapter will join solution_lines with newlines and build final training text.
+Return a JSON object that matches the configured schema:
+- top-level key: records
+- each record has task, solution_lines, language, task_type, difficulty, topic, metadata
+- do not return a text field
+- task must be a single-line string
+- solution_lines must be an array of single-line strings
+- the Python adapter will join solution_lines with newlines and build final training text
 
 Allowed task families:
 - list transformations
@@ -119,9 +110,6 @@ Hard rules:
   filesystem, subprocess, database, external API, CLI-input, or production-hardening tasks.
 - Do not use HumanEval, APPS, LeetCode, CodeContests, interview benchmark tasks,
   benchmark-derived wording, or named benchmark problems.
-
-Each output line must look like this:
-{{"task":"Write a Python function that returns the even numbers from a list while preserving order.","solution_lines":["def extract_evens(numbers):","    return [n for n in numbers if n % 2 == 0]","","# Tests","assert extract_evens([1, 2, 3, 4]) == [2, 4]","assert extract_evens([1, 3, 5]) == []"],"language":"python","task_type":"collection_transform","difficulty":"easy","topic":"lists","metadata":{{}}}}
 
 Specs:
 {specs_json}
@@ -175,7 +163,6 @@ Specs:
 
         if "Task:" not in text or "Solution:" not in text:
             return False
-
         if text.count("Task:") != 1 or text.count("Solution:") != 1:
             return False
 
@@ -251,3 +238,43 @@ Specs:
             return False
 
         return True
+
+    def _structured_response_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["records"],
+            "properties": {
+                "records": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": [
+                            "task",
+                            "solution_lines",
+                            "language",
+                            "task_type",
+                            "difficulty",
+                            "topic",
+                            "metadata",
+                        ],
+                        "properties": {
+                            "task": {"type": "string"},
+                            "solution_lines": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                            "language": {"type": "string"},
+                            "task_type": {"type": "string"},
+                            "difficulty": {"type": "string"},
+                            "topic": {"type": "string"},
+                            "metadata": {
+                                "type": "object",
+                                "additionalProperties": True,
+                            },
+                        },
+                    },
+                },
+            },
+        }

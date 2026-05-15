@@ -45,7 +45,7 @@ class FactualRestraintSource(GroqSyntheticSource):
             "category": "factual_restraint",
             "kind": row.get("kind", "unknown"),
             "difficulty": row.get("difficulty", "unknown"),
-            "prompt_template": "factual_restraint_groq_v4_jsonl",
+            "prompt_template": "factual_restraint_groq_v5_schema",
             "benchmark_excluded": True,
         }
 
@@ -62,32 +62,12 @@ class FactualRestraintSource(GroqSyntheticSource):
         return f"""
 Generate unique factual-restraint pretraining records.
 
-Purpose:
-- Teach the model not to hallucinate when facts are unavailable, private, current, or source-dependent.
-- Keep answers concise and helpful, not over-refusal-heavy.
-
-Critical output rules:
-- Return JSONL only.
-- Return exactly one compact JSON object per line.
-- Do not return an outer object.
-- Do not return a "records" array.
-- Do not return markdown fences.
-- Do not return assistant chatter.
-- Do not return a "text" field.
-- Each JSON object must have separate "question" and "answer" fields.
-- Each field value must be a single-line JSON string.
-- Do not put newline characters inside any JSON string value.
-- The Python adapter will build the final multiline training text.
-
-Balanced categories:
-- live/current data unavailable
-- private personal data
-- confidential medical/legal/financial records
-- unverifiable facts about private people
-- exact proprietary/internal data
-- unknown fictional or nonexistent identifiers
-- no fake browsing/search/tool claims
-- invented citation avoidance
+Return a JSON object that matches the configured schema:
+- top-level key: records
+- each record has question, answer, kind, difficulty, metadata
+- do not return a text field
+- all string fields must be single-line strings
+- the Python adapter will build final multiline training text
 
 Rules:
 - The answer should avoid guessing and should not invent facts.
@@ -96,9 +76,6 @@ Rules:
 - Do not refuse ordinary stable public facts.
 - When useful, briefly say what would be needed to answer.
 - Keep the answer concise; avoid long policy-style refusals.
-
-Each output line must look like this:
-{{"question":"What is the current private salary of a specific non-public person?","answer":"I do not have access to private salary information. A reliable authorized source would be needed to answer.","kind":"unverifiable_private_fact","difficulty":"simple","metadata":{{}}}}
 
 Specs:
 {specs_json}
@@ -151,3 +128,36 @@ Specs:
             return False
 
         return True
+
+    def _structured_response_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["records"],
+            "properties": {
+                "records": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": [
+                            "question",
+                            "answer",
+                            "kind",
+                            "difficulty",
+                            "metadata",
+                        ],
+                        "properties": {
+                            "question": {"type": "string"},
+                            "answer": {"type": "string"},
+                            "kind": {"type": "string"},
+                            "difficulty": {"type": "string"},
+                            "metadata": {
+                                "type": "object",
+                                "additionalProperties": True,
+                            },
+                        },
+                    },
+                },
+            },
+        }

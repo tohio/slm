@@ -12,10 +12,6 @@ class SyntheticArithmeticSource(GroqSyntheticSource):
     SOURCE_TAG = "synthetic_arithmetic"
     SHARD_PREFIX = "synthetic_arithmetic"
     DEFAULT_DOCS = 100_000
-
-    # Arithmetic records are intentionally short, but large JSON object/array
-    # batches are unreliable with LLM output. Use JSONL output and a moderate
-    # batch size so individual valid records can be recovered independently.
     DEFAULT_BATCH_SIZE = 32
 
     FORMATS = [
@@ -47,7 +43,7 @@ class SyntheticArithmeticSource(GroqSyntheticSource):
             "category": "arithmetic",
             "format": row.get("format", "unknown"),
             "difficulty": row.get("difficulty", "unknown"),
-            "prompt_template": "synthetic_arithmetic_groq_v4_jsonl",
+            "prompt_template": "synthetic_arithmetic_groq_v5_schema",
             "benchmark_excluded": True,
         }
 
@@ -71,41 +67,25 @@ class SyntheticArithmeticSource(GroqSyntheticSource):
         return f"""
 Generate unique elementary arithmetic pretraining records.
 
-Purpose:
-- Reinforce concise arithmetic question-answer behavior.
-- Keep records simple, correct, and easy to verify.
-
-Critical output rules:
-- Return JSONL only.
-- Return exactly one compact JSON object per line.
-- Do not return an outer object.
-- Do not return a "records" array.
-- Do not return markdown fences.
-- Do not return assistant chatter.
-- Do not return a "text" field.
-- Each JSON object must have separate "question" and "answer" fields.
-- The "question" and "answer" values must be single-line JSON strings.
-- Do not put newline characters inside any JSON string value.
-- The Python adapter will build the final multiline training text.
+Return a JSON object that matches the configured schema:
+- top-level key: records
+- records is an array of objects
+- each record has question, answer, format, difficulty, metadata
+- do not return a text field
+- question and answer must be single-line strings
+- the Python adapter will build final multiline training text
 
 Rules:
 - Each record must contain exactly one arithmetic question and one short answer.
-- Include the final answer explicitly in the "answer" field.
+- Include the final answer explicitly in the answer field.
 - Use original numbers and wording.
-- Allowed:
-  - single-step addition, subtraction, multiplication, division
-  - simple word problems
-  - simple comparisons
-  - simple solve-for-x equations with one unknown
-  - clear two-step arithmetic where the answer is still short
+- Allowed: single-step arithmetic, simple word problems, simple comparisons,
+  simple solve-for-x equations, and clear two-step arithmetic.
 - Do not include multiple separate questions in one record.
 - Do not use blanks like "__".
 - Do not create trick equations, ambiguous equations, or malformed equations.
 - Do not use long GSM8K-style reasoning chains or benchmark-style wording.
 - Do not include explanations.
-
-Each output line must look like this:
-{{"question":"2 + 3 =","answer":"5","format":"qa_arithmetic","difficulty":"single_step","metadata":{{}}}}
 
 Specs:
 {specs_json}
@@ -153,8 +133,40 @@ Specs:
 
         if not question or not answer:
             return False
-
         if len(answer) > 40:
             return False
 
         return True
+
+    def _structured_response_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["records"],
+            "properties": {
+                "records": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": [
+                            "question",
+                            "answer",
+                            "format",
+                            "difficulty",
+                            "metadata",
+                        ],
+                        "properties": {
+                            "question": {"type": "string"},
+                            "answer": {"type": "string"},
+                            "format": {"type": "string"},
+                            "difficulty": {"type": "string"},
+                            "metadata": {
+                                "type": "object",
+                                "additionalProperties": True,
+                            },
+                        },
+                    },
+                },
+            },
+        }

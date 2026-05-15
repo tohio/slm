@@ -67,8 +67,7 @@ DEFAULT_GROQ_MODEL = os.environ.get("SYNTHETIC_GROQ_MODEL", "llama-3.1-8b-instan
 DEFAULT_TEMPERATURE = float(os.environ.get("SYNTHETIC_GROQ_TEMPERATURE", "0.8"))
 DEFAULT_MAX_TOKENS = int(os.environ.get("SYNTHETIC_GROQ_MAX_TOKENS", "4096"))
 
-# Request pacing. This is proactive protection so long full-corpus synthetic
-# runs do not hammer the API as fast as the loop can issue requests.
+# Proactive pacing to avoid hammering Groq during long synthetic runs.
 DEFAULT_MIN_REQUEST_INTERVAL_SECONDS = float(
     os.environ.get("GROQ_MIN_REQUEST_INTERVAL_SECONDS", "0.5")
 )
@@ -77,6 +76,16 @@ DEFAULT_MIN_REQUEST_INTERVAL_SECONDS = float(
 DEFAULT_MAX_RETRIES = int(os.environ.get("GROQ_MAX_RETRIES", "6"))
 DEFAULT_RETRY_BASE_SECONDS = float(os.environ.get("GROQ_RETRY_BASE_SECONDS", "2"))
 DEFAULT_RETRY_MAX_SECONDS = float(os.environ.get("GROQ_RETRY_MAX_SECONDS", "60"))
+
+# Use API-enforced JSON Schema output when adapters provide a schema.
+# If the selected model/account rejects response_format=json_schema, switch to a
+# Groq model that supports structured outputs or set GROQ_STRUCTURED_OUTPUTS=0
+# to fall back to prompt-only parsing.
+DEFAULT_STRUCTURED_OUTPUTS = os.environ.get("GROQ_STRUCTURED_OUTPUTS", "1").lower() not in {
+    "0",
+    "false",
+    "no",
+}
 
 
 def _env_model_for_source(source_tag: str) -> str:
@@ -106,12 +115,11 @@ class GroqSyntheticSource:
     PROGRESS_EVERY_DOCS = 10_000
     SYSTEM_PROMPT = (
         "You generate high-quality synthetic pretraining records. "
-        "Return only valid JSON or JSONL as requested by the user prompt. "
-        "Do not include markdown fences, assistant chatter, or explanatory text "
-        "outside the requested payload. If the user asks for JSONL, return one "
-        "compact JSON object per line with no outer array or wrapper. Do not place "
-        "raw newline characters inside quoted JSON string values. If generating "
-        "code, the code and tests must be syntactically valid for the stated language."
+        "Return only the JSON payload requested by the user. Do not include "
+        "markdown fences, assistant chatter, or explanatory text outside the "
+        "payload. Do not place raw newline characters inside quoted JSON string "
+        "values. If generating code, the code and tests must be syntactically "
+        "valid for the stated language."
     )
 
     def __init__(
@@ -129,6 +137,7 @@ class GroqSyntheticSource:
         max_retries: int | None = None,
         retry_base_seconds: float | None = None,
         retry_max_seconds: float | None = None,
+        structured_outputs: bool | None = None,
     ):
         self.output_dir = Path(output_dir)
         self.max_docs = max_docs or self.DEFAULT_DOCS
@@ -151,6 +160,9 @@ class GroqSyntheticSource:
         )
         self.retry_max_seconds = (
             DEFAULT_RETRY_MAX_SECONDS if retry_max_seconds is None else retry_max_seconds
+        )
+        self.structured_outputs = (
+            DEFAULT_STRUCTURED_OUTPUTS if structured_outputs is None else structured_outputs
         )
         self._last_request_at = 0.0
 
@@ -188,9 +200,11 @@ class GroqSyntheticSource:
         next_idx = 0
         consecutive_failed_batches = 0
 
+        schema_enabled = bool(self.structured_outputs and self._structured_response_schema())
+
         log.info(
             "%s: generating via Groq model=%s max_docs=%s max_chars=%s "
-            "batch_size=%s min_request_interval=%ss max_retries=%s output=%s",
+            "batch_size=%s min_request_interval=%ss max_retries=%s structured_outputs=%s output=%s",
             self.SOURCE_TAG,
             self.model,
             f"{self.max_docs:,}" if self.max_docs is not None else "None",
@@ -198,6 +212,7 @@ class GroqSyntheticSource:
             self.batch_size,
             self.min_request_interval_seconds,
             self.max_retries,
+            schema_enabled,
             self.output_dir,
         )
 
@@ -228,7 +243,8 @@ class GroqSyntheticSource:
                         f"{self.SOURCE_TAG}: Groq generation produced no records after "
                         f"{consecutive_failed_batches} consecutive failed batch(es). "
                         "Check GROQ_API_KEY, model access, account status, network/IP "
-                        "restrictions, throttling, and prompt validity."
+                        "restrictions, throttling, prompt validity, and whether the "
+                        "selected model supports structured outputs."
                     )
                 continue
 
@@ -323,11 +339,20 @@ class GroqSyntheticSource:
             except GroqHTTPError as exc:
                 last_error = exc
                 if not self._should_retry_http(exc.status):
-                    log.warning(
-                        "%s: non-retryable Groq HTTP error: %s",
-                        self.SOURCE_TAG,
-                        exc,
-                    )
+                    if exc.status == 400 and self.structured_outputs and self._structured_response_schema():
+                        log.error(
+                            "%s: Groq rejected structured output request. "
+                            "Use a model that supports response_format=json_schema, "
+                            "or set GROQ_STRUCTURED_OUTPUTS=0 to fall back to prompt-only parsing. Error: %s",
+                            self.SOURCE_TAG,
+                            exc,
+                        )
+                    else:
+                        log.warning(
+                            "%s: non-retryable Groq HTTP error: %s",
+                            self.SOURCE_TAG,
+                            exc,
+                        )
                     return []
 
                 sleep_seconds = self._retry_sleep_seconds(
@@ -392,7 +417,7 @@ class GroqSyntheticSource:
         self._pace_request()
 
         api_key = os.environ["GROQ_API_KEY"]
-        payload = {
+        payload: dict[str, Any] = {
             "model": self.model,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
@@ -401,6 +426,18 @@ class GroqSyntheticSource:
                 {"role": "user", "content": prompt},
             ],
         }
+
+        schema = self._structured_response_schema()
+        if self.structured_outputs and schema:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": self._structured_response_name(),
+                    "schema": schema,
+                    "strict": True,
+                },
+            }
+
         req = urllib.request.Request(
             GROQ_API_URL,
             data=json.dumps(payload).encode("utf-8"),
@@ -481,8 +518,7 @@ class GroqSyntheticSource:
         text = re.sub(r"^```(?:json|jsonl)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text).strip()
 
-        # Preferred contract: JSONL, one independent JSON object per line.
-        # This recovers usable records even if a later line is malformed.
+        # Preferred fallback contract: JSONL, one independent object per line.
         rows: list[dict[str, Any]] = []
         for raw_line in text.splitlines():
             line = raw_line.strip().rstrip(",")
@@ -502,7 +538,7 @@ class GroqSyntheticSource:
         if rows:
             return rows
 
-        # Backward-compatible fallback: object with records array or plain array.
+        # Primary structured-output contract: object with records array.
         try:
             obj = json.loads(text)
             if isinstance(obj, dict) and isinstance(obj.get("records"), list):
@@ -557,11 +593,9 @@ class GroqSyntheticSource:
     def _clean_generated_text(self, raw_text: str) -> str:
         """Normalize common LLM JSON escaping artifacts before filtering/dedup."""
         text = raw_text.strip()
-
         text = text.replace("\\r\\n", "\n")
         text = text.replace("\\n", "\n")
         text = text.replace("\\t", "\t")
-
         return text.strip()
 
     def _quality_ok(self, text: str, metadata: dict[str, Any]) -> bool:
@@ -620,6 +654,7 @@ class GroqSyntheticSource:
             "retries": self.retries,
             "rate_limit_retries": self.rate_limit_retries,
             "min_request_interval_seconds": self.min_request_interval_seconds,
+            "structured_outputs": bool(self.structured_outputs and self._structured_response_schema()),
             "output_dir": str(self.output_dir),
         }
 
@@ -628,3 +663,10 @@ class GroqSyntheticSource:
 
     def _build_prompt(self, batch_count: int, start_index: int, rng: random.Random) -> str:
         raise NotImplementedError
+
+    def _structured_response_name(self) -> str:
+        safe = re.sub(r"[^a-zA-Z0-9_]+", "_", self.SOURCE_TAG).strip("_")
+        return f"{safe}_records"
+
+    def _structured_response_schema(self) -> dict[str, Any] | None:
+        return None
