@@ -12,11 +12,11 @@ Checks:
     - Deduped shards exist and have no exact duplicates
     - data/curated/train.jsonl exists, is non-empty, contains most sources
     - data/curated/blend_stats.json is correct and complete
-    - Cap-and-redistribute: any deficit is covered by FineWeb overflow
+    - Synthetic sources are present and non-empty in curated outputs
+    - Cap-and-redistribute: any deficit is covered by overflow accounting
 """
 
 import json
-from pathlib import Path
 
 import pytest
 
@@ -33,12 +33,14 @@ from curator.filters.dedup import exact_hash
 # bypass prose filters.
 from config import ALL_SOURCES, CODE_SOURCES, NON_CODE_SOURCES
 
-SYMBOL_HEAVY_SKIP_SOURCES = {
+SYNTHETIC_SOURCES = {
     "synthetic_arithmetic",
     "synthetic_task_code",
     "educational_qa_mcq",
     "factual_restraint",
 }
+
+SYMBOL_HEAVY_SKIP_SOURCES = set(SYNTHETIC_SOURCES)
 QUALITY_SKIP_SOURCES = set(CODE_SOURCES) | SYMBOL_HEAVY_SKIP_SOURCES
 
 
@@ -220,13 +222,16 @@ class TestCuratedOutput:
     def test_train_jsonl_exists(self):
         assert pipeline_path("curated", "train.jsonl").exists()
 
+    def test_val_jsonl_exists(self):
+        assert pipeline_path("curated", "val.jsonl").exists()
+
     def test_train_jsonl_is_non_empty(self):
         docs = read_jsonl(pipeline_path("curated", "train.jsonl"))
         assert len(docs) > 0, "train.jsonl is empty"
 
     def test_train_jsonl_contains_required_sources(self):
         """
-        train.jsonl should contain all sources in the mix.
+        train.jsonl should contain most sources in the mix.
 
         The 1% conala share at mini scale (1M tokens × 10% × 1% = 1k chars,
         roughly 200 tokens) can plausibly round to zero docs after blend
@@ -246,6 +251,21 @@ class TestCuratedOutput:
             f"got {len(present_required)}. Missing: {missing}"
         )
 
+    def test_curated_splits_contain_all_synthetic_sources(self):
+        """
+        All synthetic sources should survive into the curated split.
+
+        Check train + val together because very small mini shares can place
+        one of a source's few examples into val via reservoir sampling.
+        """
+        train_docs = read_jsonl(pipeline_path("curated", "train.jsonl"))
+        val_docs = read_jsonl(pipeline_path("curated", "val.jsonl"))
+
+        sources = {d["source"] for d in train_docs + val_docs}
+        missing = SYNTHETIC_SOURCES - sources
+
+        assert not missing, f"Synthetic sources missing from curated split: {missing}"
+
     def test_train_jsonl_has_no_unknown_sources(self):
         """Every source tag in train.jsonl should be one we recognize."""
         docs = read_jsonl(pipeline_path("curated", "train.jsonl"))
@@ -259,8 +279,8 @@ class TestCuratedOutput:
     def test_train_jsonl_has_no_short_documents(self):
         """
         No non-code document in train.jsonl should be below the quality
-        filter threshold. Code sources bypass this filter, so they may
-        legitimately have short documents (short functions, one-liners).
+        filter threshold. Code and generated/template-like sources bypass
+        this filter, so they may legitimately have short documents.
         """
         MIN_CHARS = 500
         docs = read_jsonl(pipeline_path("curated", "train.jsonl"))
@@ -276,6 +296,13 @@ class TestCuratedOutput:
 
     def test_train_jsonl_has_required_fields(self):
         docs = read_jsonl(pipeline_path("curated", "train.jsonl"))
+        for doc in docs[:20]:
+            assert "text" in doc
+            assert "source" in doc
+            assert len(doc["text"]) > 0
+
+    def test_val_jsonl_has_required_fields(self):
+        docs = read_jsonl(pipeline_path("curated", "val.jsonl"))
         for doc in docs[:20]:
             assert "text" in doc
             assert "source" in doc
@@ -310,6 +337,9 @@ class TestBlendStats:
         assert "target" in stats
         assert "target_tokens" in stats
         assert "total_documents" in stats
+        assert "train_documents" in stats
+        assert "val_documents" in stats
+        assert "val_fraction" in stats
         assert "estimated_tokens" in stats
         assert "chars_per_token" in stats
         assert "source_mix" in stats
@@ -317,6 +347,8 @@ class TestBlendStats:
     def test_blend_stats_total_documents_positive(self):
         stats = self._load_stats()
         assert stats["total_documents"] > 0
+        assert stats["train_documents"] > 0
+        assert stats["val_documents"] >= 0
 
     def test_blend_stats_sources_recorded(self):
         """
@@ -333,6 +365,67 @@ class TestBlendStats:
             f"Got: {sorted(mix.keys())}"
         )
 
+    def test_blend_stats_includes_all_synthetic_sources(self):
+        """Synthetic sources should be present and non-empty in mini curation."""
+        stats = self._load_stats()
+        mix = stats["source_mix"]
+
+        missing = SYNTHETIC_SOURCES - set(mix)
+        assert not missing, f"Missing synthetic sources in blend_stats: {missing}"
+
+        for source in SYNTHETIC_SOURCES:
+            row = mix[source]
+            assert row["docs"] > 0, f"{source} has no blended docs: {row}"
+            assert row["chars"] > 0, f"{source} has no blended chars: {row}"
+            assert row["deficit"] == 0, f"{source} has non-zero deficit: {row}"
+
     def test_blend_stats_per_source_schema(self):
         """Each source entry must have docs, chars, target_chars, deficit."""
         stats = self._load_stats()
+        mix = stats["source_mix"]
+
+        for source, row in mix.items():
+            assert "docs" in row, f"{source} missing docs"
+            assert "chars" in row, f"{source} missing chars"
+            assert "target_chars" in row, f"{source} missing target_chars"
+            assert "deficit" in row, f"{source} missing deficit"
+            assert "val_docs" in row, f"{source} missing val_docs"
+
+            assert isinstance(row["docs"], int), f"{source} docs is not int"
+            assert isinstance(row["chars"], int), f"{source} chars is not int"
+            assert isinstance(row["target_chars"], int), (
+                f"{source} target_chars is not int"
+            )
+            assert isinstance(row["deficit"], int), f"{source} deficit is not int"
+            assert isinstance(row["val_docs"], int), f"{source} val_docs is not int"
+
+            assert row["docs"] >= 0, f"{source} docs is negative"
+            assert row["chars"] >= 0, f"{source} chars is negative"
+            assert row["target_chars"] >= 0, f"{source} target_chars is negative"
+            assert row["deficit"] >= 0, f"{source} deficit is negative"
+            assert row["val_docs"] >= 0, f"{source} val_docs is negative"
+
+    def test_blend_stats_document_counts_match_curated_files(self):
+        stats = self._load_stats()
+        train_docs = read_jsonl(pipeline_path("curated", "train.jsonl"))
+        val_docs = read_jsonl(pipeline_path("curated", "val.jsonl"))
+
+        assert stats["train_documents"] == len(train_docs)
+        assert stats["val_documents"] == len(val_docs)
+        assert stats["total_documents"] == len(train_docs) + len(val_docs)
+
+    def test_blend_stats_deficits_are_closed(self):
+        """
+        Mini curation should not leave unresolved deficits after overflow.
+
+        If this fails, a source ran short and the overflow routing did not make
+        up the missing characters.
+        """
+        stats = self._load_stats()
+        deficits = {
+            source: row
+            for source, row in stats["source_mix"].items()
+            if row.get("deficit", 0) != 0
+        }
+
+        assert not deficits, f"Unresolved source deficits in blend_stats: {deficits}"
