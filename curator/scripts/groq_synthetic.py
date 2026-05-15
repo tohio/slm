@@ -345,7 +345,10 @@ class GroqSyntheticSource:
                 f.write(b"\n")
         return path
 
-    def stats(self, output_files: list[Path]) -> dict[str, Any]:
+    def stats(self, output_files: list[Path] | None = None) -> dict[str, Any]:
+        if output_files is None:
+            output_files = sorted(self.output_dir.glob(f"{self.SHARD_PREFIX}_*.jsonl"))
+
         docs = 0
         chars = 0
         for path in output_files:
