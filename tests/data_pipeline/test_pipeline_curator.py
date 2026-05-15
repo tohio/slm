@@ -40,7 +40,10 @@ SYNTHETIC_SOURCES = {
     "factual_restraint",
 }
 
-SYMBOL_HEAVY_SKIP_SOURCES = set(SYNTHETIC_SOURCES)
+SYMBOL_HEAVY_SKIP_SOURCES = set(SYNTHETIC_SOURCES) | {
+    "nemotron_cc_math",
+    "nemotron_specialized",
+}
 QUALITY_SKIP_SOURCES = set(CODE_SOURCES) | SYMBOL_HEAVY_SKIP_SOURCES
 
 
