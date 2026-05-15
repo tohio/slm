@@ -311,7 +311,7 @@ class GroqSyntheticSource:
         while attempts < self.max_retries:
             attempts += 1
             try:
-                response = self._call_groq(prompt)
+                response = self._call_groq(prompt, requested=requested)
                 content = (
                     response.get("choices", [{}])[0]
                     .get("message", {})
@@ -413,7 +413,7 @@ class GroqSyntheticSource:
         )
         return []
 
-    def _call_groq(self, prompt: str) -> dict[str, Any]:
+    def _call_groq(self, prompt: str, requested: int | None = None) -> dict[str, Any]:
         self._pace_request()
 
         api_key = os.environ["GROQ_API_KEY"]
@@ -427,7 +427,7 @@ class GroqSyntheticSource:
             ],
         }
 
-        schema = self._structured_response_schema()
+        schema = self._structured_response_schema(batch_count=requested)
         if self.structured_outputs and schema:
             payload["response_format"] = {
                 "type": "json_schema",
@@ -668,5 +668,5 @@ class GroqSyntheticSource:
         safe = re.sub(r"[^a-zA-Z0-9_]+", "_", self.SOURCE_TAG).strip("_")
         return f"{safe}_records"
 
-    def _structured_response_schema(self) -> dict[str, Any] | None:
+    def _structured_response_schema(self, batch_count: int | None = None) -> dict[str, Any] | None:
         return None

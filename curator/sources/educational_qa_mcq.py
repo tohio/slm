@@ -153,7 +153,7 @@ Specs:
 
         return True
 
-    def _structured_response_schema(self) -> dict[str, Any]:
+    def _structured_response_schema(self, batch_count: int | None = None) -> dict[str, Any]:
         return {
             "type": "object",
             "additionalProperties": False,
@@ -161,6 +161,7 @@ Specs:
             "properties": {
                 "records": {
                     "type": "array",
+                    **({"minItems": batch_count, "maxItems": batch_count} if batch_count else {}),
                     "items": {
                         "type": "object",
                         "additionalProperties": False,
