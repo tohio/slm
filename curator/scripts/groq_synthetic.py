@@ -309,6 +309,12 @@ class GroqSyntheticSource:
 
                 # Empty/invalid model output is a failed batch, but retrying the
                 # same prompt often helps if the model emitted malformed JSON.
+                preview = content[:800].replace("\n", "\\n")
+                log.warning(
+                    "%s: unparseable Groq response preview: %s",
+                    self.SOURCE_TAG,
+                    preview,
+                )
                 last_error = RuntimeError("Groq response did not contain parseable records")
 
             except GroqHTTPError as exc:
