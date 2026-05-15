@@ -208,6 +208,86 @@ DEFAULT_OVERFLOW_CHAIN = (
 )
 
 
+# ── Source selection / source-scoped runs ──────────────────────────────────────
+
+def _resolve_sources(source_arg: str | None) -> list[str]:
+    """Resolve a comma-separated --sources value into concrete source names."""
+    if not source_arg:
+        return list(ALL_SOURCES)
+
+    requested: list[str] = []
+    seen: set[str] = set()
+    for raw in source_arg.split(","):
+        name = raw.strip()
+        if not name or name in seen:
+            continue
+        requested.append(name)
+        seen.add(name)
+
+    unknown = sorted(set(requested) - set(ALL_SOURCES))
+    if unknown:
+        valid = ", ".join(ALL_SOURCES)
+        raise ValueError(
+            f"Unknown source(s): {', '.join(unknown)}. Valid sources: {valid}"
+        )
+    if not requested:
+        raise ValueError("--sources was provided but no source names were parsed")
+    return requested
+
+
+def _count_jsonl_dir(path: Path) -> tuple[int, int, int]:
+    """Return (files, docs, chars) for JSONL shards in a directory."""
+    files = sorted(path.glob("*.jsonl"))
+    docs = 0
+    chars = 0
+
+    for shard in files:
+        with open(shard, "rb", buffering=8 * 1024 * 1024) as f:
+            for line in f:
+                try:
+                    row = orjson.loads(line)
+                except Exception:
+                    continue
+                docs += 1
+                chars += len(row.get("text", ""))
+
+    return len(files), docs, chars
+
+
+def stage_source_stats(sources: list[str] | None = None) -> None:
+    """Report raw/filter/dedup capacity stats for selected sources."""
+    selected_sources = sources or list(ALL_SOURCES)
+    log.info("=== Source capacity stats ===")
+
+    for source in selected_sources:
+        log.info("=" * 80)
+        log.info(source)
+
+        rows: dict[str, tuple[int, int, int]] = {}
+        for label, path in {
+            "raw": RAW_DIR / source,
+            "filtered": FILTERED_DIR / source,
+            "deduped": FILTERED_DIR / f"{source}_deduped",
+        }.items():
+            files, docs, chars = _count_jsonl_dir(path)
+            rows[label] = (files, docs, chars)
+            avg = chars // max(docs, 1)
+            log.info(
+                f"  {label:8s} files={files:5,} "
+                f"docs={docs:12,} chars={chars:15,} avg_chars_doc={avg:,}"
+            )
+
+        raw_docs, raw_chars = rows["raw"][1], rows["raw"][2]
+        filt_docs, filt_chars = rows["filtered"][1], rows["filtered"][2]
+        ded_docs, ded_chars = rows["deduped"][1], rows["deduped"][2]
+
+        log.info(
+            f"  filter_doc_retention={filt_docs / max(raw_docs, 1) * 100:8.2f}% "
+            f"dedup_doc_retention={ded_docs / max(filt_docs, 1) * 100:8.2f}% "
+            f"total_char_retention={ded_chars / max(raw_chars, 1) * 100:8.2f}%"
+        )
+
+
 # ── Per-source download cap derivation ─────────────────────────────────────────
 #
 # Translating a char target into a doc cap requires knowing the avg chars/doc
@@ -527,7 +607,12 @@ def _build_source(
     raise ValueError(f"Unknown source: {name}")
 
 
-def stage_download(target: str, mini: bool = False, workers: int | None = None) -> None:
+def stage_download(
+    target: str,
+    mini: bool = False,
+    workers: int | None = None,
+    sources: list[str] | None = None,
+) -> None:
     """Download every source in DATA_MIX + CODE_SUBMIX."""
     n_workers = workers or default_workers()
     log.info(f"=== Stage 1: Download (target={target}, mini={mini}) ===")
@@ -541,7 +626,9 @@ def stage_download(target: str, mini: bool = False, workers: int | None = None) 
             f"÷ {CC_CHARS_PER_SEGMENT:,} chars/segment"
         )
 
-    for name in ALL_SOURCES:
+    selected_sources = sources or list(ALL_SOURCES)
+
+    for name in selected_sources:
         log.info(f"Downloading {name}...")
         source = _build_source(name, mini=mini, target=target, workers=n_workers)
         try:
@@ -594,13 +681,15 @@ def _filter_shard(args: tuple[Path, Path]) -> str:
     return report
 
 
-def stage_filter(workers: int | None = None) -> None:
+def stage_filter(workers: int | None = None, sources: list[str] | None = None) -> None:
     """Apply quality filters to all raw data in parallel."""
     n_workers = workers or default_workers()
     log.info(f"=== Stage 2: Quality Filter ({n_workers} workers) ===")
 
+    selected_sources = sources or list(ALL_SOURCES)
+
     all_work: list[tuple[Path, Path]] = []
-    for source in ALL_SOURCES:
+    for source in selected_sources:
         src_dir = RAW_DIR / source
         dst_dir = FILTERED_DIR / source
         dst_dir.mkdir(parents=True, exist_ok=True)
@@ -639,14 +728,16 @@ def stage_filter(workers: int | None = None) -> None:
 
 # ── Stage 3: Deduplicate ───────────────────────────────────────────────────────
 
-def stage_dedup(workers: int | None = None) -> None:
+def stage_dedup(workers: int | None = None, sources: list[str] | None = None) -> None:
     n_workers = workers or default_workers()
     log.info(f"=== Stage 3: Deduplication ({n_workers} workers) ===")
 
     working_dir = DEDUP_SCRATCH_DIR
     dedup = Deduplicator(working_dir=working_dir, workers=n_workers)
 
-    for source in ALL_SOURCES:
+    selected_sources = sources or list(ALL_SOURCES)
+
+    for source in selected_sources:
         src_dir = FILTERED_DIR / source
         dst_dir = FILTERED_DIR / f"{source}_deduped"
 
@@ -1315,7 +1406,7 @@ def stage_upload(target: str) -> None:
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
-STAGES = ["download", "filter", "dedup", "blend", "upload", "all"]
+STAGES = ["download", "filter", "dedup", "blend", "upload", "stats", "all"]
 
 
 def main():
@@ -1331,6 +1422,16 @@ def main():
     parser.add_argument("--stage", choices=STAGES, default="all")
     parser.add_argument("--mini", action="store_true")
     parser.add_argument(
+        "--sources",
+        default=None,
+        help=(
+            "Comma-separated concrete source names for source-scoped capacity "
+            "runs. Example: --sources nemotron_cc_math,nemotron_specialized. "
+            "When used with --stage all, only download/filter/dedup/stats run; "
+            "blend/upload are intentionally skipped."
+        ),
+    )
+    parser.add_argument(
         "--workers", type=int, default=None,
         help="Parallel workers for filter/dedup/blend. Default: cpu_count - 2.",
     )
@@ -1345,23 +1446,45 @@ def main():
 
     configure_data_dirs(args.target)
 
+    try:
+        selected_sources = _resolve_sources(args.sources)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    source_scoped = args.sources is not None
+
+    if source_scoped and args.stage in ("blend", "upload"):
+        parser.error("--sources is for source capacity runs; do not use it with blend/upload")
+
     n_workers = args.workers or default_workers()
     log.info(
         f"SLM Curation — "
         f"target={args.target}, stage={args.stage}, "
-        f"mini={args.mini}, workers={n_workers} (cpu_count={os.cpu_count()}), data_dir={DATA_DIR}"
+        f"mini={args.mini}, workers={n_workers} (cpu_count={os.cpu_count()}), "
+        f"data_dir={DATA_DIR}, "
+        f"sources={','.join(selected_sources) if source_scoped else 'all'}"
     )
 
     if args.stage in ("download", "all"):
-        stage_download(args.target, mini=args.mini, workers=n_workers)
+        stage_download(args.target, mini=args.mini, workers=n_workers, sources=selected_sources)
     if args.stage in ("filter", "all"):
-        stage_filter(workers=n_workers)
+        stage_filter(workers=n_workers, sources=selected_sources)
     if args.stage in ("dedup", "all"):
-        stage_dedup(workers=n_workers)
-    if args.stage in ("blend", "all"):
-        stage_blend(args.target, seed=args.seed, workers=n_workers)
-    if args.stage in ("upload", "all"):
-        stage_upload(args.target)
+        stage_dedup(workers=n_workers, sources=selected_sources)
+
+    if source_scoped:
+        if args.stage in ("all", "stats"):
+            stage_source_stats(selected_sources)
+        if args.stage == "all":
+            log.info(
+                "Source-scoped --stage all complete after download/filter/dedup/stats; "
+                "blend/upload intentionally skipped."
+            )
+    else:
+        if args.stage in ("blend", "all"):
+            stage_blend(args.target, seed=args.seed, workers=n_workers)
+        if args.stage in ("upload", "all"):
+            stage_upload(args.target)
 
     log.info("Pipeline complete.")
 
