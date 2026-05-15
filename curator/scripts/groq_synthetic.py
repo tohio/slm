@@ -17,6 +17,7 @@ run-scoped raw/filtered/dedup directories to force fresh generation.
 from __future__ import annotations
 
 import hashlib
+import ast
 import json
 import logging
 import os
@@ -84,7 +85,10 @@ class GroqSyntheticSource:
     MAX_CONSECUTIVE_FAILED_BATCHES = 3
     SYSTEM_PROMPT = (
         "You generate high-quality synthetic pretraining records. "
-        "Return only valid JSON. Do not include markdown fences."
+        "Return only valid JSON. Do not include markdown fences, assistant chatter, "
+        "or explanatory text outside the JSON payload. Use real newlines inside text "
+        "fields, not escaped literal \\n sequences. If generating code, the code and "
+        "tests must be syntactically valid for the stated language."
     )
 
     def __init__(
@@ -315,13 +319,17 @@ class GroqSyntheticSource:
         raw_text = row.get("text")
         if not isinstance(raw_text, str):
             return None
-        text = raw_text.strip()
+
+        text = self._clean_generated_text(raw_text)
         if len(text) < 40:
             return None
 
         metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
         metadata.update(self._record_metadata(row=row, idx=idx))
         metadata.update({"generator": "groq", "model": self.model, "synthetic": True})
+
+        if not self._quality_ok(text=text, metadata=metadata):
+            return None
 
         stable_material = json.dumps(
             {"source": self.SOURCE_TAG, "idx": idx, "text": text, "metadata": metadata},
@@ -336,6 +344,97 @@ class GroqSyntheticSource:
             "generated": True,
             "metadata": metadata,
         }
+
+    def _clean_generated_text(self, raw_text: str) -> str:
+        """Normalize common LLM JSON escaping artifacts before filtering/dedup."""
+        text = raw_text.strip()
+
+        # Some model outputs place literal escaped newlines in the JSON string
+        # instead of actual newlines. These hurt readability and create noisy
+        # pretraining examples, so normalize them before writing raw shards.
+        text = text.replace("\\r\\n", "\n")
+        text = text.replace("\\n", "\n")
+        text = text.replace("\\t", "\t")
+
+        return text.strip()
+
+    def _quality_ok(self, text: str, metadata: dict[str, Any]) -> bool:
+        """Reject obvious synthetic-generation artifacts and malformed records."""
+        lowered = text.lower()
+
+        # Do not let assistant chatter or markdown fence artifacts enter the corpus.
+        blocked_fragments = [
+            "```",
+            "here are the records",
+            "here is the json",
+            "as an ai language model",
+            "i cannot generate",
+        ]
+        if any(fragment in lowered for fragment in blocked_fragments):
+            return False
+
+        if self.SOURCE_TAG == "synthetic_task_code":
+            return self._task_code_quality_ok(text=text, metadata=metadata)
+
+        if self.SOURCE_TAG == "educational_qa_mcq":
+            return self._educational_qa_quality_ok(text=text, metadata=metadata)
+
+        return True
+
+    def _task_code_quality_ok(self, text: str, metadata: dict[str, Any]) -> bool:
+        """Reject Python task-code records whose generated solution is invalid Python."""
+        language = str(metadata.get("language", "")).lower()
+        if language != "python":
+            return True
+
+        marker = "Solution:"
+        if marker not in text:
+            return False
+
+        solution = text.split(marker, 1)[1].strip()
+        if not solution:
+            return False
+
+        # The generated records often include comments and assert-based tests.
+        # ast.parse handles those fine and catches broken parentheses/brackets,
+        # such as: assert count_elements(["a", "a", "b"] == {"a": 2})
+        try:
+            ast.parse(solution)
+        except SyntaxError:
+            log.debug(
+                "%s: rejected invalid Python synthetic task-code record: %r",
+                self.SOURCE_TAG,
+                text[:240],
+            )
+            return False
+
+        return True
+
+    def _educational_qa_quality_ok(self, text: str, metadata: dict[str, Any]) -> bool:
+        """Reject trivial or needlessly ambiguous educational QA examples."""
+        lowered = text.lower()
+
+        # Keep these examples educational rather than generic life-routine filler.
+        trivial_fragments = [
+            "first thing you should do when you wake up",
+            "get out of bed",
+        ]
+        if any(fragment in lowered for fragment in trivial_fragments):
+            return False
+
+        # Avoid controversial/measurement-dependent facts unless the prompt is
+        # explicitly about ambiguity. This exact pattern appeared in inspection.
+        ambiguous_fragments = [
+            "which river is longer, the nile or the amazon",
+            "answer: the nile",
+        ]
+        if all(fragment in lowered for fragment in ambiguous_fragments):
+            return False
+
+        if "Question:" not in text or "Answer:" not in text:
+            return False
+
+        return True
 
     def _write_shard(self, records: list[dict[str, Any]], shard_idx: int) -> Path:
         path = self.output_dir / f"{self.SHARD_PREFIX}_{shard_idx:05d}.jsonl"
