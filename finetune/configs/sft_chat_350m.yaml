@@ -2,12 +2,12 @@ name: slm-350m-chat
 wandb_project: slm
 
 model:
-  base_model_path: $RESULTS_DIR/slm-350m/final
+  base_model_path: $RESULTS_DIR/runs/350m/pretrain/final
   max_seq_length: 2048
 
 data:
-  train_path: $DATA_DIR/sft/chat/train.jsonl
-  val_path:   $DATA_DIR/sft/chat/val.jsonl
+  train_path: $DATA_DIR/runs/350m/sft_chat/train.jsonl
+  val_path:   $DATA_DIR/runs/350m/sft_chat/val.jsonl
   packing: false
 
 training:

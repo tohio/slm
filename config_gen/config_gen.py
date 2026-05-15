@@ -912,9 +912,9 @@ def render_sft_chat_yaml(cfg: GeneratedConfig) -> str:
     profile = SFT_CHAT_PROFILES[cfg.size]
     return _render_sft_yaml(
         cfg, profile,
-        base_model_path=f"$RESULTS_DIR/slm-{cfg.size}/final",
-        train_path="$DATA_DIR/sft/chat/train.jsonl",
-        val_path="$DATA_DIR/sft/chat/val.jsonl",
+        base_model_path=f"$RESULTS_DIR/runs/{cfg.size}/pretrain/final",
+        train_path=f"$DATA_DIR/runs/{cfg.size}/sft_chat/train.jsonl",
+        val_path=f"$DATA_DIR/runs/{cfg.size}/sft_chat/val.jsonl",
         out_name="chat",
     )
 
@@ -923,9 +923,9 @@ def render_sft_code_yaml(cfg: GeneratedConfig) -> str:
     profile = SFT_CODE_PROFILES[cfg.size]
     return _render_sft_yaml(
         cfg, profile,
-        base_model_path=f"$RESULTS_DIR/slm-{cfg.size}-chat/final",
-        train_path="$DATA_DIR/sft/code/train.jsonl",
-        val_path="$DATA_DIR/sft/code/val.jsonl",
+        base_model_path=f"$RESULTS_DIR/runs/{cfg.size}/sft_chat/final",
+        train_path=f"$DATA_DIR/runs/{cfg.size}/sft_code/train.jsonl",
+        val_path=f"$DATA_DIR/runs/{cfg.size}/sft_code/val.jsonl",
         out_name="chat-code",
     )
 
@@ -939,12 +939,12 @@ name: slm-{cfg.size}-dpo
 wandb_project: slm
 
 model:
-  base_model_path: $RESULTS_DIR/slm-{cfg.size}-chat-code/final
+  base_model_path: $RESULTS_DIR/runs/{cfg.size}/sft_code/final
   max_seq_length: {profile.max_seq_length}
 
 data:
-  train_path: $DATA_DIR/dpo/train.jsonl
-  val_path:   $DATA_DIR/dpo/val.jsonl
+  train_path: $DATA_DIR/runs/{cfg.size}/dpo/train.jsonl
+  val_path:   $DATA_DIR/runs/{cfg.size}/dpo/val.jsonl
 
 dpo:
   beta: {profile.dpo_beta}

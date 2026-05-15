@@ -88,7 +88,9 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 DATA_DIR    = Path(os.environ.get("DATA_DIR", "data"))
-RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", "results"))
+from config.paths import sft_chat_dir, sft_code_dir, BASE_RESULTS_DIR
+
+RESULTS_DIR = BASE_RESULTS_DIR
 
 
 def load_config(config_path: Path) -> dict:
@@ -311,6 +313,16 @@ def build_sft_args(cfg: dict, output_dir: Path, num_train_examples: int):
     return sft_args
 
 
+def _size_from_model_name(model_name: str) -> str:
+    name = model_name.removeprefix("slm-")
+    return name.split("-")[0]
+
+
+def _sft_output_dir(model_name: str) -> Path:
+    size = _size_from_model_name(model_name)
+    return sft_code_dir(size) if model_name.endswith("-chat-code") else sft_chat_dir(size)
+
+
 def main():
     parser = argparse.ArgumentParser(description="SLM Supervised Fine-Tuning")
     parser.add_argument("--config",     type=Path, required=True, help="Path to SFT config YAML")
@@ -320,7 +332,7 @@ def main():
 
     cfg             = load_config(args.config)
     model_name      = cfg["name"]
-    output_dir      = RESULTS_DIR / model_name
+    output_dir      = _sft_output_dir(model_name)
     base_model_path = args.base_model or Path(
         os.path.expandvars(cfg["model"]["base_model_path"])
     )

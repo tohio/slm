@@ -29,7 +29,9 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
+from config.paths import tokenizer_dir, BASE_DATA_DIR
+
+DATA_DIR = BASE_DATA_DIR
 
 from tokenizer.train_tokenizer import SPECIAL_TOKENS, BOS_ID, EOS_ID, PAD_ID, UNK_ID
 from config import CODE_SOURCES
@@ -306,10 +308,11 @@ def test_vocab_coverage(tokenizer) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description="Test SLM tokenizer")
+    parser.add_argument("--size", default=os.environ.get("SIZE", "125m"), help="Run size")
     parser.add_argument(
         "--tokenizer",
         type=Path,
-        default=DATA_DIR / "tokenizer",
+        default=None,
         help="Tokenizer directory",
     )
     parser.add_argument(
@@ -319,6 +322,7 @@ def main():
         help="Sample data for fertility test",
     )
     args = parser.parse_args()
+    args.tokenizer = args.tokenizer or tokenizer_dir(getattr(args, "size", os.environ.get("SIZE", "125m")))
 
     # Load both tokenizer forms
     tokenizer = load_tokenizer(args.tokenizer)

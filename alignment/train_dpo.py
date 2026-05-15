@@ -81,7 +81,9 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 DATA_DIR    = Path(os.environ.get("DATA_DIR", "data"))
-RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", "results"))
+from config.paths import dpo_dir, BASE_RESULTS_DIR
+
+RESULTS_DIR = BASE_RESULTS_DIR
 
 
 def load_config(config_path: Path) -> dict:
@@ -284,6 +286,11 @@ def build_dpo_args(cfg: dict, output_dir: Path, beta: float, num_train_examples:
     )
 
 
+def _size_from_model_name(model_name: str) -> str:
+    name = model_name.removeprefix("slm-")
+    return name.split("-")[0]
+
+
 def main():
     parser = argparse.ArgumentParser(description="SLM DPO Alignment")
     parser.add_argument("--config",     type=Path, required=True)
@@ -293,7 +300,7 @@ def main():
 
     cfg             = load_config(args.config)
     model_name      = cfg["name"]
-    output_dir      = RESULTS_DIR / model_name
+    output_dir      = dpo_dir(_size_from_model_name(model_name))
     base_model_path = args.base_model or Path(
         os.path.expandvars(cfg["model"]["base_model_path"])
     )

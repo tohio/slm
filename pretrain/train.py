@@ -29,7 +29,9 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 DATA_DIR    = Path(os.environ.get("DATA_DIR", "data"))
-RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", "results"))
+from config.paths import pretrain_dir, BASE_RESULTS_DIR
+
+RESULTS_DIR = BASE_RESULTS_DIR
 
 
 def _configure_cuda_for_performance() -> None:
@@ -300,6 +302,11 @@ def build_training_args(cfg: dict, output_dir: Path, resume: bool):
     )
 
 
+def _size_from_model_name(model_name: str) -> str:
+    name = model_name.removeprefix("slm-")
+    return name.split("-")[0]
+
+
 def main():
     parser = argparse.ArgumentParser(description="SLM Pretraining")
     parser.add_argument("--config", type=Path, required=True)
@@ -310,7 +317,7 @@ def main():
 
     cfg        = load_config(args.config)
     model_name = cfg["name"]
-    output_dir = args.results_dir / model_name
+    output_dir = args.results_dir / "runs" / _size_from_model_name(model_name) / "pretrain"
 
     log.info(f"=== SLM Pretraining ===")
     log.info(f"Config:     {args.config}")

@@ -94,6 +94,11 @@ from config import (
     SHUFFLE_RAM_BUDGET_GB,
     PRETRAIN_VAL_FRACTION,
     MINI_OVERRIDES,
+    SUPPLEMENTAL_CHAR_CAPS,
+)
+
+from config.paths import (
+    data_run_dir, raw_dir, filtered_dir, dedup_scratch_dir, curated_dir,
 )
 
 from curator.filters.dedup import Deduplicator
@@ -152,11 +157,23 @@ _CODE_SUB_SHARE: dict[str, float] = {
     name: entry["pct"] / 100.0 for name, entry in CODE_SUBMIX.items()
 }
 
-# Data directories
-DATA_DIR     = Path(os.environ.get("DATA_DIR", "data"))
-RAW_DIR      = DATA_DIR / "raw"
-FILTERED_DIR = DATA_DIR / "filtered"
-CURATED_DIR  = DATA_DIR / "curated"
+# Data directories are target-scoped. DATA_DIR remains the base root
+# (default: data); curation writes under data/runs/<target>/...
+DATA_DIR     = data_run_dir("125m")
+RAW_DIR      = raw_dir("125m")
+FILTERED_DIR = filtered_dir("125m")
+DEDUP_SCRATCH_DIR = dedup_scratch_dir("125m")
+CURATED_DIR  = curated_dir("125m")
+
+
+def configure_data_dirs(target: str) -> None:
+    """Configure target-scoped curation artifact directories."""
+    global DATA_DIR, RAW_DIR, FILTERED_DIR, DEDUP_SCRATCH_DIR, CURATED_DIR
+    DATA_DIR = data_run_dir(target)
+    RAW_DIR = raw_dir(target)
+    FILTERED_DIR = filtered_dir(target)
+    DEDUP_SCRATCH_DIR = dedup_scratch_dir(target)
+    CURATED_DIR = curated_dir(target)
 
 # Generated/template-like sources are intentionally dense and repetitive.
 # Fuzzy MinHash dedup collapses them aggressively, which destroys the intended
@@ -226,6 +243,8 @@ _AVG_CHARS_PER_DOC: dict[str, int] = {
     "wikipedia":     5_000,
     "pg19":          400_000,
     "pes2o":         1_400,
+    "nemotron_cc_math": 4_000,
+    "nemotron_specialized": 2_200,
     "open_web_math": 8_000,
     "stackexchange": 1_700,
     "synthetic_arithmetic": 1_500,
@@ -243,6 +262,8 @@ _DOWNLOAD_INFLATION: dict[str, float] = {
     "wikipedia":     3.0,
     "pg19":          1.5,
     "pes2o":         5.0,
+    "nemotron_cc_math": 2.0,
+    "nemotron_specialized": 1.6,
     "open_web_math": 5.0,
     "stackexchange": 5.0,
     "synthetic_arithmetic": 1.5,
@@ -254,6 +275,22 @@ _DOWNLOAD_INFLATION: dict[str, float] = {
     "jupyter":       5.0,
 }
 
+
+
+def _source_target_chars(name: str, target: str) -> int | None:
+    """Return target chars for a concrete source, applying supplemental caps."""
+    target_tokens = TARGET_CONFIGS[target]["total_tokens"]
+    if name in _TOP_LEVEL_SHARE:
+        share = _TOP_LEVEL_SHARE[name]
+    elif name in _CODE_SUB_SHARE:
+        share = _TOP_LEVEL_SHARE["code"] * _CODE_SUB_SHARE[name]
+    else:
+        return None
+    target_chars = int(target_tokens * share * CHARS_PER_TOKEN)
+    cap = SUPPLEMENTAL_CHAR_CAPS.get(name, {}).get(target)
+    if cap is not None:
+        return min(target_chars, cap)
+    return target_chars
 
 def _derive_max_docs(name: str, target: str) -> int | None:
     """
@@ -280,20 +317,11 @@ def _derive_max_docs(name: str, target: str) -> int | None:
     if name not in _AVG_CHARS_PER_DOC:
         return None
 
-    target_tokens = TARGET_CONFIGS[target]["total_tokens"]
-    avg_chars     = _AVG_CHARS_PER_DOC[name]
-    inflation     = _DOWNLOAD_INFLATION[name]
-
-    if name in _TOP_LEVEL_SHARE:
-        share = _TOP_LEVEL_SHARE[name]
-    elif name in _CODE_SUB_SHARE:
-        share = _TOP_LEVEL_SHARE["code"] * _CODE_SUB_SHARE[name]
-    else:
-        # Source has chars/doc data but no share — shouldn't happen for
-        # well-formed config. Conservative: don't cap.
+    avg_chars = _AVG_CHARS_PER_DOC[name]
+    inflation = _DOWNLOAD_INFLATION[name]
+    target_chars = _source_target_chars(name, target)
+    if target_chars is None:
         return None
-
-    target_chars = target_tokens * share * CHARS_PER_TOKEN
     return int((target_chars / avg_chars) * inflation)
 
 
@@ -311,11 +339,9 @@ def _derive_max_chars(name: str, target: str) -> int | None:
     if name != "pg19":
         return None
 
-    target_tokens = TARGET_CONFIGS[target]["total_tokens"]
-    if name not in _TOP_LEVEL_SHARE:
+    target_chars = _source_target_chars(name, target)
+    if target_chars is None:
         return None
-
-    target_chars = int(target_tokens * _TOP_LEVEL_SHARE[name] * CHARS_PER_TOKEN)
     return int(target_chars * 1.30)
 
 def compute_cc_segments(total_tokens: int) -> int:
@@ -331,24 +357,19 @@ def compute_cc_segments(total_tokens: int) -> int:
     return max(1, math.ceil(target_chars / CC_CHARS_PER_SEGMENT))
 
 
-def compute_source_char_targets(total_tokens: int) -> dict[str, int]:
-    """
-    Compute the character budget for each source from the target tokens.
-
-    Returns a dict mapping each concrete source name to its target character
-    count. Code sources get their share of the code budget according to
-    CODE_SUBMIX.
-    """
+def compute_source_char_targets(target: str) -> dict[str, int]:
+    """Compute character budgets for all concrete sources with caps applied."""
     targets: dict[str, int] = {}
-    for source, share in _TOP_LEVEL_SHARE.items():
+    for source in _TOP_LEVEL_SHARE:
         if source == "code":
             continue
-        targets[source] = int(total_tokens * share * CHARS_PER_TOKEN)
-
-    code_total_chars = int(total_tokens * _TOP_LEVEL_SHARE["code"] * CHARS_PER_TOKEN)
-    for code_source, sub_share in _CODE_SUB_SHARE.items():
-        targets[code_source] = int(code_total_chars * sub_share)
-
+        chars = _source_target_chars(source, target)
+        if chars is not None:
+            targets[source] = chars
+    for code_source in _CODE_SUB_SHARE:
+        chars = _source_target_chars(code_source, target)
+        if chars is not None:
+            targets[code_source] = chars
     return targets
 
 
@@ -622,7 +643,7 @@ def stage_dedup(workers: int | None = None) -> None:
     n_workers = workers or default_workers()
     log.info(f"=== Stage 3: Deduplication ({n_workers} workers) ===")
 
-    working_dir = DATA_DIR / "dedup_scratch"
+    working_dir = DEDUP_SCRATCH_DIR
     dedup = Deduplicator(working_dir=working_dir, workers=n_workers)
 
     for source in ALL_SOURCES:
@@ -1099,7 +1120,7 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
     }
 
     # Initial character targets from the locked mix.
-    target_chars = compute_source_char_targets(total_tokens)
+    target_chars = compute_source_char_targets(target)
 
     # Remove any stale staging files from prior runs (always re-stage).
     for source in ALL_SOURCES:
@@ -1152,34 +1173,49 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
                 f"(target {target_chars[source] / 1e9:.3f}B){flag}"
             )
 
-    # ── Pass 2: overflow ───────────────────────────────────────────────────────
-    total_deficit = sum(s["deficit"] for s in source_stats.values())
-    overflow_chars = 0
-    overflow_docs = 0
+    # ── Pass 2: source-aware overflow ─────────────────────────────────────────
+    overflow_chains = {
+        source: SYNTHETIC_OVERFLOW_CHAIN for source in LOCAL_SYNTHETIC_SOURCES
+    }
+    for source in CODE_SOURCES:
+        overflow_chains[source] = ("stack_v1", "fineweb_edu", OVERFLOW_SINK)
 
-    if total_deficit > 0 and OVERFLOW_SINK in staging_paths:
+    total_deficit = sum(s["deficit"] for s in source_stats.values())
+    if total_deficit > 0:
         log.info(
-            f"Pass 2/3: {OVERFLOW_SINK} overflow — covering "
+            f"Pass 2/3: source-aware overflow — covering "
             f"{total_deficit / 1e9:.3f}B character deficit..."
         )
-        src_dir = source_dirs[OVERFLOW_SINK]
-        staging = staging_paths[OVERFLOW_SINK]
-        overflow_docs, overflow_chars = _append_overflow(
-            (str(src_dir), str(staging), total_deficit)
-        )
-        source_stats[OVERFLOW_SINK]["docs"] += overflow_docs
-        source_stats[OVERFLOW_SINK]["chars"] += overflow_chars
-        source_stats[OVERFLOW_SINK]["overflow_docs"] = overflow_docs
-        source_stats[OVERFLOW_SINK]["overflow_chars"] = overflow_chars
+
+    for source, stats in list(source_stats.items()):
+        remaining_deficit = stats.get("deficit", 0)
+        if remaining_deficit <= 0:
+            continue
+
+        chain = overflow_chains.get(source, DEFAULT_OVERFLOW_CHAIN)
         log.info(
-            f"  {OVERFLOW_SINK} overflow: +{overflow_docs:,} docs, "
-            f"+{overflow_chars / 1e9:.3f}B chars"
+            f"  {source}: routing {remaining_deficit / 1e9:.3f}B "
+            f"deficit via {' -> '.join(chain)}"
         )
-    elif total_deficit > 0:
-        log.warning(
-            f"Deficit of {total_deficit / 1e9:.3f}B chars but {OVERFLOW_SINK} "
-            f"unavailable — total token count will be below target"
-        )
+        for overflow_source in chain:
+            if remaining_deficit <= 0:
+                break
+            if overflow_source == source:
+                continue
+            docs, chars = _append_overflow_to_source(
+                overflow_source=overflow_source,
+                requested_chars=remaining_deficit,
+                source_dirs=source_dirs,
+                staging_paths=staging_paths,
+                source_stats=source_stats,
+            )
+            remaining_deficit = max(0, remaining_deficit - chars)
+
+        if remaining_deficit > 0:
+            log.warning(
+                f"  {source}: unresolved deficit after overflow: "
+                f"{remaining_deficit / 1e9:.3f}B chars"
+            )
 
     # ── Pass 3: shuffle + split ────────────────────────────────────────────────
     total_staging_bytes = sum(p.stat().st_size for p in staging_paths.values())
@@ -1307,11 +1343,13 @@ def main():
             f"Consider --target mini."
         )
 
+    configure_data_dirs(args.target)
+
     n_workers = args.workers or default_workers()
     log.info(
         f"SLM Curation — "
         f"target={args.target}, stage={args.stage}, "
-        f"mini={args.mini}, workers={n_workers} (cpu_count={os.cpu_count()})"
+        f"mini={args.mini}, workers={n_workers} (cpu_count={os.cpu_count()}), data_dir={DATA_DIR}"
     )
 
     if args.stage in ("download", "all"):

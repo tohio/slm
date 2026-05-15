@@ -1,14 +1,14 @@
 name: slm-350m-dpo
 wandb_project: slm
 model:
-  base_model_path: $RESULTS_DIR/slm-350m-chat-code/final
+  base_model_path: $RESULTS_DIR/runs/350m/sft_code/final
   max_seq_length: 2048
 dpo:
   beta: 0.1
   max_prompt_length: 1024            # trl 0.29: prompt truncation (removed in trl 1.0)
 data:
-  train_path: $DATA_DIR/dpo/train.jsonl
-  val_path:   $DATA_DIR/dpo/val.jsonl
+  train_path: $DATA_DIR/runs/350m/dpo/train.jsonl
+  val_path:   $DATA_DIR/runs/350m/dpo/val.jsonl
 training:
   epochs: 1                          # DPO needs only 1 epoch — more causes overoptimization
   warmup_ratio: 0.05

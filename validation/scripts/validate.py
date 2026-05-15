@@ -64,6 +64,8 @@ load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from config.paths import curated_dir, validated_dir, BASE_DATA_DIR
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -71,8 +73,7 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
-VALIDATED_DIR = DATA_DIR / "validated"
+DATA_DIR = BASE_DATA_DIR
 
 # Source tags whose content is primarily code. These bypass the prose-style
 # structural checks (terminal punctuation, repeated-line ratio) which would
@@ -321,28 +322,29 @@ def _log_split_report(split: str, stats: dict) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description="SLM data validation pipeline")
+    parser.add_argument("--size", default=os.environ.get("SIZE", "125m"), help="Run size: mini, 125m, 350m, or 1b")
     parser.add_argument(
         "--train",
         type=Path,
-        default=DATA_DIR / "curated" / "train.jsonl",
+        default=None,
         help="Input train JSONL file",
     )
     parser.add_argument(
         "--val",
         type=Path,
-        default=DATA_DIR / "curated" / "val.jsonl",
+        default=None,
         help="Input val JSONL file (processed if present, warning if missing)",
     )
     parser.add_argument(
         "--train-output",
         type=Path,
-        default=VALIDATED_DIR / "train.jsonl",
+        default=None,
         help="Output train JSONL file",
     )
     parser.add_argument(
         "--val-output",
         type=Path,
-        default=VALIDATED_DIR / "val.jsonl",
+        default=None,
         help="Output val JSONL file",
     )
     parser.add_argument(
@@ -374,6 +376,13 @@ def main():
         help="Use datatrove pipeline (requires datatrove installed)",
     )
     args = parser.parse_args()
+
+    run_curated_dir = curated_dir(args.size)
+    run_validated_dir = validated_dir(args.size)
+    args.train = args.train or (run_curated_dir / "train.jsonl")
+    args.val = args.val or (run_curated_dir / "val.jsonl")
+    args.train_output = args.train_output or (run_validated_dir / "train.jsonl")
+    args.val_output = args.val_output or (run_validated_dir / "val.jsonl")
 
     kenlm_path = None if args.no_perplexity else args.kenlm_model
 
@@ -473,8 +482,8 @@ def main():
         },
     }
 
-    stats_path = VALIDATED_DIR / "validation_stats.json"
-    VALIDATED_DIR.mkdir(parents=True, exist_ok=True)
+    stats_path = run_validated_dir / "validation_stats.json"
+    run_validated_dir.mkdir(parents=True, exist_ok=True)
     with open(stats_path, "w") as f:
         json.dump(combined, f, indent=2)
     log.info(f"Stats written to {stats_path}")

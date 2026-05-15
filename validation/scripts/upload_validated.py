@@ -35,6 +35,8 @@ load_dotenv()
 # Add repo root to path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from config.paths import validated_dir, BASE_DATA_DIR
+
 from curator.scripts.upload_s3 import upload_directory, get_bucket_and_prefix
 
 logging.basicConfig(
@@ -69,6 +71,9 @@ Examples:
         help="Model size target — used to construct the S3 path. Default: 125m",
     )
     args = parser.parse_args()
+
+    global VALIDATED_DIR
+    VALIDATED_DIR = validated_dir(args.target)
 
     # Verify the validated directory exists and has content
     if not VALIDATED_DIR.exists():

@@ -1,0 +1,79 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+BASE_DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
+BASE_RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", "results"))
+
+
+def data_run_dir(size: str) -> Path:
+    return BASE_DATA_DIR / "runs" / size
+
+
+def raw_dir(size: str) -> Path:
+    return data_run_dir(size) / "raw"
+
+
+def filtered_dir(size: str) -> Path:
+    return data_run_dir(size) / "filtered"
+
+
+def dedup_scratch_dir(size: str) -> Path:
+    return data_run_dir(size) / "dedup_scratch"
+
+
+def curated_dir(size: str) -> Path:
+    return data_run_dir(size) / "curated"
+
+
+def validated_dir(size: str) -> Path:
+    return data_run_dir(size) / "validated"
+
+
+def tokenizer_dir(size: str) -> Path:
+    return data_run_dir(size) / "tokenizer"
+
+
+def tokenized_dir(size: str) -> Path:
+    return data_run_dir(size) / "tokenized"
+
+
+def sft_chat_data_dir(size: str) -> Path:
+    return data_run_dir(size) / "sft_chat"
+
+
+def sft_code_data_dir(size: str) -> Path:
+    return data_run_dir(size) / "sft_code"
+
+
+def dpo_data_dir(size: str) -> Path:
+    return data_run_dir(size) / "dpo"
+
+
+def results_run_dir(size: str) -> Path:
+    return BASE_RESULTS_DIR / "runs" / size
+
+
+def pretrain_dir(size: str) -> Path:
+    return results_run_dir(size) / "pretrain"
+
+
+def sft_chat_dir(size: str) -> Path:
+    return results_run_dir(size) / "sft_chat"
+
+
+def sft_code_dir(size: str) -> Path:
+    return results_run_dir(size) / "sft_code"
+
+
+def dpo_dir(size: str) -> Path:
+    return results_run_dir(size) / "dpo"
+
+
+def eval_dir(size: str) -> Path:
+    return results_run_dir(size) / "eval"
+
+
+def export_dir(size: str) -> Path:
+    return results_run_dir(size) / "export"

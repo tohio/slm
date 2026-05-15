@@ -76,6 +76,8 @@ load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from config.paths import validated_dir, tokenizer_dir, BASE_DATA_DIR
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -83,8 +85,7 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
-TOKENIZER_DIR = DATA_DIR / "tokenizer"
+DATA_DIR = BASE_DATA_DIR
 
 # ── Special tokens ─────────────────────────────────────────────────────────────
 
@@ -366,16 +367,17 @@ def _save_as_hf_tokenizer(tokenizer, output_dir: Path) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description="Train SLM BPE tokenizer")
+    parser.add_argument("--size", default=os.environ.get("SIZE", "125m"), help="Run size")
     parser.add_argument(
         "--input",
         type=Path,
-        default=DATA_DIR / "validated" / "train.jsonl",
+        default=None,
         help="Input JSONL file (default: data/validated/train.jsonl)",
     )
     parser.add_argument(
         "--output",
         type=Path,
-        default=TOKENIZER_DIR,
+        default=None,
         help="Output directory (default: data/tokenizer)",
     )
     parser.add_argument(
@@ -391,6 +393,9 @@ def main():
         help="Minimum token frequency (default: 2)",
     )
     args = parser.parse_args()
+
+    args.input = args.input or (validated_dir(args.size) / "train.jsonl")
+    args.output = args.output or tokenizer_dir(args.size)
 
     if not args.input.exists():
         log.error(f"Input file not found: {args.input}")

@@ -2,12 +2,12 @@ name: slm-1b-chat-code
 wandb_project: slm
 
 model:
-  base_model_path: $RESULTS_DIR/slm-1b-chat/final
+  base_model_path: $RESULTS_DIR/runs/1b/sft_chat/final
   max_seq_length: 4096
 
 data:
-  train_path: $DATA_DIR/sft/code/train.jsonl
-  val_path:   $DATA_DIR/sft/code/val.jsonl
+  train_path: $DATA_DIR/runs/1b/sft_code/train.jsonl
+  val_path:   $DATA_DIR/runs/1b/sft_code/val.jsonl
   packing: false
 
 training:

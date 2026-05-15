@@ -70,6 +70,8 @@ load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from config.paths import validated_dir, tokenizer_dir, tokenized_dir, BASE_DATA_DIR
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -382,28 +384,29 @@ def verify_dataset(bin_path: Path, meta_path: Path) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description="Tokenize dataset for pretraining")
+    parser.add_argument("--size", default=os.environ.get("SIZE", "125m"), help="Run size")
     parser.add_argument(
         "--train",
         type=Path,
-        default=DATA_DIR / "validated" / "train.jsonl",
+        default=None,
         help="Input train JSONL file",
     )
     parser.add_argument(
         "--val",
         type=Path,
-        default=DATA_DIR / "validated" / "val.jsonl",
+        default=None,
         help="Input val JSONL file (skipped if missing)",
     )
     parser.add_argument(
         "--output",
         type=Path,
-        default=TOKENIZED_DIR,
+        default=None,
         help="Output directory",
     )
     parser.add_argument(
         "--tokenizer",
         type=Path,
-        default=DATA_DIR / "tokenizer" / "slm_tokenizer.json",
+        default=None,
         help="Path to slm_tokenizer.json (raw BPE tokenizer)",
     )
     parser.add_argument(

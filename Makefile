@@ -125,29 +125,29 @@ curate-upload:
 
 validate:
 	@echo "==> Stage 2: Validation (train + val splits)"
-	$(PYTHON) validation/scripts/validate.py
+	$(PYTHON) validation/scripts/validate.py --size $(SIZE)
 
 validate-upload:
 	@echo "==> Stage 2: Upload validated data to S3 (target=$(SIZE))"
 	$(PYTHON) validation/scripts/upload_validated.py --target $(SIZE)
 
 validate-datatrove:
-	$(PYTHON) validation/scripts/validate.py --use-datatrove
+	$(PYTHON) validation/scripts/validate.py --size $(SIZE) --use-datatrove
 
 # ── Stage 3: Tokenizer ────────────────────────────────────────────────────────
 
 tokenizer:
 	@echo "==> Stage 3: Tokenizer training"
-	$(PYTHON) tokenizer/train_tokenizer.py
+	$(PYTHON) tokenizer/train_tokenizer.py --size $(SIZE)
 
 tokenizer-test:
-	$(PYTHON) tokenizer/test_tokenizer.py
+	$(PYTHON) tokenizer/test_tokenizer.py --size $(SIZE)
 
 # ── Stage 4: Pretrain ─────────────────────────────────────────────────────────
 
 tokenize:
 	@echo "==> Stage 4a: Tokenize dataset (train + val splits)"
-	$(PYTHON) pretrain/data/tokenize_data.py --chunk-size 256 --verify
+	$(PYTHON) pretrain/data/tokenize_data.py --size $(SIZE) --chunk-size 256 --verify
 
 tokenize-upload:
 	@echo "==> Stage 4a: Upload tokenized binaries to S3 (target=$(SIZE))"
@@ -159,14 +159,14 @@ tokenize-download:
 
 tokenizer-upload:
 	@echo "==> Uploading tokenizer to S3..."
-	$(PYTHON) curator/scripts/upload_s3.py upload --src $(DATA_DIR)/tokenizer --dst tokenizer --overwrite
+	$(PYTHON) curator/scripts/upload_s3.py upload --src $(DATA_DIR)/runs/$(SIZE)/tokenizer --dst tokenizer --overwrite
 	@echo "  Tokenizer uploaded"
 
 tokenizer-download:
 	@echo "==> Downloading tokenizer from S3..."
-	mkdir -p $(DATA_DIR)/tokenizer
-	$(PYTHON) curator/scripts/upload_s3.py download --src tokenizer --dst $(DATA_DIR)/tokenizer
-	@echo "  Tokenizer downloaded to $(DATA_DIR)/tokenizer/"
+	mkdir -p $(DATA_DIR)/runs/$(SIZE)/tokenizer
+	$(PYTHON) curator/scripts/upload_s3.py download --src tokenizer --dst $(DATA_DIR)/runs/$(SIZE)/tokenizer
+	@echo "  Tokenizer downloaded to $(DATA_DIR)/runs/$(SIZE)/tokenizer/"
 
 # ── Config generation ─────────────────────────────────────────────────────────
 # Auto-generates training configs tuned for the current GPU and GPU count.
@@ -258,7 +258,7 @@ smoke-gen:
 		"The history of artificial intelligence"; do \
 		echo "--- prompt: $$prompt ---"; \
 		echo "$$prompt" | $(PYTHON) inference/generate.py \
-			--model results/slm-$(SIZE)/final \
+			--model results/runs/$(SIZE)/pretrain/final \
 			--max-new-tokens 30 \
 			--greedy; \
 		echo ""; \
@@ -308,7 +308,7 @@ sft-code-mini:
 
 prepare-dpo:
 	@echo "==> Stage 6a: Prepare DPO data"
-	$(PYTHON) alignment/data/prepare_dpo.py
+	$(PYTHON) alignment/data/prepare_dpo.py --size $(SIZE)
 
 dpo:
 	@echo "==> Stage 6b: DPO alignment ($(SIZE), $(GPUS) GPU(s), config=$(DPO_CONFIG))"
@@ -332,15 +332,15 @@ eval: eval-chat
 
 eval-base:
 	@echo "==> Stage 7: Evaluation (base, $(SIZE))"
-	$(PYTHON) eval/eval.py --model results/slm-$(SIZE)/final
+	$(PYTHON) eval/eval.py --model results/runs/$(SIZE)/pretrain/final
 
 eval-instruct:
 	@echo "==> Stage 7: Evaluation (instruct, $(SIZE))"
-	$(PYTHON) eval/eval.py --model results/slm-$(SIZE)-chat-code/final
+	$(PYTHON) eval/eval.py --model results/runs/$(SIZE)/sft_code/final
 
 eval-chat:
 	@echo "==> Stage 7: Evaluation (chat, $(SIZE))"
-	$(PYTHON) eval/eval.py --model results/slm-$(SIZE)-dpo/final
+	$(PYTHON) eval/eval.py --model results/runs/$(SIZE)/dpo/final
 
 # Behavior sanity eval targets.
 # These are deterministic generation checks for factuality, task format,
@@ -351,24 +351,24 @@ eval-sanity: eval-sanity-chat
 eval-sanity-base:
 	@echo "==> Stage 7: Sanity evaluation (base, $(SIZE))"
 	$(PYTHON) eval/sanity_eval.py \
-		--model results/slm-$(SIZE)/final \
+		--model results/runs/$(SIZE)/pretrain/final \
 		--json-out results/eval/sanity/slm-$(SIZE).json
 
 eval-sanity-instruct:
 	@echo "==> Stage 7: Sanity evaluation (instruct, $(SIZE))"
 	$(PYTHON) eval/sanity_eval.py \
-		--model results/slm-$(SIZE)-chat-code/final \
+		--model results/runs/$(SIZE)/sft_code/final \
 		--json-out results/eval/sanity/slm-$(SIZE)-chat-code.json
 
 eval-sanity-chat:
 	@echo "==> Stage 7: Sanity evaluation (chat, $(SIZE))"
 	$(PYTHON) eval/sanity_eval.py \
-		--model results/slm-$(SIZE)-dpo/final \
+		--model results/runs/$(SIZE)/dpo/final \
 		--json-out results/eval/sanity/slm-$(SIZE)-dpo.json
 
 eval-mini:
 	@echo "==> Stage 7: Mini evaluation (pipeline validation)"
-	$(PYTHON) eval/eval.py --model results/slm-mini-dpo/final --tasks hellaswag --limit 50 --batch-size 4
+	$(PYTHON) eval/eval.py --model results/runs/mini/dpo/final --tasks hellaswag --limit 50 --batch-size 4
 # ── Stage 8: Export ───────────────────────────────────────────────────────────
 
 export: export-base export-instruct export-chat
@@ -394,15 +394,15 @@ serve:
 
 serve-local:
 	@echo "==> Stage 10: Serve local checkpoint ($(SIZE))"
-	MODEL=results/slm-$(SIZE)-dpo/final ./serve/serve.sh
+	MODEL=results/runs/$(SIZE)/dpo/final ./serve/serve.sh
 
 # ── S3 utilities ──────────────────────────────────────────────────────────────
 
 s3-upload:
-	$(PYTHON) curator/scripts/upload_s3.py upload --src data/curated --dst curated
+	$(PYTHON) curator/scripts/upload_s3.py upload --src $(DATA_DIR)/runs/$(SIZE)/curated --dst $(SIZE)/$(DATE)/curated
 
 s3-download:
-	$(PYTHON) curator/scripts/upload_s3.py download --src curated --dst data/curated
+	$(PYTHON) curator/scripts/upload_s3.py download --src $(SIZE)/$(DATE)/curated --dst $(DATA_DIR)/runs/$(SIZE)/curated
 
 s3-list:
 	$(PYTHON) curator/scripts/upload_s3.py list
@@ -561,7 +561,7 @@ endif
 # ── Clean ─────────────────────────────────────────────────────────────────────
 
 clean-data:
-	rm -rf data/raw data/filtered data/curated data/validated data/tokenized data/sft data/dpo data/dedup_scratch
+	rm -rf $(DATA_DIR)/runs/$(SIZE)
 
 clean-results:
 	rm -rf results/

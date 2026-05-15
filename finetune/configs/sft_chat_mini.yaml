@@ -1,11 +1,11 @@
 name: slm-mini-chat
 wandb_project: slm-mini
 model:
-  base_model_path: $RESULTS_DIR/slm-mini/final
+  base_model_path: $RESULTS_DIR/runs/mini/pretrain/final
   max_seq_length: 1024
 data:
-  train_path: $DATA_DIR/sft/chat/train.jsonl
-  val_path:   $DATA_DIR/sft/chat/val.jsonl
+  train_path: $DATA_DIR/runs/mini/sft_chat/train.jsonl
+  val_path:   $DATA_DIR/runs/mini/sft_chat/val.jsonl
   packing: false
   max_samples: 500                   # truncate for mini validation
 training:

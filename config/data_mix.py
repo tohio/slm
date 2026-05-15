@@ -101,7 +101,7 @@ DATA_MIX: dict[str, dict] = {
         "hub":     "HuggingFaceFW/fineweb",
     },
     "fineweb_edu": {
-        "pct":     26.0,
+        "pct":     27.98,
         "display": "FineWeb-Edu",
         "hub":     "HuggingFaceFW/fineweb-edu",
     },
@@ -121,7 +121,7 @@ DATA_MIX: dict[str, dict] = {
         "hub":     "allenai/peS2o",
     },
     "nemotron_cc_math": {
-        "pct":     5.0,
+        "pct":     7.0,
         "display": "Nemotron CC Math",
         "hub":     "nvidia/Nemotron-CC-Math-v1",
         "config":  "4plus",
@@ -132,27 +132,27 @@ DATA_MIX: dict[str, dict] = {
         "hub":     "HuggingFaceH4/stack-exchange-preferences",
     },
     "synthetic_arithmetic": {
-        "pct":     3.0,
+        "pct":     0.3,
         "display": "Synthetic arithmetic",
         "url":     "generated locally by curator/sources/synthetic_arithmetic.py",
     },
     "synthetic_task_code": {
-        "pct":     5.0,
+        "pct":     0.1,
         "display": "Synthetic task code",
         "url":     "generated locally by curator/sources/synthetic_task_code.py",
     },
     "educational_qa_mcq": {
-        "pct":     3.0,
+        "pct":     0.1,
         "display": "Educational QA/MCQ",
         "url":     "generated locally by curator/sources/educational_qa_mcq.py",
     },
     "factual_restraint": {
-        "pct":     0.5,
+        "pct":     0.02,
         "display": "Factual restraint",
         "url":     "generated locally by curator/sources/factual_restraint.py",
     },
     "nemotron_specialized": {
-        "pct":     5.0,
+        "pct":     12.0,
         "display": "Nemotron Specialized",
         "hub":     "nvidia/Nemotron-Pretraining-Specialized-v1.1",
     },
@@ -174,34 +174,54 @@ DATA_MIX: dict[str, dict] = {
 
 CODE_SUBMIX: dict[str, dict] = {
     "stack_v1": {
-        "pct": 40.0,
+        "pct": 80.0,
         "display": 'The Stack v1 dedup',
         "hub": 'bigcode/the-stack-dedup',
     },
     "codesearchnet": {
-        "pct": 30.0,
+        "pct": 15.0,
         "display": 'CodeSearchNet',
         "hub": 'code_search_net',
     },
     "stack_smol": {
-        "pct": 15.0,
+        "pct": 3.0,
         "display": 'The Stack (smol)',
         "hub": 'bigcode/the-stack-smol',
     },
     "jupyter": {
-        "pct": 10.0,
+        "pct": 1.5,
         "display": 'Jupyter notebooks',
         "hub": 'bigcode/jupyter-parsed',
     },
     "conala": {
-        "pct": 5.0,
+        "pct": 0.5,
         "display": 'CoNaLa',
         "hub": 'neulab/conala',
     },
 }
 
 
-# ── 3. Overflow sink ───────────────────────────────────────────────────────────
+# ── 3. Supplemental/fixed-supply caps ─────────────────────────────────────────
+#
+# Some sources are high-signal supplements rather than scalable corpus pillars.
+# Their nominal percentage targets are capped by target size so they remain
+# useful without silently forcing large overflow when supply or uniqueness runs
+# out. The curator applies min(percentage_target_chars, cap).
+
+SUPPLEMENTAL_CHAR_CAPS: dict[str, dict[str, int]] = {
+    "synthetic_arithmetic": {"125m": 150_000_000, "350m": 300_000_000, "1b": 500_000_000},
+    "synthetic_task_code": {"125m": 50_000_000, "350m": 100_000_000, "1b": 200_000_000},
+    "educational_qa_mcq": {"125m": 50_000_000, "350m": 100_000_000, "1b": 200_000_000},
+    "factual_restraint": {"125m": 10_000_000, "350m": 20_000_000, "1b": 50_000_000},
+
+    "codesearchnet": {"125m": 1_100_000_000, "350m": 1_250_000_000, "1b": 1_500_000_000},
+    "stack_smol": {"125m": 450_000_000, "350m": 550_000_000, "1b": 700_000_000},
+    "jupyter": {"125m": 100_000_000, "350m": 150_000_000, "1b": 250_000_000},
+    "conala": {"125m": 50_000_000, "350m": 60_000_000, "1b": 75_000_000},
+}
+
+
+# ── 4. Overflow sink ───────────────────────────────────────────────────────────
 #
 # When supply-constrained sources (Wikipedia, pg19, etc.) fall short of their
 # character budget, the deficit is routed to this source. FineWeb has ~15T
@@ -210,7 +230,7 @@ CODE_SUBMIX: dict[str, dict] = {
 OVERFLOW_SINK: str = "fineweb"
 
 
-# ── 4. Source name lists ───────────────────────────────────────────────────────
+# ── 5. Source name lists ───────────────────────────────────────────────────────
 #
 # Derived lists for iteration. The "code" key in DATA_MIX is a logical bucket;
 # the concrete source names used by the curator come from CODE_SUBMIX.
@@ -220,7 +240,7 @@ CODE_SOURCES: list[str] = list(CODE_SUBMIX.keys())
 ALL_SOURCES: list[str] = NON_CODE_SOURCES + CODE_SOURCES
 
 
-# ── 5. Target configurations ───────────────────────────────────────────────────
+# ── 6. Target configurations ───────────────────────────────────────────────────
 #
 # Per-size training targets. Carries everything a size-specific run needs:
 #   corpus_tokens    — curation-side corpus target for this model size
@@ -291,7 +311,7 @@ TARGET_CONFIGS: dict[str, dict] = {
 }
 
 
-# ── 6. Curator constants ───────────────────────────────────────────────────────
+# ── 7. Curator constants ───────────────────────────────────────────────────────
 #
 # These were previously scattered across curator/constants.py and curator/
 # scripts/curate.py. Centralising means a retokenizer run (which could shift
@@ -355,7 +375,7 @@ MINI_OVERRIDES: dict[str, int] = {
 }
 
 
-# ── 7. Helpers ─────────────────────────────────────────────────────────────────
+# ── 8. Helpers ─────────────────────────────────────────────────────────────────
 
 def dataset_link(entry: dict) -> str:
     """

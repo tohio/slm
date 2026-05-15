@@ -59,6 +59,8 @@ load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from config.paths import dpo_data_dir, BASE_DATA_DIR
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -66,8 +68,8 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
-DPO_DIR  = DATA_DIR / "dpo"
+DATA_DIR = BASE_DATA_DIR
+DPO_DIR = dpo_data_dir(os.environ.get("SIZE", "125m"))
 
 DEFAULT_SYSTEM = "You are a helpful, harmless, and honest assistant."
 
@@ -672,6 +674,7 @@ def blend_and_split(
 
 def main():
     parser = argparse.ArgumentParser(description="Prepare DPO datasets")
+    parser.add_argument("--size", default=os.environ.get("SIZE", "125m"), help="Run size")
     parser.add_argument(
         "--source",
         choices=["all", "ultrafeedback", "handcrafted"],
@@ -694,6 +697,9 @@ def main():
         help="Re-run even if output files already exist",
     )
     args = parser.parse_args()
+
+    global DPO_DIR
+    DPO_DIR = dpo_data_dir(args.size)
 
     train_path = DPO_DIR / "train.jsonl"
     val_path   = DPO_DIR / "val.jsonl"

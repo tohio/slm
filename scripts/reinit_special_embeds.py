@@ -201,7 +201,7 @@ def log_ignored_additional_specials(tok: PreTrainedTokenizerFast) -> None:
 def main():
     args = parse_args()
 
-    src = args.src or Path(f"results/slm-{args.size}/final")
+    src = args.src or Path(f"results/runs/{args.size}/pretrain/final")
     dst = args.dst or src
 
     if not src.exists():

@@ -46,6 +46,8 @@ load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from config.paths import tokenized_dir, BASE_DATA_DIR
+
 from curator.scripts.upload_s3 import (
     upload_directory,
     download_prefix,
@@ -206,6 +208,9 @@ Examples:
     )
 
     args = parser.parse_args()
+
+    global TOKENIZED_DIR
+    TOKENIZED_DIR = tokenized_dir(args.target)
 
     if args.command == "upload":
         cmd_upload(args.target)

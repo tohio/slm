@@ -98,22 +98,22 @@ BUNDLED_SOURCE_FILES = [
 
 VARIANTS: dict[str, dict] = {
     "base": {
-        "checkpoint":    lambda size: RESULTS_DIR / f"slm-{size}" / "final",
-        "eval_dir":      lambda size: RESULTS_DIR / "eval" / f"slm-{size}",
+        "checkpoint":    lambda size: RESULTS_DIR / "runs" / size / "pretrain" / "final",
+        "eval_dir":      lambda size: RESULTS_DIR / "runs" / size / "eval" / "pretrain",
         "hub_suffix":    "",
         "description":   "base pretrained model",
         "pipeline_tag":  "text-generation",
     },
     "instruct": {
-        "checkpoint":    lambda size: RESULTS_DIR / f"slm-{size}-chat-code" / "final",
-        "eval_dir":      lambda size: RESULTS_DIR / "eval" / f"slm-{size}-chat-code",
+        "checkpoint":    lambda size: RESULTS_DIR / "runs" / size / "sft_code" / "final",
+        "eval_dir":      lambda size: RESULTS_DIR / "runs" / size / "eval" / "sft_code",
         "hub_suffix":    "-instruct",
         "description":   "instruction-tuned via chat SFT + code SFT",
         "pipeline_tag":  "text-generation",
     },
     "chat": {
-        "checkpoint":    lambda size: RESULTS_DIR / f"slm-{size}-dpo" / "final",
-        "eval_dir":      lambda size: RESULTS_DIR / "eval" / f"slm-{size}-dpo",
+        "checkpoint":    lambda size: RESULTS_DIR / "runs" / size / "dpo" / "final",
+        "eval_dir":      lambda size: RESULTS_DIR / "runs" / size / "eval" / "dpo",
         "hub_suffix":    "-chat",
         "description":   "chat-aligned via SFT + DPO preference learning",
         "pipeline_tag":  "text-generation",

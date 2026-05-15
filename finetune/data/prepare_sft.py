@@ -69,6 +69,8 @@ load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from config.paths import sft_chat_data_dir, sft_code_data_dir, BASE_DATA_DIR
+
 from finetune.data.response_control import build_response_control_records
 
 logging.basicConfig(
@@ -78,8 +80,8 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
-SFT_DIR  = DATA_DIR / "sft"
+DATA_DIR = BASE_DATA_DIR
+SFT_DIR = None
 
 # Default system prompts
 DEFAULT_SYSTEM = "You are a helpful, harmless, and honest assistant."
@@ -974,7 +976,7 @@ def prepare_chat(size: str, val_fraction: float) -> None:
 
     policy = smoltalk_policy(size)
 
-    out_dir    = SFT_DIR / "chat"
+    out_dir    = sft_chat_data_dir(size)
     train_path = out_dir / "train.jsonl"
     val_path   = out_dir / "val.jsonl"
 
@@ -1059,7 +1061,7 @@ def prepare_code(val_fraction: float) -> None:
     """
     from datasets import load_dataset
 
-    out_dir    = SFT_DIR / "code"
+    out_dir    = sft_code_data_dir(os.environ.get("SIZE", "125m"))
     train_path = out_dir / "train.jsonl"
     val_path   = out_dir / "val.jsonl"
 
@@ -1222,6 +1224,10 @@ def main():
         ),
     )
     args = parser.parse_args()
+    os.environ["SIZE"] = args.size
+
+    global SFT_DIR
+    SFT_DIR = DATA_DIR / "runs" / args.size
 
     if args.stage in ("chat", "both"):
         policy = smoltalk_policy(args.size)
