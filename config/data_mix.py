@@ -319,7 +319,7 @@ TARGET_CONFIGS: dict[str, dict] = {
 
 # Average characters per BPE token from the trained tokenizer. Measured at
 # 4.284 chars/token on the 32k-vocab tokenizer trained on the 125m
-# pretraining corpus (10k docs sampled from data/validated/train.jsonl,
+# pretraining corpus (10k docs sampled from data/runs/<size>/validated/train.jsonl,
 # excluding code sources). Rounded to 4.3 for budget math.
 #
 # Previous value of 5 was a planning estimate that overshot retained tokens.

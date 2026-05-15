@@ -8,7 +8,7 @@ S3 path structure:
     e.g. slm/data/125m/2026-04-02/validated/train.jsonl
 
 Mirrors the curated upload in curator/scripts/curate.py but points at
-data/validated/ and uses the 'validated' path segment so curated and
+data/runs/<target>/validated/ and uses the 'validated' path segment so curated and
 validated artifacts are stored independently and never overwrite each other.
 
 Each run gets its own dated folder per target. Re-uploading on the same
@@ -46,9 +46,9 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# Data directory — override with DATA_DIR env var
-DATA_DIR      = Path(os.environ.get("DATA_DIR", "data"))
-VALIDATED_DIR = DATA_DIR / "validated"
+# Data directory — override with DATA_DIR env var. Runtime path is target-scoped.
+DATA_DIR = BASE_DATA_DIR
+VALIDATED_DIR = validated_dir("125m")
 
 # Valid targets — must match TARGET_CONFIGS in curate.py
 TARGETS = ["mini", "125m", "350m", "1b"]

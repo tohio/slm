@@ -15,13 +15,13 @@ Three variants are exported per model size:
 
     Variant     Checkpoint                                    Hub repo
     --------    ----------                                    --------
-    base        results/slm-{size}/final                      <user>/slm-{size}
-    instruct    results/slm-{size}-chat-code/final            <user>/slm-{size}-instruct
-    chat        results/slm-{size}-dpo/final                  <user>/slm-{size}-chat
+    base        results/runs/{size}/pretrain/final                      <user>/slm-{size}
+    instruct    results/runs/{size}/sft_code/final            <user>/slm-{size}-instruct
+    chat        results/runs/{size}/dpo/final                  <user>/slm-{size}-chat
 
 Data mix and token targets are imported from config/data_mix.py — the
 single source of truth for design intent. The model card additionally
-loads data/curated/blend_stats.json (if present and matching --size) to
+loads data/runs/{size}/curated/blend_stats.json (if present and matching --size) to
 render the realized per-source breakdown alongside the design targets,
 so the published card reflects what actually shipped — not just what
 was planned. Falls back to design-only with a caveat note if blend_stats
@@ -73,9 +73,9 @@ RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", "results"))
 DATA_DIR    = Path(os.environ.get("DATA_DIR", "data"))
 
 # blend_stats.json is written by curator/scripts/curate.py at the end of the
-# blend stage. Reading from data/curated/ matches the curator's output
+# blend stage. Reading from data/runs/<size>/curated/ matches the curator's output
 # location regardless of how DATA_DIR is set.
-BLEND_STATS_PATH = DATA_DIR / "curated" / "blend_stats.json"
+# Blend stats path is target-scoped; see _load_blend_stats(size).
 
 REPO_ROOT   = Path(__file__).resolve().parents[1]
 MODEL_PKG_DIR = REPO_ROOT / "model"
@@ -186,7 +186,7 @@ def _format_eval_table(scores: dict[str, float]) -> str:
 
 def _load_blend_stats(size: str) -> dict | None:
     """
-    Load data/curated/blend_stats.json if present and matching this size.
+    Load data/runs/{size}/curated/blend_stats.json if present and matching this size.
 
     Returns the parsed dict, or None if:
       - file doesn't exist (curator hasn't run, or blend output not on this host)
@@ -194,18 +194,19 @@ def _load_blend_stats(size: str) -> dict | None:
       - file's `target` field doesn't match the size we're exporting
         (avoids shipping wrong numbers when blend_stats is from a different scale)
     """
-    if not BLEND_STATS_PATH.exists():
+    blend_stats_path = curated_dir(size) / "blend_stats.json"
+    if not blend_stats_path.exists():
         log.info(
-            f"blend_stats.json not found at {BLEND_STATS_PATH} — "
+            f"blend_stats.json not found at {blend_stats_path} — "
             f"model card will use design targets only."
         )
         return None
 
     try:
-        with open(BLEND_STATS_PATH) as f:
+        with open(blend_stats_path) as f:
             stats = json.load(f)
     except (json.JSONDecodeError, OSError) as e:
-        log.warning(f"Failed to read {BLEND_STATS_PATH}: {e}")
+        log.warning(f"Failed to read {blend_stats_path}: {e}")
         return None
 
     blend_target = stats.get("target")
@@ -224,7 +225,7 @@ def _format_data_mix_table(size: str) -> str:
     """
     Render the pretraining data mix as a markdown table.
 
-    If data/curated/blend_stats.json exists and matches `size`, the table
+    If data/runs/{size}/curated/blend_stats.json exists and matches `size`, the table
     shows both target % and realized % per source, so the model card
     reflects what actually shipped in the published corpus. Otherwise it
     falls back to a design-target-only view with a caveat note that the
@@ -720,7 +721,7 @@ def export(
 
     tokenizer_path = checkpoint / "tokenizer"
     if not (tokenizer_path / "tokenizer_config.json").exists():
-        tokenizer_path = Path(os.environ.get("DATA_DIR", "data")) / "tokenizer"
+        tokenizer_path = tokenizer_dir(size)
     tokenizer = load_tokenizer(tokenizer_path)
     log.info(f"Tokenizer loaded from {tokenizer_path}")
 

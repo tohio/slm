@@ -10,7 +10,7 @@ CLI works against SLM checkpoints without trust_remote_code.
 Usage:
     python scripts/run_lm_eval.py \\
       --model hf \\
-      --model_args pretrained=results/slm-125m-chat-code/final,dtype=bfloat16 \\
+      --model_args pretrained=results/runs/125m/sft_code/final,dtype=bfloat16 \\
       --tasks humaneval \\
       --num_fewshot 0 \\
       --batch_size 1 \\

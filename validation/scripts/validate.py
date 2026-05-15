@@ -9,10 +9,10 @@ KenLM language model — the most impactful filter for removing low-quality
 web text that passes heuristic checks.
 
 Pipeline (run independently for each split):
-    1. Load curated JSONL from data/curated/{train,val}.jsonl
+    1. Load curated JSONL from data/runs/<size>/curated/{train,val}.jsonl
     2. Apply datatrove quality filters (C4, Gopher repetition)
     3. Apply perplexity filter (KenLM 5-gram model)
-    4. Write validated JSONL to data/validated/{train,val}.jsonl
+    4. Write validated JSONL to data/runs/<size>/validated/{train,val}.jsonl
     5. Write per-split rejection stats
 
 Why validate both splits? The curator produces train.jsonl and val.jsonl
@@ -44,8 +44,8 @@ KenLM model:
 
 Usage:
     python validation/scripts/validate.py
-    python validation/scripts/validate.py --train data/curated/train.jsonl \\
-                                          --val   data/curated/val.jsonl
+    python validation/scripts/validate.py --size 125m
+python validation/scripts/validate.py --train data/runs/125m/curated/train.jsonl \\
     python validation/scripts/validate.py --perplexity-threshold 500
     python validation/scripts/validate.py --no-perplexity   # skip perplexity filter
 """

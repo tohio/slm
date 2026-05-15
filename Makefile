@@ -641,7 +641,7 @@ help:
 	@echo "  tokenize-upload    Stage 4a — upload tokenized binaries to S3"
 	@echo "  pretrain           Stage 4b — pretrain from scratch (auto-runs smoke-gen)"
 	@echo "  pretrain-mini      Stage 4b — mini pretrain run (auto-runs smoke-gen)"
-	@echo "  smoke-gen          Stage 4b — generate from results/slm-\$$(SIZE)/final to spot-check"
+	@echo "  smoke-gen          Stage 4b — generate from results/runs/$$(SIZE)/pretrain/final to spot-check"
 	@echo "  reinit-embeds      Stage 4c — re-init chat special-token embeds before SFT"
 	@echo "  prepare-sft        Stage 5a — download SFT datasets"
 	@echo "  sft                Stage 5b — chat supervised fine-tuning"

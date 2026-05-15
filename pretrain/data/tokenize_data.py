@@ -20,10 +20,10 @@ Format:
     uint16 supports vocab sizes up to 65,535 — sufficient for 32k vocab.
 
 Output:
-    data/tokenized/train.bin    — token IDs as uint16
-    data/tokenized/train.json   — metadata (n_tokens, n_docs, dtype, vocab_size)
-    data/tokenized/val.bin      — same, for validation split
-    data/tokenized/val.json
+    data/runs/<size>/tokenized/train.bin    — token IDs as uint16
+    data/runs/<size>/tokenized/train.json   — metadata (n_tokens, n_docs, dtype, vocab_size)
+    data/runs/<size>/tokenized/val.bin      — same, for validation split
+    data/runs/<size>/tokenized/val.json
 
 Inputs:
     By default both validated/train.jsonl and validated/val.jsonl are tokenized.
@@ -48,8 +48,8 @@ Performance notes:
 
 Usage:
     python pretrain/data/tokenize_data.py
-    python pretrain/data/tokenize_data.py --train data/validated/train.jsonl \\
-                                          --val   data/validated/val.jsonl
+    python pretrain/data/tokenize_data.py --size 125m
+python pretrain/data/tokenize_data.py --train data/runs/125m/validated/train.jsonl \\
     python pretrain/data/tokenize_data.py --workers 24
 """
 
@@ -79,8 +79,8 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-DATA_DIR      = Path(os.environ.get("DATA_DIR", "data"))
-TOKENIZED_DIR = DATA_DIR / "tokenized"
+DATA_DIR = BASE_DATA_DIR
+TOKENIZED_DIR = tokenized_dir("125m")
 
 # uint16 supports up to this vocab size (exclusive). If our tokenizer ever
 # exceeds this we must switch the binary format to uint32 — silently
@@ -428,16 +428,22 @@ def main():
     )
     args = parser.parse_args()
 
+    run_validated_dir = validated_dir(args.size)
+    args.train = args.train or (run_validated_dir / "train.jsonl")
+    args.val = args.val or (run_validated_dir / "val.jsonl")
+    args.output = args.output or tokenized_dir(args.size)
+    args.tokenizer = args.tokenizer or (tokenizer_dir(args.size) / "slm_tokenizer.json")
+
     # Pre-flight checks — fail with clear messages before spawning the pool
     if not args.train.exists():
         log.error(f"Train input not found: {args.train}")
-        log.error("Run: make validate")
+        log.error("Run: make validate SIZE=<size>")
         sys.exit(1)
 
     if not args.tokenizer.exists():
         log.error(f"Tokenizer not found: {args.tokenizer}")
-        log.error("Run: make tokenizer && make tokenizer-upload")
-        log.error("Or:  make tokenizer-download")
+        log.error("Run: make tokenizer SIZE=<size> && make tokenizer-upload SIZE=<size>")
+        log.error("Or:  make tokenizer-download SIZE=<size>")
         sys.exit(1)
 
     # Single-pass tokenizer validation: vocab size + special token IDs.

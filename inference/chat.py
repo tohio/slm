@@ -12,9 +12,9 @@ Special-token IDs (PAD, EOS, ENDOFTURN) are read from the loaded tokenizer
 via inference.utils.resolve_special_token_ids() — never hardcoded here.
 
 Usage:
-    python inference/chat.py --model results/slm-125m-dpo/final
+    python inference/chat.py --model results/runs/125m/dpo/final
     python inference/chat.py --model tohio/slm-125m
-    python inference/chat.py --model results/slm-125m-dpo/final --system "You are a coding assistant."
+    python inference/chat.py --model results/runs/125m/dpo/final --system "You are a coding assistant."
 """
 
 import argparse

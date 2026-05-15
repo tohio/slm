@@ -17,7 +17,7 @@ day, this script WARNS that existing objects will be overwritten and
 then proceeds — same-day re-uploads are frequent during pipeline
 development. Runs on different days are preserved independently.
 
-Note: The tokenizer itself (data/tokenizer/) does not need S3 — it is
+Note: The tokenizer itself (data/runs/<size>/tokenizer/) does not need S3 — it is
 pushed to HuggingFace Hub as part of make export and can be pulled from
 there in seconds. Only the tokenized binaries need S3.
 
@@ -62,8 +62,8 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-DATA_DIR      = Path(os.environ.get("DATA_DIR", "data"))
-TOKENIZED_DIR = DATA_DIR / "tokenized"
+DATA_DIR = BASE_DATA_DIR
+TOKENIZED_DIR = tokenized_dir("125m")
 
 TARGETS = ["mini", "125m", "350m", "1b"]
 

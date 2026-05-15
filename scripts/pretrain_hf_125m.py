@@ -12,11 +12,11 @@ Hugging Face pretraining dataset. It intentionally writes the SAME normal
 pipeline paths used by the regular curated-data workflow so downstream commands
 need no modification:
 
-    data/curated/train.jsonl
-    data/curated/val.jsonl
-    data/curated/blend_stats.json
-    data/tokenized/...
-    results/slm-125m/final
+    data/runs/125m/curated/train.jsonl
+    data/runs/125m/curated/val.jsonl
+    data/runs/125m/curated/blend_stats.json
+    data/runs/125m/tokenized/...
+    results/runs/125m/pretrain/final
 
 After this script prepares/pretrains the 125M base model, the existing flow can
 continue unchanged:
@@ -31,9 +31,9 @@ Destructive behavior
 This is a data-substitution tool, not a separate training lane. It can overwrite
 normal 125M artifacts. Before writing new data, it checks for existing:
 
-    data/curated
-    data/tokenized
-    results/slm-125m
+    data/runs/125m/curated
+    data/runs/125m/tokenized
+    results/runs/125m/pretrain
 
 If any exist, the script refuses to proceed unless one of these is supplied:
 
@@ -132,7 +132,7 @@ def parse_args() -> argparse.Namespace:
         "--stage",
         choices=["prepare", "tokenizer", "tokenize", "pretrain", "all"],
         default="prepare",
-        help="Stage to run. 'prepare' writes data/curated. 'all' runs prepare + tokenizer + tokenize + pretrain.",
+        help="Stage to run. 'prepare' writes data/runs/125m/curated. 'all' runs prepare + tokenizer + tokenize + pretrain.",
     )
     parser.add_argument("--dataset", default=DEFAULT_DATASET)
     parser.add_argument("--split", default="train")

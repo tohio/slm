@@ -88,7 +88,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 DATA_DIR    = Path(os.environ.get("DATA_DIR", "data"))
-from config.paths import sft_chat_dir, sft_code_dir, BASE_RESULTS_DIR
+from config.paths import tokenizer_dir, sft_chat_dir, sft_code_dir, BASE_RESULTS_DIR
 
 RESULTS_DIR = BASE_RESULTS_DIR
 
@@ -360,9 +360,9 @@ def main():
     if not (tokenizer_path / "tokenizer_config.json").exists():
         log.warning(
             f"tokenizer_config.json not found at {tokenizer_path} — "
-            f"falling back to {DATA_DIR / 'tokenizer'}"
+            f"falling back to target-scoped tokenizer"
         )
-        tokenizer_path = DATA_DIR / "tokenizer"
+        tokenizer_path = tokenizer_dir(config.get("size", "125m"))
 
     log.info(f"Loading tokenizer from {tokenizer_path}...")
     tokenizer = load_tokenizer(tokenizer_path)

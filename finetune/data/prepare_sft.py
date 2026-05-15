@@ -22,12 +22,12 @@ Stage 1 — Chat SFT:
         350m: full HuggingFaceTB/smol-smoltalk
         1b:   full HuggingFaceTB/smoltalk
     Plus:    generated response-control examples from finetune/data/response_control.py
-    Output:  data/sft/chat/train.jsonl + val.jsonl
+    Output:  data/runs/<size>/sft_chat/train.jsonl + val.jsonl
 
 Stage 2 — Code SFT:
     Dataset: ise-uiuc/Magicoder-OSS-Instruct-75K
     Size:    ~75k examples before filtering
-    Output:  data/sft/code/train.jsonl + val.jsonl
+    Output:  data/runs/<size>/sft_code/train.jsonl + val.jsonl
 
     Code SFT keeps examples whose assistant responses contain actual code.
     Obvious prose-only / explanation-only examples are dropped so this stage

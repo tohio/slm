@@ -17,8 +17,8 @@ Usage:
 
     Safer explicit recovery behavior:
         python scripts/reinit_special_embeds.py \
-          --src results/slm-125m/checkpoint-152000 \
-          --dst results/slm-125m/final
+          --src results/runs/125m/pretrain/checkpoint-152000 \
+          --dst results/runs/125m/pretrain/final
 
     Via Makefile:
         make reinit-embeds SIZE=125m
@@ -54,14 +54,14 @@ def parse_args():
     p.add_argument(
         "--size",
         default="125m",
-        help="Model size, matching results/slm-<size>/final. Default: 125m",
+        help="Model size, matching results/runs/<size>/pretrain/final. Default: 125m",
     )
 
     p.add_argument(
         "--src",
         type=Path,
         default=None,
-        help="Source checkpoint directory. Default: results/slm-<size>/final",
+        help="Source checkpoint directory. Default: results/runs/<size>/pretrain/final",
     )
 
     p.add_argument(

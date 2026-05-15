@@ -36,10 +36,10 @@ lm-eval compatibility:
     We run each benchmark separately so each uses its canonical few-shot count.
 
 Usage:
-    python eval/eval.py --model results/slm-125m-dpo/final
-    python eval/eval.py --model results/slm-125m-dpo/final --tasks hellaswag,arc_easy
-    python eval/eval.py --model results/slm-125m/final --tasks all --num-fewshot 0
-    python eval/eval.py --model results/slm-125m-dpo/final --dtype float16
+    python eval/eval.py --model results/runs/125m/dpo/final
+    python eval/eval.py --model results/runs/125m/dpo/final --tasks hellaswag,arc_easy
+    python eval/eval.py --model results/runs/125m/pretrain/final --tasks all --num-fewshot 0
+    python eval/eval.py --model results/runs/125m/dpo/final --dtype float16
 """
 
 import argparse
@@ -124,7 +124,7 @@ CODE_EXECUTING_TASKS = {"humaneval"}
 
 def model_display_name(model_path: Path) -> str:
     """
-    Compact name for a checkpoint dir. `results/slm-125m-dpo/final` → `slm-125m-dpo`.
+    Compact name for a checkpoint dir. `results/runs/125m/dpo/final` → `slm-125m-dpo`.
     """
     return model_path.parent.name if model_path.name == "final" else model_path.name
 

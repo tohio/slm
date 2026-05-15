@@ -10,12 +10,12 @@ regardless of dataset size.
 Train / val split:
     The train / val split is produced by the curator (blend stage), not at
     runtime. The blend stage writes:
-        data/curated/train.jsonl   — ~99.5% of shuffled documents
-        data/curated/val.jsonl     — ~0.5% of shuffled documents (same distribution)
+        data/runs/<size>/curated/train.jsonl   — ~99.5% of shuffled documents
+        data/runs/<size>/curated/val.jsonl     — ~0.5% of shuffled documents (same distribution)
 
     Tokenization (pretrain/data/tokenize_data.py) then produces:
-        data/tokenized/train.bin   + train.json metadata
-        data/tokenized/val.bin     + val.json metadata
+        data/runs/<size>/tokenized/train.bin   + train.json metadata
+        data/runs/<size>/tokenized/val.bin     + val.json metadata
 
     This module just wraps each .bin independently. No runtime splitting,
     no risk of stale split files drifting out of sync with the underlying
@@ -81,7 +81,7 @@ class PretrainingDataset(Dataset):
     Example::
 
         dataset = PretrainingDataset(
-            bin_path=Path("data/tokenized/train.bin"),
+            bin_path=Path("data/runs/<size>/tokenized/train.bin"),
             seq_len=2048,
         )
         print(f"Examples: {len(dataset):,}")

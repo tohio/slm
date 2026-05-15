@@ -21,11 +21,11 @@ Defaults:
 
 Usage:
     # Single prompt (base model completion)
-    echo "The history of AI" | python inference/generate.py --model results/slm-125m/final
+    echo "The history of AI" | python inference/generate.py --model results/runs/125m/pretrain/final
 
     # From file
     python inference/generate.py \\
-        --model results/slm-125m-dpo/final \\
+        --model results/runs/125m/dpo/final \\
         --input prompts.txt \\
         --output completions.jsonl \\
         --chat
@@ -34,7 +34,7 @@ Usage:
     python inference/generate.py --model tohio/slm-125m
 
     # Raw completion without a BOS prefix
-    python inference/generate.py --model results/slm-125m/final --no-bos
+    python inference/generate.py --model results/runs/125m/pretrain/final --no-bos
 """
 
 import argparse

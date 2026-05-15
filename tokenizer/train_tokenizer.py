@@ -60,7 +60,7 @@ Output:
 Usage:
     python tokenizer/train_tokenizer.py
     python tokenizer/train_tokenizer.py --vocab-size 32000
-    python tokenizer/train_tokenizer.py --input data/validated/train.jsonl
+    python tokenizer/train_tokenizer.py --input data/runs/<size>/validated/train.jsonl
 """
 
 import argparse
@@ -372,13 +372,13 @@ def main():
         "--input",
         type=Path,
         default=None,
-        help="Input JSONL file (default: data/validated/train.jsonl)",
+        help="Input JSONL file (default: data/runs/<size>/validated/train.jsonl)",
     )
     parser.add_argument(
         "--output",
         type=Path,
         default=None,
-        help="Output directory (default: data/tokenizer)",
+        help="Output directory (default: data/runs/<size>/tokenizer)",
     )
     parser.add_argument(
         "--vocab-size",
@@ -399,7 +399,7 @@ def main():
 
     if not args.input.exists():
         log.error(f"Input file not found: {args.input}")
-        log.error("Run: python validation/scripts/validate.py")
+        log.error("Run: python validation/scripts/validate.py --size <size>")
         sys.exit(1)
 
     train_tokenizer(
