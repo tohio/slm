@@ -359,10 +359,13 @@ class GroqSyntheticSource:
         return text.strip()
 
     def _quality_ok(self, text: str, metadata: dict[str, Any]) -> bool:
-        """Reject obvious synthetic-generation artifacts and malformed records."""
+        """Reject only generic LLM-generation artifacts.
+
+        Source-specific validation belongs in the source adapters, not in this
+        shared Groq transport/generation engine.
+        """
         lowered = text.lower()
 
-        # Do not let assistant chatter or markdown fence artifacts enter the corpus.
         blocked_fragments = [
             "```",
             "here are the records",
@@ -372,12 +375,6 @@ class GroqSyntheticSource:
         ]
         if any(fragment in lowered for fragment in blocked_fragments):
             return False
-
-        if self.SOURCE_TAG == "synthetic_task_code":
-            return self._task_code_quality_ok(text=text, metadata=metadata)
-
-        if self.SOURCE_TAG == "educational_qa_mcq":
-            return self._educational_qa_quality_ok(text=text, metadata=metadata)
 
         return True
 

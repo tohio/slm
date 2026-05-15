@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import random
 from pathlib import Path
+from typing import Any
 
 from curator.scripts.groq_synthetic import GroqSyntheticSource
 
@@ -44,7 +45,7 @@ class FactualRestraintSource(GroqSyntheticSource):
             "category": "factual_restraint",
             "kind": row.get("kind", "unknown"),
             "difficulty": row.get("difficulty", "unknown"),
-            "prompt_template": "factual_restraint_groq_v1",
+            "prompt_template": "factual_restraint_groq_v2",
             "benchmark_excluded": True,
         }
 
@@ -61,18 +62,37 @@ class FactualRestraintSource(GroqSyntheticSource):
         return f"""
 Generate unique factual-restraint pretraining records.
 
-Rules:
-- The assistant answer should avoid guessing.
-- Do not invent citations, URLs, sources, current events, browsing, or tool-use claims.
-- Respect privacy and say when information is unavailable or source-dependent.
-- Do not include real private personal data.
-- Vary names, contexts, industries, and wording.
+Purpose:
+- Teach the model not to hallucinate when facts are unavailable, private, current, or source-dependent.
+- Keep answers concise and helpful, not over-refusal-heavy.
 
-Return JSON only, no markdown fences, using exactly this shape:
+Balanced categories:
+- live/current data unavailable
+- private personal data
+- confidential medical/legal/financial records
+- unverifiable facts about private people
+- exact proprietary/internal data
+- unknown fictional or nonexistent identifiers
+- no fake browsing/search/tool claims
+- invented citation avoidance
+
+Rules:
+- Each record must contain exactly:
+  Question:
+  Answer:
+- The answer should avoid guessing and should not invent facts.
+- Do not claim to browse, search, verify, access tools, access databases, or check live systems.
+- Do not include real private personal data.
+- Do not refuse ordinary stable public facts.
+- When useful, briefly say what would be needed to answer.
+- Keep the answer concise; avoid long policy-style refusals.
+- Return JSON only. No markdown fences. No assistant chatter.
+
+Return JSON using exactly this shape:
 {{
   "records": [
     {{
-      "text": "Question: ...\\nAnswer: ...",
+      "text": "Question: .\\nAnswer: .",
       "kind": "unknown_or_insufficient_info",
       "difficulty": "simple",
       "metadata": {{}}
@@ -83,3 +103,31 @@ Return JSON only, no markdown fences, using exactly this shape:
 Specs:
 {specs_json}
 """.strip()
+
+    def _quality_ok(self, text: str, metadata: dict[str, Any]) -> bool:
+        if not super()._quality_ok(text=text, metadata=metadata):
+            return False
+
+        if text.count("Question:") != 1:
+            return False
+        if text.count("Answer:") != 1:
+            return False
+
+        answer = text.split("Answer:", 1)[1].strip()
+        if len(answer) < 20:
+            return False
+
+        lowered_answer = answer.lower()
+        fake_tool_claims = [
+            "i searched",
+            "i browsed",
+            "i checked online",
+            "according to my search",
+            "i accessed",
+            "i found a source",
+            "the current value is",
+        ]
+        if any(fragment in lowered_answer for fragment in fake_tool_claims):
+            return False
+
+        return True

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import random
 from pathlib import Path
+from typing import Any
 
 from curator.scripts.groq_synthetic import GroqSyntheticSource
 
@@ -14,13 +15,11 @@ class SyntheticArithmeticSource(GroqSyntheticSource):
     DEFAULT_BATCH_SIZE = 16
 
     FORMATS = [
-        "bare_equation_full",
-        "bare_equation_completion",
         "qa_arithmetic",
         "word_problem",
         "comparison_arithmetic",
-        "multi_step_simple",
-        "explain_short_solution",
+        "single_equation",
+        "two_step_clear",
     ]
 
     def __init__(
@@ -44,7 +43,7 @@ class SyntheticArithmeticSource(GroqSyntheticSource):
             "category": "arithmetic",
             "format": row.get("format", "unknown"),
             "difficulty": row.get("difficulty", "unknown"),
-            "prompt_template": "synthetic_arithmetic_groq_v1",
+            "prompt_template": "synthetic_arithmetic_groq_v2",
             "benchmark_excluded": True,
         }
 
@@ -54,26 +53,43 @@ class SyntheticArithmeticSource(GroqSyntheticSource):
             specs.append({
                 "id": start_index + offset,
                 "format": rng.choice(self.FORMATS),
-                "difficulty": rng.choice(["single_step", "single_step", "two_step", "word_problem"]),
-                "range": rng.choice(["0-20", "0-100", "mixed small integers", "multiplication table", "division exact"]),
+                "difficulty": rng.choice(["single_step", "single_step", "two_step_clear"]),
+                "range": rng.choice(["0-20", "0-100", "small integers", "multiplication table", "division exact"]),
             })
 
         specs_json = json.dumps(specs, indent=2)
         return f"""
 Generate unique elementary arithmetic pretraining records.
 
-Rules:
-- Use original numbers and wording.
-- Keep answers correct.
-- Include the final numeric answer explicitly.
-- Avoid GSM8K-style long grade-school benchmark problems.
-- Vary equation forms, short QA, word problems, comparisons, and two-step examples.
+Purpose:
+- Reinforce concise arithmetic question-answer behavior.
+- Keep records simple, correct, and easy to verify.
 
-Return JSON only, no markdown fences, using exactly this shape:
+Rules:
+- Each record must contain exactly one Question and exactly one Answer.
+- Use this exact text structure:
+  Question: <one arithmetic question>
+  Answer: <short numeric answer or yes/no answer>
+- Include the final answer explicitly.
+- Use original numbers and wording.
+- Allowed:
+  - single-step addition, subtraction, multiplication, division
+  - simple word problems
+  - simple comparisons
+  - simple solve-for-x equations with one unknown
+  - clear two-step arithmetic where the answer is still short
+- Do not include multiple separate questions in one record.
+- Do not use blanks like "__".
+- Do not create trick equations, ambiguous equations, or malformed equations.
+- Do not use long GSM8K-style reasoning chains or benchmark-style wording.
+- Do not include explanations unless the format explicitly asks for a very short one.
+- Return JSON only. No markdown fences. No assistant chatter.
+
+Return JSON using exactly this shape:
 {{
   "records": [
     {{
-      "text": "Question: ...\\nAnswer: ...",
+      "text": "Question: .\\nAnswer: .",
       "format": "qa_arithmetic",
       "difficulty": "single_step",
       "metadata": {{}}
@@ -84,3 +100,20 @@ Return JSON only, no markdown fences, using exactly this shape:
 Specs:
 {specs_json}
 """.strip()
+
+    def _quality_ok(self, text: str, metadata: dict[str, Any]) -> bool:
+        if not super()._quality_ok(text=text, metadata=metadata):
+            return False
+
+        if text.count("Question:") != 1:
+            return False
+        if text.count("Answer:") != 1:
+            return False
+        if "__" in text:
+            return False
+
+        lowered = text.lower()
+        if "explain" in lowered and "explanation:" in lowered:
+            return False
+
+        return True

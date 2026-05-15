@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import random
 from pathlib import Path
+from typing import Any
 
 from curator.scripts.groq_synthetic import GroqSyntheticSource
 
@@ -17,17 +18,19 @@ class EducationalQAMCQSource(GroqSyntheticSource):
         "science",
         "math_concepts",
         "computer_science",
-        "history_geography",
-        "general_knowledge",
-        "reading_common_sense",
+        "stable_geography",
+        "vocabulary_context",
+        "reading_reasoning",
+        "common_misconception",
     ]
+
     QA_TYPES = [
         "short_qa",
         "multiple_choice_qa",
         "qa_with_explanation",
         "cloze_completion",
-        "compare_and_contrast",
         "common_misconception",
+        "cause_effect_reasoning",
     ]
 
     def __init__(
@@ -52,7 +55,7 @@ class EducationalQAMCQSource(GroqSyntheticSource):
             "subject": row.get("subject", "unknown"),
             "qa_type": row.get("qa_type", "unknown"),
             "difficulty": row.get("difficulty", "unknown"),
-            "prompt_template": "educational_qa_mcq_groq_v1",
+            "prompt_template": "educational_qa_mcq_groq_v2",
             "benchmark_excluded": True,
         }
 
@@ -63,24 +66,46 @@ class EducationalQAMCQSource(GroqSyntheticSource):
                 "id": start_index + offset,
                 "subject": rng.choice(self.SUBJECTS),
                 "qa_type": rng.choice(self.QA_TYPES),
-                "difficulty": rng.choice(["elementary", "middle", "high_school", "intro_college"]),
+                "difficulty": rng.choice(["elementary", "middle", "high_school"]),
             })
 
         specs_json = json.dumps(specs, indent=2)
         return f"""
-Generate unique educational pretraining records.
+Generate unique educational QA pretraining records.
+
+Purpose:
+- Teach stable educational facts, concepts, and reasoning.
+- Prefer clear explanations over trivia.
+
+Allowed subjects:
+- arithmetic and math concepts
+- basic science
+- introductory computer science concepts
+- stable geography only when facts are non-controversial
+- vocabulary/context reasoning
+- common misconceptions with clear corrections
+- cause/effect reasoning
 
 Rules:
-- Do not copy or paraphrase benchmark datasets such as MMLU, ARC, HellaSwag, TruthfulQA, GSM8K, HumanEval, APPS, or exam collections.
-- Use original questions, answers, and explanations.
-- Include the correct answer clearly.
-- Vary wording, subjects, entities, and format heavily.
+- Each record must contain:
+  Question:
+  Answer:
+  Explanation:
+- The explanation must teach the reasoning, not merely restate the answer.
+- Use stable, non-current, non-controversial facts.
+- Avoid trivial life-routine filler.
+- Avoid current events, live data, prices, laws, recent statistics, politics, and medical advice.
+- Avoid disputed rankings, measurement-dependent claims, or facts that require a caveat.
+- Avoid private people or made-up claims about real people.
+- Do not copy or paraphrase MMLU, ARC, HellaSwag, TruthfulQA, GSM8K, exam collections,
+  or other benchmark datasets.
+- Return JSON only. No markdown fences. No assistant chatter.
 
-Return JSON only, no markdown fences, using exactly this shape:
+Return JSON using exactly this shape:
 {{
   "records": [
     {{
-      "text": "Question: ...\\nAnswer: ...\\nExplanation: ...",
+      "text": "Question: .\\nAnswer: .\\nExplanation: .",
       "subject": "science",
       "qa_type": "short_qa",
       "difficulty": "middle",
@@ -92,3 +117,36 @@ Return JSON only, no markdown fences, using exactly this shape:
 Specs:
 {specs_json}
 """.strip()
+
+    def _quality_ok(self, text: str, metadata: dict[str, Any]) -> bool:
+        if not super()._quality_ok(text=text, metadata=metadata):
+            return False
+
+        if text.count("Question:") != 1:
+            return False
+        if text.count("Answer:") != 1:
+            return False
+        if text.count("Explanation:") != 1:
+            return False
+
+        explanation = text.split("Explanation:", 1)[1].strip()
+        if len(explanation) < 40:
+            return False
+
+        lowered = text.lower()
+        forbidden = [
+            "right now",
+            "today",
+            "latest",
+            "current",
+            "stock price",
+            "weather",
+            "first thing you should do when you wake up",
+            "get out of bed",
+            "which river is longer, the nile or the amazon",
+            "longest river",
+        ]
+        if any(fragment in lowered for fragment in forbidden):
+            return False
+
+        return True
