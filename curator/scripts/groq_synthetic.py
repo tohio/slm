@@ -382,17 +382,21 @@ class GroqSyntheticSource:
         return True
 
     def _task_code_quality_ok(self, text: str, metadata: dict[str, Any]) -> bool:
-        """Reject Python task-code records whose generated solution is invalid Python."""
-        language = str(metadata.get("language", "")).lower()
-        if language != "python":
-            return True
-
+        """Reject incomplete task-code records and keep only syntax-checked Python for now."""
         marker = "Solution:"
         if marker not in text:
             return False
 
         solution = text.split(marker, 1)[1].strip()
         if not solution:
+            return False
+
+        language = str(metadata.get("language", "")).lower()
+
+        # Until we add language-specific validators for Go/Rust/Bash/etc.,
+        # keep this Groq supplement to Python only. Bad non-Python synthetic
+        # code is worse than a smaller but cleaner source.
+        if language != "python":
             return False
 
         # The generated records often include comments and assert-based tests.
