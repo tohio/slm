@@ -518,7 +518,21 @@ class GroqSyntheticSource:
         text = re.sub(r"^```(?:json|jsonl)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text).strip()
 
-        # Preferred fallback contract: JSONL, one independent object per line.
+        # Primary structured-output contract: object with records array.
+        #
+        # Important: parse this before JSONL. A compact structured response like
+        # {"records":[...]} is one physical line, so JSONL-first parsing would
+        # incorrectly return the wrapper object as a single record.
+        try:
+            obj = json.loads(text)
+            if isinstance(obj, dict) and isinstance(obj.get("records"), list):
+                return [r for r in obj["records"] if isinstance(r, dict)]
+            if isinstance(obj, list):
+                return [r for r in obj if isinstance(r, dict)]
+        except Exception:
+            pass
+
+        # Fallback contract: JSONL, one independent object per line.
         rows: list[dict[str, Any]] = []
         for raw_line in text.splitlines():
             line = raw_line.strip().rstrip(",")
@@ -532,21 +546,14 @@ class GroqSyntheticSource:
                 obj = json.loads(line)
             except Exception:
                 continue
-            if isinstance(obj, dict):
+
+            if isinstance(obj, dict) and isinstance(obj.get("records"), list):
+                rows.extend(r for r in obj["records"] if isinstance(r, dict))
+            elif isinstance(obj, dict):
                 rows.append(obj)
 
         if rows:
             return rows
-
-        # Primary structured-output contract: object with records array.
-        try:
-            obj = json.loads(text)
-            if isinstance(obj, dict) and isinstance(obj.get("records"), list):
-                return [r for r in obj["records"] if isinstance(r, dict)]
-            if isinstance(obj, list):
-                return [r for r in obj if isinstance(r, dict)]
-        except Exception:
-            pass
 
         # Last-resort fallback: recover a JSON array embedded in chatter.
         array_match = re.search(r"\[[\s\S]*\]", text)
