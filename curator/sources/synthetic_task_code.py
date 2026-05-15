@@ -60,7 +60,7 @@ class SyntheticTaskCodeSource(GroqSyntheticSource):
             "task_type": row.get("task_type", "unknown"),
             "difficulty": row.get("difficulty", "unknown"),
             "topic": row.get("topic", "unknown"),
-            "prompt_template": "synthetic_task_code_groq_v3",
+            "prompt_template": "synthetic_task_code_groq_v4_jsonl",
             "benchmark_excluded": True,
         }
 
@@ -83,7 +83,13 @@ Purpose:
 - Create clean task -> implementation -> tests examples for a small language model.
 - Prefer boring, correct, simple utility functions over clever or production-hard tasks.
 
-Critical JSON rules:
+Critical output rules:
+- Return JSONL only.
+- Return exactly one compact JSON object per line.
+- Do not return an outer object.
+- Do not return a "records" array.
+- Do not return markdown fences.
+- Do not return assistant chatter.
 - Do not return a "text" field.
 - Return a single-line "task" field.
 - Return a "solution_lines" field as a JSON array of single-line strings.
@@ -113,29 +119,9 @@ Hard rules:
   filesystem, subprocess, database, external API, CLI-input, or production-hardening tasks.
 - Do not use HumanEval, APPS, LeetCode, CodeContests, interview benchmark tasks,
   benchmark-derived wording, or named benchmark problems.
-- Return JSON only. No markdown fences. No assistant chatter.
 
-Return JSON using exactly this shape:
-{{
-  "records": [
-    {{
-      "task": "Write a Python function that returns the even numbers from a list while preserving order.",
-      "solution_lines": [
-        "def extract_evens(numbers):",
-        "    return [n for n in numbers if n % 2 == 0]",
-        "",
-        "# Tests",
-        "assert extract_evens([1, 2, 3, 4]) == [2, 4]",
-        "assert extract_evens([1, 3, 5]) == []"
-      ],
-      "language": "python",
-      "task_type": "collection_transform",
-      "difficulty": "easy",
-      "topic": "lists",
-      "metadata": {{}}
-    }}
-  ]
-}}
+Each output line must look like this:
+{{"task":"Write a Python function that returns the even numbers from a list while preserving order.","solution_lines":["def extract_evens(numbers):","    return [n for n in numbers if n % 2 == 0]","","# Tests","assert extract_evens([1, 2, 3, 4]) == [2, 4]","assert extract_evens([1, 3, 5]) == []"],"language":"python","task_type":"collection_transform","difficulty":"easy","topic":"lists","metadata":{{}}}}
 
 Specs:
 {specs_json}

@@ -45,7 +45,7 @@ class FactualRestraintSource(GroqSyntheticSource):
             "category": "factual_restraint",
             "kind": row.get("kind", "unknown"),
             "difficulty": row.get("difficulty", "unknown"),
-            "prompt_template": "factual_restraint_groq_v3",
+            "prompt_template": "factual_restraint_groq_v4_jsonl",
             "benchmark_excluded": True,
         }
 
@@ -66,9 +66,15 @@ Purpose:
 - Teach the model not to hallucinate when facts are unavailable, private, current, or source-dependent.
 - Keep answers concise and helpful, not over-refusal-heavy.
 
-Critical JSON rules:
+Critical output rules:
+- Return JSONL only.
+- Return exactly one compact JSON object per line.
+- Do not return an outer object.
+- Do not return a "records" array.
+- Do not return markdown fences.
+- Do not return assistant chatter.
 - Do not return a "text" field.
-- Return separate "question" and "answer" fields.
+- Each JSON object must have separate "question" and "answer" fields.
 - Each field value must be a single-line JSON string.
 - Do not put newline characters inside any JSON string value.
 - The Python adapter will build the final multiline training text.
@@ -90,20 +96,9 @@ Rules:
 - Do not refuse ordinary stable public facts.
 - When useful, briefly say what would be needed to answer.
 - Keep the answer concise; avoid long policy-style refusals.
-- Return JSON only. No markdown fences. No assistant chatter.
 
-Return JSON using exactly this shape:
-{{
-  "records": [
-    {{
-      "question": "What is the current private salary of a specific non-public person?",
-      "answer": "I do not have access to private salary information. A reliable authorized source would be needed to answer.",
-      "kind": "unverifiable_private_fact",
-      "difficulty": "simple",
-      "metadata": {{}}
-    }}
-  ]
-}}
+Each output line must look like this:
+{{"question":"What is the current private salary of a specific non-public person?","answer":"I do not have access to private salary information. A reliable authorized source would be needed to answer.","kind":"unverifiable_private_fact","difficulty":"simple","metadata":{{}}}}
 
 Specs:
 {specs_json}

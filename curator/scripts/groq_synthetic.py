@@ -69,10 +69,6 @@ DEFAULT_MAX_TOKENS = int(os.environ.get("SYNTHETIC_GROQ_MAX_TOKENS", "4096"))
 
 # Request pacing. This is proactive protection so long full-corpus synthetic
 # runs do not hammer the API as fast as the loop can issue requests.
-#
-# Example:
-#   GROQ_MIN_REQUEST_INTERVAL_SECONDS=0.5  -> at most ~120 requests/minute
-#   GROQ_MIN_REQUEST_INTERVAL_SECONDS=1.0  -> at most ~60 requests/minute
 DEFAULT_MIN_REQUEST_INTERVAL_SECONDS = float(
     os.environ.get("GROQ_MIN_REQUEST_INTERVAL_SECONDS", "0.5")
 )
@@ -110,13 +106,13 @@ class GroqSyntheticSource:
     PROGRESS_EVERY_DOCS = 10_000
     SYSTEM_PROMPT = (
         "You generate high-quality synthetic pretraining records. "
-        "Return only valid JSON. Do not include markdown fences, assistant chatter, "
-        "or explanatory text outside the JSON payload. Because the response must be "
-        "valid JSON, newline characters inside JSON string values must be escaped as "
-        "\\\\n. Do not place raw newline characters inside quoted JSON strings. "
-        "If generating code, the code and tests must be syntactically valid for the "
-        "stated language."
-        )
+        "Return only valid JSON or JSONL as requested by the user prompt. "
+        "Do not include markdown fences, assistant chatter, or explanatory text "
+        "outside the requested payload. If the user asks for JSONL, return one "
+        "compact JSON object per line with no outer array or wrapper. Do not place "
+        "raw newline characters inside quoted JSON string values. If generating "
+        "code, the code and tests must be syntactically valid for the stated language."
+    )
 
     def __init__(
         self,
@@ -307,10 +303,15 @@ class GroqSyntheticSource:
                 )
                 rows = self._parse_records(content)
                 if rows:
+                    if len(rows) < requested:
+                        log.warning(
+                            "%s: recovered %d/%d requested record(s) from Groq response",
+                            self.SOURCE_TAG,
+                            len(rows),
+                            requested,
+                        )
                     return rows[:requested]
 
-                # Empty/invalid model output is a failed batch, but retrying the
-                # same prompt often helps if the model emitted malformed JSON.
                 preview = content[:800].replace("\n", "\\n")
                 log.warning(
                     "%s: unparseable Groq response preview: %s",
@@ -454,7 +455,6 @@ class GroqSyntheticSource:
         if retry_after is not None and retry_after > 0:
             return min(float(retry_after), self.retry_max_seconds)
 
-        # Exponential backoff with small jitter to avoid synchronized retries.
         base = max(0.1, float(self.retry_base_seconds))
         sleep_seconds = min(base * (2 ** max(0, attempt - 1)), self.retry_max_seconds)
         jitter = random.uniform(0, min(1.0, sleep_seconds * 0.10))
@@ -477,9 +477,32 @@ class GroqSyntheticSource:
         text = content.strip()
         if not text:
             return []
-        text = re.sub(r"^```(?:json|jsonl)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
 
+        text = re.sub(r"^```(?:json|jsonl)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text).strip()
+
+        # Preferred contract: JSONL, one independent JSON object per line.
+        # This recovers usable records even if a later line is malformed.
+        rows: list[dict[str, Any]] = []
+        for raw_line in text.splitlines():
+            line = raw_line.strip().rstrip(",")
+            if not line:
+                continue
+            if not line.startswith("{"):
+                continue
+            if not line.endswith("}"):
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(obj, dict):
+                rows.append(obj)
+
+        if rows:
+            return rows
+
+        # Backward-compatible fallback: object with records array or plain array.
         try:
             obj = json.loads(text)
             if isinstance(obj, dict) and isinstance(obj.get("records"), list):
@@ -489,6 +512,7 @@ class GroqSyntheticSource:
         except Exception:
             pass
 
+        # Last-resort fallback: recover a JSON array embedded in chatter.
         array_match = re.search(r"\[[\s\S]*\]", text)
         if array_match:
             try:
@@ -498,18 +522,7 @@ class GroqSyntheticSource:
             except Exception:
                 pass
 
-        rows: list[dict[str, Any]] = []
-        for line in text.splitlines():
-            line = line.strip().rstrip(",")
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except Exception:
-                continue
-            if isinstance(obj, dict):
-                rows.append(obj)
-        return rows
+        return []
 
     def _normalise_record(self, row: dict[str, Any], idx: int) -> dict[str, Any] | None:
         raw_text = row.get("text")
@@ -545,9 +558,6 @@ class GroqSyntheticSource:
         """Normalize common LLM JSON escaping artifacts before filtering/dedup."""
         text = raw_text.strip()
 
-        # Some model outputs place literal escaped newlines in the JSON string
-        # instead of actual newlines. These hurt readability and create noisy
-        # pretraining examples, so normalize them before writing raw shards.
         text = text.replace("\\r\\n", "\n")
         text = text.replace("\\n", "\n")
         text = text.replace("\\t", "\t")

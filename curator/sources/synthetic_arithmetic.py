@@ -12,6 +12,10 @@ class SyntheticArithmeticSource(GroqSyntheticSource):
     SOURCE_TAG = "synthetic_arithmetic"
     SHARD_PREFIX = "synthetic_arithmetic"
     DEFAULT_DOCS = 100_000
+
+    # Arithmetic records are intentionally short, but large JSON object/array
+    # batches are unreliable with LLM output. Use JSONL output and a moderate
+    # batch size so individual valid records can be recovered independently.
     DEFAULT_BATCH_SIZE = 32
 
     FORMATS = [
@@ -43,7 +47,7 @@ class SyntheticArithmeticSource(GroqSyntheticSource):
             "category": "arithmetic",
             "format": row.get("format", "unknown"),
             "difficulty": row.get("difficulty", "unknown"),
-            "prompt_template": "synthetic_arithmetic_groq_v3",
+            "prompt_template": "synthetic_arithmetic_groq_v4_jsonl",
             "benchmark_excluded": True,
         }
 
@@ -71,9 +75,15 @@ Purpose:
 - Reinforce concise arithmetic question-answer behavior.
 - Keep records simple, correct, and easy to verify.
 
-Critical JSON rules:
+Critical output rules:
+- Return JSONL only.
+- Return exactly one compact JSON object per line.
+- Do not return an outer object.
+- Do not return a "records" array.
+- Do not return markdown fences.
+- Do not return assistant chatter.
 - Do not return a "text" field.
-- Return separate "question" and "answer" fields.
+- Each JSON object must have separate "question" and "answer" fields.
 - The "question" and "answer" values must be single-line JSON strings.
 - Do not put newline characters inside any JSON string value.
 - The Python adapter will build the final multiline training text.
@@ -93,20 +103,9 @@ Rules:
 - Do not create trick equations, ambiguous equations, or malformed equations.
 - Do not use long GSM8K-style reasoning chains or benchmark-style wording.
 - Do not include explanations.
-- Return JSON only. No markdown fences. No assistant chatter.
 
-Return JSON using exactly this shape:
-{{
-  "records": [
-    {{
-      "question": "2 + 3 =",
-      "answer": "5",
-      "format": "qa_arithmetic",
-      "difficulty": "single_step",
-      "metadata": {{}}
-    }}
-  ]
-}}
+Each output line must look like this:
+{{"question":"2 + 3 =","answer":"5","format":"qa_arithmetic","difficulty":"single_step","metadata":{{}}}}
 
 Specs:
 {specs_json}
@@ -154,6 +153,7 @@ Specs:
 
         if not question or not answer:
             return False
+
         if len(answer) > 40:
             return False
 

@@ -55,7 +55,7 @@ class EducationalQAMCQSource(GroqSyntheticSource):
             "subject": row.get("subject", "unknown"),
             "qa_type": row.get("qa_type", "unknown"),
             "difficulty": row.get("difficulty", "unknown"),
-            "prompt_template": "educational_qa_mcq_groq_v3",
+            "prompt_template": "educational_qa_mcq_groq_v4_jsonl",
             "benchmark_excluded": True,
         }
 
@@ -77,9 +77,15 @@ Purpose:
 - Teach stable educational facts, concepts, and reasoning.
 - Prefer clear explanations over trivia.
 
-Critical JSON rules:
+Critical output rules:
+- Return JSONL only.
+- Return exactly one compact JSON object per line.
+- Do not return an outer object.
+- Do not return a "records" array.
+- Do not return markdown fences.
+- Do not return assistant chatter.
 - Do not return a "text" field.
-- Return separate "question", "answer", and "explanation" fields.
+- Each JSON object must have separate "question", "answer", and "explanation" fields.
 - Each field value must be a single-line JSON string.
 - Do not put newline characters inside any JSON string value.
 - The Python adapter will build the final multiline training text.
@@ -103,22 +109,9 @@ Rules:
 - Avoid private people or made-up claims about real people.
 - Do not copy or paraphrase MMLU, ARC, HellaSwag, TruthfulQA, GSM8K, exam collections,
   or other benchmark datasets.
-- Return JSON only. No markdown fences. No assistant chatter.
 
-Return JSON using exactly this shape:
-{{
-  "records": [
-    {{
-      "question": "Why do plants need sunlight?",
-      "answer": "Plants use sunlight as an energy source for photosynthesis.",
-      "explanation": "During photosynthesis, plants use light energy to turn carbon dioxide and water into sugars they can use for growth.",
-      "subject": "science",
-      "qa_type": "short_qa",
-      "difficulty": "middle",
-      "metadata": {{}}
-    }}
-  ]
-}}
+Each output line must look like this:
+{{"question":"Why do plants need sunlight?","answer":"Plants use sunlight as an energy source for photosynthesis.","explanation":"During photosynthesis, plants use light energy to turn carbon dioxide and water into sugars they can use for growth.","subject":"science","qa_type":"short_qa","difficulty":"middle","metadata":{{}}}}
 
 Specs:
 {specs_json}
