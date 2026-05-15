@@ -174,7 +174,7 @@ DATA_MIX: dict[str, dict] = {
 
 CODE_SUBMIX: dict[str, dict] = {
     "stack_v1": {
-        "pct": 80.0,
+        "pct": 83.0,
         "display": 'The Stack v1 dedup',
         "hub": 'bigcode/the-stack-dedup',
     },
@@ -184,12 +184,12 @@ CODE_SUBMIX: dict[str, dict] = {
         "hub": 'code_search_net',
     },
     "stack_smol": {
-        "pct": 3.0,
+        "pct": 1.0,
         "display": 'The Stack (smol)',
         "hub": 'bigcode/the-stack-smol',
     },
     "jupyter": {
-        "pct": 1.5,
+        "pct": 0.5,
         "display": 'Jupyter notebooks',
         "hub": 'bigcode/jupyter-parsed',
     },
@@ -213,11 +213,6 @@ SUPPLEMENTAL_CHAR_CAPS: dict[str, dict[str, int]] = {
     "synthetic_task_code": {"125m": 50_000_000, "350m": 100_000_000, "1b": 200_000_000},
     "educational_qa_mcq": {"125m": 50_000_000, "350m": 100_000_000, "1b": 200_000_000},
     "factual_restraint": {"125m": 10_000_000, "350m": 20_000_000, "1b": 50_000_000},
-
-    "codesearchnet": {"125m": 1_100_000_000, "350m": 1_250_000_000, "1b": 1_500_000_000},
-    "stack_smol": {"125m": 450_000_000, "350m": 550_000_000, "1b": 700_000_000},
-    "jupyter": {"125m": 100_000_000, "350m": 150_000_000, "1b": 250_000_000},
-    "conala": {"125m": 50_000_000, "350m": 60_000_000, "1b": 75_000_000},
 }
 
 
@@ -368,10 +363,6 @@ MINI_OVERRIDES: dict[str, int] = {
     "factual_restraint":     1_000,
     "nemotron_specialized":  2_000,
     "stack_v1":      3_000,
-    "codesearchnet": 5_000,
-    "stack_smol":    2_000,
-    "jupyter":       500,
-    "conala":        500,
 }
 
 
