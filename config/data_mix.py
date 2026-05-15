@@ -101,7 +101,7 @@ DATA_MIX: dict[str, dict] = {
         "hub":     "HuggingFaceFW/fineweb",
     },
     "fineweb_edu": {
-        "pct":     27.98,
+        "pct":     31.98,
         "display": "FineWeb-Edu",
         "hub":     "HuggingFaceFW/fineweb-edu",
     },
@@ -127,7 +127,7 @@ DATA_MIX: dict[str, dict] = {
         "config":  "4plus",
     },
     "stackexchange": {
-        "pct":     5.0,
+        "pct":     1.00,
         "display": "StackExchange",
         "hub":     "HuggingFaceH4/stack-exchange-preferences",
     },
