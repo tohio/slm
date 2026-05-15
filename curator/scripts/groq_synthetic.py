@@ -399,6 +399,30 @@ class GroqSyntheticSource:
         if language != "python":
             return False
 
+        # Avoid plausible-but-wrong synthetic code in areas where syntax checks
+        # are not enough to prove correctness. Keep this supplement focused on
+        # simple utility functions, transformations, parsing, aggregation, and
+        # tests rather than bug-fix/security/Unicode edge cases.
+        risky_fragments = [
+            "fix the bug",
+            "fix this",
+            "bug",
+            "race condition",
+            "unicode",
+            "combining character",
+            "email validation",
+            "validate email",
+            "security",
+            "authentication",
+            "password",
+            "cryptographic",
+            "encryption",
+            "sanitize",
+        ]
+        lowered = text.lower()
+        if any(fragment in lowered for fragment in risky_fragments):
+            return False
+
         # The generated records often include comments and assert-based tests.
         # ast.parse handles those fine and catches broken parentheses/brackets,
         # such as: assert count_elements(["a", "a", "b"] == {"a": 2})
