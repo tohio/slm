@@ -236,6 +236,38 @@ SYNTHETIC_AVG_CHARS_PER_DOC: dict[str, int] = {
     "factual_restraint": 105,
 }
 
+# Hard safety caps for Groq-backed synthetic sources on full curation runs.
+#
+# These sources are behavior-control supplements, not bulk corpus sources.
+# Without explicit caps, doc counts derived from target_chars can reach millions
+# of Groq calls for 125m+ runs because synthetic records are intentionally short.
+# Any remaining target deficit should be handled by normal blend overflow rather
+# than forcing synthetic generation to fill the whole char budget.
+SYNTHETIC_FULL_RUN_DOC_CAPS: dict[str, dict[str, int]] = {
+    "synthetic_arithmetic": {
+        "125m": 75_000,
+        "350m": 75_000,
+        "1b": 75_000,
+    },
+    "synthetic_task_code": {
+        "125m": 20_000,
+        "350m": 20_000,
+        "1b": 20_000,
+    },
+    "educational_qa_mcq": {
+        "125m": 20_000,
+        "350m": 20_000,
+        "1b": 20_000,
+    },
+    "factual_restraint": {
+        "125m": 10_000,
+        "350m": 10_000,
+        "1b": 10_000,
+    },
+}
+
+
+
 # Extra document request headroom for records rejected by source validators,
 # quality filtering, and exact dedup. The max_chars budget remains the primary
 # stop condition, so this does not force extra retained data beyond the target.

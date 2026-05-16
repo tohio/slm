@@ -100,6 +100,7 @@ from config import (
 from config.data_mix import (
     SYNTHETIC_AVG_CHARS_PER_DOC,
     SYNTHETIC_DOC_INFLATION,
+    SYNTHETIC_FULL_RUN_DOC_CAPS,
 )
 
 from config.paths import (
@@ -391,6 +392,16 @@ def _derive_max_docs(name: str, target: str) -> int | None:
     Then in both cases:
         max_docs = (target_chars / avg_chars_per_doc) × inflation
     """
+    synthetic_full_run_cap = SYNTHETIC_FULL_RUN_DOC_CAPS.get(name, {}).get(target)
+    if synthetic_full_run_cap is not None:
+        log.info(
+            "%s cap for %s limited to %s docs by SYNTHETIC_FULL_RUN_DOC_CAPS",
+            name,
+            target,
+            f"{synthetic_full_run_cap:,}",
+        )
+        return synthetic_full_run_cap
+
     if name in LOCAL_SYNTHETIC_SOURCES:
         avg_chars = SYNTHETIC_AVG_CHARS_PER_DOC[name]
         inflation = SYNTHETIC_DOC_INFLATION
