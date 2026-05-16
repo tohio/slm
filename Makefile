@@ -483,16 +483,16 @@ accelerate-config-multi:
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
 test-curator:
-	@echo "==> Validating curate-mini outputs..."
-	.venv/bin/pytest tests/data_pipeline/test_pipeline_curator.py -v --tb=short
+	@echo "==> Validating curate outputs (TEST_SIZE=$(TEST_SIZE))..."
+	DATA_DIR=$(DATA_DIR)/runs/$(TEST_SIZE) .venv/bin/pytest tests/data_pipeline/test_pipeline_curator.py -v --tb=short
 
 test-validate:
-	@echo "==> Validating validate outputs..."
-	.venv/bin/pytest tests/data_pipeline/test_pipeline_validate.py -v --tb=short
+	@echo "==> Validating validate outputs (TEST_SIZE=$(TEST_SIZE))..."
+	DATA_DIR=$(DATA_DIR)/runs/$(TEST_SIZE) .venv/bin/pytest tests/data_pipeline/test_pipeline_validate.py -v --tb=short
 
 test-tokenizer:
-	@echo "==> Validating tokenizer and tokenized binary outputs..."
-	.venv/bin/pytest tests/data_pipeline/test_pipeline_tokenizer.py -v --tb=short
+	@echo "==> Validating tokenizer and tokenized binary outputs (TEST_SIZE=$(TEST_SIZE))..."
+	DATA_DIR=$(DATA_DIR)/runs/$(TEST_SIZE) .venv/bin/pytest tests/data_pipeline/test_pipeline_tokenizer.py -v --tb=short
 
 test-data-pipeline: test-curator test-validate test-tokenizer
 	@echo "==> Data pipeline tests complete"
