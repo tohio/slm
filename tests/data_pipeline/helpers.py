@@ -10,11 +10,16 @@ import pytest
 
 
 def data_dir() -> Path:
-    return Path(os.environ.get("DATA_DIR", "data"))
+    return Path(
+        os.environ.get(
+            "PIPELINE_TEST_DATA_DIR",
+            os.environ.get("DATA_DIR", "data"),
+        )
+    )
 
 
 def pipeline_path(*parts: str) -> Path:
-    """Resolve a path under DATA_DIR for pipeline output tests."""
+    """Resolve a path under the selected pipeline test data directory."""
     return data_dir().joinpath(*parts)
 
 
