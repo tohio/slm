@@ -511,59 +511,67 @@ class GroqSyntheticSource:
         return status in {408, 409, 425, 429, 500, 502, 503, 504}
 
     def _parse_records(self, content: str) -> list[dict[str, Any]]:
-        text = content.strip()
-        if not text:
+        """
+        Parse Groq output into a list of record dictionaries.
+
+        Supports:
+        - a top-level JSON object: {"records": [...]}
+        - a top-level JSON array: [...]
+        - markdown-fenced JSON
+        - extra assistant text around the JSON payload
+
+        This is intentionally lenient because prompt-only generation is used
+        for high-volume synthetic data. We keep parseable rows and let each
+        source's _normalise_record/_quality_ok drop bad rows.
+        """
+        content = (content or "").strip()
+        if not content:
             return []
 
-        text = re.sub(r"^```(?:json|jsonl)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text).strip()
+        candidates: list[str] = []
 
-        # Primary structured-output contract: object with records array.
-        #
-        # Important: parse this before JSONL. A compact structured response like
-        # {"records":[...]} is one physical line, so JSONL-first parsing would
-        # incorrectly return the wrapper object as a single record.
-        try:
-            obj = json.loads(text)
-            if isinstance(obj, dict) and isinstance(obj.get("records"), list):
-                return [r for r in obj["records"] if isinstance(r, dict)]
-            if isinstance(obj, list):
-                return [r for r in obj if isinstance(r, dict)]
-        except Exception:
-            pass
+        # Raw content first.
+        candidates.append(content)
 
-        # Fallback contract: JSONL, one independent object per line.
-        rows: list[dict[str, Any]] = []
-        for raw_line in text.splitlines():
-            line = raw_line.strip().rstrip(",")
-            if not line:
+        # Strip common markdown JSON fences.
+        if content.startswith("```"):
+            stripped = content
+            stripped = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.IGNORECASE)
+            stripped = re.sub(r"\s*```$", "", stripped)
+            candidates.append(stripped.strip())
+
+        # Extract first plausible JSON object.
+        obj_start = content.find("{")
+        obj_end = content.rfind("}")
+        if obj_start != -1 and obj_end != -1 and obj_end > obj_start:
+            candidates.append(content[obj_start : obj_end + 1])
+
+        # Extract first plausible JSON array.
+        arr_start = content.find("[")
+        arr_end = content.rfind("]")
+        if arr_start != -1 and arr_end != -1 and arr_end > arr_start:
+            candidates.append(content[arr_start : arr_end + 1])
+
+        seen: set[str] = set()
+        for candidate in candidates:
+            candidate = candidate.strip()
+            if not candidate or candidate in seen:
                 continue
-            if not line.startswith("{"):
-                continue
-            if not line.endswith("}"):
-                continue
+            seen.add(candidate)
+
             try:
-                obj = json.loads(line)
+                parsed = json.loads(candidate)
             except Exception:
                 continue
 
-            if isinstance(obj, dict) and isinstance(obj.get("records"), list):
-                rows.extend(r for r in obj["records"] if isinstance(r, dict))
-            elif isinstance(obj, dict):
-                rows.append(obj)
+            if isinstance(parsed, dict):
+                records = parsed.get("records")
+                if isinstance(records, list):
+                    return [row for row in records if isinstance(row, dict)]
+                return [parsed]
 
-        if rows:
-            return rows
-
-        # Last-resort fallback: recover a JSON array embedded in chatter.
-        array_match = re.search(r"\[[\s\S]*\]", text)
-        if array_match:
-            try:
-                obj = json.loads(array_match.group(0))
-                if isinstance(obj, list):
-                    return [r for r in obj if isinstance(r, dict)]
-            except Exception:
-                pass
+            if isinstance(parsed, list):
+                return [row for row in parsed if isinstance(row, dict)]
 
         return []
 
