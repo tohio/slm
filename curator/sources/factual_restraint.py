@@ -12,7 +12,7 @@ class FactualRestraintSource(GroqSyntheticSource):
     SOURCE_TAG = "factual_restraint"
     SHARD_PREFIX = "factual_restraint"
     DEFAULT_DOCS = 100_000
-    DEFAULT_BATCH_SIZE = 16
+    DEFAULT_BATCH_SIZE = 4
 
     KINDS = [
         "unverifiable_private_fact",
@@ -45,7 +45,7 @@ class FactualRestraintSource(GroqSyntheticSource):
             "category": "factual_restraint",
             "kind": row.get("kind", "unknown"),
             "difficulty": row.get("difficulty", "unknown"),
-            "prompt_template": "factual_restraint_groq_v5_schema",
+            "prompt_template": "factual_restraint_groq_v6_jsonl",
             "benchmark_excluded": True,
         }
 
@@ -62,12 +62,16 @@ class FactualRestraintSource(GroqSyntheticSource):
         return f"""
 Generate unique factual-restraint pretraining records.
 
-Return a JSON object that matches the configured schema:
-- top-level key: records
-- each record has question, answer, kind, difficulty, metadata
-- do not return a text field
-- all string fields must be single-line strings
-- the Python adapter will build final multiline training text
+Return JSONL only:
+- Return exactly one JSON object per line.
+- Do not wrap the records in an array.
+- Do not use a top-level records key.
+- Do not use markdown fences or assistant chatter.
+- Each JSON object must have question, answer, kind, difficulty, metadata.
+- Do not return a text field.
+- all string fields must be single-line strings.
+- metadata must be an object; use {{}} when there is no metadata.
+- The Python adapter will build final multiline training text.
 
 Rules:
 - The answer should avoid guessing and should not invent facts.
@@ -93,6 +97,10 @@ Specs:
 
             row = dict(row)
             row["text"] = f"Question: {question}\nAnswer: {answer}"
+            row.setdefault("kind", "unknown_or_insufficient_info")
+            row.setdefault("difficulty", "unknown")
+            if not isinstance(row.get("metadata"), dict):
+                row["metadata"] = {}
 
         return super()._normalise_record(row=row, idx=idx)
 

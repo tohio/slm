@@ -12,7 +12,7 @@ class EducationalQAMCQSource(GroqSyntheticSource):
     SOURCE_TAG = "educational_qa_mcq"
     SHARD_PREFIX = "educational_qa_mcq"
     DEFAULT_DOCS = 100_000
-    DEFAULT_BATCH_SIZE = 12
+    DEFAULT_BATCH_SIZE = 4
 
     SUBJECTS = [
         "science",
@@ -55,7 +55,7 @@ class EducationalQAMCQSource(GroqSyntheticSource):
             "subject": row.get("subject", "unknown"),
             "qa_type": row.get("qa_type", "unknown"),
             "difficulty": row.get("difficulty", "unknown"),
-            "prompt_template": "educational_qa_mcq_groq_v5_schema",
+            "prompt_template": "educational_qa_mcq_groq_v6_jsonl",
             "benchmark_excluded": True,
         }
 
@@ -73,12 +73,16 @@ class EducationalQAMCQSource(GroqSyntheticSource):
         return f"""
 Generate unique educational QA pretraining records.
 
-Return a JSON object that matches the configured schema:
-- top-level key: records
-- each record has question, answer, explanation, subject, qa_type, difficulty, metadata
-- do not return a text field
-- all string fields must be single-line strings
-- the Python adapter will build final multiline training text
+Return JSONL only:
+- Return exactly one JSON object per line.
+- Do not wrap the records in an array.
+- Do not use a top-level records key.
+- Do not use markdown fences or assistant chatter.
+- Each JSON object must have question, answer, explanation, subject, qa_type, difficulty, metadata.
+- Do not return a text field.
+- all string fields must be single-line strings.
+- metadata must be an object; use {{}} when there is no metadata.
+- The Python adapter will build final multiline training text.
 
 Rules:
 - The explanation must teach the reasoning, not merely restate the answer.
@@ -112,6 +116,11 @@ Specs:
                 f"Answer: {answer}\n"
                 f"Explanation: {explanation}"
             )
+            row.setdefault("subject", "unknown")
+            row.setdefault("qa_type", "short_qa")
+            row.setdefault("difficulty", "unknown")
+            if not isinstance(row.get("metadata"), dict):
+                row["metadata"] = {}
 
         return super()._normalise_record(row=row, idx=idx)
 

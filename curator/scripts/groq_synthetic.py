@@ -77,11 +77,11 @@ DEFAULT_MAX_RETRIES = int(os.environ.get("GROQ_MAX_RETRIES", "6"))
 DEFAULT_RETRY_BASE_SECONDS = float(os.environ.get("GROQ_RETRY_BASE_SECONDS", "2"))
 DEFAULT_RETRY_MAX_SECONDS = float(os.environ.get("GROQ_RETRY_MAX_SECONDS", "60"))
 
-# Use API-enforced JSON Schema output when adapters provide a schema.
-# If the selected model/account rejects response_format=json_schema, switch to a
-# Groq model that supports structured outputs or set GROQ_STRUCTURED_OUTPUTS=0
-# to fall back to prompt-only parsing.
-DEFAULT_STRUCTURED_OUTPUTS = os.environ.get("GROQ_STRUCTURED_OUTPUTS", "1").lower() not in {
+# Prompt-only generation is the default for high-volume synthetic curation.
+# API-enforced JSON Schema is too brittle at scale: one malformed item can make
+# Groq reject an otherwise useful batch. Set GROQ_STRUCTURED_OUTPUTS=1 only for
+# small diagnostics where hard schema rejection is desired.
+DEFAULT_STRUCTURED_OUTPUTS = os.environ.get("GROQ_STRUCTURED_OUTPUTS", "0").lower() not in {
     "0",
     "false",
     "no",
@@ -115,11 +115,12 @@ class GroqSyntheticSource:
     PROGRESS_EVERY_DOCS = 10_000
     SYSTEM_PROMPT = (
         "You generate high-quality synthetic pretraining records. "
-        "Return only the JSON payload requested by the user. Do not include "
-        "markdown fences, assistant chatter, or explanatory text outside the "
-        "payload. Do not place raw newline characters inside quoted JSON string "
-        "values. If generating code, the code and tests must be syntactically "
-        "valid for the stated language."
+        "Return only the payload requested by the user. Prefer JSONL when the "
+        "user asks for JSONL: one complete JSON object per line, no outer array, "
+        "no records wrapper, no markdown fences, no assistant chatter. "
+        "Do not place raw newline characters inside quoted JSON string values. "
+        "If generating code, code and tests must be syntactically valid for the "
+        "stated language."
     )
 
     def __init__(
@@ -512,41 +513,110 @@ class GroqSyntheticSource:
 
     def _parse_records(self, content: str) -> list[dict[str, Any]]:
         """
-        Parse Groq output into a list of record dictionaries.
+        Parse Groq output into a list of candidate record dictionaries.
 
-        Supports:
-        - a top-level JSON object: {"records": [...]}
-        - a top-level JSON array: [...]
-        - markdown-fenced JSON
-        - extra assistant text around the JSON payload
+        The parser is intentionally tolerant because LLM output is raw,
+        untrusted data. It supports:
+        - JSONL: one JSON object per line
+        - a top-level object: {"records": [...]}
+        - a top-level array: [...]
+        - markdown-fenced payloads
+        - string-encoded record objects inside arrays
+        - partially malformed wrappers where individual object literals can
+          still be recovered
 
-        This is intentionally lenient because prompt-only generation is used
-        for high-volume synthetic data. We keep parseable rows and let each
-        source's _normalise_record/_quality_ok drop bad rows.
+        Bad rows are ignored here or later by source-specific normalizers.
+        One malformed record should never poison a whole batch.
         """
-        content = (content or "").strip()
+        content = self._strip_output_wrapper(content or "")
         if not content:
             return []
 
-        candidates: list[str] = []
+        parsed_rows = self._parse_structured_payload(content)
+        if parsed_rows:
+            return parsed_rows
 
-        # Raw content first.
-        candidates.append(content)
+        jsonl_rows = self._parse_jsonl_payload(content)
+        if jsonl_rows:
+            return jsonl_rows
 
-        # Strip common markdown JSON fences.
-        if content.startswith("```"):
-            stripped = content
-            stripped = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.IGNORECASE)
-            stripped = re.sub(r"\s*```$", "", stripped)
-            candidates.append(stripped.strip())
+        records_array_rows = self._parse_records_array_lenient(content)
+        if records_array_rows:
+            return records_array_rows
 
-        # Extract first plausible JSON object.
+        object_rows = self._extract_json_objects_lenient(content)
+        if object_rows:
+            return object_rows
+
+        return []
+
+    def _strip_output_wrapper(self, content: str) -> str:
+        """Remove common markdown fences and assistant preambles."""
+        text = content.strip()
+        if not text:
+            return ""
+
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json|jsonl)?\s*", "", text, flags=re.IGNORECASE)
+            text = re.sub(r"\s*```$", "", text).strip()
+
+        return text
+
+    def _coerce_record(self, value: Any) -> dict[str, Any] | None:
+        """
+        Convert a candidate value into a record dict when possible.
+
+        Some prompt-only model responses contain a JSON object encoded as a
+        string inside a records array. Decode those strings and keep the row.
+        """
+        if isinstance(value, dict):
+            return value
+
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return None
+            try:
+                decoded = json.loads(stripped)
+            except Exception:
+                return None
+            if isinstance(decoded, dict):
+                return decoded
+
+        return None
+
+    def _coerce_records(self, value: Any) -> list[dict[str, Any]]:
+        if isinstance(value, dict):
+            records = value.get("records")
+            if isinstance(records, list):
+                return [
+                    record
+                    for item in records
+                    if (record := self._coerce_record(item)) is not None
+                ]
+            record = self._coerce_record(value)
+            return [record] if record is not None else []
+
+        if isinstance(value, list):
+            return [
+                record
+                for item in value
+                if (record := self._coerce_record(item)) is not None
+            ]
+
+        return []
+
+    def _parse_structured_payload(self, content: str) -> list[dict[str, Any]]:
+        """
+        Try parsing the whole payload or the largest obvious JSON object/array.
+        """
+        candidates: list[str] = [content]
+
         obj_start = content.find("{")
         obj_end = content.rfind("}")
         if obj_start != -1 and obj_end != -1 and obj_end > obj_start:
             candidates.append(content[obj_start : obj_end + 1])
 
-        # Extract first plausible JSON array.
         arr_start = content.find("[")
         arr_end = content.rfind("]")
         if arr_start != -1 and arr_end != -1 and arr_end > arr_start:
@@ -564,16 +634,111 @@ class GroqSyntheticSource:
             except Exception:
                 continue
 
-            if isinstance(parsed, dict):
-                records = parsed.get("records")
-                if isinstance(records, list):
-                    return [row for row in records if isinstance(row, dict)]
-                return [parsed]
-
-            if isinstance(parsed, list):
-                return [row for row in parsed if isinstance(row, dict)]
+            rows = self._coerce_records(parsed)
+            if rows:
+                return rows
 
         return []
+
+    def _parse_jsonl_payload(self, content: str) -> list[dict[str, Any]]:
+        """
+        Parse one JSON object per line. This is the preferred prompt-only
+        contract for synthetic generation.
+        """
+        rows: list[dict[str, Any]] = []
+        for raw_line in content.splitlines():
+            line = raw_line.strip().rstrip(",")
+            if not line:
+                continue
+            if line.startswith("```") or line.lower() in {"json", "jsonl"}:
+                continue
+
+            try:
+                parsed = json.loads(line)
+            except Exception:
+                continue
+
+            rows.extend(self._coerce_records(parsed))
+
+        return rows
+
+    def _parse_records_array_lenient(self, content: str) -> list[dict[str, Any]]:
+        """
+        Recover individual array elements after a "records": [ prefix.
+
+        This handles payloads like:
+            {"records":[{...},"{\"task\": ...}",{...}
+        where the wrapper may be truncated or mixed with string-encoded objects.
+        """
+        records_pos = content.find('"records"')
+        if records_pos == -1:
+            records_pos = content.find("'records'")
+        if records_pos == -1:
+            return []
+
+        array_start = content.find("[", records_pos)
+        if array_start == -1:
+            return []
+
+        decoder = json.JSONDecoder()
+        idx = array_start + 1
+        rows: list[dict[str, Any]] = []
+        n = len(content)
+
+        while idx < n:
+            while idx < n and content[idx] in " \t\r\n,":
+                idx += 1
+            if idx >= n or content[idx] == "]":
+                break
+
+            try:
+                item, end = decoder.raw_decode(content, idx)
+            except Exception:
+                next_object = content.find("{", idx + 1)
+                next_string_object = content.find('"{', idx + 1)
+                candidates = [pos for pos in (next_object, next_string_object) if pos != -1]
+                if not candidates:
+                    break
+                idx = min(candidates)
+                continue
+
+            record = self._coerce_record(item)
+            if record is not None:
+                rows.append(record)
+            idx = end
+
+        return rows
+
+    def _extract_json_objects_lenient(self, content: str) -> list[dict[str, Any]]:
+        """
+        Last-resort object extraction. It may also see nested metadata objects;
+        source-specific normalization will drop irrelevant dicts.
+        """
+        decoder = json.JSONDecoder()
+        rows: list[dict[str, Any]] = []
+        idx = 0
+        n = len(content)
+
+        while idx < n:
+            start = content.find("{", idx)
+            if start == -1:
+                break
+
+            try:
+                item, end = decoder.raw_decode(content, start)
+            except Exception:
+                idx = start + 1
+                continue
+
+            record = self._coerce_record(item)
+            if record is not None:
+                if isinstance(record.get("records"), list):
+                    rows.extend(self._coerce_records(record))
+                else:
+                    rows.append(record)
+            idx = end
+
+        return rows
 
     def _normalise_record(self, row: dict[str, Any], idx: int) -> dict[str, Any] | None:
         raw_text = row.get("text")

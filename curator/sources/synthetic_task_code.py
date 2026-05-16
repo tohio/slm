@@ -13,7 +13,7 @@ class SyntheticTaskCodeSource(GroqSyntheticSource):
     SOURCE_TAG = "synthetic_task_code"
     SHARD_PREFIX = "synthetic_task_code"
     DEFAULT_DOCS = 100_000
-    DEFAULT_BATCH_SIZE = 8
+    DEFAULT_BATCH_SIZE = 2
 
     TASK_TYPES = [
         "prompt_to_function",
@@ -60,7 +60,7 @@ class SyntheticTaskCodeSource(GroqSyntheticSource):
             "task_type": row.get("task_type", "unknown"),
             "difficulty": row.get("difficulty", "unknown"),
             "topic": row.get("topic", "unknown"),
-            "prompt_template": "synthetic_task_code_groq_v5_schema",
+            "prompt_template": "synthetic_task_code_groq_v6_jsonl",
             "benchmark_excluded": True,
         }
 
@@ -79,13 +79,17 @@ class SyntheticTaskCodeSource(GroqSyntheticSource):
         return f"""
 Generate unique Python-only synthetic coding pretraining records.
 
-Return a JSON object that matches the configured schema:
-- top-level key: records
-- each record has task, solution_lines, language, task_type, difficulty, topic, metadata
-- do not return a text field
-- task must be a single-line string
-- solution_lines must be an array of single-line strings
-- the Python adapter will join solution_lines with newlines and build final training text
+Return JSONL only:
+- Return exactly one JSON object per line.
+- Do not wrap the records in an array.
+- Do not use a top-level records key.
+- Do not use markdown fences or assistant chatter.
+- Each JSON object must have task, solution_lines, language, task_type, difficulty, topic, metadata.
+- Do not return a text field.
+- task must be a single-line string.
+- solution_lines must be an array of single-line strings.
+- metadata must be an object; use {{}} when there is no metadata.
+- The Python adapter will join solution_lines with newlines and build final training text.
 
 Allowed task families:
 - list transformations
@@ -132,6 +136,11 @@ Specs:
             row = dict(row)
             row["text"] = f"Task: {task}\n\nSolution:\n{solution}"
             row["language"] = "python"
+            row.setdefault("task_type", "function_with_tests")
+            row.setdefault("difficulty", "unknown")
+            row.setdefault("topic", "general")
+            if not isinstance(row.get("metadata"), dict):
+                row["metadata"] = {}
 
         return super()._normalise_record(row=row, idx=idx)
 

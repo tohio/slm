@@ -43,7 +43,7 @@ class SyntheticArithmeticSource(GroqSyntheticSource):
             "category": "arithmetic",
             "format": row.get("format", "unknown"),
             "difficulty": row.get("difficulty", "unknown"),
-            "prompt_template": "synthetic_arithmetic_groq_v5_schema",
+            "prompt_template": "synthetic_arithmetic_groq_v6_jsonl",
             "benchmark_excluded": True,
         }
 
@@ -67,13 +67,16 @@ class SyntheticArithmeticSource(GroqSyntheticSource):
         return f"""
 Generate unique elementary arithmetic pretraining records.
 
-Return a JSON object that matches the configured schema:
-- top-level key: records
-- records is an array of objects
-- each record has question, answer, format, difficulty, metadata
-- do not return a text field
-- question and answer must be single-line strings
-- the Python adapter will build final multiline training text
+Return JSONL only:
+- Return exactly one JSON object per line.
+- Do not wrap the records in an array.
+- Do not use a top-level records key.
+- Do not use markdown fences or assistant chatter.
+- Each JSON object must have question, answer, format, difficulty, metadata.
+- Do not return a text field.
+- question and answer must be single-line strings.
+- metadata must be an object; use {{}} when there is no metadata.
+- The Python adapter will build final multiline training text.
 
 Rules:
 - Each record must contain exactly one arithmetic question and one short answer.
