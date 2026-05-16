@@ -75,18 +75,38 @@ log = logging.getLogger(__name__)
 
 DATA_DIR = BASE_DATA_DIR
 
-# Source tags whose content is primarily code. These bypass the prose-style
-# structural checks (terminal punctuation, repeated-line ratio) which would
-# reject legitimate code. Must match CODE_SOURCES in
-# curator/filters/quality.py — both files enumerate the same set of
-# specific loader names.
-CODE_SOURCES: frozenset[str] = frozenset({
+# Source tags whose records are primarily code-like, synthetic/template-like,
+# or symbol-heavy. These bypass prose-only validation heuristics that are
+# intended for normal English web/document text.
+#
+# Keep this aligned with curator.filters.quality.CODE_SOURCES and the
+# synthetic/generated source routing used by curator/scripts/curate.py.
+PROSE_HEURISTIC_SKIP_SOURCES: frozenset[str] = frozenset({
+    # Code sub-sources.
     "codesearchnet",
     "stack_smol",
     "stack_v1",
     "jupyter",
     "conala",
+
+    # Generated/template-like sources.
+    "synthetic_arithmetic",
+    "synthetic_task_code",
+    "educational_qa_mcq",
+    "factual_restraint",
+
+    # Symbol-heavy / specialized sources that do not behave like prose.
+    "nemotron_cc_math",
+    "nemotron_specialized",
 })
+
+# Backward-compatible alias: older comments/tests refer to CODE_SOURCES.
+CODE_SOURCES: frozenset[str] = PROSE_HEURISTIC_SKIP_SOURCES
+
+
+def _skip_prose_heuristics(record: dict) -> bool:
+    """Return True when prose-only validation checks should be bypassed."""
+    return record.get("source") in PROSE_HEURISTIC_SKIP_SOURCES
 
 
 # ── Datatrove filters ──────────────────────────────────────────────────────────
@@ -190,20 +210,45 @@ def _compute_perplexity_threshold(
     kenlm_model,
     input_path: Path,
     sample_size: int,
-) -> float:
-    """Compute the 90th-percentile perplexity from a sample of documents."""
-    log.info(f"Computing perplexity threshold from {sample_size:,} documents...")
+) -> float | None:
+    """Compute the 90th-percentile perplexity from prose-like train documents."""
+    log.info(
+        f"Computing perplexity threshold from up to {sample_size:,} prose-like documents..."
+    )
     perplexities: list[float] = []
+
     with open(input_path) as f:
-        for i, line in enumerate(f):
-            if i >= sample_size:
+        for line in f:
+            if len(perplexities) >= sample_size:
                 break
-            text = json.loads(line).get("text", "")
+            if not line.strip():
+                continue
+
+            record = json.loads(line)
+            if _skip_prose_heuristics(record):
+                continue
+
+            text = record.get("text", "")
+            if not text:
+                continue
+
             score = kenlm_model.perplexity(text[:1000])
             perplexities.append(score)
+
+    if not perplexities:
+        log.warning(
+            "No prose-like documents available for perplexity threshold; "
+            "perplexity filtering will be skipped."
+        )
+        return None
+
     perplexities.sort()
-    threshold = perplexities[int(0.9 * len(perplexities))]
-    log.info(f"Auto perplexity threshold (90th percentile): {threshold:.1f}")
+    idx = min(int(0.9 * len(perplexities)), len(perplexities) - 1)
+    threshold = perplexities[idx]
+    log.info(
+        f"Auto perplexity threshold (90th percentile, n={len(perplexities):,}): "
+        f"{threshold:.1f}"
+    )
     return threshold
 
 
@@ -247,20 +292,23 @@ def validate_manual_split(
         "rejected_terminal_punct": 0,
         "rejected_repeated_lines": 0,
         "rejected_perplexity": 0,
+        "skipped_prose_heuristics": 0,
     }
 
     with open(input_path) as fin, open(output_path, "w") as fout:
         for line in tqdm(fin, desc=f"Validating {split}", unit="doc"):
             record = json.loads(line)
             text = record.get("text", "")
-            source = record.get("source", "")
             stats["total"] += 1
 
-            # Skip structural prose checks for code sources — code doesn't
-            # follow English prose conventions.
-            if source not in CODE_SOURCES:
-                # C4-style: at least one line ending with terminal punctuation
-                lines = [l.strip() for l in text.split("\n") if l.strip()]
+            skip_prose = _skip_prose_heuristics(record)
+            if skip_prose:
+                stats["skipped_prose_heuristics"] += 1
+
+            lines = [l.strip() for l in text.split("\n") if l.strip()]
+
+            # C4-style terminal punctuation is a prose-only heuristic.
+            if not skip_prose:
                 has_terminal = any(
                     l.endswith((".", "!", "?", '"', "'")) for l in lines
                 )
@@ -268,16 +316,28 @@ def validate_manual_split(
                     stats["rejected_terminal_punct"] += 1
                     continue
 
-                # Gopher-style: repeated line check
-                if len(lines) >= 4:
-                    seen = set()
-                    dups = sum(1 for l in lines if l in seen or seen.add(l))
-                    if dups / len(lines) > 0.3:
-                        stats["rejected_repeated_lines"] += 1
-                        continue
+            # Gopher-style repeated line check can catch broken output for any
+            # source, including code/template-like records.
+            if len(lines) >= 4:
+                seen = set()
+                dups = 0
+                for l in lines:
+                    if l in seen:
+                        dups += 1
+                    else:
+                        seen.add(l)
+                if dups / len(lines) > 0.3:
+                    stats["rejected_repeated_lines"] += 1
+                    continue
 
-            # Perplexity filter — applies to all sources
-            if kenlm_model is not None and perplexity_threshold is not None:
+            # KenLM perplexity is an English prose heuristic. It is not
+            # meaningful for code, arithmetic templates, symbol-heavy math, or
+            # specialized/generated task records.
+            if (
+                not skip_prose
+                and kenlm_model is not None
+                and perplexity_threshold is not None
+            ):
                 try:
                     ppl = kenlm_model.perplexity(text[:2000])
                     if ppl > perplexity_threshold:
@@ -316,6 +376,7 @@ def _log_split_report(split: str, stats: dict) -> None:
     log.info(f"  Rejected (terminal punct):{stats['rejected_terminal_punct']:>10,}")
     log.info(f"  Rejected (repeated lines):{stats['rejected_repeated_lines']:>10,}")
     log.info(f"  Rejected (perplexity):    {stats['rejected_perplexity']:>10,}")
+    log.info(f"  Skipped prose heuristics: {stats.get('skipped_prose_heuristics', 0):>10,}")
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -474,6 +535,10 @@ def main():
         "rejected_perplexity": (
             train_stats["rejected_perplexity"]
             + (val_stats["rejected_perplexity"] if val_stats else 0)
+        ),
+        "skipped_prose_heuristics": (
+            train_stats.get("skipped_prose_heuristics", 0)
+            + (val_stats.get("skipped_prose_heuristics", 0) if val_stats else 0)
         ),
         "perplexity_threshold": perplexity_threshold,
         "splits": {
