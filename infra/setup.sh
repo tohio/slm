@@ -114,13 +114,25 @@ echo "==> Downloading spaCy English model..."
 python -m spacy download en_core_web_sm
 
 # ── 6. Data directory structure ───────────────────────────────────────────────
-# Source classes create their own data/raw/<source_name>/ subdirectories
-# at first use — we just create the parent. The source-name list lives in
-# config/data_mix.py and shouldn't be duplicated here. The other directories
-# below are referenced by tooling that expects them to exist up front.
+# Source classes now store raw downloads under data/raw/<size>/<source_name>/.
+# This makes raw curation artifacts reusable per model size and allows
+# artifact restore workflows such as:
+#
+#   make artifacts-download SIZE=125m DATE=...
+#   rm -rf data/raw/125m/<source>
+#   make curate SIZE=125m
+#
+# The curate code skips source data already present on disk, so restoring
+# raw/<size>/ lets a run resume without redownloading every source.
+#
+# The source-name list lives in config/data_mix.py and shouldn't be
+# duplicated here. We only create size-level parents.
 
 echo ""
 echo "==> Creating data directory structure at $DATA_DIR..."
+
+CURATION_SIZES=("mini" "125m" "350m" "1b")
+
 mkdir -p \
     "${DATA_DIR}/raw" \
     "${DATA_DIR}/filtered" \
@@ -128,11 +140,21 @@ mkdir -p \
     "${DATA_DIR}/dedup_scratch" \
     "${DATA_DIR}/validated" \
     "${DATA_DIR}/tokenized" \
+    "${DATA_DIR}/runs" \
     "${DATA_DIR}/models" \
     "${HF_CACHE_DIR}"
 
+for size in "${CURATION_SIZES[@]}"; do
+    mkdir -p \
+        "${DATA_DIR}/raw/${size}" \
+        "${DATA_DIR}/runs/${size}/curated" \
+        "${DATA_DIR}/runs/${size}/tokenized" \
+        "${DATA_DIR}/runs/${size}/tokenizer"
+done
+
 echo "  Created: $DATA_DIR"
 echo "  Created: $HF_CACHE_DIR"
+echo "  Created size-scoped raw dirs: ${CURATION_SIZES[*]}"
 
 # ── 7. Configure .env ─────────────────────────────────────────────────────────
 
@@ -229,15 +251,33 @@ else:
 python -c "import spacy; spacy.load('en_core_web_sm'); print('  spaCy en_core_web_sm OK')" \
     || { echo "  MISSING spaCy model — run: python -m spacy download en_core_web_sm"; ERRORS=$((ERRORS + 1)); }
 
-# Check data directories
+## Check data directories
 for dir in "${DATA_DIR}/raw" "${DATA_DIR}/filtered" "${DATA_DIR}/curated" \
-           "${DATA_DIR}/validated" "${DATA_DIR}/models" "${HF_CACHE_DIR}"; do
+           "${DATA_DIR}/dedup_scratch" "${DATA_DIR}/validated" \
+           "${DATA_DIR}/tokenized" "${DATA_DIR}/runs" \
+           "${DATA_DIR}/models" "${HF_CACHE_DIR}"; do
     if [ -d "$dir" ]; then
         echo "  OK: $dir"
     else
         echo "  MISSING: $dir"
         ERRORS=$((ERRORS + 1))
     fi
+done
+
+# Check size-scoped curation directories
+for size in "${CURATION_SIZES[@]}"; do
+    for dir in \
+        "${DATA_DIR}/raw/${size}" \
+        "${DATA_DIR}/runs/${size}/curated" \
+        "${DATA_DIR}/runs/${size}/tokenized" \
+        "${DATA_DIR}/runs/${size}/tokenizer"; do
+        if [ -d "$dir" ]; then
+            echo "  OK: $dir"
+        else
+            echo "  MISSING: $dir"
+            ERRORS=$((ERRORS + 1))
+        fi
+    done
 done
 
 # Check fasttext model — warn only (downloaded separately)
