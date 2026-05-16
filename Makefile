@@ -18,6 +18,7 @@ SIZE    ?= 125m
 GPUS    ?= 1
 WORKERS ?=
 DATE     ?= $(shell date +%Y-%m-%d)
+ARTIFACT_STAGES ?= raw validated tokenized tokenizer
 
 # DATA_DIR — read from .env if not set in environment.
 DATA_DIR ?= $(shell grep -v '^\#' .env 2>/dev/null | grep '^DATA_DIR=' | head -1 | cut -d= -f2 | tr -d ' ')
@@ -74,7 +75,7 @@ endif
 
 .PHONY: all curate curate-mini curate-download curate-filter curate-dedup \
         curate-blend curate-upload validate validate-upload validate-datatrove \
-        tokenizer tokenizer-test tokenize tokenize-upload tokenize-download tokenizer-upload tokenizer-download \
+        tokenizer tokenizer-test tokenize artifacts-upload artifacts-download \
         config-gen config-gen-pretrain config-gen-sft config-gen-dpo \
         accel-gen-ddp accel-gen-fsdp \
         pretrain pretrain-mini pretrain-resume reinit-embeds smoke-gen prepare-sft sft sft-mini sft-resume sft-code sft-code-mini sft-code-resume \
@@ -125,48 +126,44 @@ curate-upload:
 
 validate:
 	@echo "==> Stage 2: Validation (train + val splits)"
-	$(PYTHON) validation/scripts/validate.py --size $(SIZE)
+	$(PYTHON) validation/scripts/validate.py
 
 validate-upload:
 	@echo "==> Stage 2: Upload validated data to S3 (target=$(SIZE))"
 	$(PYTHON) validation/scripts/upload_validated.py --target $(SIZE)
 
 validate-datatrove:
-	$(PYTHON) validation/scripts/validate.py --size $(SIZE) --use-datatrove
+	$(PYTHON) validation/scripts/validate.py --use-datatrove
 
 # ── Stage 3: Tokenizer ────────────────────────────────────────────────────────
 
 tokenizer:
 	@echo "==> Stage 3: Tokenizer training"
-	$(PYTHON) tokenizer/train_tokenizer.py --size $(SIZE)
+	$(PYTHON) tokenizer/train_tokenizer.py
 
 tokenizer-test:
-	$(PYTHON) tokenizer/test_tokenizer.py --size $(SIZE)
+	$(PYTHON) tokenizer/test_tokenizer.py
 
 # ── Stage 4: Pretrain ─────────────────────────────────────────────────────────
 
 tokenize:
 	@echo "==> Stage 4a: Tokenize dataset (train + val splits)"
-	$(PYTHON) pretrain/data/tokenize_data.py --size $(SIZE) --chunk-size 256 --verify
+	$(PYTHON) pretrain/data/tokenize_data.py --chunk-size 256 --verify
 
-tokenize-upload:
-	@echo "==> Stage 4a: Upload tokenized binaries to S3 (target=$(SIZE))"
-	$(PYTHON) pretrain/data/upload_tokenized.py upload --target $(SIZE)
+artifacts-upload:
+	@echo "==> Uploading artifacts to S3 (target=$(SIZE), date=$(DATE), stages=$(ARTIFACT_STAGES))"
+	$(PYTHON) curator/scripts/upload_s3.py artifacts-upload \
+		--size $(SIZE) \
+		--date $(DATE) \
+		--stages $(ARTIFACT_STAGES) \
+		--overwrite
 
-tokenize-download:
-	@echo "==> Stage 4a: Download tokenized binaries from S3 (target=$(SIZE), date=$(DATE))"
-	$(PYTHON) pretrain/data/upload_tokenized.py download --target $(SIZE) --date $(DATE)
-
-tokenizer-upload:
-	@echo "==> Uploading tokenizer to S3..."
-	$(PYTHON) curator/scripts/upload_s3.py upload --src $(DATA_DIR)/runs/$(SIZE)/tokenizer --dst tokenizer --overwrite
-	@echo "  Tokenizer uploaded"
-
-tokenizer-download:
-	@echo "==> Downloading tokenizer from S3..."
-	mkdir -p $(DATA_DIR)/runs/$(SIZE)/tokenizer
-	$(PYTHON) curator/scripts/upload_s3.py download --src tokenizer --dst $(DATA_DIR)/runs/$(SIZE)/tokenizer
-	@echo "  Tokenizer downloaded to $(DATA_DIR)/runs/$(SIZE)/tokenizer/"
+artifacts-download:
+	@echo "==> Downloading artifacts from S3 (target=$(SIZE), date=$(DATE), stages=$(ARTIFACT_STAGES))"
+	$(PYTHON) curator/scripts/upload_s3.py artifacts-download \
+		--size $(SIZE) \
+		--date $(DATE) \
+		--stages $(ARTIFACT_STAGES)
 
 # ── Config generation ─────────────────────────────────────────────────────────
 # Auto-generates training configs tuned for the current GPU and GPU count.
@@ -258,7 +255,7 @@ smoke-gen:
 		"The history of artificial intelligence"; do \
 		echo "--- prompt: $$prompt ---"; \
 		echo "$$prompt" | $(PYTHON) inference/generate.py \
-			--model results/runs/$(SIZE)/pretrain/final \
+			--model results/slm-$(SIZE)/final \
 			--max-new-tokens 30 \
 			--greedy; \
 		echo ""; \
@@ -308,7 +305,7 @@ sft-code-mini:
 
 prepare-dpo:
 	@echo "==> Stage 6a: Prepare DPO data"
-	$(PYTHON) alignment/data/prepare_dpo.py --size $(SIZE)
+	$(PYTHON) alignment/data/prepare_dpo.py
 
 dpo:
 	@echo "==> Stage 6b: DPO alignment ($(SIZE), $(GPUS) GPU(s), config=$(DPO_CONFIG))"
@@ -332,15 +329,15 @@ eval: eval-chat
 
 eval-base:
 	@echo "==> Stage 7: Evaluation (base, $(SIZE))"
-	$(PYTHON) eval/eval.py --model results/runs/$(SIZE)/pretrain/final
+	$(PYTHON) eval/eval.py --model results/slm-$(SIZE)/final
 
 eval-instruct:
 	@echo "==> Stage 7: Evaluation (instruct, $(SIZE))"
-	$(PYTHON) eval/eval.py --model results/runs/$(SIZE)/sft_code/final
+	$(PYTHON) eval/eval.py --model results/slm-$(SIZE)-chat-code/final
 
 eval-chat:
 	@echo "==> Stage 7: Evaluation (chat, $(SIZE))"
-	$(PYTHON) eval/eval.py --model results/runs/$(SIZE)/dpo/final
+	$(PYTHON) eval/eval.py --model results/slm-$(SIZE)-dpo/final
 
 # Behavior sanity eval targets.
 # These are deterministic generation checks for factuality, task format,
@@ -351,24 +348,24 @@ eval-sanity: eval-sanity-chat
 eval-sanity-base:
 	@echo "==> Stage 7: Sanity evaluation (base, $(SIZE))"
 	$(PYTHON) eval/sanity_eval.py \
-		--model results/runs/$(SIZE)/pretrain/final \
+		--model results/slm-$(SIZE)/final \
 		--json-out results/eval/sanity/slm-$(SIZE).json
 
 eval-sanity-instruct:
 	@echo "==> Stage 7: Sanity evaluation (instruct, $(SIZE))"
 	$(PYTHON) eval/sanity_eval.py \
-		--model results/runs/$(SIZE)/sft_code/final \
+		--model results/slm-$(SIZE)-chat-code/final \
 		--json-out results/eval/sanity/slm-$(SIZE)-chat-code.json
 
 eval-sanity-chat:
 	@echo "==> Stage 7: Sanity evaluation (chat, $(SIZE))"
 	$(PYTHON) eval/sanity_eval.py \
-		--model results/runs/$(SIZE)/dpo/final \
+		--model results/slm-$(SIZE)-dpo/final \
 		--json-out results/eval/sanity/slm-$(SIZE)-dpo.json
 
 eval-mini:
 	@echo "==> Stage 7: Mini evaluation (pipeline validation)"
-	$(PYTHON) eval/eval.py --model results/runs/mini/dpo/final --tasks hellaswag --limit 50 --batch-size 4
+	$(PYTHON) eval/eval.py --model results/slm-mini-dpo/final --tasks hellaswag --limit 50 --batch-size 4
 # ── Stage 8: Export ───────────────────────────────────────────────────────────
 
 export: export-base export-instruct export-chat
@@ -394,15 +391,15 @@ serve:
 
 serve-local:
 	@echo "==> Stage 10: Serve local checkpoint ($(SIZE))"
-	MODEL=results/runs/$(SIZE)/dpo/final ./serve/serve.sh
+	MODEL=results/slm-$(SIZE)-dpo/final ./serve/serve.sh
 
 # ── S3 utilities ──────────────────────────────────────────────────────────────
 
 s3-upload:
-	$(PYTHON) curator/scripts/upload_s3.py upload --src $(DATA_DIR)/runs/$(SIZE)/curated --dst $(SIZE)/$(DATE)/curated
+	$(PYTHON) curator/scripts/upload_s3.py upload --src data/curated --dst curated
 
 s3-download:
-	$(PYTHON) curator/scripts/upload_s3.py download --src $(SIZE)/$(DATE)/curated --dst $(DATA_DIR)/runs/$(SIZE)/curated
+	$(PYTHON) curator/scripts/upload_s3.py download --src curated --dst data/curated
 
 s3-list:
 	$(PYTHON) curator/scripts/upload_s3.py list
@@ -483,16 +480,16 @@ accelerate-config-multi:
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
 test-curator:
-	@echo "==> Validating curate outputs (TEST_SIZE=$(TEST_SIZE))..."
-	PIPELINE_TEST_DATA_DIR=$(DATA_DIR)/runs/$(TEST_SIZE) .venv/bin/pytest tests/data_pipeline/test_pipeline_curator.py -v --tb=short
+	@echo "==> Validating curate-mini outputs..."
+	.venv/bin/pytest tests/data_pipeline/test_pipeline_curator.py -v --tb=short
 
 test-validate:
-	@echo "==> Validating validate outputs (TEST_SIZE=$(TEST_SIZE))..."
-	PIPELINE_TEST_DATA_DIR=$(DATA_DIR)/runs/$(TEST_SIZE) .venv/bin/pytest tests/data_pipeline/test_pipeline_validate.py -v --tb=short
+	@echo "==> Validating validate outputs..."
+	.venv/bin/pytest tests/data_pipeline/test_pipeline_validate.py -v --tb=short
 
 test-tokenizer:
-	@echo "==> Validating tokenizer and tokenized binary outputs (TEST_SIZE=$(TEST_SIZE))..."
-	PIPELINE_TEST_DATA_DIR=$(DATA_DIR)/runs/$(TEST_SIZE) .venv/bin/pytest tests/data_pipeline/test_pipeline_tokenizer.py -v --tb=short
+	@echo "==> Validating tokenizer and tokenized binary outputs..."
+	.venv/bin/pytest tests/data_pipeline/test_pipeline_tokenizer.py -v --tb=short
 
 test-data-pipeline: test-curator test-validate test-tokenizer
 	@echo "==> Data pipeline tests complete"
@@ -561,7 +558,7 @@ endif
 # ── Clean ─────────────────────────────────────────────────────────────────────
 
 clean-data:
-	rm -rf $(DATA_DIR)/runs/$(SIZE)
+	rm -rf data/raw data/filtered data/curated data/validated data/tokenized data/sft data/dpo data/dedup_scratch
 
 clean-results:
 	rm -rf results/
@@ -638,10 +635,11 @@ help:
 	@echo "  validate-upload    Stage 2  — upload validated data to S3"
 	@echo "  tokenizer          Stage 3  — train BPE tokenizer"
 	@echo "  tokenize           Stage 4a — tokenize train + val to binaries"
-	@echo "  tokenize-upload    Stage 4a — upload tokenized binaries to S3"
+	@echo "  artifacts-upload   Upload raw/validated/tokenized/tokenizer artifacts to S3"
+	@echo "  artifacts-download Download raw/validated/tokenized/tokenizer artifacts from S3"
 	@echo "  pretrain           Stage 4b — pretrain from scratch (auto-runs smoke-gen)"
 	@echo "  pretrain-mini      Stage 4b — mini pretrain run (auto-runs smoke-gen)"
-	@echo "  smoke-gen          Stage 4b — generate from results/runs/$$(SIZE)/pretrain/final to spot-check"
+	@echo "  smoke-gen          Stage 4b — generate from results/slm-\$$(SIZE)/final to spot-check"
 	@echo "  reinit-embeds      Stage 4c — re-init chat special-token embeds before SFT"
 	@echo "  prepare-sft        Stage 5a — download SFT datasets"
 	@echo "  sft                Stage 5b — chat supervised fine-tuning"

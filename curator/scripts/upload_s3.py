@@ -43,6 +43,9 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
+ARTIFACT_STAGES = ("raw", "validated", "tokenized", "tokenizer")
+
 # Default transfer config: adaptive retries, reasonable connect/read timeouts.
 _BOTO_CONFIG = Config(
     retries={"max_attempts": 5, "mode": "adaptive"},
@@ -302,6 +305,128 @@ def list_prefix(prefix_path: str, bucket: str, prefix: str) -> list[dict]:
     return objects
 
 
+# ── Artifact sync ──────────────────────────────────────────────────────────────
+
+def _artifact_paths(size: str, date: str, stage: str) -> tuple[Path, str]:
+    """Return (local_path, s3_prefix) for a named curation/training artifact.
+
+    Stage names are intentionally user-facing and stable:
+      - raw:        downloaded source data, size-scoped under data/raw/<size>
+      - validated:  curated/validated JSONL under data/runs/<size>/curated
+      - tokenized:  pretraining binaries under data/runs/<size>/tokenized
+      - tokenizer:  tokenizer files under data/runs/<size>/tokenizer
+
+    S3 keys are grouped by size/date so a prior run can be restored exactly:
+      <size>/<date>/<artifact>/...
+    """
+    if stage == "raw":
+        return DATA_DIR / "raw" / size, f"{size}/{date}/raw"
+    if stage == "validated":
+        return DATA_DIR / "runs" / size / "curated", f"{size}/{date}/curated"
+    if stage == "tokenized":
+        return DATA_DIR / "runs" / size / "tokenized", f"{size}/{date}/tokenized"
+    if stage == "tokenizer":
+        return DATA_DIR / "runs" / size / "tokenizer", f"{size}/{date}/tokenizer"
+    raise ValueError(
+        f"Unknown artifact stage: {stage}. "
+        f"Valid stages: {' '.join(ARTIFACT_STAGES)}"
+    )
+
+
+def _normalize_stages(stages: list[str] | None) -> list[str]:
+    if not stages:
+        return list(ARTIFACT_STAGES)
+
+    normalized: list[str] = []
+    for item in stages:
+        for stage in item.split():
+            if stage not in ARTIFACT_STAGES:
+                raise ValueError(
+                    f"Unknown artifact stage: {stage}. "
+                    f"Valid stages: {' '.join(ARTIFACT_STAGES)}"
+                )
+            normalized.append(stage)
+    return normalized
+
+
+def upload_artifacts(
+    size: str,
+    date: str,
+    stages: list[str] | None,
+    bucket: str,
+    prefix: str,
+    workers: int = 16,
+    overwrite: bool = False,
+    glob: str = "**/*",
+) -> dict[str, int]:
+    """Upload selected artifact stages for a size/date."""
+    totals = {"uploaded": 0, "skipped": 0, "failed": 0}
+
+    for stage in _normalize_stages(stages):
+        src, dst_prefix = _artifact_paths(size, date, stage)
+        if not src.exists():
+            log.warning(f"Skipping missing artifact stage '{stage}': {src}")
+            continue
+
+        log.info(f"Uploading artifact stage '{stage}': {src} → {dst_prefix}")
+        counts = upload_directory(
+            src=src,
+            dst_prefix=dst_prefix,
+            bucket=bucket,
+            prefix=prefix,
+            workers=workers,
+            overwrite=overwrite,
+            glob=glob,
+        )
+        for key in totals:
+            totals[key] += counts.get(key, 0)
+
+    log.info(
+        f"Artifact upload complete — "
+        f"uploaded: {totals['uploaded']}, "
+        f"skipped: {totals['skipped']}, "
+        f"failed: {totals['failed']}"
+    )
+    return totals
+
+
+def download_artifacts(
+    size: str,
+    date: str,
+    stages: list[str] | None,
+    bucket: str,
+    prefix: str,
+    workers: int = 16,
+    overwrite: bool = False,
+) -> dict[str, int]:
+    """Download selected artifact stages for a size/date into local pipeline paths."""
+    totals = {"downloaded": 0, "skipped": 0, "failed": 0}
+
+    for stage in _normalize_stages(stages):
+        dst, src_prefix = _artifact_paths(size, date, stage)
+        dst.mkdir(parents=True, exist_ok=True)
+
+        log.info(f"Downloading artifact stage '{stage}': {src_prefix} → {dst}")
+        counts = download_prefix(
+            src_prefix=src_prefix,
+            dst=dst,
+            bucket=bucket,
+            prefix=prefix,
+            workers=workers,
+            overwrite=overwrite,
+        )
+        for key in totals:
+            totals[key] += counts.get(key, 0)
+
+    log.info(
+        f"Artifact download complete — "
+        f"downloaded: {totals['downloaded']}, "
+        f"skipped: {totals['skipped']}, "
+        f"failed: {totals['failed']}"
+    )
+    return totals
+
+
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
 def main():
@@ -323,6 +448,31 @@ def main():
 
     ls = subparsers.add_parser("list")
     ls.add_argument("--prefix", type=str, default="")
+
+    up_artifacts = subparsers.add_parser("artifacts-upload")
+    up_artifacts.add_argument("--size", type=str, required=True)
+    up_artifacts.add_argument("--date", type=str, required=True)
+    up_artifacts.add_argument(
+        "--stages",
+        nargs="+",
+        default=list(ARTIFACT_STAGES),
+        help="Artifact stages to upload: raw validated tokenized tokenizer",
+    )
+    up_artifacts.add_argument("--workers", type=int, default=16)
+    up_artifacts.add_argument("--overwrite", action="store_true")
+    up_artifacts.add_argument("--glob", type=str, default="**/*")
+
+    dl_artifacts = subparsers.add_parser("artifacts-download")
+    dl_artifacts.add_argument("--size", type=str, required=True)
+    dl_artifacts.add_argument("--date", type=str, required=True)
+    dl_artifacts.add_argument(
+        "--stages",
+        nargs="+",
+        default=list(ARTIFACT_STAGES),
+        help="Artifact stages to download: raw validated tokenized tokenizer",
+    )
+    dl_artifacts.add_argument("--workers", type=int, default=16)
+    dl_artifacts.add_argument("--overwrite", action="store_true")
 
     args = parser.parse_args()
     bucket, prefix = get_bucket_and_prefix()
@@ -355,7 +505,27 @@ def main():
             print(f"{obj['Key']:<80} {obj['Size']:>10,}")
         print("-" * 92)
         print(f"Total: {len(objects)} objects, {total_size / 1024**3:.2f} GB")
-
+    elif args.command == "artifacts-upload":
+        upload_artifacts(
+            size=args.size,
+            date=args.date,
+            stages=args.stages,
+            bucket=bucket,
+            prefix=prefix,
+            workers=args.workers,
+            overwrite=args.overwrite,
+            glob=args.glob,
+        )
+    elif args.command == "artifacts-download":
+        download_artifacts(
+            size=args.size,
+            date=args.date,
+            stages=args.stages,
+            bucket=bucket,
+            prefix=prefix,
+            workers=args.workers,
+            overwrite=args.overwrite,
+        )
 
 if __name__ == "__main__":
     main()
