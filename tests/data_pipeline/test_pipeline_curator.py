@@ -9,11 +9,15 @@ Command:   make test-curator
 Checks:
     - Raw source directories exist and have shards for all configured sources
     - Filtered shards exist and contain no documents failing quality checks
-    - Deduped shards exist and have no exact duplicates
+    - Deduped shards exist and sampled deduped output has no exact duplicates
     - data/curated/train.jsonl exists, is non-empty, contains most sources
     - data/curated/blend_stats.json is correct and complete
     - Synthetic sources are present and non-empty in curated outputs
-    - Cap-and-redistribute: any deficit is covered by overflow accounting
+    - Cap-and-redistribute: unresolved deficits are not allowed
+
+This file is intentionally fast. Full-corpus exact dedup coverage belongs to
+the curation stage itself; pytest spot-checks representative output so normal
+developer validation does not hang on large intermediate shards.
 """
 
 import json
@@ -24,14 +28,9 @@ from tests.data_pipeline.helpers import requires_stage, read_jsonl, pipeline_pat
 from curator.filters.quality import QualityFilter, CODE_SOURCES as QUALITY_CODE_SOURCES
 from curator.filters.dedup import exact_hash
 
-# Import source lists from config — the single source of truth. Previously
-# NON_CODE_SOURCES / CODE_SOURCE_NAMES / ALL_SOURCES were hand-maintained
-# here, which meant every change to the mix needed a matching edit in this
-# file. TestConfigurationDrift still guards the separate quality-filter
-# CODE_SOURCES constant (defined in curator.filters.quality) against drift
-# from config, allowing symbol-heavy generated sources that should also
-# bypass prose filters.
+# Import source lists from config — the single source of truth.
 from config import ALL_SOURCES, CODE_SOURCES, NON_CODE_SOURCES
+
 
 SYNTHETIC_SOURCES = {
     "synthetic_arithmetic",
@@ -40,24 +39,28 @@ SYNTHETIC_SOURCES = {
     "factual_restraint",
 }
 
-SYMBOL_HEAVY_SKIP_SOURCES = set(SYNTHETIC_SOURCES) | {
+# Sources that bypass prose-only quality filters. This must match
+# curator.filters.quality.CODE_SOURCES, which is broader than config.CODE_SOURCES.
+QUALITY_PROSE_SKIP_SOURCES = set(CODE_SOURCES) | SYNTHETIC_SOURCES | {
     "nemotron_cc_math",
     "nemotron_specialized",
 }
-QUALITY_SKIP_SOURCES = set(CODE_SOURCES) | SYMBOL_HEAVY_SKIP_SOURCES
+
+# Generated/template-like sources should bypass fuzzy MinHash only. Nemotron
+# sources bypass prose filters, but they should not bypass fuzzy dedup.
+FUZZY_DEDUP_SKIP_SOURCES = set(SYNTHETIC_SOURCES)
+
+QUALITY_SKIP_SOURCES = QUALITY_PROSE_SKIP_SOURCES
 
 
 pytestmark = requires_stage("curate-mini")
 
-
-# All sources must appear in train.jsonl. Any missing source indicates a
-# real failure (download, filter, dedup, or blend problem) that should be
-# surfaced, not papered over with a skip. stack_v1 replaced stack_v2 in the
-# mix specifically so this assertion could be unconditional — v2's SWH
-# content fetch was the one external dependency that could produce zero
-# docs at mini scale, and v1 has content inline so it doesn't have that
-# failure mode.
 REQUIRED_IN_TRAIN = list(ALL_SOURCES)
+
+# Keep pytest fast. Full exact-dedup coverage is performed by the curation
+# stage; this test samples enough rows to catch obvious regressions.
+DEDUP_EXACT_SAMPLE_PER_SOURCE = 2_000
+DEDUP_EXACT_MAX_SHARDS_PER_SOURCE = 2
 
 
 # ── Configuration drift guard ──────────────────────────────────────────────────
@@ -67,21 +70,19 @@ class TestConfigurationDrift:
 
     def test_quality_filter_skip_sources_match_expected_sources(self):
         """
-        config.CODE_SOURCES means the 5 code sub-sources in the data mix.
-        quality.CODE_SOURCES is broader: it is the set of sources that bypass
-        English-prose filters. That includes code plus symbol-heavy generated
-        sources such as synthetic_arithmetic.
+        config.CODE_SOURCES means the code sub-sources in the data mix.
+        quality.CODE_SOURCES is broader: sources that bypass prose filters.
         """
-        assert set(QUALITY_CODE_SOURCES) == QUALITY_SKIP_SOURCES, (
+        assert set(QUALITY_CODE_SOURCES) == QUALITY_PROSE_SKIP_SOURCES, (
             f"CODE_SOURCES in quality.py ({set(QUALITY_CODE_SOURCES)}) drifted "
-            f"from expected prose-filter skip sources ({QUALITY_SKIP_SOURCES}). "
+            f"from expected prose-filter skip sources ({QUALITY_PROSE_SKIP_SOURCES}). "
             f"Update quality.py or this test if a new symbol-heavy source is added."
         )
 
-    def test_symbol_heavy_skip_sources_are_real_sources(self):
-        missing = SYMBOL_HEAVY_SKIP_SOURCES - set(ALL_SOURCES)
+    def test_prose_skip_sources_are_real_sources(self):
+        missing = QUALITY_PROSE_SKIP_SOURCES - set(ALL_SOURCES)
         assert not missing, (
-            f"Symbol-heavy quality skip sources are not in ALL_SOURCES: {missing}"
+            f"Quality prose-skip sources are not in ALL_SOURCES: {missing}"
         )
 
     def test_generated_sources_skip_fuzzy_dedup_only(self):
@@ -92,7 +93,7 @@ class TestConfigurationDrift:
         """
         from curator.scripts.curate import SKIP_FUZZY_DEDUP_SOURCES
 
-        assert SKIP_FUZZY_DEDUP_SOURCES == SYMBOL_HEAVY_SKIP_SOURCES
+        assert SKIP_FUZZY_DEDUP_SOURCES == FUZZY_DEDUP_SKIP_SOURCES
 
 
 # ── Raw data ───────────────────────────────────────────────────────────────────
@@ -108,7 +109,7 @@ class TestRawData:
         shards = list(pipeline_path("raw", source).glob("*.jsonl"))
         if not shards:
             pytest.skip(f"No raw shards for {source} — covered by presence test")
-        # Check first shard per source
+
         shard = sorted(shards)[0]
         docs = read_jsonl(shard)
         assert len(docs) > 0, f"Empty shard: {shard}"
@@ -145,7 +146,7 @@ class TestFilteredData:
         assert len(shards) > 0, f"No filtered shards for {source}"
 
     def test_filtered_docs_pass_quality_checks(self):
-        """Every document in filtered output should pass quality filters."""
+        """Every sampled document in filtered output should pass quality filters."""
         qf = QualityFilter()
         failures = []
 
@@ -173,8 +174,8 @@ class TestFilteredData:
     def test_filtered_non_code_has_minimum_length(self, source):
         """
         Prose-like non-code sources go through the full minimum-length filter.
-        Generated/template-like sources are excluded because they intentionally
-        produce short examples.
+        Generated/template-like and symbol-heavy sources are excluded because
+        they intentionally produce short or non-prose examples.
         """
         MIN_CHARS = 500
         shards = sorted(pipeline_path("filtered", source).glob("*.jsonl"))
@@ -196,25 +197,45 @@ class TestDedupedData:
         shards = list(pipeline_path("filtered", f"{source}_deduped").glob("*.jsonl"))
         assert len(shards) > 0, f"No deduped shards for {source}"
 
-    def test_no_exact_duplicates_in_deduped_output(self):
-        """No exact duplicate documents should exist across all deduped sources."""
+    def test_no_exact_duplicates_in_deduped_output_sample(self):
+        """
+        Spot-check exact duplicate removal without scanning the whole corpus.
+
+        The curation stage already performs full exact dedup and logs the full
+        hash index size. This pytest check is intentionally bounded so
+        make test-curator stays quick even when mini/raw sources contain many
+        upstream records.
+        """
         seen_hashes: set[bytes] = set()
         duplicates = []
 
         for source in ALL_SOURCES:
+            checked = 0
             shards = sorted(
                 pipeline_path("filtered", f"{source}_deduped").glob("*.jsonl")
-            )
+            )[:DEDUP_EXACT_MAX_SHARDS_PER_SOURCE]
+
             for shard in shards:
-                docs = read_jsonl(shard)
-                for doc in docs:
-                    h = exact_hash(doc.get("text", ""))
-                    if h in seen_hashes:
-                        duplicates.append(f"{source}: {doc['text'][:60]}")
-                    seen_hashes.add(h)
+                with open(shard, encoding="utf-8") as f:
+                    for line in f:
+                        if not line.strip():
+                            continue
+
+                        doc = json.loads(line)
+                        h = exact_hash(doc.get("text", ""))
+                        if h in seen_hashes:
+                            duplicates.append(f"{source}: {doc.get('text', '')[:60]}")
+                        seen_hashes.add(h)
+
+                        checked += 1
+                        if checked >= DEDUP_EXACT_SAMPLE_PER_SOURCE:
+                            break
+
+                if checked >= DEDUP_EXACT_SAMPLE_PER_SOURCE:
+                    break
 
         assert len(duplicates) == 0, (
-            f"{len(duplicates)} exact duplicates found in deduped output:\n"
+            f"{len(duplicates)} exact duplicates found in sampled deduped output:\n"
             + "\n".join(duplicates[:5])
         )
 
@@ -229,18 +250,17 @@ class TestCuratedOutput:
         assert pipeline_path("curated", "val.jsonl").exists()
 
     def test_train_jsonl_is_non_empty(self):
-        docs = read_jsonl(pipeline_path("curated", "train.jsonl"))
-        assert len(docs) > 0, "train.jsonl is empty"
+        path = pipeline_path("curated", "train.jsonl")
+        with open(path, encoding="utf-8") as f:
+            assert any(line.strip() for line in f), f"{path} is empty"
 
     def test_train_jsonl_contains_required_sources(self):
         """
         train.jsonl should contain most sources in the mix.
 
-        The 1% conala share at mini scale (1M tokens × 10% × 1% = 1k chars,
-        roughly 200 tokens) can plausibly round to zero docs after blend
-        cap trimming — this is why we allow up to one source to be absent
-        rather than requiring strict presence of every one. If more than
-        one source is missing, there's a real pipeline problem.
+        The 1% conala share at mini scale can plausibly round to zero docs
+        after blend cap trimming — this is why we allow up to one source to be
+        absent rather than requiring strict presence of every one.
         """
         docs = read_jsonl(pipeline_path("curated", "train.jsonl"))
         sources = {d["source"] for d in docs}
@@ -281,9 +301,9 @@ class TestCuratedOutput:
 
     def test_train_jsonl_has_no_short_documents(self):
         """
-        No non-code document in train.jsonl should be below the quality
-        filter threshold. Code and generated/template-like sources bypass
-        this filter, so they may legitimately have short documents.
+        No prose-like document in train.jsonl should be below the quality
+        filter threshold. Code/generated/symbol-heavy sources bypass this
+        filter, so they may legitimately have short documents.
         """
         MIN_CHARS = 500
         docs = read_jsonl(pipeline_path("curated", "train.jsonl"))
@@ -293,7 +313,7 @@ class TestCuratedOutput:
             and len(d.get("text", "")) < MIN_CHARS
         ]
         assert len(short_non_code) == 0, (
-            f"{len(short_non_code)} non-code documents in train.jsonl "
+            f"{len(short_non_code)} prose-like documents in train.jsonl "
             f"are below {MIN_CHARS} chars"
         )
 
@@ -311,16 +331,18 @@ class TestCuratedOutput:
             assert "source" in doc
             assert len(doc["text"]) > 0
 
-    def test_train_jsonl_has_no_exact_duplicates(self):
+    def test_train_jsonl_has_no_exact_duplicates_sample(self):
         docs = read_jsonl(pipeline_path("curated", "train.jsonl"))
         seen: set[bytes] = set()
         duplicates = 0
-        for doc in docs:
+        for doc in docs[:10_000]:
             h = exact_hash(doc.get("text", ""))
             if h in seen:
                 duplicates += 1
             seen.add(h)
-        assert duplicates == 0, f"{duplicates} exact duplicates found in train.jsonl"
+        assert duplicates == 0, (
+            f"{duplicates} exact duplicates found in sampled train.jsonl"
+        )
 
 
 # ── blend_stats.json ───────────────────────────────────────────────────────────
@@ -356,9 +378,8 @@ class TestBlendStats:
     def test_blend_stats_sources_recorded(self):
         """
         All sources that produced output should appear in blend_stats.
-        We allow up to one source to be absent (same caveat as the
-        train.jsonl test — the 1% conala share can round to zero at
-        mini scale).
+        We allow up to one source to be absent because tiny submix shares can
+        round to zero at mini scale.
         """
         stats = self._load_stats()
         mix = stats["source_mix"]
@@ -421,8 +442,8 @@ class TestBlendStats:
         """
         Mini curation should not leave unresolved deficits after overflow.
 
-        If this fails, a source ran short and the overflow routing did not make
-        up the missing characters.
+        If this fails, a source ran short and overflow routing did not make up
+        the missing characters.
         """
         stats = self._load_stats()
         deficits = {

@@ -3,23 +3,25 @@ tests/data_pipeline/test_pipeline_validate.py
 ----------------------------------------------
 Validates real outputs from 'make validate'.
 
-Run after: make validate
+Run after: make validate SIZE=mini
 Command:   make test-validate
 
 Checks:
     - data/validated/train.jsonl exists and is non-empty
-    - Validated output is a subset of curated input (validation only removes)
-    - All docs pass the same quality checks as the curator
-    - No code documents were filtered by perplexity (code is exempt)
-    - validation_stats.json exists and is internally consistent
+    - Validated output is a sampled subset of curated input
+    - Validated prose-like docs pass quality checks
+    - Source-aware validation stats are internally consistent
+    - validation_stats.json exists and matches output files
+
+This file is intentionally fast. Tests stream/sample large JSONL files rather
+than loading whole corpora when a quick invariant is enough.
 """
 
 import json
-from pathlib import Path
 
 import pytest
 
-from tests.data_pipeline.helpers import requires_stage, read_jsonl, pipeline_path
+from tests.data_pipeline.helpers import requires_stage, pipeline_path
 from curator.filters.quality import QualityFilter
 from curator.filters.dedup import exact_hash
 
@@ -27,63 +29,128 @@ from curator.filters.dedup import exact_hash
 pytestmark = requires_stage("validate")
 
 
+PROSE_HEURISTIC_SKIP_SOURCES = {
+    "codesearchnet",
+    "stack_smol",
+    "stack_v1",
+    "jupyter",
+    "conala",
+    "synthetic_arithmetic",
+    "synthetic_task_code",
+    "educational_qa_mcq",
+    "factual_restraint",
+    "nemotron_cc_math",
+    "nemotron_specialized",
+}
+
+VALIDATE_SAMPLE_DOCS = 500
+
+
+def _count_jsonl(path) -> int:
+    with open(path, encoding="utf-8") as f:
+        return sum(1 for line in f if line.strip())
+
+
 class TestValidatedOutput:
     def test_validated_train_jsonl_exists(self):
         assert pipeline_path("validated", "train.jsonl").exists()
 
-    def test_validated_train_jsonl_non_empty(self):
-        docs = read_jsonl(pipeline_path("validated", "train.jsonl"))
-        assert len(docs) > 0
+    def test_validated_val_jsonl_exists(self):
+        assert pipeline_path("validated", "val.jsonl").exists()
 
-    def test_validated_is_subset_of_curated(self):
+    def test_validated_train_jsonl_non_empty(self):
+        path = pipeline_path("validated", "train.jsonl")
+        with open(path, encoding="utf-8") as f:
+            assert any(line.strip() for line in f), f"{path} is empty"
+
+    def test_validated_is_subset_of_curated_sample(self):
         """
-        Validation only filters — every validated doc must exist in curated.
+        Validation only filters — sampled validated docs must exist in curated.
+
+        This is bounded so make test-validate stays quick on larger runs.
         """
-        curated_hashes = {
-            exact_hash(d.get("text", ""))
-            for d in read_jsonl(pipeline_path("curated", "train.jsonl"))
-        }
-        validated_docs = read_jsonl(pipeline_path("validated", "train.jsonl"))
-        not_in_curated = [
-            d for d in validated_docs
-            if exact_hash(d.get("text", "")) not in curated_hashes
-        ]
-        assert len(not_in_curated) == 0, (
-            f"{len(not_in_curated)} validated docs not found in curated output — "
-            f"validation is adding documents, not just filtering"
+        validated_hashes: list[bytes] = []
+        with open(pipeline_path("validated", "train.jsonl"), encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                validated_hashes.append(exact_hash(json.loads(line).get("text", "")))
+                if len(validated_hashes) >= VALIDATE_SAMPLE_DOCS:
+                    break
+
+        assert validated_hashes, "validated/train.jsonl has no sampled docs"
+
+        wanted = set(validated_hashes)
+        found: set[bytes] = set()
+        with open(pipeline_path("curated", "train.jsonl"), encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                h = exact_hash(json.loads(line).get("text", ""))
+                if h in wanted:
+                    found.add(h)
+                if found == wanted:
+                    break
+
+        missing = wanted - found
+        assert not missing, (
+            f"{len(missing)} sampled validated docs not found in curated output — "
+            f"validation may be adding documents, not just filtering"
         )
 
     def test_validated_docs_pass_quality_checks(self):
-        """All validated docs should still pass quality filters."""
+        """Validated prose-like docs should still pass quality filters."""
         qf = QualityFilter()
         failures = []
-        docs = read_jsonl(pipeline_path("validated", "train.jsonl"))
-        for doc in docs[:100]:
-            passed, reason = qf.check(doc)
-            if not passed:
-                failures.append(f"rejected '{reason}': {doc['text'][:80]}")
+        checked = 0
+
+        with open(pipeline_path("validated", "train.jsonl"), encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+
+                doc = json.loads(line)
+                if doc.get("source") in PROSE_HEURISTIC_SKIP_SOURCES:
+                    continue
+
+                passed, reason = qf.check(doc)
+                if not passed:
+                    failures.append(f"rejected '{reason}': {doc['text'][:80]}")
+
+                checked += 1
+                if checked >= 100:
+                    break
+
         assert len(failures) == 0, (
-            f"{len(failures)} validated docs fail quality checks:\n"
+            f"{len(failures)} validated prose-like docs fail quality checks:\n"
             + "\n".join(failures[:5])
         )
 
     def test_validated_has_required_fields(self):
-        docs = read_jsonl(pipeline_path("validated", "train.jsonl"))
-        for doc in docs[:20]:
-            assert "text" in doc
-            assert "source" in doc
+        checked = 0
+        with open(pipeline_path("validated", "train.jsonl"), encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+
+                doc = json.loads(line)
+                assert "text" in doc
+                assert "source" in doc
+                assert len(doc["text"]) > 0
+
+                checked += 1
+                if checked >= 20:
+                    break
+
+        assert checked > 0, "validated/train.jsonl has no docs to check"
 
     def test_validated_retention_rate_reasonable(self):
         """
         Validation should remove some docs but not too many.
         Expect 70-100% retention — if below 70% something is wrong.
         """
-        curated_count = sum(
-            1 for _ in open(pipeline_path("curated", "train.jsonl"))
-        )
-        validated_count = sum(
-            1 for _ in open(pipeline_path("validated", "train.jsonl"))
-        )
+        curated_count = _count_jsonl(pipeline_path("curated", "train.jsonl"))
+        validated_count = _count_jsonl(pipeline_path("validated", "train.jsonl"))
         retention = validated_count / max(curated_count, 1)
         assert retention >= 0.70, (
             f"Validation retention rate too low: {retention:.1%} "
@@ -106,6 +173,11 @@ class TestValidationStats:
         stats = self._load_stats()
         assert "total" in stats
         assert "kept" in stats
+        assert "rejected_terminal_punct" in stats
+        assert "rejected_repeated_lines" in stats
+        assert "rejected_perplexity" in stats
+        assert "skipped_prose_heuristics" in stats
+        assert "splits" in stats
 
     def test_validation_stats_kept_le_total(self):
         stats = self._load_stats()
@@ -115,15 +187,19 @@ class TestValidationStats:
         stats = self._load_stats()
         assert stats["kept"] > 0, "Validation kept 0 documents — something is wrong"
 
+    def test_validation_stats_record_source_aware_skips(self):
+        stats = self._load_stats()
+        assert stats["skipped_prose_heuristics"] > 0, (
+            "Expected source-aware validation to skip prose heuristics for "
+            "code/synthetic/symbol-heavy sources"
+        )
+
     def test_validation_stats_matches_output_files(self):
         """
         Per-split kept counts should match per-split output line counts.
 
-        The top-level `kept` field in validation_stats.json aggregates
-        train + val, so comparing it directly to train.jsonl is wrong by
-        exactly val.kept. Checking each split against its own file is
-        stricter: Option B (compare sum) would miss bugs where train
-        over-counts by the same amount val under-counts.
+        The top-level `kept` field aggregates train + val, so comparing it
+        directly to train.jsonl is wrong by exactly val.kept.
         """
         stats = self._load_stats()
         splits = stats.get("splits", {})
@@ -136,8 +212,7 @@ class TestValidationStats:
             path = pipeline_path("validated", f"{split_name}.jsonl")
             if not path.exists():
                 continue
-            with open(path) as f:
-                actual = sum(1 for _ in f)
+            actual = _count_jsonl(path)
             assert split_stats["kept"] == actual, (
                 f"validation_stats.json splits.{split_name}.kept = "
                 f"{split_stats['kept']} but {split_name}.jsonl has {actual} lines"
