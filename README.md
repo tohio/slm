@@ -107,10 +107,7 @@ slm/
 │   │   ├── pes2o.py
 │   │   ├── nemotron_cc_math.py
 │   │   ├── stackexchange.py
-│   │   ├── synthetic_arithmetic.py  generated arithmetic pretraining source
-│   │   ├── synthetic_task_code.py    generated task-shaped code examples
-│   │   ├── educational_qa_mcq.py     generated QA/MCQ educational examples
-│   │   ├── factual_restraint.py      generated factual-restraint examples
+│   │   ├── hf_synthetic.py           HF-backed synthetic arithmetic/task-code/QA/restraint sources
 │   │   ├── nemotron_specialized.py   nvidia/Nemotron-Pretraining-Specialized-v1.1
 │   │   ├── nemotron_code_v2.py       nvidia/Nemotron-Pretraining-Code-v2
 │   │   ├── nemotron_cc_code.py       nvidia/Nemotron-CC-Code-v1
@@ -552,13 +549,13 @@ make pretrain PRETRAIN_CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
 | peS2o | 5% | `allenai/peS2o` v2 — academic/scientific prose |
 | Nemotron CC Math | 5% | math-heavy web text |
 | StackExchange | 5% | Q&A across dozens of sites |
-| Synthetic arithmetic | 3% | generated locally; arithmetic formats: QA, bare equations, equation completion, word problems, comparisons, and simple multi-step arithmetic |
-| Synthetic task code | 5% | generated locally; task-shaped code examples, Python 70% / Go 15% / Rust 10% / Bash 5% |
-| Educational QA/MCQ | 3% | generated locally; QA, MCQ, explanation, and cloze formats; benchmark datasets excluded |
-| Factual restraint | 0.5% | generated locally; uncertainty, private/unverifiable facts, no fake search/tool claims |
+| Synthetic arithmetic | 3% | `tohio/slm-synthetic-arithmetic`, externally generated arithmetic signal |
+| Synthetic task code | 5% | `tohio/slm-synthetic-task-code`, externally generated task-shaped code examples |
+| Educational QA/MCQ | 3% | `tohio/slm-synthetic-educational-qa-mcq`, externally generated QA/MCQ examples |
+| Factual restraint | 0.5% | `tohio/slm-synthetic-factual-restraint`, externally generated uncertainty/restraint examples |
 | Code (total) | 15% | split across 5 code sub-sources (see curator/README.md) |
 
-When supply-constrained sources fall short of their character budget, deficits are routed by source type. Local synthetic deficits route to Nemotron Specialized first, then FineWeb-Edu, then FineWeb. General source deficits route to FineWeb-Edu first and FineWeb as the final fallback.
+When supply-constrained sources fall short of their character budget, deficits are routed by source type. Synthetic-source deficits route to Nemotron Specialized first, then FineWeb-Edu, then FineWeb. General source deficits route to FineWeb-Edu first and FineWeb as the final fallback.
 
 Generated/template-like sources run exact dedup but bypass fuzzy MinHash dedup so useful near-duplicate training signal is not collapsed.
 
@@ -568,7 +565,7 @@ NVIDIA/Nemotron sources are supplemental math and specialized-data sources; Fine
 
 The source mix above defines the pretraining target mix. The actual realized mix for each curation run is written to `data/curated/blend_stats.json` at the end of the blend stage.
 
-Realized percentages can differ slightly from target percentages when a source is supply-bound or filtered/deduplicated more aggressively than expected. Local synthetic deficits route to Nemotron Specialized first, then FineWeb-Edu, then FineWeb. General source deficits route to FineWeb-Edu first and FineWeb as the final fallback.
+Realized percentages can differ slightly from target percentages when a source is supply-bound or filtered/deduplicated more aggressively than expected. Synthetic-source deficits route to Nemotron Specialized first, then FineWeb-Edu, then FineWeb. General source deficits route to FineWeb-Edu first and FineWeb as the final fallback.
 
 Use `blend_stats.json` as the source of truth for a completed run. `export.py` reads this file when producing per-model cards.
 

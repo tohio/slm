@@ -41,10 +41,10 @@ Each source runs independently through filtering and deduplication. The blend st
 | peS2o | 5% | finite | academic/scientific prose; supply-bound at larger scales |
 | Nemotron CC Math | 5% | very large | `nvidia/Nemotron-CC-Math-v1`, math/STEM supplement replacing OpenWebMath |
 | StackExchange | 5% | finite/large | Q&A-style web text |
-| Synthetic arithmetic | 3% | generated locally | arithmetic formats: QA, bare equations, equation completion, word problems, comparisons, and simple multi-step arithmetic |
-| Synthetic task code | 5% | generated locally | targeted task-shaped code examples; Python 70%, Go 15%, Rust 10%, Bash 5% |
-| Educational QA/MCQ | 3% | generated locally | targeted QA, MCQ, explanation, and cloze formats; benchmark datasets excluded |
-| Factual restraint | 0.5% | generated locally | uncertainty, private/unverifiable facts, no fake search/tool claims |
+| Synthetic arithmetic | 3% | HF-backed | `tohio/slm-synthetic-arithmetic` |
+| Synthetic task code | 5% | HF-backed | `tohio/slm-synthetic-task-code` |
+| Educational QA/MCQ | 3% | HF-backed | `tohio/slm-synthetic-educational-qa-mcq` |
+| Factual restraint | 0.5% | HF-backed | `tohio/slm-synthetic-factual-restraint` |
 | Nemotron Specialized | 5% | large | `nvidia/Nemotron-Pretraining-Specialized-v1.1`, scalable specialized/synthetic reservoir |
 | **Code total** | **15%** | mixed | split across 5 code sub-sources |
 
@@ -64,7 +64,7 @@ Percentages are the same at every size. Scaling up changes `corpus_tokens`, not 
 
 ### Cap-and-redistribute
 
-Several sources are supply-bound at large scales: peS2o (abstracts only) and jupyter run out at 350m+; Wikipedia, pg19, nemotron_cc_math, and stack_smol all become supply-bound at 1b; codesearchnet and conala upstream is small enough to bind even sooner. Each source writes up to its budget or until its supply is exhausted, whichever is smaller. Deficits then follow source-aware overflow chains: local synthetic deficits route to Nemotron Specialized first, then FineWeb-Edu, then FineWeb; general deficits route to FineWeb-Edu first and FineWeb as the final fallback.
+Several sources are supply-bound at large scales: peS2o (abstracts only) and jupyter run out at 350m+; Wikipedia, pg19, nemotron_cc_math, and stack_smol all become supply-bound at 1b; codesearchnet and conala upstream is small enough to bind even sooner. Each source writes up to its budget or until its supply is exhausted, whichever is smaller. Deficits then follow source-aware overflow chains: synthetic-source deficits route to Nemotron Specialized first, then FineWeb-Edu, then FineWeb; general deficits route to FineWeb-Edu first and FineWeb as the final fallback.
 
 This behavior is load-bearing at 1b scale; partially load-bearing at 125m/350m for the always-supply-bound sources (peS2o, jupyter).
 
@@ -78,7 +78,7 @@ gaps in math and specialized synthetic data.
 
 The source mix above defines the pretraining target mix. The actual realized mix for each curation run is written to `data/curated/blend_stats.json` at the end of the blend stage.
 
-Realized percentages can differ slightly from target percentages when a source is supply-bound or filtered/deduplicated more aggressively than expected. Local synthetic deficits route to Nemotron Specialized first, then FineWeb-Edu, then FineWeb. General source deficits route to FineWeb-Edu first and FineWeb as the final fallback.
+Realized percentages can differ slightly from target percentages when a source is supply-bound or filtered/deduplicated more aggressively than expected. Synthetic-source deficits route to Nemotron Specialized first, then FineWeb-Edu, then FineWeb. General source deficits route to FineWeb-Edu first and FineWeb as the final fallback.
 
 Use `blend_stats.json` as the source of truth for a completed run. `export.py` reads this file when producing per-model cards.
 
@@ -112,10 +112,7 @@ curator/
 │   ├── nemotron_cc_math.py    nvidia/Nemotron-CC-Math-v1 (streaming)
 │   ├── stackexchange.py       HuggingFaceH4 stack-exchange Q+A (streaming)
 │   ├── nemotron_specialized.py nvidia/Nemotron-Pretraining-Specialized-v1.1
-│   ├── synthetic_arithmetic.py generated arithmetic pretraining source
-│   ├── synthetic_task_code.py  generated task-shaped code examples
-│   ├── educational_qa_mcq.py   generated QA/MCQ educational examples
-│   ├── factual_restraint.py    generated factual-restraint examples
+│   ├── hf_synthetic.py         HF-backed synthetic arithmetic/task-code/QA/restraint sources
 │   ├── code_search_net.py     CodeSearchNet — 6 languages
 │   ├── stack_smol.py          bigcode/the-stack-smol — 30 languages
 │   ├── stack_v1.py            bigcode/the-stack-dedup (inline content)
@@ -288,36 +285,20 @@ python curator/scripts/upload_s3.py download --src 125m/2026-04-02/curated --dst
 
 ```
 data/
-├── raw/
-│   ├── common_crawl/               raw CC JSONL shards + cc_progress.json
-│   ├── fineweb/                    streamed FineWeb shards
-│   ├── fineweb_edu/                streamed FineWeb-Edu shards
-│   ├── wikipedia/                  raw Wikipedia shards
-│   ├── pg19/                       pg19 book shards
-│   ├── pes2o/                      streamed peS2o shards
-│   ├── nemotron_cc_math/           streamed math web shards
-│   ├── stackexchange/              streamed SE Q+A shards
-│   ├── synthetic_arithmetic/       generated arithmetic shards
-│   ├── synthetic_task_code/        generated task-code shards
-│   ├── educational_qa_mcq/         generated QA/MCQ shards
-│   ├── factual_restraint/          generated factual-restraint shards
-│   ├── nemotron_specialized/       streamed specialized synthetic shards
-│   ├── codesearchnet/              CSN 6-language shards
-│   ├── stack_smol/                 stack-smol 30-language shards
-│   ├── stack_v1/                   stack-v1 4-language shards (content inline)
-│   ├── stack_v2/                   (disabled — present only if re-enabled)
-│   ├── jupyter/                    jupyter notebook shards
-│   └── conala/                     CoNaLa pair shards
-├── filtered/
-│   ├── <source>/                   quality-filtered shards
-│   └── <source>deduped/           + deduplicated
-├── dedup_scratch/                  datatrove intermediate state (cleaned per-source after success)
-│   └── <source>/                   per-source exact + minhash state
-└── curated/
-├── blend<source>.jsonl        per-source staging (cleaned up after shuffle)
-├── train.jsonl                 final blended train split
-├── val.jsonl                   final blended val split (uniform sample)
-└── blend_stats.json            per-source docs/chars/deficit/val_docs breakdown
+└── runs/
+    └── <size>/
+        ├── raw/
+        │   └── <source>/           raw JSONL shards from upstream/HF sources
+        ├── filtered/
+        │   └── <source>/           quality-filtered shards
+        ├── dedup_scratch/
+        │   └── <source>/           per-source exact + MinHash state
+        ├── curated/
+        │   ├── train.jsonl         final blended train split
+        │   ├── val.jsonl           final blended val split
+        │   └── blend_stats.json    per-source docs/chars/deficit/val_docs breakdown
+        ├── tokenized/
+        └── tokenizer/
 ```
 
 ---
@@ -403,7 +384,7 @@ Two-stage deduplication applied after quality filtering, per source:
 
 **Stage 2 — Fuzzy dedup (datatrove).** 4-stage disk-based MinHash LSH pipeline: signatures → buckets → cluster → filter. Catches near-duplicates (Jaccard similarity > 0.8). Peak RAM is bounded by shard size, not corpus size — 125m, 350m, and 1b run with the same memory footprint.
 
-Generated/template-like sources (`synthetic_arithmetic`, `synthetic_task_code`, `educational_qa_mcq`, `factual_restraint`) still run exact dedup, but bypass fuzzy MinHash dedup. MinHash collapses useful near-duplicate template variation too aggressively; exact dedup only removes true duplicate rows.
+HF-backed synthetic/template-like sources (`synthetic_arithmetic`, `synthetic_task_code`, `educational_qa_mcq`, `factual_restraint`) still run exact dedup, but bypass fuzzy MinHash dedup. MinHash collapses useful near-duplicate template variation too aggressively; exact dedup only removes true duplicate rows.
 
 Per-source scratch (`data/dedup_scratch/<source>/`) is deleted automatically after each source's MinHash filter writes its output successfully. Without this, the 125m run accumulated 135 GB of scratch across the source set; at 1b it would scale to ~780 GB and not fit on a 2 TB disk alongside raw + filtered + curated.
 
@@ -415,7 +396,7 @@ Three passes:
 
 **Pass 1 (parallel).** Each source streams its deduped shards to a per-source staging file (`blend_<source>.jsonl`), stopping when the source's character target is reached or its supply is exhausted. Deficit (target minus actual) is recorded per source.
 
-**Pass 2 (sequential).** If total deficit > 0, source-aware overflow chains append additional content. Local synthetic deficits route to Nemotron Specialized first, then FineWeb-Edu, then FineWeb. General source deficits route to FineWeb-Edu first and FineWeb as the final fallback.
+**Pass 2 (sequential).** If total deficit > 0, source-aware overflow chains append additional content. Synthetic-source deficits route to Nemotron Specialized first, then FineWeb-Edu, then FineWeb. General source deficits route to FineWeb-Edu first and FineWeb as the final fallback.
 
 **Pass 3 (shuffle + split).** Two shuffle strategies based on size, both producing globally-mixed train and a uniform-sample val:
 - **In-memory** — when total staging (scaled by ~5× for Python object overhead) fits in `SHUFFLE_RAM_BUDGET_GB` (default 12 GB). Read everything, shuffle once, write split.

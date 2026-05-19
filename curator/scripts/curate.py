@@ -100,7 +100,6 @@ from config import (
 from config.data_mix import (
     SYNTHETIC_AVG_CHARS_PER_DOC,
     SYNTHETIC_DOC_INFLATION,
-    SYNTHETIC_FULL_RUN_DOC_CAPS,
 )
 
 from config.paths import (
@@ -118,10 +117,12 @@ from curator.sources.pg19 import PG19Source
 from curator.sources.pes2o import PeS2oSource
 from curator.sources.open_web_math import OpenWebMathSource
 from curator.sources.stackexchange import StackExchangeSource
-from curator.sources.synthetic_arithmetic import SyntheticArithmeticSource
-from curator.sources.synthetic_task_code import SyntheticTaskCodeSource
-from curator.sources.educational_qa_mcq import EducationalQAMCQSource
-from curator.sources.factual_restraint import FactualRestraintSource
+from curator.sources.hf_synthetic import (
+    SyntheticArithmeticSource,
+    SyntheticTaskCodeSource,
+    EducationalQAMCQSource,
+    FactualRestraintSource,
+)
 from curator.sources.code_search_net import CodeSearchNetSource
 from curator.sources.stack_smol import StackSmolSource
 from curator.sources.stack_v1 import StackV1Source
@@ -192,10 +193,11 @@ SKIP_FUZZY_DEDUP_SOURCES = {
     "factual_restraint",
 }
 
-# Local synthetic sources are controlled behavior patches, not bulk reservoirs.
-# If they underfill, use the scalable specialized synthetic source first, then
-# cleaner educational web text, and only then the broad FineWeb fallback.
-LOCAL_SYNTHETIC_SOURCES = {
+# Synthetic sources are externally generated and published to Hugging Face.
+# They are controlled behavior supplements, not bulk reservoirs. If they
+# underfill, use the scalable specialized synthetic source first, then cleaner
+# educational web text, and only then the broad FineWeb fallback.
+SYNTHETIC_SOURCES = {
     "synthetic_arithmetic",
     "synthetic_task_code",
     "educational_qa_mcq",
@@ -392,17 +394,7 @@ def _derive_max_docs(name: str, target: str) -> int | None:
     Then in both cases:
         max_docs = (target_chars / avg_chars_per_doc) × inflation
     """
-    synthetic_full_run_cap = SYNTHETIC_FULL_RUN_DOC_CAPS.get(name, {}).get(target)
-    if synthetic_full_run_cap is not None:
-        log.info(
-            "%s cap for %s limited to %s docs by SYNTHETIC_FULL_RUN_DOC_CAPS",
-            name,
-            target,
-            f"{synthetic_full_run_cap:,}",
-        )
-        return synthetic_full_run_cap
-
-    if name in LOCAL_SYNTHETIC_SOURCES:
+    if name in SYNTHETIC_SOURCES:
         avg_chars = SYNTHETIC_AVG_CHARS_PER_DOC[name]
         inflation = SYNTHETIC_DOC_INFLATION
     elif name in _AVG_CHARS_PER_DOC:
@@ -435,7 +427,7 @@ def _derive_max_chars(name: str, target: str) -> int | None:
     if name == "pg19":
         return int(target_chars * 1.30)
 
-    if name in LOCAL_SYNTHETIC_SOURCES:
+    if name in SYNTHETIC_SOURCES:
         return int(target_chars * 2.00)
 
     return None
@@ -510,7 +502,7 @@ def _build_source(
     else:
         cap = _derive_max_docs(name, target)
         if cap is not None:
-            if name in LOCAL_SYNTHETIC_SOURCES:
+            if name in SYNTHETIC_SOURCES:
                 avg_for_log = SYNTHETIC_AVG_CHARS_PER_DOC.get(name, 0)
                 inflation_for_log = SYNTHETIC_DOC_INFLATION
             else:
@@ -1289,7 +1281,7 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
 
     # ── Pass 2: source-aware overflow ─────────────────────────────────────────
     overflow_chains = {
-        source: SYNTHETIC_OVERFLOW_CHAIN for source in LOCAL_SYNTHETIC_SOURCES
+        source: SYNTHETIC_OVERFLOW_CHAIN for source in SYNTHETIC_SOURCES
     }
     for source in CODE_SOURCES:
         overflow_chains[source] = ("stack_v1", "fineweb_edu", OVERFLOW_SINK)
