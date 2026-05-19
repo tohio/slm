@@ -24,6 +24,7 @@ Env vars:
 import argparse
 import logging
 import os
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -83,6 +84,12 @@ def get_bucket_and_prefix() -> tuple[str, str]:
 def build_key(prefix: str, relative_path: str) -> str:
     """Build a full S3 key from prefix and a relative path."""
     return f"{prefix}/{relative_path.lstrip('/')}"
+
+
+def validate_date(date: str) -> None:
+    """Validate artifact DATE format: YYYY-MM-DD."""
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+        raise ValueError(f"DATE must be YYYY-MM-DD, got: {date}")
 
 
 def _list_existing_keys(
@@ -311,7 +318,7 @@ def _artifact_paths(size: str, date: str, stage: str) -> tuple[Path, str]:
     """Return (local_path, s3_prefix) for a named curation/training artifact.
 
     Stage names are intentionally user-facing and stable:
-      - raw:        downloaded source data, size-scoped under data/raw/<size>
+      - raw:        downloaded source data under data/runs/<size>/raw
       - validated:  curated/validated JSONL under data/runs/<size>/curated
       - tokenized:  pretraining binaries under data/runs/<size>/tokenized
       - tokenizer:  tokenizer files under data/runs/<size>/tokenizer
@@ -320,7 +327,7 @@ def _artifact_paths(size: str, date: str, stage: str) -> tuple[Path, str]:
       <size>/<date>/<artifact>/...
     """
     if stage == "raw":
-        return DATA_DIR / "raw" / size, f"{size}/{date}/raw"
+        return DATA_DIR / "runs" / size / "raw", f"{size}/{date}/raw"
     if stage == "validated":
         return DATA_DIR / "runs" / size / "curated", f"{size}/{date}/curated"
     if stage == "tokenized":
@@ -506,6 +513,7 @@ def main():
         print("-" * 92)
         print(f"Total: {len(objects)} objects, {total_size / 1024**3:.2f} GB")
     elif args.command == "artifacts-upload":
+        validate_date(args.date)
         upload_artifacts(
             size=args.size,
             date=args.date,
@@ -517,6 +525,7 @@ def main():
             glob=args.glob,
         )
     elif args.command == "artifacts-download":
+        validate_date(args.date)
         download_artifacts(
             size=args.size,
             date=args.date,

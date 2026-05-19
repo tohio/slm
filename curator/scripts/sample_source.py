@@ -6,11 +6,11 @@ Purpose:
     Human review of what the model is actually being trained on.
 
 Examples:
-    python curator/scripts/sample_source.py --stage raw --source wikipedia --limit 10
-    python curator/scripts/sample_source.py --stage filtered --source wikipedia --limit 10
-    python curator/scripts/sample_source.py --stage deduped --source wikipedia --limit 10
-    python curator/scripts/sample_source.py --stage curated --source wikipedia --limit 10
-    python curator/scripts/sample_source.py --stage validated --source wikipedia --limit 10
+    python curator/scripts/sample_source.py --size 125m --stage raw --source wikipedia --limit 10
+    python curator/scripts/sample_source.py --size 125m --stage filtered --source wikipedia --limit 10
+    python curator/scripts/sample_source.py --size 125m --stage deduped --source wikipedia --limit 10
+    python curator/scripts/sample_source.py --size 125m --stage curated --source wikipedia --limit 10
+    python curator/scripts/sample_source.py --size 125m --stage validated --source wikipedia --limit 10
 
 Notes:
     - This script intentionally does not score or summarize quality.
@@ -39,6 +39,11 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data"),
         help="Root data directory. Default: data",
+    )
+    parser.add_argument(
+        "--size",
+        default="125m",
+        help="Model/data size to sample from under data/runs/<size>. Default: 125m",
     )
     parser.add_argument(
         "--stage",
@@ -77,35 +82,37 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def stage_paths(data_dir: Path, stage: str, source: str) -> list[Path]:
+def stage_paths(data_dir: Path, size: str, stage: str, source: str) -> list[Path]:
     """
     Resolve JSONL files for a source/stage.
 
-    Expected layouts:
-        raw/<source>/*.jsonl
-        filtered/<source>/*.jsonl
-        filtered/<source>_deduped/*.jsonl
-        curated/train.jsonl, curated/val.jsonl
-        validated/train.jsonl, validated/val.jsonl
+    Expected run-scoped layouts:
+        runs/<size>/raw/<source>/*.jsonl
+        runs/<size>/filtered/<source>/*.jsonl
+        runs/<size>/filtered/<source>_deduped/*.jsonl
+        runs/<size>/curated/train.jsonl, runs/<size>/curated/val.jsonl
+        runs/<size>/validated/train.jsonl, runs/<size>/validated/val.jsonl
     """
+    run_dir = data_dir / "runs" / size
+
     if stage == "raw":
-        base = data_dir / "raw" / source
+        base = run_dir / "raw" / source
         return sorted(base.glob("*.jsonl"))
 
     if stage == "filtered":
-        base = data_dir / "filtered" / source
+        base = run_dir / "filtered" / source
         return sorted(base.glob("*.jsonl"))
 
     if stage == "deduped":
-        base = data_dir / "filtered" / f"{source}_deduped"
+        base = run_dir / "filtered" / f"{source}_deduped"
         return sorted(base.glob("*.jsonl"))
 
     if stage == "curated":
-        base = data_dir / "curated"
+        base = run_dir / "curated"
         return [p for p in [base / "train.jsonl", base / "val.jsonl"] if p.is_file()]
 
     if stage == "validated":
-        base = data_dir / "validated"
+        base = run_dir / "validated"
         return [p for p in [base / "train.jsonl", base / "val.jsonl"] if p.is_file()]
 
     raise ValueError(f"Unknown stage: {stage}")
@@ -227,12 +234,12 @@ def main() -> None:
     if args.max_chars <= 0:
         raise SystemExit("--max-chars must be > 0")
 
-    paths = stage_paths(args.data_dir, args.stage, args.source)
+    paths = stage_paths(args.data_dir, args.size, args.stage, args.source)
 
     if not paths:
         raise SystemExit(
             f"No JSONL files found for stage={args.stage!r}, "
-            f"source={args.source!r}, data_dir={str(args.data_dir)!r}"
+            f"source={args.source!r}, size={args.size!r}, data_dir={str(args.data_dir)!r}"
         )
 
     samples = collect_samples(
@@ -252,7 +259,7 @@ def main() -> None:
 
     print(
         f"Showing {len(samples)} sample(s) "
-        f"from source={args.source!r}, stage={args.stage!r}"
+        f"from source={args.source!r}, size={args.size!r}, stage={args.stage!r}"
     )
     print(f"data_dir: {args.data_dir}")
     print(f"files: {len(paths)}")

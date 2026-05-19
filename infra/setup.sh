@@ -114,19 +114,17 @@ echo "==> Downloading spaCy English model..."
 python -m spacy download en_core_web_sm
 
 # ── 6. Data directory structure ───────────────────────────────────────────────
-# Source classes now store raw downloads under data/raw/<size>/<source_name>/.
-# This makes raw curation artifacts reusable per model size and allows
-# artifact restore workflows such as:
+# Curation artifacts are run-scoped under data/runs/<size>/. Source classes
+# create their own per-source subdirectories at first use, for example:
 #
-#   make artifacts-download SIZE=125m DATE=...
-#   rm -rf data/raw/125m/<source>
-#   make curate SIZE=125m
+#   data/runs/125m/raw/wikipedia/
+#   data/runs/125m/filtered/wikipedia/
+#   data/runs/125m/curated/
 #
-# The curate code skips source data already present on disk, so restoring
-# raw/<size>/ lets a run resume without redownloading every source.
-#
-# The source-name list lives in config/data_mix.py and shouldn't be
-# duplicated here. We only create size-level parents.
+# This layout lets artifact restore workflows repopulate a prior run, delete
+# one source directory, and rerun curation while existing on-disk sources are
+# skipped. The source-name list lives in config/data_mix.py and should not be
+# duplicated here.
 
 echo ""
 echo "==> Creating data directory structure at $DATA_DIR..."
@@ -146,15 +144,18 @@ mkdir -p \
 
 for size in "${CURATION_SIZES[@]}"; do
     mkdir -p \
-        "${DATA_DIR}/raw/${size}" \
+        "${DATA_DIR}/runs/${size}/raw" \
+        "${DATA_DIR}/runs/${size}/filtered" \
+        "${DATA_DIR}/runs/${size}/dedup_scratch" \
         "${DATA_DIR}/runs/${size}/curated" \
+        "${DATA_DIR}/runs/${size}/validated" \
         "${DATA_DIR}/runs/${size}/tokenized" \
         "${DATA_DIR}/runs/${size}/tokenizer"
 done
 
 echo "  Created: $DATA_DIR"
 echo "  Created: $HF_CACHE_DIR"
-echo "  Created size-scoped raw dirs: ${CURATION_SIZES[*]}"
+echo "  Created run-scoped curation dirs for: ${CURATION_SIZES[*]}"
 
 # ── 7. Configure .env ─────────────────────────────────────────────────────────
 
@@ -264,11 +265,14 @@ for dir in "${DATA_DIR}/raw" "${DATA_DIR}/filtered" "${DATA_DIR}/curated" \
     fi
 done
 
-# Check size-scoped curation directories
+# Check run-scoped curation directories
 for size in "${CURATION_SIZES[@]}"; do
     for dir in \
-        "${DATA_DIR}/raw/${size}" \
+        "${DATA_DIR}/runs/${size}/raw" \
+        "${DATA_DIR}/runs/${size}/filtered" \
+        "${DATA_DIR}/runs/${size}/dedup_scratch" \
         "${DATA_DIR}/runs/${size}/curated" \
+        "${DATA_DIR}/runs/${size}/validated" \
         "${DATA_DIR}/runs/${size}/tokenized" \
         "${DATA_DIR}/runs/${size}/tokenizer"; do
         if [ -d "$dir" ]; then
