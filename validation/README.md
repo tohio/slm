@@ -4,7 +4,7 @@ Additional quality validation on top of the curator's heuristic filters. The pri
 
 ---
 
-## What This Adds
+## Overview
 
 The curator (`curator/filters/quality.py`) already applies heuristic filters — length, symbol ratio, bullet ratio, alpha ratio, stop words, repeated lines. Validation adds:
 

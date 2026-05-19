@@ -135,7 +135,7 @@ The goal is not to teach broad knowledge. The goal is to correct common small-mo
 
 The generated records use the same structured `conversations` format as OpenHermes. They are not preformatted text; the tokenizer chat template is applied during training.
 
-The current target count is 5,000 response-control examples. Arithmetic examples were intentionally removed from this SFT supplement after diagnostics showed the issue belongs in base pretraining data, not late SFT. Clean arithmetic signal is now handled by the `synthetic_arithmetic` pretraining source in the curation pipeline.
+The response-control supplement contains 5,000 examples. Arithmetic examples are excluded from this SFT supplement because arithmetic behavior is handled by the `synthetic_arithmetic` pretraining source and downstream preference data.
 
 
 ---
@@ -193,7 +193,7 @@ results/
 
 **Why gradient checkpointing only for 1B?** At 125M and 350M, activations fit comfortably in H100 memory. At 1B with seq_len=4096, activation memory becomes the bottleneck.
 
-## Current SFT data policy
+## SFT Data Policy
 
 SFT uses external backbone datasets plus local custom datasets.
 

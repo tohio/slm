@@ -520,17 +520,17 @@ One source worth flagging: peS2o overlaps with academic papers. If future evals 
 
 ---
 
-## Known Limitations
+## Operational Notes
 
-**stack-v1 near-duplicate coverage.** stack-v1 applies exact deduplication but not near-duplicate removal. Near-dups in code (forks, templates, auto-generated files with small variants) slip through. The downstream MinHash dedup stage catches some of this, but v2's dataset-level near-dup filtering was stronger. Acceptable tradeoff for avoiding SWH's rate-limit problems; re-evaluate if repetition shows up in eval.
+**stack-v1 near-duplicate coverage.** stack-v1 applies exact deduplication but not dataset-level near-duplicate removal. Near-dups in code (forks, templates, auto-generated files with small variants) can pass through. The downstream MinHash dedup stage catches part of this while avoiding Software Heritage API rate limits.
 
-**Jupyter and CoNaLa prose components are not language-filtered.** Labeling them as code-adjacent skips English-prose filters, which means non-English prose in these sources passes through. The prose volume is small and largely English-coded on GitHub/StackOverflow, so this is not a meaningful corpus contamination, but the model will see the occasional non-English notebook comment or SO intent.
+**Jupyter and CoNaLa prose components are not language-filtered.** Labeling them as code-adjacent skips English-prose filters, so occasional non-English notebook comments or StackOverflow intents can pass through. The affected volume is small relative to the full corpus.
 
-**Char-to-token ratio is approximate.** `CHARS_PER_TOKEN = 4.3` in `config/data_mix.py` is the measured average for the trained tokenizer on the 125m corpus (excluding code sources). Real ratios vary by domain: English prose ~4.5, code ~3.5, math ~3. The approximation is fine for target sizing; filtering, validation, deduplication, source availability, and tokenization reduce the final retained/tokenized corpus. Recalibrate if the tokenizer is retrained on a substantially different mix, especially after adding symbol-heavy generated data.
+**Char-to-token ratio is approximate.** `CHARS_PER_TOKEN = 4.3` in `config/data_mix.py` is the measured average for the trained tokenizer on the 125m corpus excluding code sources. Real ratios vary by domain: English prose is roughly 4.5, code roughly 3.5, and math roughly 3. Filtering, validation, deduplication, source availability, and tokenization reduce the final retained/tokenized corpus.
 
-**wikipedia cold-cache overhead.** wikipedia's `wikimedia/wikipedia` 20231101.en config loads the full ~19GB dataset (~6.4M articles) before iteration starts, even though mini only uses 5000 articles and 125m/1b only use a fraction. Cold-cache runs spend 10–15 minutes on wikipedia alone; once cached, subsequent runs are instant. Could be migrated to streaming like pg19 was, if this overhead becomes disruptive.
+**Wikipedia cold-cache overhead.** Wikipedia's `wikimedia/wikipedia` 20231101.en config loads the full ~19GB dataset (~6.4M articles) before iteration starts. Cold-cache runs spend 10–15 minutes on Wikipedia; cached runs reuse the local dataset cache.
 
-## Curation performance notes
+## Performance Notes
 
 The curation pipeline is parallel where the work is CPU-heavy or structurally safe to parallelize.
 
@@ -541,12 +541,4 @@ Common Crawl uses a dedicated parallel pipeline because WARC processing has two 
 
 The Common Crawl source therefore uses separate download and extraction worker pools. Worker counts are derived from the global curation worker count so high-CPU machines can keep both download and extraction busy.
 
-Most Hugging Face dataset sources are streamed sequentially during the download stage. This is intentional for now. Streaming one source at a time keeps stdout readable, avoids excessive concurrent Hugging Face Hub requests, and makes failures easier to debug. Data curation is an occasional batch process, not a continuously running service, so the pipeline prioritizes reproducibility and operational clarity over maximizing every possible download parallelism opportunity.
-
-Potential future optimizations:
-
-- Run non-Common-Crawl source downloads concurrently with per-source log files.
-- Add clean parent-process progress summaries for parallel source downloads.
-- Tune per-source download caps from measured filter/dedup retention.
-- Parallelize naturally partitioned sources such as CodeSearchNet by language.
-- Parallelize Stack sources by language or data directory.
+Most Hugging Face dataset sources are streamed sequentially during the download stage. Streaming one source at a time keeps stdout readable, avoids excessive concurrent Hugging Face Hub requests, and makes failures easier to debug. Data curation is an occasional batch process, so the pipeline prioritizes reproducibility and operational clarity over maximizing download parallelism.

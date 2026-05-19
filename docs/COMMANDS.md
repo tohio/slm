@@ -747,7 +747,7 @@ make pretrain-resume SIZE=125m GPUS=4
 
 ### `make artifacts-upload`
 
-Uploads reusable curation/training artifacts to S3. This replaces the older separate tokenized/tokenizer upload targets.
+Uploads reusable curation/training artifacts to S3.
 
 ```bash
 make artifacts-upload SIZE=125m DATE=YYYY-MM-DD
@@ -770,7 +770,7 @@ make artifacts-upload SIZE=125m DATE=YYYY-MM-DD ARTIFACT_STAGES="raw validated"
 
 ### `make artifacts-download`
 
-Downloads selected artifacts from S3 back into the same local paths used by the pipeline. Use this to restore a prior run, delete one source locally, then rerun curation so only the missing source is regenerated.
+Downloads selected artifacts from S3 into the same local paths used by the pipeline. Use this to restore a run, delete one source locally, then rerun curation so only the missing source is regenerated.
 
 ```bash
 make artifacts-download SIZE=125m DATE=YYYY-MM-DD

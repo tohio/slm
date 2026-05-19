@@ -294,7 +294,7 @@ Required access checks:
 
 ## Reusable curation artifacts
 
-Curation artifacts are run-scoped and can be uploaded to S3, restored later, and reused without rerunning every source download. The run layout is:
+Curation artifacts are run-scoped and can be uploaded to S3, restored into the pipeline layout, and reused without rerunning every source download. The run layout is:
 
 ```text
 data/runs/<size>/raw/<source>/
@@ -311,7 +311,7 @@ make artifacts-download SIZE=125m DATE=YYYY-MM-DD
 make artifacts-download SIZE=125m DATE=YYYY-MM-DD ARTIFACT_STAGES="raw validated"
 ```
 
-Valid `ARTIFACT_STAGES` values are `raw`, `validated`, `tokenized`, and `tokenizer`. After restoring a run, delete the source directory you want to regenerate, then rerun curation; existing sources on disk are skipped.
+Valid `ARTIFACT_STAGES` values are `raw`, `validated`, `tokenized`, and `tokenizer`. To regenerate one source, restore the run, delete that source directory, and rerun curation. Existing sources on disk are skipped.
 
 ---
 
@@ -822,7 +822,7 @@ curl http://slm-service:8000/v1/chat/completions \
 
 This project is scoped as a complete end-to-end training pipeline and demonstration. In a larger production system:
 
-- **Data scale** — the curation pipeline is currently designed for a single multi-vCPU CPU node. In a larger production system, curation would run as a distributed job over larger crawl-scale datasets.
+- **Data scale** — the curation pipeline runs on a single multi-vCPU CPU node. Larger deployments should run curation as a distributed job over crawl-scale datasets.
 - **Training scale** — multi-node training with FSDP across 8+ nodes for models beyond 1b.
 - **Continual learning** — a data flywheel feeding new curated data back into periodic pretraining runs.
 - **Reward modelling** — a trained reward model enabling online DPO for more sophisticated alignment.

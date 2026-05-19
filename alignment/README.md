@@ -179,7 +179,7 @@ Because HF Trainer always keeps the best checkpoint in addition to the N most re
 
 **Why start from chat-code?** DPO learns preference signal on top of the SFT distribution. Starting from a well-trained SFT model with both chat and code capability ensures the alignment generalizes across both domains.
 
-## Current DPO data policy
+## DPO Data Policy
 
 DPO uses an external preference backbone plus local custom preference datasets.
 
