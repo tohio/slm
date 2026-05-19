@@ -295,6 +295,29 @@ Required access checks:
 
 ---
 
+## Reusable curation artifacts
+
+Curation artifacts are run-scoped and can be uploaded to S3, restored later, and reused without rerunning every source download. The run layout is:
+
+```text
+data/runs/<size>/raw/<source>/
+data/runs/<size>/curated/
+data/runs/<size>/tokenized/
+data/runs/<size>/tokenizer/
+```
+
+Use one artifact workflow with stage filters:
+
+```bash
+make artifacts-upload   SIZE=125m DATE=YYYY-MM-DD
+make artifacts-download SIZE=125m DATE=YYYY-MM-DD
+make artifacts-download SIZE=125m DATE=YYYY-MM-DD ARTIFACT_STAGES="raw validated"
+```
+
+Valid `ARTIFACT_STAGES` values are `raw`, `validated`, `tokenized`, and `tokenizer`. After restoring a run, delete the source directory you want to regenerate, then rerun curation; existing sources on disk are skipped.
+
+---
+
 **Run the full pipeline**
 
 ```bash
@@ -312,17 +335,14 @@ make curate-mini && make test-curator
 make validate SIZE=mini    && make test-validate
 make tokenizer SIZE=mini   
 make tokenize SIZE=mini    && make test-tokenizer      # produces train.bin + val.bin
-make tokenize-upload SIZE=mini              # push mini tokenized binaries to S3 for GPU instance
-make tokenizer-upload  SIZE=mini            # push tokenizer to S3 (shared across all sizes)
+make artifacts-upload SIZE=mini DATE=YYYY-MM-DD ARTIFACT_STAGES="tokenized tokenizer"
 
 # ── Step 3: Full curation ─────────────────────────────────────────────────────
-make curate SIZE=125m WORKERS=62    # Stage 1: 10B curation target; download, filter, dedup, blend, upload
+make curate SIZE=125m WORKERS=62    # Stage 1: 10B curation target; download, filter, dedup, blend
 make validate                       # Stage 2: perplexity filter (applied to both splits)
-make validate-upload SIZE=125m      # Stage 2: push validated data to S3
 make tokenizer                      # Stage 3: train BPE tokenizer
-make tokenizer-upload               # Stage 3: push tokenizer to S3
 make tokenize                       # Stage 4a: tokenize both splits to binary
-make tokenize-upload SIZE=125m      # Stage 4a: push tokenized binaries to S3
+make artifacts-upload SIZE=125m DATE=YYYY-MM-DD
 
 # ── Step 4: GPU instance setup ───────────────────────────────────────────────
 # For mini validation — pulls mini tokenized binaries and tokenizer from S3

@@ -298,7 +298,7 @@ def stage_source_stats(sources: list[str] | None = None) -> None:
 #
 # Translating a char target into a doc cap requires knowing the avg chars/doc
 # for each source. Values below are measured from a 125m run (sample
-# data/raw/<source>/*.jsonl) — adjust if reality drifts by >2× from these.
+# data/runs/<size>/raw/<source>/*.jsonl) — adjust if reality drifts by >2× from these.
 # The inflation factor absorbs filter losses (~40% typical), dedup losses
 # (~20% typical), and headroom against the avg-chars-per-doc estimate.
 #

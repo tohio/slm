@@ -324,26 +324,48 @@ data/
 
 ## S3 Structure
 
-Each upload is versioned by target and date, so multiple runs never overwrite each other:
+Curation artifacts are uploaded by target size and date. `DATE` must use `YYYY-MM-DD` format.
 
-```
+```text
 s3://your-bucket/slm/data/
 ├── 125m/
 │   └── YYYY-MM-DD/
-│       └── curated/
-│           ├── train.jsonl
-│           ├── val.jsonl
-│           └── blend_stats.json
+│       ├── raw/          downloaded source shards
+│       ├── curated/      final train/val JSONL + blend stats
+│       ├── tokenized/    pretraining binaries
+│       └── tokenizer/    tokenizer files
 ├── 350m/
-│   └── YYYY-MM-DD/curated/
+│   └── YYYY-MM-DD/
 ├── 1b/
-│   └── YYYY-MM-DD/curated/
+│   └── YYYY-MM-DD/
 └── mini/
-    └── YYYY-MM-DD/curated/
-
+    └── YYYY-MM-DD/
 ```
 
-Re-uploading on the same day overwrites that day's run. Runs on different days are preserved independently.
+Use the staged artifact workflow:
+
+```bash
+make artifacts-upload SIZE=125m DATE=YYYY-MM-DD
+make artifacts-download SIZE=125m DATE=YYYY-MM-DD
+make artifacts-download SIZE=125m DATE=YYYY-MM-DD ARTIFACT_STAGES="raw validated"
+```
+
+Valid `ARTIFACT_STAGES` values are:
+
+```text
+raw validated tokenized tokenizer
+```
+
+The local run layout restored by `artifacts-download` is:
+
+```text
+data/runs/<size>/raw/<source>/
+data/runs/<size>/curated/
+data/runs/<size>/tokenized/
+data/runs/<size>/tokenizer/
+```
+
+To surgically replace one source, restore the prior run, delete that source under `data/runs/<size>/raw/`, and rerun curation. Existing on-disk sources are skipped by the curation pipeline.
 
 ---
 

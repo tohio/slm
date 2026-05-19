@@ -396,8 +396,8 @@ Runs the download stage only — fetches raw data for all 17 concrete sources.
 make curate-download SIZE=125m
 ```
 
-**Produces:** `data/raw/<source>/` for each source.
-**Resume behaviour:** Most sources skip shards already on disk. Common Crawl resumes from `data/raw/common_crawl/cc_progress.json` — delete that file to force a full re-download.
+**Produces:** `data/runs/<size>/raw/<source>/` for each source.
+**Resume behaviour:** Most sources skip shards already on disk. Common Crawl resumes from `data/runs/<size>/raw/common_crawl/cc_progress.json` — delete that file to force a full re-download.
 
 ---
 
@@ -410,8 +410,8 @@ make curate-filter SIZE=125m
 make curate-filter SIZE=125m WORKERS=62   # override worker count
 ```
 
-**Requires:** `data/raw/` populated by `make curate-download`, fasttext model at `data/models/lid.176.ftz`.
-**Produces:** `data/filtered/<source>/` for each source.
+**Requires:** `data/runs/<size>/raw/` populated by `make curate-download`, fasttext model at `data/models/lid.176.ftz`.
+**Produces:** `data/runs/<size>/filtered/<source>/` for each source.
 **Resume behaviour:** Skips shards already present in the filtered output directory.
 
 **Filters applied:**
@@ -745,55 +745,39 @@ make pretrain-resume SIZE=125m GPUS=4
 
 ---
 
-### `make tokenize-upload`
+### `make artifacts-upload`
 
-Uploads `data/tokenized/` to S3 under a versioned path. Run on the CPU curation instance after `make tokenize`. At 1b scale the binary exceeds 50GB — uploading once and downloading on the GPU instance is faster and cheaper than re-tokenizing on expensive GPU hardware.
+Uploads reusable curation/training artifacts to S3. This replaces the older separate tokenized/tokenizer upload targets.
 
 ```bash
-make tokenize-upload SIZE=125m
+make artifacts-upload SIZE=125m DATE=YYYY-MM-DD
+make artifacts-upload SIZE=125m DATE=YYYY-MM-DD ARTIFACT_STAGES=raw
+make artifacts-upload SIZE=125m DATE=YYYY-MM-DD ARTIFACT_STAGES="raw validated"
 ```
 
-**Requires:** `data/tokenized/train.bin` produced by `make tokenize`.
-**Produces:** `s3://your-bucket/slm/data/125m/YYYY-MM-DD/tokenized/`
+**Default stages:** `raw validated tokenized tokenizer`
+
+| Stage | Local path | S3 path |
+|---|---|---|
+| `raw` | `data/runs/<size>/raw/` | `<size>/<date>/raw/` |
+| `validated` | `data/runs/<size>/curated/` | `<size>/<date>/curated/` |
+| `tokenized` | `data/runs/<size>/tokenized/` | `<size>/<date>/tokenized/` |
+| `tokenizer` | `data/runs/<size>/tokenizer/` | `<size>/<date>/tokenizer/` |
+
+**Requires:** AWS credentials and `S3_BUCKET` configured in `.env`. `DATE` must use `YYYY-MM-DD` format.
 
 ---
 
-### `make tokenize-download`
+### `make artifacts-download`
 
-Downloads the tokenized binary from S3 to `data/tokenized/`. Run on the GPU training instance before `make pretrain`.
-
-```bash
-make tokenize-download SIZE=125m DATE=2026-04-12
-```
-
-**Requires:** A prior `make tokenize-upload` run, AWS credentials in `.env`.
-**Produces:** `data/tokenized/train.bin`, `data/tokenized/val.bin`
-
----
-
-### `make tokenizer-upload`
-
-Uploads `DATA_DIR/tokenizer/` to S3. Run on the CPU curation instance after `make tokenizer`.
+Downloads selected artifacts from S3 back into the same local paths used by the pipeline. Use this to restore a prior run, delete one source locally, then rerun curation so only the missing source is regenerated.
 
 ```bash
-make tokenizer-upload
+make artifacts-download SIZE=125m DATE=YYYY-MM-DD
+make artifacts-download SIZE=125m DATE=YYYY-MM-DD ARTIFACT_STAGES="raw validated"
 ```
 
-**Requires:** `data/tokenizer/` produced by `make tokenizer`.
-**Produces:** `s3://your-bucket/slm/data/tokenizer/`
-
----
-
-### `make tokenizer-download`
-
-Downloads the tokenizer from S3 to `DATA_DIR/tokenizer/`. Run on the GPU instance before SFT or DPO.
-
-```bash
-make tokenizer-download
-```
-
-**Requires:** A prior `make tokenizer-upload` run.
-**Produces:** `DATA_DIR/tokenizer/`
+**Requires:** A prior `make artifacts-upload` run, AWS credentials in `.env`, and the same `SIZE`/`DATE` namespace.
 
 ---
 
@@ -1314,13 +1298,10 @@ make test-data-pipeline             # verify outputs are correct
 # ── Full curation ──────────────────────────────────────────────────────────────
 make curate SIZE=1b                 # Stage 1: download, filter, dedup, blend, upload
 make validate                       # Stage 2: perplexity filter
-make validate-upload SIZE=1b        # Stage 2: push validated data to S3
-
 # ── Tokenizer ──────────────────────────────────────────────────────────────────
 make tokenizer                      # Stage 3: train BPE tokenizer
-make tokenizer-upload               # Stage 3: push tokenizer to S3
 make tokenize                       # Stage 4a: tokenize to binary
-make tokenize-upload SIZE=1b        # Stage 4a: push tokenized binary to S3
+make artifacts-upload SIZE=1b DATE=YYYY-MM-DD  # push raw/validated/tokenized/tokenizer artifacts to S3
 
 # ── GPU instance setup ─────────────────────────────────────────────────────────
 make setup-gpu DATA_DIR=/data/slm/data SIZE=1b DATE=2026-04-15
