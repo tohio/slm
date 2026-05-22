@@ -30,6 +30,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import boto3
+from boto3.s3.transfer import TransferConfig
 from botocore.config import Config
 from botocore.exceptions import ClientError
 from dotenv import load_dotenv
@@ -45,28 +46,33 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
-ARTIFACT_STAGES = ("raw", "validated", "tokenized", "tokenizer")
+ARTIFACT_STAGES = ("raw", "curated", "validated", "tokenized", "tokenizer")
 
-# Default transfer config: adaptive retries, reasonable connect/read timeouts.
-_BOTO_CONFIG = Config(
-    retries={"max_attempts": 5, "mode": "adaptive"},
-    connect_timeout=10,
-    read_timeout=120,
-    max_pool_connections=64,
-)
+# File-level concurrency is controlled by --workers.  Disable boto3's nested
+# multipart thread pool so WORKERS remains the single transfer concurrency budget.
+_TRANSFER_CONFIG = TransferConfig(use_threads=False)
 
 
-def get_s3_client():
+def get_s3_client(workers: int = 16):
     """
-    S3 client using boto3's default credential chain.
+    Build an S3 client whose HTTP connection pool matches transfer concurrency.
 
     Explicitly passing aws_access_key_id/secret breaks IAM role auth on EC2.
     Boto3 will find creds automatically from: env vars → ~/.aws → IAM role.
     """
+    if workers < 1:
+        raise ValueError(f"workers must be >= 1, got: {workers}")
+
+    pool_connections = max(4, workers)
     return boto3.client(
         "s3",
         region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
-        config=_BOTO_CONFIG,
+        config=Config(
+            retries={"max_attempts": 5, "mode": "adaptive"},
+            connect_timeout=10,
+            read_timeout=120,
+            max_pool_connections=pool_connections,
+        ),
     )
 
 
@@ -146,11 +152,13 @@ def _upload_one(
         size = local.stat().st_size
         cb = _ProgressCallback(size, desc=local.name)
         try:
-            client.upload_file(str(local), bucket, key, Callback=cb)
+            client.upload_file(
+                str(local), bucket, key, Callback=cb, Config=_TRANSFER_CONFIG
+            )
         finally:
             cb.close()
     else:
-        client.upload_file(str(local), bucket, key)
+        client.upload_file(str(local), bucket, key, Config=_TRANSFER_CONFIG)
     return True
 
 
@@ -180,7 +188,7 @@ def upload_directory(
         glob: File pattern. Default: all files.
         large_file_bytes: Threshold above which we show per-file progress.
     """
-    client = get_s3_client()
+    client = get_s3_client(workers)
     files = [f for f in src.glob(glob) if f.is_file()]
     if not files:
         log.warning(f"No files found in {src} matching '{glob}'")
@@ -240,7 +248,7 @@ def download_prefix(
     large_file_bytes: int = 100 * 1024 * 1024,
 ) -> dict[str, int]:
     """Download all objects under an S3 prefix to a local directory."""
-    client = get_s3_client()
+    client = get_s3_client(workers)
     full_prefix = f"{prefix}/{src_prefix}".rstrip("/") + "/"
 
     paginator = client.get_paginator("list_objects_v2")
@@ -272,11 +280,14 @@ def download_prefix(
                 try:
                     client.download_file(
                         bucket, key, str(local_path), Callback=cb,
+                        Config=_TRANSFER_CONFIG,
                     )
                 finally:
                     cb.close()
             else:
-                client.download_file(bucket, key, str(local_path))
+                client.download_file(
+                    bucket, key, str(local_path), Config=_TRANSFER_CONFIG
+                )
             return "downloaded"
         except Exception as e:
             log.error(f"Failed to download {key}: {e}")
@@ -319,7 +330,8 @@ def _artifact_paths(size: str, date: str, stage: str) -> tuple[Path, str]:
 
     Stage names are intentionally user-facing and stable:
       - raw:        downloaded source data under data/runs/<size>/raw
-      - validated:  curated/validated JSONL under data/runs/<size>/curated
+      - curated:    blended train/val JSONL under data/runs/<size>/curated
+      - validated:  validated train/val JSONL under data/runs/<size>/validated
       - tokenized:  pretraining binaries under data/runs/<size>/tokenized
       - tokenizer:  tokenizer files under data/runs/<size>/tokenizer
 
@@ -328,38 +340,41 @@ def _artifact_paths(size: str, date: str, stage: str) -> tuple[Path, str]:
     """
     if stage == "raw":
         return DATA_DIR / "runs" / size / "raw", f"{size}/{date}/raw"
-    if stage == "validated":
+    if stage == "curated":
         return DATA_DIR / "runs" / size / "curated", f"{size}/{date}/curated"
+    if stage == "validated":
+        return DATA_DIR / "runs" / size / "validated", f"{size}/{date}/validated"
     if stage == "tokenized":
         return DATA_DIR / "runs" / size / "tokenized", f"{size}/{date}/tokenized"
     if stage == "tokenizer":
         return DATA_DIR / "runs" / size / "tokenizer", f"{size}/{date}/tokenizer"
     raise ValueError(
         f"Unknown artifact stage: {stage}. "
-        f"Valid stages: {' '.join(ARTIFACT_STAGES)}"
+        f"Valid stages: {','.join(ARTIFACT_STAGES)}"
     )
 
 
-def _normalize_stages(stages: list[str] | None) -> list[str]:
+def _normalize_stages(stages: str | None) -> list[str]:
     if not stages:
         return list(ARTIFACT_STAGES)
 
-    normalized: list[str] = []
-    for item in stages:
-        for stage in item.split():
-            if stage not in ARTIFACT_STAGES:
-                raise ValueError(
-                    f"Unknown artifact stage: {stage}. "
-                    f"Valid stages: {' '.join(ARTIFACT_STAGES)}"
-                )
-            normalized.append(stage)
+    normalized = [stage.strip() for stage in stages.split(",") if stage.strip()]
+    if not normalized:
+        raise ValueError("At least one artifact stage is required")
+
+    for stage in normalized:
+        if stage not in ARTIFACT_STAGES:
+            raise ValueError(
+                f"Unknown artifact stage: {stage}. "
+                f"Valid stages: {','.join(ARTIFACT_STAGES)}"
+            )
     return normalized
 
 
 def upload_artifacts(
     size: str,
     date: str,
-    stages: list[str] | None,
+    stages: str | None,
     bucket: str,
     prefix: str,
     workers: int = 16,
@@ -400,7 +415,7 @@ def upload_artifacts(
 def download_artifacts(
     size: str,
     date: str,
-    stages: list[str] | None,
+    stages: str | None,
     bucket: str,
     prefix: str,
     workers: int = 16,
@@ -461,9 +476,9 @@ def main():
     up_artifacts.add_argument("--date", type=str, required=True)
     up_artifacts.add_argument(
         "--stages",
-        nargs="+",
-        default=list(ARTIFACT_STAGES),
-        help="Artifact stages to upload: raw validated tokenized tokenizer",
+        type=str,
+        default=",".join(ARTIFACT_STAGES),
+        help="Comma-separated artifact stages to upload: raw,curated,validated,tokenized,tokenizer",
     )
     up_artifacts.add_argument("--workers", type=int, default=16)
     up_artifacts.add_argument("--overwrite", action="store_true")
@@ -474,9 +489,9 @@ def main():
     dl_artifacts.add_argument("--date", type=str, required=True)
     dl_artifacts.add_argument(
         "--stages",
-        nargs="+",
-        default=list(ARTIFACT_STAGES),
-        help="Artifact stages to download: raw validated tokenized tokenizer",
+        type=str,
+        default=",".join(ARTIFACT_STAGES),
+        help="Comma-separated artifact stages to download: raw,curated,validated,tokenized,tokenizer",
     )
     dl_artifacts.add_argument("--workers", type=int, default=16)
     dl_artifacts.add_argument("--overwrite", action="store_true")

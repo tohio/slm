@@ -4,7 +4,7 @@
 #   make <target>                                        # defaults: SIZE=125m, GPUS=1
 #   make <target> SIZE=350m                              # different model size
 #   make <target> GPUS=4                                 # multi-GPU
-#   make <target> WORKERS=16                             # parallel workers for filter, dedup, blend
+#   make <target> WORKERS=16                             # parallel workers for curation and artifact transfer
 #   make pretrain PRETRAIN_CONFIG=pretrain/configs/gpt_125m.yaml  # explicit pretrain config override
 #   make config-gen-* GPU=h200                           # override GPU auto-detection
 #   make config-gen-* MODE=aggressive                    # 90% VRAM budget (or conservative=70%)
@@ -18,7 +18,7 @@ SIZE    ?= 125m
 GPUS    ?= 1
 WORKERS ?=
 DATE     ?= $(shell date +%Y-%m-%d)
-ARTIFACT_STAGES ?= raw validated tokenized tokenizer
+ARTIFACT_STAGES ?= raw,curated,validated,tokenized,tokenizer
 
 # DATA_DIR — read from .env if not set in environment.
 DATA_DIR ?= $(shell grep -v '^\#' .env 2>/dev/null | grep '^DATA_DIR=' | head -1 | cut -d= -f2 | tr -d ' ')
@@ -155,7 +155,7 @@ artifacts-upload:
 	$(PYTHON) curator/scripts/upload_s3.py artifacts-upload \
 		--size $(SIZE) \
 		--date $(DATE) \
-		--stages $(ARTIFACT_STAGES) \
+		--stages "$(ARTIFACT_STAGES)" $(WORKERS_FLAG) \
 		--overwrite
 
 artifacts-download:
@@ -163,7 +163,7 @@ artifacts-download:
 	$(PYTHON) curator/scripts/upload_s3.py artifacts-download \
 		--size $(SIZE) \
 		--date $(DATE) \
-		--stages $(ARTIFACT_STAGES)
+		--stages "$(ARTIFACT_STAGES)" $(WORKERS_FLAG)
 
 # ── Config generation ─────────────────────────────────────────────────────────
 # Auto-generates training configs tuned for the current GPU and GPU count.
@@ -635,8 +635,8 @@ help:
 	@echo "  validate-upload    Stage 2  — upload validated data to S3"
 	@echo "  tokenizer          Stage 3  — train BPE tokenizer"
 	@echo "  tokenize           Stage 4a — tokenize train + val to binaries"
-	@echo "  artifacts-upload   Upload raw/validated/tokenized/tokenizer artifacts to S3"
-	@echo "  artifacts-download Download raw/validated/tokenized/tokenizer artifacts from S3"
+	@echo "  artifacts-upload   Upload raw/curated/validated/tokenized/tokenizer artifacts to S3"
+	@echo "  artifacts-download Download raw/curated/validated/tokenized/tokenizer artifacts from S3"
 	@echo "  pretrain           Stage 4b — pretrain from scratch (auto-runs smoke-gen)"
 	@echo "  pretrain-mini      Stage 4b — mini pretrain run (auto-runs smoke-gen)"
 	@echo "  smoke-gen          Stage 4b — generate from results/slm-\$$(SIZE)/final to spot-check"

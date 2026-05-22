@@ -752,15 +752,16 @@ Uploads reusable curation/training artifacts to S3.
 ```bash
 make artifacts-upload SIZE=125m DATE=YYYY-MM-DD
 make artifacts-upload SIZE=125m DATE=YYYY-MM-DD ARTIFACT_STAGES=raw
-make artifacts-upload SIZE=125m DATE=YYYY-MM-DD ARTIFACT_STAGES="raw validated"
+make artifacts-upload SIZE=125m DATE=YYYY-MM-DD ARTIFACT_STAGES="raw,curated,validated"
 ```
 
-**Default stages:** `raw validated tokenized tokenizer`
+**Default stages:** `raw,curated,validated,tokenized,tokenizer`
 
 | Stage | Local path | S3 path |
 |---|---|---|
 | `raw` | `data/runs/<size>/raw/` | `<size>/<date>/raw/` |
-| `validated` | `data/runs/<size>/curated/` | `<size>/<date>/curated/` |
+| `curated` | `data/runs/<size>/curated/` | `<size>/<date>/curated/` |
+| `validated` | `data/runs/<size>/validated/` | `<size>/<date>/validated/` |
 | `tokenized` | `data/runs/<size>/tokenized/` | `<size>/<date>/tokenized/` |
 | `tokenizer` | `data/runs/<size>/tokenizer/` | `<size>/<date>/tokenizer/` |
 
@@ -774,7 +775,7 @@ Downloads selected artifacts from S3 into the same local paths used by the pipel
 
 ```bash
 make artifacts-download SIZE=125m DATE=YYYY-MM-DD
-make artifacts-download SIZE=125m DATE=YYYY-MM-DD ARTIFACT_STAGES="raw validated"
+make artifacts-download SIZE=125m DATE=YYYY-MM-DD ARTIFACT_STAGES="raw,curated,validated"
 ```
 
 **Requires:** A prior `make artifacts-upload` run, AWS credentials in `.env`, and the same `SIZE`/`DATE` namespace.
@@ -1301,7 +1302,7 @@ make validate                       # Stage 2: perplexity filter
 # ── Tokenizer ──────────────────────────────────────────────────────────────────
 make tokenizer                      # Stage 3: train BPE tokenizer
 make tokenize                       # Stage 4a: tokenize to binary
-make artifacts-upload SIZE=1b DATE=YYYY-MM-DD  # push raw/validated/tokenized/tokenizer artifacts to S3
+make artifacts-upload SIZE=1b DATE=YYYY-MM-DD  # push raw/curated/validated/tokenized/tokenizer artifacts to S3
 
 # ── GPU instance setup ─────────────────────────────────────────────────────────
 make setup-gpu DATA_DIR=/data/slm/data SIZE=1b DATE=2026-04-15

@@ -299,6 +299,7 @@ Curation artifacts are run-scoped and can be uploaded to S3, restored into the p
 ```text
 data/runs/<size>/raw/<source>/
 data/runs/<size>/curated/
+data/runs/<size>/validated/
 data/runs/<size>/tokenized/
 data/runs/<size>/tokenizer/
 ```
@@ -308,10 +309,10 @@ Use one artifact workflow with stage filters:
 ```bash
 make artifacts-upload   SIZE=125m DATE=YYYY-MM-DD
 make artifacts-download SIZE=125m DATE=YYYY-MM-DD
-make artifacts-download SIZE=125m DATE=YYYY-MM-DD ARTIFACT_STAGES="raw validated"
+make artifacts-download SIZE=125m DATE=YYYY-MM-DD ARTIFACT_STAGES="raw,curated,validated"
 ```
 
-Valid `ARTIFACT_STAGES` values are `raw`, `validated`, `tokenized`, and `tokenizer`. To regenerate one source, restore the run, delete that source directory, and rerun curation. Existing sources on disk are skipped.
+Valid `ARTIFACT_STAGES` values are `raw`, `curated`, `validated`, `tokenized`, and `tokenizer`; specify multiple stages as a comma-separated value. To regenerate one source, restore the run, delete that source directory, and rerun curation. Existing sources on disk are skipped.
 
 ---
 
@@ -332,7 +333,7 @@ make curate-mini && make test-curator
 make validate SIZE=mini    && make test-validate
 make tokenizer SIZE=mini   
 make tokenize SIZE=mini    && make test-tokenizer      # produces train.bin + val.bin
-make artifacts-upload SIZE=mini DATE=YYYY-MM-DD ARTIFACT_STAGES="tokenized tokenizer"
+make artifacts-upload SIZE=mini DATE=YYYY-MM-DD ARTIFACT_STAGES="tokenized,tokenizer"
 
 # ── Step 3: Full curation ─────────────────────────────────────────────────────
 make curate SIZE=125m WORKERS=62    # Stage 1: 10B curation target; download, filter, dedup, blend

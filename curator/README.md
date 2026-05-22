@@ -328,13 +328,13 @@ Use the staged artifact workflow:
 ```bash
 make artifacts-upload SIZE=125m DATE=YYYY-MM-DD
 make artifacts-download SIZE=125m DATE=YYYY-MM-DD
-make artifacts-download SIZE=125m DATE=YYYY-MM-DD ARTIFACT_STAGES="raw validated"
+make artifacts-download SIZE=125m DATE=YYYY-MM-DD ARTIFACT_STAGES="raw,curated,validated"
 ```
 
 Valid `ARTIFACT_STAGES` values are:
 
 ```text
-raw validated tokenized tokenizer
+raw,curated,validated,tokenized,tokenizer
 ```
 
 The local run layout restored by `artifacts-download` is:
@@ -342,6 +342,7 @@ The local run layout restored by `artifacts-download` is:
 ```text
 data/runs/<size>/raw/<source>/
 data/runs/<size>/curated/
+data/runs/<size>/validated/
 data/runs/<size>/tokenized/
 data/runs/<size>/tokenizer/
 ```
