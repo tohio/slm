@@ -118,7 +118,7 @@ class CodeSearchNetSource:
         max_docs: Maximum samples to write. None = no limit.
     """
 
-    DATASET_NAME = "code_search_net"
+    DATASET_NAME = "code-search-net/code_search_net"
     SOURCE_TAG = "codesearchnet"
 
     def __init__(
