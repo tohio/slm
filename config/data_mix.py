@@ -186,7 +186,7 @@ CODE_SUBMIX: dict[str, dict] = {
     "codesearchnet": {
         "pct": 15.0,
         "display": 'CodeSearchNet',
-        "hub": 'code_search_net',
+        "hub": 'code-search-net/code_search_net',
     },
     "stack_smol": {
         "pct": 1.0,
@@ -392,6 +392,14 @@ MINI_OVERRIDES: dict[str, int] = {
     "factual_restraint":     1_000,
     "nemotron_specialized":  2_000,
     "stack_v1":      3_000,
+    # Keep every code sub-source bounded in mini validation runs. Without
+    # these overrides, supply-bound production sources stream their complete
+    # upstream datasets even though mini only needs enough records to exercise
+    # the loader/filter/dedup/blend path.
+    "codesearchnet": 10_000,
+    "stack_smol":     1_000,
+    "jupyter":          250,
+    "conala":         2_000,
 }
 
 
