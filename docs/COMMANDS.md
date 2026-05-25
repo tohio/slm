@@ -347,16 +347,16 @@ make test-unit
 
 ## Stage 1 — Data Curation
 
-Downloads raw data from 17 concrete sources (12 non-code top-level sources + 5 code sub-sources), applies quality filters, deduplicates, blends to target token ratios, and uploads to S3. The mix is defined in `config/data_mix.py` — see [README.md](../README.md#source-mix) for the full per-source breakdown.
+Downloads raw data from 19 concrete sources (14 non-code top-level sources + 5 code sub-sources), applies quality filters, deduplicates, blends to target token ratios, and uploads to S3. The mix is defined in `config/data_mix.py` — see [README.md](../README.md#source-mix) for the full per-source breakdown.
 
 ### Token targets
 
 | Model | Total tokens | CC segments |
 |---|---|---|
 | `mini` | 1M | 2 |
-| `125m` | 6.5B curation target | computed from `config/data_mix.py` |
-| `350m` | 16.5B curation target | computed from `config/data_mix.py` |
-| `1b` | 50B curation target | computed from `config/data_mix.py` |
+| `125m` | 10B curation target | computed from `config/data_mix.py` |
+| `350m` | 25B curation target | computed from `config/data_mix.py` |
+| `1b` | 75B curation target | computed from `config/data_mix.py` |
 
 ---
 
@@ -390,7 +390,7 @@ make curate-mini
 
 ### `make curate-download`
 
-Runs the download stage only — fetches raw data for all 17 concrete sources.
+Runs the download stage only — fetches raw data for all 19 concrete sources.
 
 ```bash
 make curate-download SIZE=125m

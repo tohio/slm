@@ -327,7 +327,7 @@ make download-fasttext-model DATA_DIR=/data/slm/data   # language ID model (~1MB
 make download-kenlm-model    DATA_DIR=/data/slm/data   # perplexity model (~4GB)
 
 # ── Step 2: Validate curation pipeline ───────────────────────────────────────
-# Exercises every curation stage end-to-end on tiny data — all 18 sources.
+# Exercises every curation stage end-to-end on tiny data — all 19 sources.
 # All tests run here — catch issues before spending hours on the full run.
 make curate-mini && make test-curator
 make validate SIZE=mini    && make test-validate
@@ -398,7 +398,7 @@ Tests validate real pipeline outputs at each stage. Each test target is paired w
 **CPU curation instance:**
 
 ```bash
-make curate-mini   && make test-curator      # validate curation outputs (all 18 sources)
+make curate-mini   && make test-curator      # validate curation outputs (all 19 sources)
 make validate      && make test-validate     # validate validation outputs
 make tokenize      && make test-tokenizer    # validate tokenizer outputs
 
@@ -436,7 +436,7 @@ make test-unit            # all of the above
 
 | Target | Stage | Validates |
 |---|---|---|
-| `test-curator` | `curate-mini` | Raw shards exist for all 18 sources, filter quality, dedup correctness, blend output, stats |
+| `test-curator` | `curate-mini` | Raw shards exist for all 19 sources, filter quality, dedup correctness, blend output, stats |
 | `test-validate` | `validate` | Retention rate, subset correctness, quality of retained docs |
 | `test-tokenizer` | `tokenizer` | Special token IDs, roundtrip, fertility, chat template |
 | `test-data-pipeline` | all three above | Runs curator + validate + tokenizer tests |
@@ -538,22 +538,24 @@ make pretrain PRETRAIN_CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
 
 ### Source Mix
 
-18 concrete sources total — 13 non-code top-level sources plus 5 code sub-sources that share the 15% code budget. Scale-invariant percentages — the same mix applies at every size. Defined in `config/data_mix.py` and referenced by the curator, export, and notebooks — do not duplicate these numbers elsewhere.
+19 concrete sources total — 14 non-code top-level sources plus 5 code sub-sources that share the 15% code budget. Scale-invariant percentages — the same mix applies at every size. Defined in `config/data_mix.py` and referenced by the curator, export, and notebooks — do not duplicate these numbers elsewhere.
 
 | Source | Target Share | Notes |
 |---|---:|---|
 | Common Crawl | 5% | direct WARC via trafilatura |
 | FineWeb | 10% | `HuggingFaceFW/fineweb`, broad web and final fallback |
-| FineWeb-Edu | 26% | `HuggingFaceFW/fineweb-edu`, educational/explanatory web text |
+| FineWeb-Edu | 31.98% | `HuggingFaceFW/fineweb-edu`, educational/explanatory web text |
 | Wikipedia | 10% | `wikimedia/wikipedia` EN |
 | pg19 | 2.5% | public-domain books pre-1919 |
 | peS2o | 5% | `allenai/peS2o` v2 — academic/scientific prose |
-| Nemotron CC Math | 5% | math-heavy web text |
-| StackExchange | 5% | Q&A across dozens of sites |
-| Synthetic arithmetic | 3% | `tohio/slm-synthetic-arithmetic`, externally generated arithmetic signal |
-| Synthetic task code | 5% | `tohio/slm-synthetic-task-code`, externally generated task-shaped code examples |
-| Educational QA/MCQ | 3% | `tohio/slm-synthetic-educational-qa-mcq`, externally generated QA/MCQ examples |
-| Factual restraint | 0.5% | `tohio/slm-synthetic-factual-restraint`, externally generated uncertainty/restraint examples |
+| Nemotron CC Math | 7% | `nvidia/Nemotron-CC-Math-v1`, math/STEM text |
+| StackExchange | 1% | Q&A-style web text |
+| Synthetic arithmetic | 0.3% | `tohio/slm-synthetic-arithmetic`, externally generated arithmetic signal |
+| Synthetic task code | 0.1% | `tohio/slm-synthetic-task-code`, externally generated task-shaped code examples |
+| Educational QA/MCQ (math) | 0.05% | `tohio/slm-synthetic-educational-qa-mcq-math`, externally generated mathematical MCQ examples |
+| Educational QA/MCQ (general) | 0.05% | `tohio/slm-synthetic-educational-qa-mcq-general`, externally generated evidence-grounded MCQ examples |
+| Factual restraint | 0.02% | `tohio/slm-synthetic-factual-restraint`, externally generated uncertainty/restraint examples |
+| Nemotron Specialized | 12% | `nvidia/Nemotron-Pretraining-Specialized-v1.1`, specialized supplement |
 | Code (total) | 15% | split across 5 code sub-sources (see curator/README.md) |
 
 When supply-constrained sources fall short of their character budget, deficits are routed by source type. Synthetic-source deficits route to Nemotron Specialized first, then FineWeb-Edu, then FineWeb. General source deficits route to FineWeb-Edu first and FineWeb as the final fallback.

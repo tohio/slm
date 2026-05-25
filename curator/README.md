@@ -1,6 +1,6 @@
 # curator
 
-Data curation pipeline for SLM pretraining. Downloads raw data from eighteen concrete sources (13 non-code top-level sources + 5 code sub-sources), applies quality filters, deduplicates, blends to target token ratios with cap-and-redistribute overflow handling, and uploads to S3.
+Data curation pipeline for SLM pretraining. Downloads raw data from nineteen concrete sources (14 non-code top-level sources + 5 code sub-sources), applies quality filters, deduplicates, blends to target token ratios with cap-and-redistribute overflow handling, and uploads to S3.
 
 ---
 
@@ -17,7 +17,8 @@ nemotron_cc_math      ─┤
 stackexchange         ─┤
 synthetic_arithmetic  ─┤
 synthetic_task_code   ─┤
-educational_qa_mcq    ─┤
+educational_qa_mcq_math    ─┤
+educational_qa_mcq_general ─┤
 factual_restraint     ─┤
 nemotron_specialized  ─┤
 code × 5              ─┘
@@ -29,23 +30,24 @@ Each source runs independently through filtering and deduplication. The blend st
 
 ## Data Sources
 
-13 top-level non-code sources plus 5 code sub-sources sharing the 15% code budget = 18 concrete source loaders total.
+14 top-level non-code sources plus 5 code sub-sources sharing the 15% code budget = 19 concrete source loaders total.
 
 | Source | Target Share | Supply | Notes |
 |---|---:|---|---|
 | Common Crawl | 5% | unlimited/time-bound | direct WARC download via HTTPS |
 | FineWeb | 10% | very large | `HuggingFaceFW/fineweb`, broad web fallback |
-| FineWeb-Edu | 26% | large | `HuggingFaceFW/fineweb-edu`, educational/explanatory web text |
+| FineWeb-Edu | 31.98% | large | `HuggingFaceFW/fineweb-edu`, educational/explanatory web text |
 | Wikipedia | 10% | finite | `wikimedia/wikipedia` EN |
 | pg19 | 2.5% | finite | public-domain long-form books |
 | peS2o | 5% | finite | academic/scientific prose; supply-bound at larger scales |
-| Nemotron CC Math | 5% | very large | `nvidia/Nemotron-CC-Math-v1`, math/STEM supplement replacing OpenWebMath |
-| StackExchange | 5% | finite/large | Q&A-style web text |
-| Synthetic arithmetic | 3% | HF-backed | `tohio/slm-synthetic-arithmetic` |
-| Synthetic task code | 5% | HF-backed | `tohio/slm-synthetic-task-code` |
-| Educational QA/MCQ | 3% | HF-backed | `tohio/slm-synthetic-educational-qa-mcq` |
-| Factual restraint | 0.5% | HF-backed | `tohio/slm-synthetic-factual-restraint` |
-| Nemotron Specialized | 5% | large | `nvidia/Nemotron-Pretraining-Specialized-v1.1`, scalable specialized/synthetic reservoir |
+| Nemotron CC Math | 7% | very large | `nvidia/Nemotron-CC-Math-v1`, math/STEM supplement |
+| StackExchange | 1% | finite/large | Q&A-style web text |
+| Synthetic arithmetic | 0.3% | HF-backed | `tohio/slm-synthetic-arithmetic` |
+| Synthetic task code | 0.1% | HF-backed | `tohio/slm-synthetic-task-code` |
+| Educational QA/MCQ (math) | 0.05% | HF-backed | `tohio/slm-synthetic-educational-qa-mcq-math` |
+| Educational QA/MCQ (general) | 0.05% | HF-backed | `tohio/slm-synthetic-educational-qa-mcq-general` |
+| Factual restraint | 0.02% | HF-backed | `tohio/slm-synthetic-factual-restraint` |
+| Nemotron Specialized | 12% | large | `nvidia/Nemotron-Pretraining-Specialized-v1.1`, specialized supplement |
 | **Code total** | **15%** | mixed | split across 5 code sub-sources |
 
 ### Code sub-mix (percentages of the 15% code share)
@@ -200,7 +202,7 @@ derivative models.
 python curator/scripts/curate.py --target mini --mini
 ```
 
-Mini exercises every source at small scale (~100 docs to a few thousand per source) to validate end-to-end that all 18 active source loaders, filter logic, dedup, and the mix layer work correctly. Total runtime 30–60 min.
+Mini exercises every source at small scale (~100 docs to a few thousand per source) to validate end-to-end that all 19 active source loaders, filter logic, dedup, and the mix layer work correctly. Total runtime 30–60 min.
 
 Run each stage individually to inspect output between steps:
 
@@ -353,7 +355,7 @@ To surgically replace one source, restore the prior run, delete that source unde
 
 ## Quality Filters
 
-Heuristics adapted from FineWeb and Gopher. Filters marked ✗ are skipped for code-adjacent or symbol-heavy generated sources (`synthetic_arithmetic`, `synthetic_task_code`, `educational_qa_mcq`, `factual_restraint`, `nemotron_specialized`, `codesearchnet`, `stack_smol`, `stack_v1`, `jupyter`, `conala`) — symbol-heavy syntax, long identifiers, numeric expressions, and absence of stop words are normal properties of these sources, not quality signals.
+Heuristics adapted from FineWeb and Gopher. Filters marked ✗ are skipped for code-adjacent or symbol-heavy generated sources (`synthetic_arithmetic`, `synthetic_task_code`, `educational_qa_mcq_math`, `educational_qa_mcq_general`, `factual_restraint`, `nemotron_specialized`, `codesearchnet`, `stack_smol`, `stack_v1`, `jupyter`, `conala`) — symbol-heavy syntax, long identifiers, numeric expressions, and absence of stop words are normal properties of these sources, not quality signals.
 
 The set of code-adjacent source tags lives in `curator/filters/quality.py` as `CODE_SOURCES`. Adding a new code-adjacent or symbol-heavy source is a single-line change.
 
@@ -385,7 +387,7 @@ Two-stage deduplication applied after quality filtering, per source:
 
 **Stage 2 — Fuzzy dedup (datatrove).** 4-stage disk-based MinHash LSH pipeline: signatures → buckets → cluster → filter. Catches near-duplicates (Jaccard similarity > 0.8). Peak RAM is bounded by shard size, not corpus size — 125m, 350m, and 1b run with the same memory footprint.
 
-HF-backed synthetic/template-like sources (`synthetic_arithmetic`, `synthetic_task_code`, `educational_qa_mcq`, `factual_restraint`) still run exact dedup, but bypass fuzzy MinHash dedup. MinHash collapses useful near-duplicate template variation too aggressively; exact dedup only removes true duplicate rows.
+HF-backed synthetic/template-like sources (`synthetic_arithmetic`, `synthetic_task_code`, `educational_qa_mcq_math`, `educational_qa_mcq_general`, `factual_restraint`) still run exact dedup, but bypass fuzzy MinHash dedup. MinHash collapses useful near-duplicate template variation too aggressively; exact dedup only removes true duplicate rows.
 
 Per-source scratch (`data/dedup_scratch/<source>/`) is deleted automatically after each source's MinHash filter writes its output successfully. Without this, the 125m run accumulated 135 GB of scratch across the source set; at 1b it would scale to ~780 GB and not fit on a 2 TB disk alongside raw + filtered + curated.
 
@@ -467,7 +469,7 @@ MinHash dedup of large sources (stack_v1 has ~2,103 shards at 125m) opens many f
 
 ## Key Design Decisions
 
-**Why 18 concrete sources?** Distribution coverage. A model pretrained only on web scrape (even filtered) has characteristic weaknesses: poor factual recall on niche topics (→ Wikipedia), no long-range coherence over book-length spans (→ pg19), weak technical/academic prose (→ peS2o), weak math reasoning and math-page style (→ nemotron_cc_math), sparse clean elementary arithmetic mappings (→ synthetic_arithmetic), weak Q+A structure (→ StackExchange), weak educational/explanatory web signal (→ FineWeb-Edu), weak task-shaped code signal (→ synthetic_task_code), weak QA/MCQ answer-selection format (→ educational_qa_mcq), weak factual restraint/uncertainty behavior (→ factual_restraint), and weak code (→ 5 code sources covering raw bulk, curated functions, multi-language samples, notebook prose+code, and NL→code intent). Each source covers a specific gap.
+**Why 19 concrete sources?** Distribution coverage. A model pretrained only on web scrape (even filtered) has characteristic weaknesses: poor factual recall on niche topics (→ Wikipedia), no long-range coherence over book-length spans (→ pg19), weak technical/academic prose (→ peS2o), weak math reasoning and math-page style (→ nemotron_cc_math), sparse clean elementary arithmetic mappings (→ synthetic_arithmetic), weak Q+A structure (→ StackExchange), weak educational/explanatory web signal (→ FineWeb-Edu), weak task-shaped code signal (→ synthetic_task_code), weak mathematical MCQ answer-selection format (→ educational_qa_mcq_math), weak evidence-grounded MCQ selection format (→ educational_qa_mcq_general), weak factual restraint/uncertainty behavior (→ factual_restraint), and weak code (→ 5 code sources covering raw bulk, curated functions, multi-language samples, notebook prose+code, and NL→code intent). Each source covers a specific gap.
 
 **Why scale-invariant percentages?** A reader scaling from 125m to 1b should change one number (`corpus_tokens`) and get proportionally more of everything. Per-scale mix tuning is an axis of complexity that serves no one; the supply-constrained case is handled by cap-and-redistribute, not per-scale knobs.
 

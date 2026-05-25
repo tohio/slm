@@ -250,12 +250,13 @@ class SyntheticTaskCodeSource(HFSyntheticSource):
         return metadata
 
 
-class EducationalQAMCQSource(HFSyntheticSource):
-    SOURCE_TAG = "educational_qa_mcq"
-    SHARD_PREFIX = "educational_qa_mcq"
-    HF_REPO = "tohio/slm-synthetic-educational-qa-mcq"
+class _EducationalQAMCQSource(HFSyntheticSource):
+    """Shared formatter for externally curated multiple-choice sources."""
+
+    INCLUDE_EVIDENCE = False
 
     def _format_text(self, row: dict[str, Any]) -> str:
+        evidence = self._clean_multiline(row.get("evidence"))
         question = self._clean_single_line(row.get("question"))
         choices = row.get("choices") if isinstance(row.get("choices"), list) else []
         explanation = self._clean_single_line(row.get("explanation"))
@@ -265,23 +266,40 @@ class EducationalQAMCQSource(HFSyntheticSource):
         except Exception:
             return ""
 
+        if self.INCLUDE_EVIDENCE and not evidence:
+            return ""
         if not question or len(choices) < 2 or not (0 <= correct_index < len(choices)):
             return ""
 
-        answer = self._clean_single_line(choices[correct_index])
-        if not answer:
+        choice_texts = [self._clean_single_line(choice) for choice in choices]
+        if not all(choice_texts):
             return ""
 
-        parts = [f"Question: {question}", "Choices:"]
-        for i, choice in enumerate(choices):
-            choice_text = self._clean_single_line(choice)
-            if choice_text:
-                marker = chr(ord("A") + i)
-                parts.append(f"{marker}. {choice_text}")
+        answer = choice_texts[correct_index]
+        parts: list[str] = []
+        if self.INCLUDE_EVIDENCE:
+            parts.extend(["Evidence:", evidence])
+        parts.extend([f"Question: {question}", "Choices:"])
+        for i, choice_text in enumerate(choice_texts):
+            marker = chr(ord("A") + i)
+            parts.append(f"{marker}. {choice_text}")
         parts.append(f"Answer: {answer}")
         if explanation:
             parts.append(f"Explanation: {explanation}")
         return "\n".join(parts)
+
+
+class EducationalQAMCQMathSource(_EducationalQAMCQSource):
+    SOURCE_TAG = "educational_qa_mcq_math"
+    SHARD_PREFIX = "educational_qa_mcq_math"
+    HF_REPO = "tohio/slm-synthetic-educational-qa-mcq-math"
+
+
+class EducationalQAMCQGeneralSource(_EducationalQAMCQSource):
+    SOURCE_TAG = "educational_qa_mcq_general"
+    SHARD_PREFIX = "educational_qa_mcq_general"
+    HF_REPO = "tohio/slm-synthetic-educational-qa-mcq-general"
+    INCLUDE_EVIDENCE = True
 
 
 class FactualRestraintSource(HFSyntheticSource):

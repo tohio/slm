@@ -120,7 +120,8 @@ from curator.sources.stackexchange import StackExchangeSource
 from curator.sources.hf_synthetic import (
     SyntheticArithmeticSource,
     SyntheticTaskCodeSource,
-    EducationalQAMCQSource,
+    EducationalQAMCQMathSource,
+    EducationalQAMCQGeneralSource,
     FactualRestraintSource,
 )
 from curator.sources.code_search_net import CodeSearchNetSource
@@ -189,7 +190,8 @@ def configure_data_dirs(target: str) -> None:
 SKIP_FUZZY_DEDUP_SOURCES = {
     "synthetic_arithmetic",
     "synthetic_task_code",
-    "educational_qa_mcq",
+    "educational_qa_mcq_math",
+    "educational_qa_mcq_general",
     "factual_restraint",
 }
 
@@ -200,7 +202,8 @@ SKIP_FUZZY_DEDUP_SOURCES = {
 SYNTHETIC_SOURCES = {
     "synthetic_arithmetic",
     "synthetic_task_code",
-    "educational_qa_mcq",
+    "educational_qa_mcq_math",
+    "educational_qa_mcq_general",
     "factual_restraint",
 }
 
@@ -598,8 +601,10 @@ def _build_source(
         return SyntheticArithmeticSource(output_dir=raw_dir, max_docs=cap, max_chars=_derive_max_chars(name, target))
     if name == "synthetic_task_code":
         return SyntheticTaskCodeSource(output_dir=raw_dir, max_docs=cap, max_chars=_derive_max_chars(name, target))
-    if name == "educational_qa_mcq":
-        return EducationalQAMCQSource(output_dir=raw_dir, max_docs=cap, max_chars=_derive_max_chars(name, target))
+    if name == "educational_qa_mcq_math":
+        return EducationalQAMCQMathSource(output_dir=raw_dir, max_docs=cap, max_chars=_derive_max_chars(name, target))
+    if name == "educational_qa_mcq_general":
+        return EducationalQAMCQGeneralSource(output_dir=raw_dir, max_docs=cap, max_chars=_derive_max_chars(name, target))
     if name == "factual_restraint":
         return FactualRestraintSource(output_dir=raw_dir, max_docs=cap, max_chars=_derive_max_chars(name, target))
     if name == "codesearchnet":

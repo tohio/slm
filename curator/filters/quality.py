@@ -60,7 +60,8 @@ CODE_SOURCES: frozenset[str] = frozenset({
     # repetitive by design, or formatted unlike normal prose.
     "synthetic_arithmetic",
     "synthetic_task_code",
-    "educational_qa_mcq",
+    "educational_qa_mcq_math",
+    "educational_qa_mcq_general",
     "factual_restraint",
     "nemotron_specialized",
     "nemotron_cc_math",
@@ -207,7 +208,8 @@ class QualityConfig:
             "jupyter",
             "synthetic_arithmetic",
             "synthetic_task_code",
-            "educational_qa_mcq",
+            "educational_qa_mcq_math",
+            "educational_qa_mcq_general",
             "factual_restraint",
         })
     )

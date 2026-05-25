@@ -141,10 +141,15 @@ DATA_MIX: dict[str, dict] = {
         "display": "Synthetic task code",
         "hub":     "tohio/slm-synthetic-task-code",
     },
-    "educational_qa_mcq": {
-        "pct":     0.1,
-        "display": "Educational QA/MCQ",
-        "hub":     "tohio/slm-synthetic-educational-qa-mcq",
+    "educational_qa_mcq_math": {
+        "pct":     0.05,
+        "display": "Educational QA/MCQ (math)",
+        "hub":     "tohio/slm-synthetic-educational-qa-mcq-math",
+    },
+    "educational_qa_mcq_general": {
+        "pct":     0.05,
+        "display": "Educational QA/MCQ (general)",
+        "hub":     "tohio/slm-synthetic-educational-qa-mcq-general",
     },
     "factual_restraint": {
         "pct":     0.02,
@@ -211,7 +216,8 @@ CODE_SUBMIX: dict[str, dict] = {
 SUPPLEMENTAL_CHAR_CAPS: dict[str, dict[str, int]] = {
     "synthetic_arithmetic": {"125m": 150_000_000, "350m": 300_000_000, "1b": 500_000_000},
     "synthetic_task_code": {"125m": 50_000_000, "350m": 100_000_000, "1b": 200_000_000},
-    "educational_qa_mcq": {"125m": 50_000_000, "350m": 100_000_000, "1b": 200_000_000},
+    "educational_qa_mcq_math": {"125m": 25_000_000, "350m": 50_000_000, "1b": 100_000_000},
+    "educational_qa_mcq_general": {"125m": 25_000_000, "350m": 50_000_000, "1b": 100_000_000},
     "factual_restraint": {"125m": 10_000_000, "350m": 20_000_000, "1b": 50_000_000},
 }
 
@@ -226,7 +232,8 @@ SUPPLEMENTAL_CHAR_CAPS: dict[str, dict[str, int]] = {
 SYNTHETIC_AVG_CHARS_PER_DOC: dict[str, int] = {
     "synthetic_arithmetic": 65,
     "synthetic_task_code": 190,
-    "educational_qa_mcq": 215,
+    "educational_qa_mcq_math": 215,
+    "educational_qa_mcq_general": 215,
     "factual_restraint": 105,
 }
 
@@ -380,7 +387,8 @@ MINI_OVERRIDES: dict[str, int] = {
     "stackexchange": 2_000,
     "synthetic_arithmetic": 2_000,
     "synthetic_task_code":   2_000,
-    "educational_qa_mcq":    2_000,
+    "educational_qa_mcq_math":    2_000,
+    "educational_qa_mcq_general": 2_000,
     "factual_restraint":     1_000,
     "nemotron_specialized":  2_000,
     "stack_v1":      3_000,
