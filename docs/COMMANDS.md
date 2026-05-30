@@ -358,6 +358,8 @@ Downloads raw data from 19 concrete sources (14 non-code top-level sources + 5 c
 | `350m` | 25B curation target | computed from `config/data_mix.py` |
 | `1b` | 75B curation target | computed from `config/data_mix.py` |
 
+Synthetic HF-backed sources use per-size caps in `config/data_mix.py`: approximately 100M synthetic tokens for `125m`, 200M for `350m`, and 300M for `1b`, split according to the validated 300M-token synthetic inventory profile.
+
 ---
 
 ### `make curate`

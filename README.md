@@ -544,21 +544,24 @@ make pretrain PRETRAIN_CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
 |---|---:|---|
 | Common Crawl | 5% | direct WARC via trafilatura |
 | FineWeb | 10% | `HuggingFaceFW/fineweb`, broad web and final fallback |
-| FineWeb-Edu | 31.98% | `HuggingFaceFW/fineweb-edu`, educational/explanatory web text |
+| FineWeb-Edu | 31.5% | `HuggingFaceFW/fineweb-edu`, educational/explanatory web text |
 | Wikipedia | 10% | `wikimedia/wikipedia` EN |
 | pg19 | 2.5% | public-domain books pre-1919 |
 | peS2o | 5% | `allenai/peS2o` v2 — academic/scientific prose |
 | Nemotron CC Math | 7% | `nvidia/Nemotron-CC-Math-v1`, math/STEM text |
 | StackExchange | 1% | Q&A-style web text |
-| Synthetic arithmetic | 0.3% | `tohio/slm-synthetic-arithmetic`, externally generated arithmetic signal |
-| Synthetic task code | 0.1% | `tohio/slm-synthetic-task-code`, externally generated task-shaped code examples |
-| Educational QA/MCQ (math) | 0.05% | `tohio/slm-synthetic-educational-qa-mcq-math`, externally generated mathematical MCQ examples |
-| Educational QA/MCQ (general) | 0.05% | `tohio/slm-synthetic-educational-qa-mcq-general`, externally generated evidence-grounded MCQ examples |
-| Factual restraint | 0.02% | `tohio/slm-synthetic-factual-restraint`, externally generated uncertainty/restraint examples |
+| Synthetic arithmetic | 0.1475% | `tohio/slm-synthetic-arithmetic`, externally generated arithmetic signal |
+| Synthetic task code | 0.3934% | `tohio/slm-synthetic-task-code`, externally generated task-shaped code examples |
+| Educational QA/MCQ (math) | 0.1475% | `tohio/slm-synthetic-educational-qa-mcq-math`, externally generated mathematical MCQ examples |
+| Educational QA/MCQ (general) | 0.2459% | `tohio/slm-synthetic-educational-qa-mcq-general`, externally generated evidence-grounded MCQ examples |
+| Factual restraint | 0.0657% | `tohio/slm-synthetic-factual-restraint`, externally generated uncertainty/restraint examples |
 | Nemotron Specialized | 12% | `nvidia/Nemotron-Pretraining-Specialized-v1.1`, specialized supplement |
 | Code (total) | 15% | split across 5 code sub-sources (see curator/README.md) |
 
 When supply-constrained sources fall short of their character budget, deficits are routed by source type. Synthetic-source deficits route to Nemotron Specialized first, then FineWeb-Edu, then FineWeb. General source deficits route to FineWeb-Edu first and FineWeb as the final fallback.
+
+
+Synthetic source percentages sum to 1% of the nominal corpus target, then per-size caps bound actual consumption to approximately 100M tokens for `125m`, 200M for `350m`, and 300M for `1b`. The cap split follows the validated 300M-token synthetic inventory profile: task code first, then general MCQ, arithmetic, math MCQ, and factual restraint.
 
 Generated/template-like sources run exact dedup but bypass fuzzy MinHash dedup so useful near-duplicate training signal is not collapsed.
 

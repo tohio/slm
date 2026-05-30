@@ -36,17 +36,17 @@ Each source runs independently through filtering and deduplication. The blend st
 |---|---:|---|---|
 | Common Crawl | 5% | unlimited/time-bound | direct WARC download via HTTPS |
 | FineWeb | 10% | very large | `HuggingFaceFW/fineweb`, broad web fallback |
-| FineWeb-Edu | 31.98% | large | `HuggingFaceFW/fineweb-edu`, educational/explanatory web text |
+| FineWeb-Edu | 31.5% | large | `HuggingFaceFW/fineweb-edu`, educational/explanatory web text |
 | Wikipedia | 10% | finite | `wikimedia/wikipedia` EN |
 | pg19 | 2.5% | finite | public-domain long-form books |
 | peS2o | 5% | finite | academic/scientific prose; supply-bound at larger scales |
 | Nemotron CC Math | 7% | very large | `nvidia/Nemotron-CC-Math-v1`, math/STEM supplement |
 | StackExchange | 1% | finite/large | Q&A-style web text |
-| Synthetic arithmetic | 0.3% | HF-backed | `tohio/slm-synthetic-arithmetic` |
-| Synthetic task code | 0.1% | HF-backed | `tohio/slm-synthetic-task-code` |
-| Educational QA/MCQ (math) | 0.05% | HF-backed | `tohio/slm-synthetic-educational-qa-mcq-math` |
-| Educational QA/MCQ (general) | 0.05% | HF-backed | `tohio/slm-synthetic-educational-qa-mcq-general` |
-| Factual restraint | 0.02% | HF-backed | `tohio/slm-synthetic-factual-restraint` |
+| Synthetic arithmetic | 0.1475% | HF-backed | `tohio/slm-synthetic-arithmetic` |
+| Synthetic task code | 0.3934% | HF-backed | `tohio/slm-synthetic-task-code` |
+| Educational QA/MCQ (math) | 0.1475% | HF-backed | `tohio/slm-synthetic-educational-qa-mcq-math` |
+| Educational QA/MCQ (general) | 0.2459% | HF-backed | `tohio/slm-synthetic-educational-qa-mcq-general` |
+| Factual restraint | 0.0657% | HF-backed | `tohio/slm-synthetic-factual-restraint` |
 | Nemotron Specialized | 12% | large | `nvidia/Nemotron-Pretraining-Specialized-v1.1`, specialized supplement |
 | **Code total** | **15%** | mixed | split across 5 code sub-sources |
 
@@ -63,6 +63,9 @@ Each source runs independently through filtering and deduplication. The blend st
 ### Scale-invariant percentages
 
 Percentages are the same at every size. Scaling up changes `corpus_tokens`, not the mix. A reader adding a new size (e.g. `slm-500m`) gets correct per-source budgets without editing curator code.
+
+
+Synthetic source percentages sum to 1% of the nominal corpus target, then per-size caps bound actual consumption to approximately 100M tokens for `125m`, 200M for `350m`, and 300M for `1b`. The cap split follows the validated 300M-token synthetic inventory profile: task code first, then general MCQ, arithmetic, math MCQ, and factual restraint.
 
 ### Cap-and-redistribute
 

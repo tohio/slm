@@ -101,7 +101,7 @@ DATA_MIX: dict[str, dict] = {
         "hub":     "HuggingFaceFW/fineweb",
     },
     "fineweb_edu": {
-        "pct":     31.98,
+        "pct":     31.50,
         "display": "FineWeb-Edu",
         "hub":     "HuggingFaceFW/fineweb-edu",
     },
@@ -132,27 +132,27 @@ DATA_MIX: dict[str, dict] = {
         "hub":     "HuggingFaceH4/stack-exchange-preferences",
     },
     "synthetic_arithmetic": {
-        "pct":     0.3,
+        "pct":     0.1475,
         "display": "Synthetic arithmetic",
         "hub":     "tohio/slm-synthetic-arithmetic",
     },
     "synthetic_task_code": {
-        "pct":     0.1,
+        "pct":     0.3934,
         "display": "Synthetic task code",
         "hub":     "tohio/slm-synthetic-task-code",
     },
     "educational_qa_mcq_math": {
-        "pct":     0.05,
+        "pct":     0.1475,
         "display": "Educational QA/MCQ (math)",
         "hub":     "tohio/slm-synthetic-educational-qa-mcq-math",
     },
     "educational_qa_mcq_general": {
-        "pct":     0.05,
+        "pct":     0.2459,
         "display": "Educational QA/MCQ (general)",
         "hub":     "tohio/slm-synthetic-educational-qa-mcq-general",
     },
     "factual_restraint": {
-        "pct":     0.02,
+        "pct":     0.0657,
         "display": "Factual restraint",
         "hub":     "tohio/slm-synthetic-factual-restraint",
     },
@@ -214,11 +214,37 @@ CODE_SUBMIX: dict[str, dict] = {
 # out. The curator applies min(percentage_target_chars, cap).
 
 SUPPLEMENTAL_CHAR_CAPS: dict[str, dict[str, int]] = {
-    "synthetic_arithmetic": {"125m": 150_000_000, "350m": 300_000_000, "1b": 500_000_000},
-    "synthetic_task_code": {"125m": 50_000_000, "350m": 100_000_000, "1b": 200_000_000},
-    "educational_qa_mcq_math": {"125m": 25_000_000, "350m": 50_000_000, "1b": 100_000_000},
-    "educational_qa_mcq_general": {"125m": 25_000_000, "350m": 50_000_000, "1b": 100_000_000},
-    "factual_restraint": {"125m": 10_000_000, "350m": 20_000_000, "1b": 50_000_000},
+    # Caps are character budgets. At CHARS_PER_TOKEN=4.3, the combined
+    # synthetic caps are approximately:
+    #   125m: 100M tokens
+    #   350m: 200M tokens
+    #   1b:   300M tokens
+    # The split follows the validated 300M-token HF inventory profile.
+    "synthetic_task_code": {
+        "125m": 169_000_000,
+        "350m": 338_000_000,
+        "1b":   508_000_000,
+    },
+    "educational_qa_mcq_general": {
+        "125m": 106_000_000,
+        "350m": 211_000_000,
+        "1b":   317_000_000,
+    },
+    "synthetic_arithmetic": {
+        "125m":  63_000_000,
+        "350m": 127_000_000,
+        "1b":   190_000_000,
+    },
+    "educational_qa_mcq_math": {
+        "125m":  63_000_000,
+        "350m": 127_000_000,
+        "1b":   190_000_000,
+    },
+    "factual_restraint": {
+        "125m":  28_000_000,
+        "350m":  56_000_000,
+        "1b":    85_000_000,
+    },
 }
 
 
