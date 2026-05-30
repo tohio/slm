@@ -41,7 +41,7 @@ Stages:
 Usage:
     python -m config_gen.config_gen --stage pretrain --gpu h200 --size 125m --gpus 1
     python -m config_gen.config_gen --stage sft      --detect    --size 350m --gpus 4
-    python -m config_gen.config_gen --stage dpo      --gpu b200  --size 1b   --gpus 8 --mode aggressive
+    python -m config_gen.config_gen --stage dpo      --gpu b300  --size 1b   --gpus 8 --mode aggressive
 
     # Convenience (via Makefile): generate all three stages
     make config-gen SIZE=125m GPUS=1
@@ -75,6 +75,10 @@ GPU_SPECS: dict[str, dict] = {
     "h100_sxm":  {"vram_gb": 80,  "bf16_tflops": 989,  "display": "H100 SXM 80GB"},
     "h200":      {"vram_gb": 141, "bf16_tflops": 989,  "display": "H200 SXM 141GB"},
     "b200":      {"vram_gb": 192, "bf16_tflops": 2250, "display": "B200 192GB"},
+    # Provider-visible usable memory for B300 instances is commonly shown as
+    # ~262 GB even when the physical SXM part is marketed with a larger HBM
+    # figure. Use the exposed value for safer batch-size planning.
+    "b300":      {"vram_gb": 262, "bf16_tflops": 2250, "display": "B300 262GB"},
     "rtx4090":   {"vram_gb": 24,  "bf16_tflops": 165,  "display": "RTX 4090"},
     "rtx5090":   {"vram_gb": 32,  "bf16_tflops": 250,  "display": "RTX 5090"},
 }
@@ -83,6 +87,8 @@ NVIDIA_SMI_NAME_MAP: list[tuple[str, str]] = [
     ("H200",            "h200"),
     ("H100 SXM",        "h100_sxm"),
     ("H100",            "h100"),
+    ("B300",            "b300"),
+    ("GB300",           "b300"),
     ("B200",            "b200"),
     ("A100 80GB",       "a100_80"),
     ("A100-SXM4-80GB",  "a100_80"),
@@ -211,13 +217,9 @@ class DPOProfile:
     torch_compile: bool = False
 
 # consumed_tokens (= corpus_tokens × epochs) is sourced from
-# config/data_mix.py — that's the single source of truth for both numbers.
-# The values here therefore evolve automatically when the curator's TARGET_CONFIGS
-# is edited; no manual sync required.
-#
-#   125m: 6.5B  × 2 = 13B
-#   350m: 16.5B × 2 = 33B
-#   1b:   50B   × 1 = 50B
+# config/data_mix.py — that's the single source of truth for both corpus size
+# and epoch count. These values evolve automatically when TARGET_CONFIGS is
+# edited; do not duplicate hard-coded token targets in this file.
 SIZE_PROFILES: dict[str, PretrainProfile] = {
     "125m": PretrainProfile(
         state_gb=2.0, act_per_seq_gb_no_ckpt=1.75, act_per_seq_gb_ckpt=0.60,
