@@ -317,7 +317,12 @@ def main():
 
     cfg        = load_config(args.config)
     model_name = cfg["name"]
-    output_dir = args.results_dir / "runs" / _size_from_model_name(model_name) / "pretrain"
+    if cfg.get("output_dir"):
+        output_dir = Path(cfg["output_dir"])
+        if not output_dir.is_absolute():
+            output_dir = args.results_dir.parent / output_dir
+    else:
+        output_dir = args.results_dir / "runs" / _size_from_model_name(model_name) / "pretrain"
 
     log.info(f"=== SLM Pretraining ===")
     log.info(f"Config:     {args.config}")
