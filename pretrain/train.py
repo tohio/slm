@@ -418,9 +418,9 @@ def main():
         callbacks=[VRAMProbe()],
     )
 
-    run_baseline_eval = train_cfg.get(
+    run_baseline_eval = cfg.get(
         "run_baseline_eval",
-        cfg.get("run_baseline_eval", True),
+        cfg.get("training", {}).get("run_baseline_eval", True),
     )
     if not args.resume and run_baseline_eval:
         log.info("Running baseline eval before training (step 0)...")
