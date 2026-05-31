@@ -78,7 +78,7 @@ endif
         tokenizer tokenizer-test tokenize artifacts-upload artifacts-download \
         config-gen config-gen-pretrain config-gen-sft config-gen-dpo \
         accel-gen-ddp accel-gen-fsdp \
-        pretrain pretrain-mini pretrain-resume reinit-embeds smoke-gen prepare-sft sft sft-mini sft-resume sft-code sft-code-mini sft-code-resume \
+        pretrain pretrain-mini pretrain-smoke pretrain-resume reinit-embeds smoke-gen prepare-sft sft sft-mini sft-resume sft-code sft-code-mini sft-code-resume \
         prepare-dpo dpo dpo-mini dpo-resume eval eval-base eval-instruct eval-chat eval-sanity eval-sanity-base eval-sanity-instruct eval-sanity-chat eval-mini serve serve-local \
         export export-base export-instruct export-chat \
         setup setup-data-dir setup-gpu install install-gpu install-uv install-conda install-kenlm install-orjson \
@@ -240,6 +240,11 @@ pretrain-mini:
 	$(ACCELERATE) pretrain/train.py \
 		--config pretrain/configs/gpt_mini.yaml
 	@$(MAKE) smoke-gen SIZE=mini
+
+pretrain-smoke:
+	@echo "==> Stage 4b: Tiny pretraining smoke run (DDP/pipeline validation)"
+	$(ACCELERATE) pretrain/train.py \
+		--config pretrain/configs/gpt_smoke.yaml
 
 smoke-gen:
 	@echo "==> Smoke generation test for slm-$(SIZE)"
