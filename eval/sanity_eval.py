@@ -99,19 +99,24 @@ def resolve_tokenizer_path(model_id: str) -> str:
 
 
 def load_model_and_tokenizer(model_id: str, trust_remote_code: bool, device: str):
-    # Local repo custom class path is safer for local checkpoints if available.
-    if Path(model_id).exists() and not trust_remote_code:
-        try:
-            from model.model import SLMForCausalLM
+    dtype = torch.bfloat16 if device == "cuda" else torch.float32
 
-            model = SLMForCausalLM.from_pretrained(model_id)
-        except Exception:
-            model = AutoModelForCausalLM.from_pretrained(
-                model_id,
-                trust_remote_code=trust_remote_code,
-            )
+    if Path(model_id).exists() and not trust_remote_code:
+        # Local checkpoints use the in-repo custom architecture. Register the
+        # config/model pair before loading through AutoModel so Transformers
+        # sees model_type="slm" mapped to SLMForCausalLM.
+        from transformers import AutoConfig
+        from model.config import SLMConfig
+        from model.model import SLMForCausalLM
+
+        AutoConfig.register("slm", SLMConfig)
+        AutoModelForCausalLM.register(SLMConfig, SLMForCausalLM)
+
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            dtype=dtype,
+        )
     else:
-        dtype = torch.bfloat16 if device == "cuda" else torch.float32
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
             trust_remote_code=trust_remote_code,
