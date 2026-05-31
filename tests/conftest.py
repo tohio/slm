@@ -7,9 +7,6 @@ can validate any model size (mini, 125m, 350m, 1b) without code changes.
 Default is mini. Full-size artifact checks are opt-in by passing
 --size=125m, --size=350m, or --size=1b after the corresponding run completes.
 
-Default is mini. Full-size artifact checks are opt-in by passing
---size=125m, --size=350m, or --size=1b after the corresponding run completes.
-
 Usage:
     pytest tests/gpu_pipeline/ --size=mini
     pytest tests/gpu_pipeline/ --size=125m
@@ -42,19 +39,19 @@ def results_dir():
 
 @pytest.fixture(scope="session")
 def pretrain_model_dir(results_dir, model_size):
-    return results_dir / f"slm-{model_size}" / "final"
+    return results_dir / "runs" / model_size / "pretrain" / "final"
 
 
 @pytest.fixture(scope="session")
 def chat_sft_model_dir(results_dir, model_size):
-    return results_dir / f"slm-{model_size}-chat" / "final"
+    return results_dir / "runs" / model_size / "sft_chat" / "final"
 
 
 @pytest.fixture(scope="session")
 def code_sft_model_dir(results_dir, model_size):
-    return results_dir / f"slm-{model_size}-chat-code" / "final"
+    return results_dir / "runs" / model_size / "sft_code" / "final"
 
 
 @pytest.fixture(scope="session")
 def dpo_model_dir(results_dir, model_size):
-    return results_dir / f"slm-{model_size}-dpo" / "final"
+    return results_dir / "runs" / model_size / "dpo" / "final"
