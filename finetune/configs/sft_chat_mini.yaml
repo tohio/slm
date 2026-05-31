@@ -12,7 +12,7 @@ training:
   # max_steps governs run length; num_train_epochs defaults to 1 and is
   # effectively ignored. Do not set both.
   max_steps: 50                      # enough to validate the training loop
-  warmup_ratio: 0.03                 # ~1-2 warmup steps at this scale
+  warmup_ratio_recipe: 0.03                 # ~1-2 warmup steps at this scale
   micro_batch_size: 2
   gradient_accumulation_steps: 2     # not performance-sensitive for validation
   precision: bf16
