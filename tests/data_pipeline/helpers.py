@@ -18,9 +18,42 @@ def data_dir() -> Path:
     )
 
 
+def pipeline_size() -> str:
+    return os.environ.get("PIPELINE_TEST_SIZE", os.environ.get("SIZE", "mini"))
+
+
+def run_data_dir() -> Path:
+    return data_dir() / "runs" / pipeline_size()
+
+
 def pipeline_path(*parts: str) -> Path:
-    """Resolve a path under the selected pipeline test data directory."""
-    return data_dir().joinpath(*parts)
+    """
+    Resolve pipeline artifact paths.
+
+    Most pipeline artifacts are size-scoped under:
+        data/runs/<size>/<stage>/...
+
+    The tokenizer remains shared at:
+        data/tokenizer/...
+    """
+    if not parts:
+        return data_dir()
+
+    stage, *rest = parts
+
+    # Shared tokenizer path used by training/inference setup.
+    if stage == "tokenizer":
+        return data_dir().joinpath(stage, *rest)
+
+    # Backward-compatible aliases used by older tests.
+    if stage == "sft" and rest:
+        variant, *tail = rest
+        if variant == "chat":
+            return run_data_dir().joinpath("sft_chat", *tail)
+        if variant == "code":
+            return run_data_dir().joinpath("sft_code", *tail)
+
+    return run_data_dir().joinpath(stage, *rest)
 
 
 def read_jsonl(path: Path) -> list[dict]:

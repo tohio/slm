@@ -131,11 +131,11 @@ The mini curation run exercises all 17 concrete data sources (12 non-code top-le
 
 ### `test-training` — after a pretrain run
 
-Defaults to validating `results/slm-mini/final`. Pass `SIZE=<size>` to validate any other size's pretrain checkpoint, e.g. `make test-training SIZE=125m` validates `results/slm-125m/final`.
+Defaults to validating `results/runs/mini/pretrain/final`. Pass `SIZE=<size>` to validate any other size's pretrain checkpoint, e.g. `make test-training SIZE=125m` validates `results/slm-125m/final`.
 
 | Check | What it catches |
 |---|---|
-| `results/slm-<size>/final/` exists | Training didn't complete |
+| `results/runs/<size>/pretrain/final/` exists | Training didn't complete |
 | Model files present | Checkpoint not saved |
 | Tokenizer saved alongside model | `shutil.copytree` failed |
 | Config matches `gpt_<size>.yaml` | Wrong config used |
@@ -146,7 +146,7 @@ Defaults to validating `results/slm-mini/final`. Pass `SIZE=<size>` to validate 
 
 ### `test-sft-chat` — after a chat SFT run
 
-Defaults to `results/slm-mini-chat/final`. Pass `SIZE=<size>` to validate other sizes.
+Defaults to `results/runs/mini/sft_chat/final`. Pass `SIZE=<size>` to validate other sizes.
 
 | Check | What it catches |
 |---|---|
@@ -159,7 +159,7 @@ Defaults to `results/slm-mini-chat/final`. Pass `SIZE=<size>` to validate other 
 
 ### `test-sft-code` — after a code SFT run
 
-Defaults to `results/slm-mini-chat-code/final`. Pass `SIZE=<size>` to validate other sizes.
+Defaults to `results/runs/mini/sft_code/final`. Pass `SIZE=<size>` to validate other sizes.
 
 | Check | What it catches |
 |---|---|
@@ -169,7 +169,7 @@ Defaults to `results/slm-mini-chat-code/final`. Pass `SIZE=<size>` to validate o
 
 ### `test-dpo` — after a DPO run
 
-Defaults to `results/slm-mini-dpo/final`. Pass `SIZE=<size>` to validate other sizes.
+Defaults to `results/runs/mini/dpo/final`. Pass `SIZE=<size>` to validate other sizes.
 
 | Check | What it catches |
 |---|---|
