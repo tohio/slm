@@ -978,6 +978,46 @@ def _limit_records(records: list[dict], max_records: int | None, seed: int = 42)
     return records[:max_records]
 
 
+def _stratified_response_control_records(records: list[dict], max_records: int) -> list[dict]:
+    """
+    Deterministically cap response-control records while preserving every
+    response-control category in mini validation data.
+    """
+    by_type: dict[str, list[dict]] = {}
+    for record in records:
+        by_type.setdefault(record.get("sft_type", "unknown"), []).append(record)
+
+    if not by_type or len(records) <= max_records:
+        return records
+
+    rng = random.Random(42)
+    for bucket in by_type.values():
+        rng.shuffle(bucket)
+
+    selected: list[dict] = []
+
+    # First pass: guarantee at least one example per category.
+    for sft_type in sorted(by_type):
+        if by_type[sft_type]:
+            selected.append(by_type[sft_type].pop())
+
+    # Fill remaining slots round-robin so larger categories still contribute.
+    type_names = sorted(by_type)
+    while len(selected) < max_records:
+        added = False
+        for sft_type in type_names:
+            if len(selected) >= max_records:
+                break
+            if by_type[sft_type]:
+                selected.append(by_type[sft_type].pop())
+                added = True
+        if not added:
+            break
+
+    rng.shuffle(selected)
+    return selected
+
+
 def prepare_chat(size: str, val_fraction: float) -> None:
     """
     Download and format the size-aware SmolTalk chat SFT backbone.
@@ -1050,8 +1090,13 @@ def prepare_chat(size: str, val_fraction: float) -> None:
 
     handcrafted_max = 500 if size == "mini" else 5000
     handcrafted_records = build_handcrafted_response_control_records(
-        max_examples=handcrafted_max,
+        max_examples=5000,
     )
+    if size == "mini":
+        handcrafted_records = _stratified_response_control_records(
+            handcrafted_records,
+            max_records=handcrafted_max,
+        )
     records = selected_backbone + handcrafted_records
 
     log.info(f"Added generated response-control chat examples: {len(handcrafted_records):,}")
