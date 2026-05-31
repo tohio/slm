@@ -33,7 +33,7 @@ SFT_CHAT_CONFIG ?= finetune/configs/sft_chat_$(SIZE).yaml
 SFT_CODE_CONFIG ?= finetune/configs/sft_code_$(SIZE).yaml
 DPO_CONFIG      ?= alignment/configs/dpo_$(SIZE).yaml
 
-ACCELERATE = $(_ACCELERATE) launch --num_processes $(GPUS)
+ACCELERATE = $(_ACCELERATE) launch --num_processes $(GPUS) --num_machines 1 --mixed_precision bf16 --dynamo_backend no
 
 ifdef WORKERS
   WORKERS_FLAG = --workers $(WORKERS)
