@@ -29,7 +29,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 DATA_DIR    = Path(os.environ.get("DATA_DIR", "data"))
-from config.paths import pretrain_dir, BASE_RESULTS_DIR
+from config.paths import pretrain_dir, tokenized_dir as run_tokenized_dir, BASE_RESULTS_DIR
 
 RESULTS_DIR = BASE_RESULTS_DIR
 
@@ -366,11 +366,16 @@ def main():
 
     from pretrain.data.dataset import load_train_val
 
-    tokenized_dir = args.data_dir / "tokenized"
+    run_size = (
+        cfg.get("size")
+        or cfg.get("data", {}).get("size")
+        or model_name.removeprefix("slm-")
+    )
+    resolved_tokenized_dir = run_tokenized_dir(run_size)
     seq_len = model_cfg_dict["max_position_embeddings"]
 
-    log.info(f"Loading datasets from {tokenized_dir}")
-    train_ds, val_ds = load_train_val(tokenized_dir=tokenized_dir, seq_len=seq_len)
+    log.info(f"Loading datasets from {resolved_tokenized_dir}")
+    train_ds, val_ds = load_train_val(tokenized_dir=resolved_tokenized_dir, seq_len=seq_len)
 
     log.info(f"Train examples: {len(train_ds):,}")
     log.info(f"Val examples:   {len(val_ds):,}")
