@@ -319,7 +319,7 @@ class CommonCrawlSource:
         download_workers: int = 16,
         extract_workers: int | None = None,
         in_flight: int = 8,
-        retries: int = 3,
+        retries: int = COMMON_CRAWL_MAX_RETRIES,
         retry_backoff: float = 5.0,
         request_timeout: int = 300,
         tmp_dir: Path | None = None,
