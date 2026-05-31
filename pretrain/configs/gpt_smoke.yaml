@@ -46,3 +46,7 @@ optimizer:
   beta1: 0.9
   beta2: 0.95
   eps: 1.0e-8
+# Smoke validation controls
+run_baseline_eval: false
+
+output_dir: results/runs/mini/pretrain_smoke

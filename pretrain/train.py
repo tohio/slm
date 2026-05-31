@@ -418,10 +418,16 @@ def main():
         callbacks=[VRAMProbe()],
     )
 
-    if not args.resume:
+    run_baseline_eval = train_cfg.get(
+        "run_baseline_eval",
+        cfg.get("run_baseline_eval", True),
+    )
+    if not args.resume and run_baseline_eval:
         log.info("Running baseline eval before training (step 0)...")
         baseline = trainer.evaluate()
         log.info(f"Baseline eval: {baseline}")
+    elif not args.resume:
+        log.info("Skipping baseline eval before training (run_baseline_eval=false)")
 
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
