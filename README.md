@@ -24,11 +24,11 @@ All three sizes run through the same code path — the only differences are conf
 
 | Size | Curation time | Training time | Rough cost | Suits |
 |---|---|---|---|---|
-| `slm-125m` | ~16 hrs (measured) | ~16 hrs (measured)  | ~$86.00 | learning the pipeline, single-GPU runs |
+| `slm-125m` | 6 hrs 4mins | ~16 hrs | $4.06+ | learning the pipeline, single-GPU runs |
 | `slm-350m` | _TBD_ | _TBD_ | _TBD_ | serious research budget, multi-GPU |
 | `slm-1b` | _TBD_ | _TBD_ | _TBD_ | production-useful small model, GPU cluster |
 
-Curation process ran on `64 vCPU with 256 GiB`
+Curation process ran on `96 vCPU with 384 GiB`
 
 Training on single GPU H200 `1 GPU with 141GiB`
 
@@ -330,16 +330,16 @@ make download-kenlm-model    DATA_DIR=/data/slm/data   # perplexity model (~4GB)
 # Exercises every curation stage end-to-end on tiny data — all 19 sources.
 # All tests run here — catch issues before spending hours on the full run.
 make curate-mini && make test-curator
-make validate SIZE=mini    && make test-validate
-make tokenizer SIZE=mini   
-make tokenize SIZE=mini    && make test-tokenizer      # produces train.bin + val.bin
+make validate SIZE=mini    && make test-validate  SIZE=mini
+make tokenizer SIZE=mini
+make tokenize SIZE=mini    && make test-tokenizer SIZE=mini      # produces train.bin + val.bin
 make artifacts-upload SIZE=mini DATE=YYYY-MM-DD ARTIFACT_STAGES="tokenized,tokenizer"
 
 # ── Step 3: Full curation ─────────────────────────────────────────────────────
 make curate SIZE=125m WORKERS=62    # Stage 1: 10B curation target; download, filter, dedup, blend
-make validate                       # Stage 2: perplexity filter (applied to both splits)
-make tokenizer                      # Stage 3: train BPE tokenizer
-make tokenize                       # Stage 4a: tokenize both splits to binary
+make validate SIZE=125m             # Stage 2: perplexity filter applied to both splits
+make tokenizer SIZE=125m            # Stage 3: train BPE tokenizer
+make tokenize SIZE=125m             # Stage 4a: tokenize both splits to binary
 make artifacts-upload SIZE=125m DATE=YYYY-MM-DD
 
 # ── Step 4: GPU instance setup ───────────────────────────────────────────────
@@ -349,17 +349,21 @@ source ~/.bashrc
 
 # ── Step 5: Validate training pipeline ───────────────────────────────────────
 # Exercises every training stage end-to-end on a single GPU.
-# All tests run here — catch issues before spending hours on the full run.
-# GPU pipeline test targets default to SIZE=mini, so no flag needed here.
+# Use SIZE=mini explicitly for every prepare/train/eval command.
+# Test targets also receive SIZE=mini so they validate run-scoped mini artifacts.
 make accelerate-config-single       # single GPU for mini validation
-make pretrain-mini  GPUS=1 && make test-training  SIZE=mini
+
+make pretrain-mini  SIZE=mini GPUS=1 && make test-training  SIZE=mini
 make reinit-embeds  SIZE=mini       # Stage 4c: re-init chat special-token embeds before SFT
-make prepare-sft
-make sft-mini       GPUS=1 && make test-sft-chat  SIZE=mini
-make sft-code-mini  GPUS=1 && make test-sft-code  SIZE=mini
-make prepare-dpo
-make dpo-mini       GPUS=1 && make test-dpo       SIZE=mini
-make eval-mini
+
+make prepare-sft    SIZE=mini
+make sft-mini       SIZE=mini GPUS=1 && make test-sft-chat  SIZE=mini
+make sft-code-mini  SIZE=mini GPUS=1 && make test-sft-code  SIZE=mini
+
+make prepare-dpo    SIZE=mini
+make dpo-mini       SIZE=mini GPUS=1 && make test-dpo       SIZE=mini
+
+make eval-mini      SIZE=mini
 
 # ── Step 6: Full training ─────────────────────────────────────────────────────
 # All training configs are auto-generated for the current GPU by `make config-gen`.
@@ -368,23 +372,28 @@ make eval-mini
 # the "Multi-GPU Config Scaling" section below for the formula.
 # Re-run setup-gpu to pull the 125m tokenized binaries before training.
 make setup-gpu DATA_DIR=/data/slm/data SIZE=125m DATE=YYYY-MM-DD
-make accelerate-config-single        # single GPU — change to: make accelerate-config-multi GPUS=x for multi-GPU
-make config-gen      SIZE=125m GPUS=1   # Stage 4-6: auto-tune pretrain + sft + dpo configs for current GPU
-make pretrain        SIZE=125m GPUS=1   # Stage 4b: pretrain from scratch; auto-runs smoke-gen at the end
-make reinit-embeds   SIZE=125m          # Stage 4c: re-init chat special-token embeds before SFT
-make eval-base       SIZE=125m          # Stage 7:  evaluate base variant
-make export-base     SIZE=125m          # Stage 8:  push base model to Hub
-make prepare-sft
-make sft             SIZE=125m GPUS=1   # Stage 5b: chat SFT
-make sft-code        SIZE=125m GPUS=1   # Stage 5c: code SFT
-make eval-instruct   SIZE=125m          # Stage 7:  evaluate instruct variant
-make export-instruct SIZE=125m          # Stage 8:  push instruct model to Hub
-make prepare-dpo
-make dpo             SIZE=125m GPUS=1   # Stage 6b: DPO alignment
-make eval-chat       SIZE=125m          # Stage 7:  benchmark eval for chat variant (also: make eval)
-make eval-sanity     SIZE=125m          # Stage 7:  behavior sanity eval for chat variant
-make export-chat     SIZE=125m          # Stage 8:  push chat model to Hub
-make serve                              # Stage 10: launch vLLM server
+
+make accelerate-config-single          # single GPU — change to: make accelerate-config-multi GPUS=x for multi-GPU
+make config-gen      SIZE=125m GPUS=1  # Stage 4-6: auto-tune pretrain + sft + dpo configs for current GPU
+
+make pretrain        SIZE=125m GPUS=1  # Stage 4b: pretrain from scratch; auto-runs smoke-gen at the end
+make reinit-embeds   SIZE=125m         # Stage 4c: re-init chat special-token embeds before SFT
+make eval-base       SIZE=125m         # Stage 7: evaluate base variant
+make export-base     SIZE=125m         # Stage 8: push base model to Hub
+
+make prepare-sft     SIZE=125m
+make sft             SIZE=125m GPUS=1  # Stage 5b: chat SFT
+make sft-code        SIZE=125m GPUS=1  # Stage 5c: code SFT
+make eval-instruct   SIZE=125m         # Stage 7: evaluate instruct variant
+make export-instruct SIZE=125m         # Stage 8: push instruct model to Hub
+
+make prepare-dpo     SIZE=125m
+make dpo             SIZE=125m GPUS=1  # Stage 6b: DPO alignment
+make eval-chat       SIZE=125m         # Stage 7: benchmark eval for chat variant
+make eval-sanity     SIZE=125m         # Stage 7: behavior sanity eval for chat variant
+make export-chat     SIZE=125m         # Stage 8: push chat model to Hub
+
+make serve                             # Stage 10: launch vLLM server
 ```
 
 For full documentation of every `make` target see [docs/COMMANDS.md](docs/COMMANDS.md).
