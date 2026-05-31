@@ -391,15 +391,15 @@ serve:
 
 serve-local:
 	@echo "==> Stage 10: Serve local checkpoint ($(SIZE))"
-	MODEL=results/slm-$(SIZE)-dpo/final ./serve/serve.sh
+	MODEL=results/runs/$(SIZE)/dpo/final ./serve/serve.sh
 
 # ── S3 utilities ──────────────────────────────────────────────────────────────
 
 s3-upload:
-	$(PYTHON) curator/scripts/upload_s3.py upload --src data/curated --dst curated
+	$(PYTHON) curator/scripts/upload_s3.py upload --src "$(DATA_DIR)/runs/$(SIZE)/curated" --dst "runs/$(SIZE)/curated"
 
 s3-download:
-	$(PYTHON) curator/scripts/upload_s3.py download --src curated --dst data/curated
+	$(PYTHON) curator/scripts/upload_s3.py download --src "runs/$(SIZE)/curated" --dst "$(DATA_DIR)/runs/$(SIZE)/curated"
 
 s3-list:
 	$(PYTHON) curator/scripts/upload_s3.py list
@@ -558,7 +558,7 @@ endif
 # ── Clean ─────────────────────────────────────────────────────────────────────
 
 clean-data:
-	rm -rf data/raw data/filtered data/curated data/validated data/tokenized data/sft data/dpo data/dedup_scratch
+	rm -rf "$(DATA_DIR)/runs/$(SIZE)" "$(DATA_DIR)/dedup_scratch"
 
 clean-results:
 	rm -rf results/
