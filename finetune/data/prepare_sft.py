@@ -109,10 +109,18 @@ HANDCRAFTED_CODE_EXPLANATION_REPEAT = 20
 # response_control supplies the targeted custom gap-fill examples.
 #
 # Size policy:
+#   mini: tiny smol-smoltalk subset for end-to-end GPU validation
 #   125m: half of smol-smoltalk
 #   350m: full smol-smoltalk
 #   1b: full smoltalk
 CHAT_SFT_BACKBONE = {
+    "mini": {
+        "dataset": "HuggingFaceTB/smol-smoltalk",
+        "split": "train",
+        "source": "smol_smoltalk",
+        "fraction": 0.01,
+        "max_records": 1000,
+    },
     "125m": {
         "dataset": "HuggingFaceTB/smol-smoltalk",
         "split": "train",
@@ -136,7 +144,7 @@ CHAT_SFT_BACKBONE = {
 VALID_SFT_SIZES = tuple(CHAT_SFT_BACKBONE.keys())
 
 
-def build_handcrafted_response_control_records() -> list[dict]:
+def build_handcrafted_response_control_records(max_examples: int = 5000) -> list[dict]:
     """Return generated response-control chat examples.
 
     Kept under the old function name so prepare_chat() does not need broader
@@ -144,7 +152,7 @@ def build_handcrafted_response_control_records() -> list[dict]:
     """
     return build_response_control_records(
         system=DEFAULT_SYSTEM,
-        max_examples=5000,
+        max_examples=max_examples,
     )
 
 
@@ -960,6 +968,16 @@ DEFAULT_VAL_FRACTION = {
 }
 
 
+def _limit_records(records: list[dict], max_records: int | None, seed: int = 42) -> list[dict]:
+    """Deterministically cap a record list for mini pipeline validation."""
+    if not max_records or len(records) <= max_records:
+        return records
+    rng = random.Random(seed)
+    records = list(records)
+    rng.shuffle(records)
+    return records[:max_records]
+
+
 def prepare_chat(size: str, val_fraction: float) -> None:
     """
     Download and format the size-aware SmolTalk chat SFT backbone.
@@ -1019,13 +1037,21 @@ def prepare_chat(size: str, val_fraction: float) -> None:
         backbone_records.append(record)
 
     selected_backbone = select_backbone_records(backbone_records, fraction=fraction, seed=42)
+    selected_backbone = _limit_records(
+        selected_backbone,
+        policy.get("max_records"),
+        seed=42,
+    )
 
     log.info(
         f"Chat backbone: {len(backbone_records):,} valid, "
         f"{len(selected_backbone):,} selected, {skipped:,} skipped"
     )
 
-    handcrafted_records = build_handcrafted_response_control_records()
+    handcrafted_max = 500 if size == "mini" else 5000
+    handcrafted_records = build_handcrafted_response_control_records(
+        max_examples=handcrafted_max,
+    )
     records = selected_backbone + handcrafted_records
 
     log.info(f"Added generated response-control chat examples: {len(handcrafted_records):,}")
@@ -1046,7 +1072,7 @@ def prepare_chat(size: str, val_fraction: float) -> None:
 
 # ── Code SFT — Magicoder-OSS-Instruct ─────────────────────────────────────────
 
-def prepare_code(val_fraction: float) -> None:
+def prepare_code(size: str, val_fraction: float) -> None:
     """
     Download and format Magicoder-OSS-Instruct-75K for code SFT.
 
@@ -1061,7 +1087,7 @@ def prepare_code(val_fraction: float) -> None:
     """
     from datasets import load_dataset
 
-    out_dir    = sft_code_data_dir(os.environ.get("SIZE", "125m"))
+    out_dir    = sft_code_data_dir(size)
     train_path = out_dir / "train.jsonl"
     val_path   = out_dir / "val.jsonl"
 
@@ -1182,8 +1208,11 @@ def prepare_code(val_fraction: float) -> None:
             "or inspect Magicoder schema changes."
         )
 
+    # Keep mini validation small while preserving all code-task categories.
+    records = _limit_records(records, 1000 if size == "mini" else None, seed=42)
+
     # Split
-    n_val = max(500, int(len(records) * val_fraction))
+    n_val = max(100 if size == "mini" else 500, int(len(records) * val_fraction))
     n_val = min(n_val, max(1, len(records) - 1))
     random.seed(42)
     random.shuffle(records)
@@ -1220,7 +1249,8 @@ def main():
         default="125m",
         help=(
             "Model size used for size-aware chat SFT source policy. "
-            "125m=half smol-smoltalk, 350m=full smol-smoltalk, 1b=full smoltalk."
+            "mini=tiny smol-smoltalk subset, 125m=half smol-smoltalk, "
+            "350m=full smol-smoltalk, 1b=full smoltalk."
         ),
     )
     args = parser.parse_args()
@@ -1241,7 +1271,7 @@ def main():
     if args.stage in ("code", "both"):
         log.info("=== Preparing Code SFT data (Magicoder-OSS-Instruct) ===")
         frac = args.val_fraction if args.val_fraction is not None else DEFAULT_VAL_FRACTION["code"]
-        prepare_code(val_fraction=frac)
+        prepare_code(size=args.size, val_fraction=frac)
 
     log.info("SFT data preparation complete.")
     log.info(f"Output: {SFT_DIR}")

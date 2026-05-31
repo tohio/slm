@@ -674,7 +674,12 @@ def blend_and_split(
 
 def main():
     parser = argparse.ArgumentParser(description="Prepare DPO datasets")
-    parser.add_argument("--size", default=os.environ.get("SIZE", "125m"), help="Run size")
+    parser.add_argument(
+        "--size",
+        choices=["mini", "125m", "350m", "1b"],
+        default=os.environ.get("SIZE", "125m"),
+        help="Run size. mini uses local handcrafted/targeted pairs only.",
+    )
     parser.add_argument(
         "--source",
         choices=["all", "ultrafeedback", "handcrafted"],
@@ -697,6 +702,11 @@ def main():
         help="Re-run even if output files already exist",
     )
     args = parser.parse_args()
+
+    if args.size == "mini" and args.source == "all":
+        log.info("Mini DPO prep: using handcrafted/targeted pairs only.")
+        args.source = "handcrafted"
+        args.val_fraction = min(args.val_fraction, 0.10)
 
     global DPO_DIR
     DPO_DIR = dpo_data_dir(args.size)
@@ -752,6 +762,13 @@ def main():
     for source, count in source_counts.items():
         pct = 100 * count / len(all_records) if all_records else 0
         log.info(f"  {source:<15} {count:>8,}  ({pct:.1f}%)")
+
+    if args.size == "mini" and len(all_records) > 1000:
+        rng = random.Random(42)
+        rng.shuffle(all_records)
+        all_records = all_records[:1000]
+        source_counts = Counter(r["source"] for r in all_records)
+        log.info("Mini DPO cap applied: 1,000 records")
 
     train_records, val_records = blend_and_split(all_records, args.val_fraction)
 

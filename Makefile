@@ -304,8 +304,8 @@ sft-code-mini:
 # ── Stage 6: DPO ──────────────────────────────────────────────────────────────
 
 prepare-dpo:
-	@echo "==> Stage 6a: Prepare DPO data"
-	$(PYTHON) alignment/data/prepare_dpo.py
+	@echo "==> Stage 6a: Prepare DPO data ($(SIZE))"
+	$(PYTHON) alignment/data/prepare_dpo.py --size $(SIZE)
 
 dpo:
 	@echo "==> Stage 6b: DPO alignment ($(SIZE), $(GPUS) GPU(s), config=$(DPO_CONFIG))"
