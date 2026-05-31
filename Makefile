@@ -255,7 +255,7 @@ smoke-gen:
 		"The history of artificial intelligence"; do \
 		echo "--- prompt: $$prompt ---"; \
 		echo "$$prompt" | $(PYTHON) inference/generate.py \
-			--model results/slm-$(SIZE)/final \
+			--model results/runs/$(SIZE)/pretrain/final \
 			--max-new-tokens 30 \
 			--greedy; \
 		echo ""; \
@@ -348,7 +348,7 @@ eval-sanity: eval-sanity-chat
 eval-sanity-base:
 	@echo "==> Stage 7: Sanity evaluation (base, $(SIZE))"
 	$(PYTHON) eval/sanity_eval.py \
-		--model results/slm-$(SIZE)/final \
+		--model results/runs/$(SIZE)/pretrain/final \
 		--json-out results/eval/sanity/slm-$(SIZE).json
 
 eval-sanity-instruct:
@@ -639,7 +639,7 @@ help:
 	@echo "  artifacts-download Download raw/curated/validated/tokenized/tokenizer artifacts from S3"
 	@echo "  pretrain           Stage 4b — pretrain from scratch (auto-runs smoke-gen)"
 	@echo "  pretrain-mini      Stage 4b — mini pretrain run (auto-runs smoke-gen)"
-	@echo "  smoke-gen          Stage 4b — generate from results/slm-\$$(SIZE)/final to spot-check"
+	@echo "  smoke-gen          Stage 4b — generate from results/runs/\$$(SIZE)/pretrain/final to spot-check"
 	@echo "  reinit-embeds      Stage 4c — re-init chat special-token embeds before SFT"
 	@echo "  prepare-sft        Stage 5a — download SFT datasets"
 	@echo "  sft                Stage 5b — chat supervised fine-tuning"
