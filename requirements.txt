@@ -1,11 +1,12 @@
---extra-index-url https://download.pytorch.org/whl/cu121
 # ── Core ──────────────────────────────────────────────────────────────────────
-# torch 2.5.1 is the highest version available for CUDA 12.1.
-# trl 0.29 is compatible with torch 2.5.1 — trl does not require FSDPModule
-# from PyTorch 2.6 until later versions (that constraint was introduced, then
-# relaxed, in the 0.27–0.29 range).
-torch==2.5.1+cu121
-torchvision==0.20.1+cu121
+# PyTorch GPU wheels are installed by infra/setup_gpu_instance.sh so the wheel
+# matches the detected GPU generation:
+#   - A100/H100/H200/L40S: known-good CUDA 12.1 wheel
+#   - B200/B300/GB300/RTX 50-class: CUDA 12.8 wheel with Blackwell support
+# Keep broad constraints here so pip -r requirements.txt does not downgrade the
+# hardware-specific wheel installed by the setup script.
+torch>=2.5,<2.8
+torchvision>=0.20,<0.23
 
 # ── HuggingFace — pinned to compatible v5 stack ───────────────────────────────
 # transformers v5 is a breaking change from v4:

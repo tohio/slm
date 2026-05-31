@@ -52,6 +52,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 HF_CACHE_DIR="$(dirname "$DATA_DIR")/hf_cache"
+RUN_DATA_DIR="$DATA_DIR/runs/$SIZE"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
@@ -60,10 +61,13 @@ log "Repo:     $REPO_DIR"
 log "Data:     $DATA_DIR"
 log "HF cache: $HF_CACHE_DIR"
 log "Results:  $RESULTS_DIR"
+log "Run data: $RUN_DATA_DIR"
 
 # ── GPU check ─────────────────────────────────────────────────────────────────
 log "GPU check:"
+GPU_NAME="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1 | tr -d '\r')"
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
+log "Detected GPU: $GPU_NAME"
 
 # ── Directories ───────────────────────────────────────────────────────────────
 log "Creating directory structure..."
@@ -77,11 +81,11 @@ if [[ ! -w "$DATA_PARENT" ]]; then
 fi
 
 mkdir -p \
-    "$DATA_DIR/tokenized" \
+    "$RUN_DATA_DIR/tokenized" \
+    "$RUN_DATA_DIR/sft_chat" \
+    "$RUN_DATA_DIR/sft_code" \
+    "$RUN_DATA_DIR/dpo" \
     "$DATA_DIR/tokenizer" \
-    "$DATA_DIR/sft/chat" \
-    "$DATA_DIR/sft/code" \
-    "$DATA_DIR/dpo" \
     "$DATA_DIR/models" \
     "$RESULTS_DIR" \
     "$HF_CACHE_DIR" \
@@ -120,7 +124,41 @@ else
     fi
 
     .venv/bin/pip install --upgrade pip --quiet
+
+    if [[ "$GPU_NAME" == *"B200"* || "$GPU_NAME" == *"B300"* || "$GPU_NAME" == *"GB300"* || "$GPU_NAME" == *"RTX 50"* ]]; then
+        log "  Installing PyTorch CUDA 12.8 wheel for Blackwell-class GPU..."
+        .venv/bin/pip install --upgrade --force-reinstall --quiet \
+            "torch>=2.7,<2.8" \
+            "torchvision>=0.22,<0.23" \
+            --index-url https://download.pytorch.org/whl/cu128
+    else
+        log "  Installing known-good PyTorch CUDA 12.1 wheel..."
+        .venv/bin/pip install --upgrade --force-reinstall --quiet \
+            "torch==2.5.1+cu121" \
+            "torchvision==0.20.1+cu121" \
+            --index-url https://download.pytorch.org/whl/cu121
+    fi
+
     .venv/bin/pip install -r requirements.txt --quiet
+
+    .venv/bin/python - <<'PYTORCH_CHECK'
+import torch
+
+print(f"torch={torch.__version__} cuda={torch.version.cuda}")
+if not torch.cuda.is_available():
+    raise SystemExit("CUDA is not available after PyTorch install")
+
+name = torch.cuda.get_device_name(0)
+cap = torch.cuda.get_device_capability(0)
+arch = torch.cuda.get_arch_list()
+print(f"gpu={name} capability={cap} arch_list={arch}")
+
+if cap >= (10, 0) and "sm_100" not in arch:
+    raise SystemExit(
+        "Detected Blackwell-class GPU, but installed PyTorch lacks sm_100 support"
+    )
+PYTORCH_CHECK
+
     log "  ✓ Python dependencies installed"
 fi
 
@@ -213,7 +251,7 @@ else
     fi
 
     # Verify the download landed correctly
-    TRAIN_BIN="$DATA_DIR/tokenized/train.bin"
+    TRAIN_BIN="$RUN_DATA_DIR/tokenized/train.bin"
     if [[ -f "$TRAIN_BIN" ]]; then
         BIN_SIZE=$(du -sh "$TRAIN_BIN" | cut -f1)
         log "  ✓ train.bin: $BIN_SIZE"
