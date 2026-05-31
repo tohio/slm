@@ -421,6 +421,7 @@ setup-data-dir:
 
 setup-gpu:
 	@echo "==> Running GPU instance setup (DATA_DIR=$(DATA_DIR))..."
+	$(MAKE) restore-size-tokenizer SIZE=$(SIZE) DATA_DIR=$(DATA_DIR)
 	bash infra/setup_gpu_instance.sh --data-dir $(DATA_DIR) --size $(SIZE) $(if $(DATE),--date $(DATE),)
 
 install:
@@ -666,3 +667,11 @@ help:
 	@echo "  export             Stage 8  — push all variants to HuggingFace Hub"
 	@echo "  serve              Stage 10 — launch vLLM server"
 	@echo ""
+
+.PHONY: restore-size-tokenizer
+restore-size-tokenizer:
+	@echo "==> Restoring size-specific tokenizer ($(SIZE)) into active tokenizer path..."
+	@test -d "$(DATA_DIR)/runs/$(SIZE)/tokenizer" || (echo "Missing $(DATA_DIR)/runs/$(SIZE)/tokenizer — download tokenizer artifact first" && exit 1)
+	mkdir -p "$(DATA_DIR)/tokenizer"
+	rsync -a "$(DATA_DIR)/runs/$(SIZE)/tokenizer/" "$(DATA_DIR)/tokenizer/"
+	@echo "  Active tokenizer restored from $(DATA_DIR)/runs/$(SIZE)/tokenizer"

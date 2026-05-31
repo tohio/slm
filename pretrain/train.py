@@ -6,11 +6,13 @@ Pretraining entry point using HuggingFace Trainer.
 
 import argparse
 import json
+import hashlib
 import logging
 import os
 import shutil
 import sys
 from pathlib import Path
+from tokenizers import Tokenizer
 from transformers import Trainer, TrainerCallback
 
 import torch
@@ -81,6 +83,48 @@ def load_config(config_path: Path) -> dict:
     return _coerce_numeric(cfg)
 
 
+
+def tokenizer_fingerprint(tokenizer_path: Path) -> str:
+    """Return the same tokenizer fingerprint used by tokenization metadata."""
+    tok = Tokenizer.from_file(str(tokenizer_path))
+    return hashlib.sha256(tok.to_str().encode("utf-8")).hexdigest()
+
+
+def validate_active_tokenizer_matches_tokenized_data(tokenized_dir: Path, tokenizer_dir: Path) -> None:
+    """Fail fast if tokenized train.bin was produced with a different tokenizer."""
+    train_meta_path = tokenized_dir / "train.json"
+    active_tokenizer_path = tokenizer_dir / "slm_tokenizer.json"
+
+    if not train_meta_path.exists():
+        raise FileNotFoundError(f"Missing tokenized metadata: {train_meta_path}")
+
+    if not active_tokenizer_path.exists():
+        raise FileNotFoundError(f"Missing active tokenizer: {active_tokenizer_path}")
+
+    with train_meta_path.open("r", encoding="utf-8") as f:
+        train_meta = json.load(f)
+
+    expected = train_meta.get("tokenizer_sha256")
+    if not expected:
+        raise RuntimeError(
+            f"{train_meta_path} does not contain tokenizer_sha256; refusing to train."
+        )
+
+    actual = tokenizer_fingerprint(active_tokenizer_path)
+
+    if actual != expected:
+        raise RuntimeError(
+            "Tokenizer/tokenized artifact mismatch.\n"
+            f"Tokenized metadata: {train_meta_path}\n"
+            f"Expected tokenizer fingerprint: {expected}\n"
+            f"Active tokenizer: {active_tokenizer_path}\n"
+            f"Actual tokenizer fingerprint:   {actual}\n"
+            "Refusing to train. Restore the size-specific tokenizer that produced train.bin."
+        )
+
+    log.info("Tokenizer fingerprint matches tokenized training metadata: %s", actual)
+
+
 def validate_tokenizer(tokenizer_dir: Path) -> None:
     if not tokenizer_dir.exists() or not any(tokenizer_dir.iterdir()):
         raise RuntimeError(
@@ -115,6 +159,7 @@ def validate_tokenizer(tokenizer_dir: Path) -> None:
             ) from e
 
     log.info(f"Tokenizer validated at {tokenizer_dir}")
+    validate_active_tokenizer_matches_tokenized_data(tokenized_dir, tokenizer_dir)
 
 
 def _find_latest_checkpoint(output_dir: Path) -> Path | None:
