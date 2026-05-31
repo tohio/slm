@@ -76,6 +76,18 @@ from curator.constants import CHARS_PER_TOKEN
 
 log = logging.getLogger(__name__)
 
+COMMON_CRAWL_MAX_RETRIES = 8
+COMMON_CRAWL_BACKOFF_BASE_SECONDS = 5
+COMMON_CRAWL_BACKOFF_MAX_SECONDS = 120
+
+
+def _common_crawl_backoff_seconds(attempt: int) -> int:
+    """Bounded exponential backoff for transient Common Crawl 503s."""
+    return min(
+        COMMON_CRAWL_BACKOFF_MAX_SECONDS,
+        COMMON_CRAWL_BACKOFF_BASE_SECONDS * (2 ** max(0, attempt - 1)),
+    )
+
 # Common Crawl base URL — HTTPS via CloudFront, no credentials needed
 CC_BASE_URL = "https://data.commoncrawl.org"
 CC_PATHS_URL = f"{CC_BASE_URL}/crawl-data/{{crawl}}/warc.paths.gz"
