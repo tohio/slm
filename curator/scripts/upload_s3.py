@@ -48,9 +48,22 @@ log = logging.getLogger(__name__)
 DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
 ARTIFACT_STAGES = ("raw", "curated", "validated", "tokenized", "tokenizer")
 
-# File-level concurrency is controlled by --workers.  Disable boto3's nested
-# multipart thread pool so WORKERS remains the single transfer concurrency budget.
-_TRANSFER_CONFIG = TransferConfig(use_threads=False)
+# S3 transfer configuration is built per command so large single-file artifacts
+# can use multipart concurrency. File-level concurrency is still controlled by
+# --workers; each large-file transfer uses a bounded inner pool so files such as
+# curated/train.jsonl and validated/train.jsonl do not upload as a single slow
+# stream.
+def _transfer_config(workers: int) -> TransferConfig:
+    if workers < 1:
+        raise ValueError(f"workers must be >= 1, got: {workers}")
+
+    multipart_workers = min(max(4, workers), 32)
+    return TransferConfig(
+        multipart_threshold=64 * 1024 * 1024,
+        multipart_chunksize=64 * 1024 * 1024,
+        max_concurrency=multipart_workers,
+        use_threads=True,
+    )
 
 
 def get_s3_client(workers: int = 16):
@@ -63,7 +76,7 @@ def get_s3_client(workers: int = 16):
     if workers < 1:
         raise ValueError(f"workers must be >= 1, got: {workers}")
 
-    pool_connections = max(4, workers)
+    pool_connections = max(16, workers * 4)
     return boto3.client(
         "s3",
         region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
@@ -146,6 +159,7 @@ def _upload_one(
     bucket: str,
     client,
     show_progress: bool,
+    transfer_config: TransferConfig,
 ) -> bool:
     """Upload one file, optionally with a progress callback."""
     if show_progress:
@@ -153,12 +167,12 @@ def _upload_one(
         cb = _ProgressCallback(size, desc=local.name)
         try:
             client.upload_file(
-                str(local), bucket, key, Callback=cb, Config=_TRANSFER_CONFIG
+                str(local), bucket, key, Callback=cb, Config=transfer_config
             )
         finally:
             cb.close()
     else:
-        client.upload_file(str(local), bucket, key, Config=_TRANSFER_CONFIG)
+        client.upload_file(str(local), bucket, key, Config=transfer_config)
     return True
 
 
@@ -189,6 +203,7 @@ def upload_directory(
         large_file_bytes: Threshold above which we show per-file progress.
     """
     client = get_s3_client(workers)
+    transfer_config = _transfer_config(workers)
     files = [f for f in src.glob(glob) if f.is_file()]
     if not files:
         log.warning(f"No files found in {src} matching '{glob}'")
@@ -213,7 +228,11 @@ def upload_directory(
             return "skipped"
         try:
             show_progress = f.stat().st_size >= large_file_bytes
-            _upload_one(f, key, bucket, client, show_progress=show_progress)
+            _upload_one(
+                f, key, bucket, client,
+                show_progress=show_progress,
+                transfer_config=transfer_config,
+            )
             return "uploaded"
         except Exception as e:
             log.error(f"Failed to upload {f}: {e}")
@@ -249,6 +268,7 @@ def download_prefix(
 ) -> dict[str, int]:
     """Download all objects under an S3 prefix to a local directory."""
     client = get_s3_client(workers)
+    transfer_config = _transfer_config(workers)
     full_prefix = f"{prefix}/{src_prefix}".rstrip("/") + "/"
 
     paginator = client.get_paginator("list_objects_v2")
@@ -280,13 +300,13 @@ def download_prefix(
                 try:
                     client.download_file(
                         bucket, key, str(local_path), Callback=cb,
-                        Config=_TRANSFER_CONFIG,
+                        Config=transfer_config,
                     )
                 finally:
                     cb.close()
             else:
                 client.download_file(
-                    bucket, key, str(local_path), Config=_TRANSFER_CONFIG
+                    bucket, key, str(local_path), Config=transfer_config
                 )
             return "downloaded"
         except Exception as e:
