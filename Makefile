@@ -329,15 +329,15 @@ eval: eval-chat
 
 eval-base:
 	@echo "==> Stage 7: Evaluation (base, $(SIZE))"
-	$(PYTHON) eval/eval.py --model results/slm-$(SIZE)/final
+	$(PYTHON) eval/eval.py --model results/runs/$(SIZE)/pretrain/final
 
 eval-instruct:
 	@echo "==> Stage 7: Evaluation (instruct, $(SIZE))"
-	$(PYTHON) eval/eval.py --model results/slm-$(SIZE)-chat-code/final
+	$(PYTHON) eval/eval.py --model results/runs/$(SIZE)/sft_code/final
 
 eval-chat:
 	@echo "==> Stage 7: Evaluation (chat, $(SIZE))"
-	$(PYTHON) eval/eval.py --model results/slm-$(SIZE)-dpo/final
+	$(PYTHON) eval/eval.py --model results/runs/$(SIZE)/dpo/final
 
 # Behavior sanity eval targets.
 # These are deterministic generation checks for factuality, task format,
@@ -354,18 +354,18 @@ eval-sanity-base:
 eval-sanity-instruct:
 	@echo "==> Stage 7: Sanity evaluation (instruct, $(SIZE))"
 	$(PYTHON) eval/sanity_eval.py \
-		--model results/slm-$(SIZE)-chat-code/final \
+		--model results/runs/$(SIZE)/sft_code/final \
 		--json-out results/eval/sanity/slm-$(SIZE)-chat-code.json
 
 eval-sanity-chat:
 	@echo "==> Stage 7: Sanity evaluation (chat, $(SIZE))"
 	$(PYTHON) eval/sanity_eval.py \
-		--model results/slm-$(SIZE)-dpo/final \
+		--model results/runs/$(SIZE)/dpo/final \
 		--json-out results/eval/sanity/slm-$(SIZE)-dpo.json
 
 eval-mini:
 	@echo "==> Stage 7: Mini evaluation (pipeline validation)"
-	$(PYTHON) eval/eval.py --model results/slm-mini-dpo/final --tasks hellaswag --limit 50 --batch-size 4
+	$(PYTHON) eval/eval.py --model results/runs/mini/dpo/final --tasks hellaswag --limit 50 --batch-size 4
 # ── Stage 8: Export ───────────────────────────────────────────────────────────
 
 export: export-base export-instruct export-chat
