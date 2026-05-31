@@ -349,23 +349,23 @@ eval-sanity-base:
 	@echo "==> Stage 7: Sanity evaluation (base, $(SIZE))"
 	$(PYTHON) eval/sanity_eval.py \
 		--model results/runs/$(SIZE)/pretrain/final \
-		--json-out results/eval/sanity/slm-$(SIZE).json
+		--json-out results/runs/$(SIZE)/eval/sanity/base.json
 
 eval-sanity-instruct:
 	@echo "==> Stage 7: Sanity evaluation (instruct, $(SIZE))"
 	$(PYTHON) eval/sanity_eval.py \
 		--model results/runs/$(SIZE)/sft_code/final \
-		--json-out results/eval/sanity/slm-$(SIZE)-chat-code.json
+		--json-out results/runs/$(SIZE)/eval/sanity/instruct.json
 
 eval-sanity-chat:
 	@echo "==> Stage 7: Sanity evaluation (chat, $(SIZE))"
 	$(PYTHON) eval/sanity_eval.py \
 		--model results/runs/$(SIZE)/dpo/final \
-		--json-out results/eval/sanity/slm-$(SIZE)-dpo.json
+		--json-out results/runs/$(SIZE)/eval/sanity/chat.json
 
 eval-mini:
 	@echo "==> Stage 7: Mini evaluation (pipeline validation)"
-	$(PYTHON) eval/eval.py --model results/runs/mini/dpo/final --tasks hellaswag --limit 50 --batch-size 4
+	$(PYTHON) eval/eval.py --model results/runs/$(SIZE)/dpo/final --tasks hellaswag --limit 50 --batch-size 4
 # ── Stage 8: Export ───────────────────────────────────────────────────────────
 
 export: export-base export-instruct export-chat

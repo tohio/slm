@@ -122,10 +122,38 @@ QUICK_TASKS = ["hellaswag", "arc_easy", "arc_challenge"]
 CODE_EXECUTING_TASKS = {"humaneval"}
 
 
+def _run_scoped_checkpoint_parts(model_path: Path) -> tuple[str, str] | None:
+    """
+    Return (size, variant) for run-scoped checkpoints:
+
+        results/runs/<size>/<variant>/final
+
+    Returns None for Hub IDs or legacy/non-standard local paths.
+    """
+    parts = model_path.parts
+    if len(parts) >= 4 and model_path.name == "final":
+        try:
+            runs_idx = parts.index("runs")
+        except ValueError:
+            return None
+
+        if len(parts) > runs_idx + 3:
+            size = parts[runs_idx + 1]
+            variant = parts[runs_idx + 2]
+            return size, variant
+
+    return None
+
+
 def model_display_name(model_path: Path) -> str:
     """
-    Compact name for a checkpoint dir. `results/runs/125m/dpo/final` → `slm-125m-dpo`.
+    Compact name for a checkpoint dir.
+    `results/runs/125m/dpo/final` → `slm-125m-dpo`.
     """
+    scoped = _run_scoped_checkpoint_parts(model_path)
+    if scoped:
+        size, variant = scoped
+        return f"slm-{size}-{variant}"
     return model_path.parent.name if model_path.name == "final" else model_path.name
 
 
@@ -372,7 +400,14 @@ def save_results(
     model_name = model_display_name(model_path)
     # UTC so filenames sort correctly across machines in different timezones.
     timestamp  = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
-    out_dir    = _eval_results_dir() / model_name
+
+    scoped = _run_scoped_checkpoint_parts(model_path)
+    if scoped:
+        size, variant = scoped
+        out_dir = Path(os.environ.get("RESULTS_DIR", "results")) / "runs" / size / "eval" / variant
+    else:
+        out_dir = _eval_results_dir() / model_name
+
     out_dir.mkdir(parents=True, exist_ok=True)
 
     out_path = out_dir / f"eval_{timestamp}.json"
