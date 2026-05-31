@@ -28,6 +28,12 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+def _is_rank_zero() -> bool:
+    """True only on global rank 0 under torchrun/accelerate DDP."""
+    return int(os.environ.get("RANK", "0")) == 0
+
+
+
 DATA_DIR    = Path(os.environ.get("DATA_DIR", "data"))
 from config.paths import pretrain_dir, tokenized_dir as run_tokenized_dir, BASE_RESULTS_DIR
 
@@ -400,7 +406,7 @@ def main():
         f"grad_ckpt={training_args.gradient_checkpointing}"
     )
 
-    if "wandb" in training_args.report_to:
+    if "wandb" in training_args.report_to and _is_rank_zero():
         import wandb
         wandb.init(
             project=cfg.get("wandb_project", "slm"),
@@ -439,17 +445,24 @@ def main():
     log.info("Starting training...")
     trainer.train(resume_from_checkpoint=resume_checkpoint if args.resume else None)
 
-    log.info("Saving final model...")
     final_dir = output_dir / "final"
-    trainer.save_model(str(final_dir))
-    model_config.save_pretrained(str(final_dir))
+    if _is_rank_zero():
+        log.info("Saving final model...")
+        trainer.save_model(str(final_dir))
+        model_config.save_pretrained(str(final_dir))
 
-    shutil.copytree(tokenizer_dir, final_dir / "tokenizer", dirs_exist_ok=True)
-    log.info(f"Tokenizer copied to {final_dir / 'tokenizer'}")
+        shutil.copytree(tokenizer_dir, final_dir / "tokenizer", dirs_exist_ok=True)
+        log.info(f"Tokenizer copied to {final_dir / 'tokenizer'}")
 
-    log.info(f"Model saved to {final_dir}")
-    log.info("Pretraining complete.")
-    log.info("Next step: make sft")
+        log.info(f"Model saved to {final_dir}")
+
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.barrier()
+        torch.distributed.destroy_process_group()
+
+    if _is_rank_zero():
+        log.info("Pretraining complete.")
+        log.info("Next step: make sft")
 
 
 if __name__ == "__main__":
