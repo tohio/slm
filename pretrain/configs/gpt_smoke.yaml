@@ -1,4 +1,5 @@
 name: slm-smoke
+size: mini
 wandb_project: slm-mini
 
 model:
