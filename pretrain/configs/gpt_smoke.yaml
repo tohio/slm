@@ -30,7 +30,7 @@ training:
   precision: bf16
   gradient_clip_val: 1.0
   gradient_checkpointing: false
-  torch_compile: false
+  torch_compile: true
   eval_steps: 4
   save_steps: 4
   save_total_limit: 2
