@@ -81,18 +81,46 @@ def _prepare_batch(tokenizer, prompts: list[str], *,
     (the base model saw BOS at sequence start during pretraining).
     """
     if chat:
-        encoded = [
-            {
-                "input_ids": tokenizer.apply_chat_template(
-                    [{"role": "user", "content": p}],
-                    tokenize=True,
-                    add_generation_prompt=True,
-                    truncation=True,
-                    max_length=max_input_length,
-                )
-            }
-            for p in prompts
-        ]
+        encoded = []
+        for p in prompts:
+            item = tokenizer.apply_chat_template(
+                [{"role": "user", "content": p}],
+                tokenize=True,
+                add_generation_prompt=True,
+                truncation=True,
+                max_length=max_input_length,
+                return_dict=True,
+            )
+
+            # Transformers versions differ:
+            # - some return list[int]
+            # - some return BatchEncoding/dict with input_ids + attention_mask
+            if hasattr(item, "data"):
+                item = dict(item.data)
+            elif isinstance(item, dict):
+                item = dict(item)
+            else:
+                item = {"input_ids": item}
+
+            input_ids = item["input_ids"]
+            attention_mask = item.get("attention_mask")
+
+            if hasattr(input_ids, "tolist"):
+                input_ids = input_ids.tolist()
+            if input_ids and isinstance(input_ids[0], list):
+                input_ids = input_ids[0]
+
+            if attention_mask is None:
+                attention_mask = [1] * len(input_ids)
+            elif hasattr(attention_mask, "tolist"):
+                attention_mask = attention_mask.tolist()
+            if attention_mask and isinstance(attention_mask[0], list):
+                attention_mask = attention_mask[0]
+
+            encoded.append({
+                "input_ids": list(input_ids),
+                "attention_mask": list(attention_mask),
+            })
     else:
         encoded = [
             {
