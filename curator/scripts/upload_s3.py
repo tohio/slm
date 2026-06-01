@@ -46,7 +46,9 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
-ARTIFACT_STAGES = ("raw", "curated", "validated", "tokenized", "tokenizer")
+ARTIFACT_STAGES = ("raw", "tokenized", "tokenizer", "metadata")
+OPTIONAL_ARTIFACT_STAGES = ("curated", "validated")
+ALL_ARTIFACT_STAGES = ARTIFACT_STAGES + OPTIONAL_ARTIFACT_STAGES
 
 # S3 transfer configuration is built per command so large single-file artifacts
 # can use multipart concurrency. File-level concurrency is still controlled by
@@ -350,10 +352,11 @@ def _artifact_paths(size: str, date: str, stage: str) -> tuple[Path, str]:
 
     Stage names are intentionally user-facing and stable:
       - raw:        downloaded source data under data/runs/<size>/raw
-      - curated:    blended train/val JSONL under data/runs/<size>/curated
-      - validated:  validated train/val JSONL under data/runs/<size>/validated
       - tokenized:  pretraining binaries under data/runs/<size>/tokenized
       - tokenizer:  tokenizer files under data/runs/<size>/tokenizer
+      - metadata:   run metadata under data/runs/<size>/metadata
+      - curated:    optional blended train/val JSONL under data/runs/<size>/curated
+      - validated:  optional validated train/val JSONL under data/runs/<size>/validated
 
     S3 keys are grouped by size/date so a prior run can be restored exactly:
       <size>/<date>/<artifact>/...
@@ -368,10 +371,33 @@ def _artifact_paths(size: str, date: str, stage: str) -> tuple[Path, str]:
         return DATA_DIR / "runs" / size / "tokenized", f"{size}/{date}/tokenized"
     if stage == "tokenizer":
         return DATA_DIR / "runs" / size / "tokenizer", f"{size}/{date}/tokenizer"
+    if stage == "metadata":
+        return DATA_DIR / "runs" / size / "metadata", f"{size}/{date}/metadata"
     raise ValueError(
         f"Unknown artifact stage: {stage}. "
-        f"Valid stages: {','.join(ARTIFACT_STAGES)}"
+        f"Valid stages: {','.join(ALL_ARTIFACT_STAGES)}"
     )
+
+
+def _artifact_upload_paths(size: str, date: str, stage: str) -> tuple[Path, str, str]:
+    """Return (local_path, s3_prefix, glob) for artifact uploads.
+
+    The metadata stage is a stable downstream contract:
+      local: data/runs/<size>/curated/blend_stats.json
+      s3:   <size>/<date>/metadata/blend_stats.json
+
+    Curated and validated JSONL stages remain optional archival stages and are
+    not included in ARTIFACT_STAGES by default.
+    """
+    if stage == "metadata":
+        return (
+            DATA_DIR / "runs" / size / "curated",
+            f"{size}/{date}/metadata",
+            "blend_stats.json",
+        )
+
+    src, dst_prefix = _artifact_paths(size, date, stage)
+    return src, dst_prefix, "**/*"
 
 
 def _normalize_stages(stages: str | None) -> list[str]:
@@ -383,10 +409,10 @@ def _normalize_stages(stages: str | None) -> list[str]:
         raise ValueError("At least one artifact stage is required")
 
     for stage in normalized:
-        if stage not in ARTIFACT_STAGES:
+        if stage not in ALL_ARTIFACT_STAGES:
             raise ValueError(
                 f"Unknown artifact stage: {stage}. "
-                f"Valid stages: {','.join(ARTIFACT_STAGES)}"
+                f"Valid stages: {','.join(ALL_ARTIFACT_STAGES)}"
             )
     return normalized
 
@@ -405,11 +431,12 @@ def upload_artifacts(
     totals = {"uploaded": 0, "skipped": 0, "failed": 0}
 
     for stage in _normalize_stages(stages):
-        src, dst_prefix = _artifact_paths(size, date, stage)
+        src, dst_prefix, stage_glob = _artifact_upload_paths(size, date, stage)
         if not src.exists():
             log.warning(f"Skipping missing artifact stage '{stage}': {src}")
             continue
 
+        effective_glob = stage_glob if stage == "metadata" else glob
         log.info(f"Uploading artifact stage '{stage}': {src} → {dst_prefix}")
         counts = upload_directory(
             src=src,
@@ -418,7 +445,7 @@ def upload_artifacts(
             prefix=prefix,
             workers=workers,
             overwrite=overwrite,
-            glob=glob,
+            glob=effective_glob,
         )
         for key in totals:
             totals[key] += counts.get(key, 0)
@@ -498,7 +525,7 @@ def main():
         "--stages",
         type=str,
         default=",".join(ARTIFACT_STAGES),
-        help="Comma-separated artifact stages to upload: raw,curated,validated,tokenized,tokenizer",
+        help=("Comma-separated artifact stages to upload. Default: raw,tokenized,tokenizer,metadata. Optional archival stages: curated,validated."),
     )
     up_artifacts.add_argument("--workers", type=int, default=16)
     up_artifacts.add_argument("--overwrite", action="store_true")
@@ -511,7 +538,7 @@ def main():
         "--stages",
         type=str,
         default=",".join(ARTIFACT_STAGES),
-        help="Comma-separated artifact stages to download: raw,curated,validated,tokenized,tokenizer",
+        help=("Comma-separated artifact stages to download. Default: raw,tokenized,tokenizer,metadata. Optional archival stages: curated,validated."),
     )
     dl_artifacts.add_argument("--workers", type=int, default=16)
     dl_artifacts.add_argument("--overwrite", action="store_true")
