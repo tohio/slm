@@ -519,6 +519,10 @@ HANDCRAFTED_SIMPLE_CODE_GENERATION = [
 # to Magicoder's broader instruction distribution.
 HANDCRAFTED_SIMPLE_CODE_GENERATION_REPEAT = 100
 
+# Repeat raw HumanEval-style function-body completions so this signal is not
+# drowned out by the broader Magicoder instruction distribution.
+HANDCRAFTED_RAW_FUNCTION_COMPLETION_REPEAT = 100
+
 # ── Handcrafted function-completion examples ─────────────────────────────────
 
 HANDCRAFTED_FUNCTION_COMPLETIONS = [
@@ -688,6 +692,60 @@ def build_handcrafted_function_completion_records() -> list[dict]:
                 "sft_type": "function_completion",
                 "normalized": False,
                 "body_only_variant": True,
+            })
+
+    return records
+
+
+def build_handcrafted_raw_function_completion_records() -> list[dict]:
+    """Return raw-prefix function-body completion examples.
+
+    Canonical HumanEval prompts are not chat instructions. They provide:
+
+        def foo(...):
+            """docstring"""
+
+    and expect the model to continue with only the indented function body.
+    These examples reinforce that raw completion mode while still using the
+    existing conversational SFT record format.
+    """
+    records = []
+
+    prompt_templates = [
+        "{snippet}",
+        "{snippet}\n",
+        "Complete the function body only.\n\n{snippet}",
+        "Return only the indented function body.\n\n{snippet}",
+    ]
+
+    for example in HANDCRAFTED_FUNCTION_COMPLETIONS:
+        imports = example["imports"].strip()
+        signature = example["signature"].strip()
+        docstring = example["docstring"].strip()
+        body = example["body"].strip()
+
+        snippet_parts = []
+        if imports:
+            snippet_parts.append(imports)
+        snippet_parts.append(f'{signature}\n    """{docstring}"""')
+        snippet = "\n\n".join(snippet_parts)
+
+        indented_body = "\n".join(
+            f"    {line}" if line.strip() else line
+            for line in body.splitlines()
+        )
+
+        for template in prompt_templates:
+            records.append({
+                "conversations": [
+                    {"role": "system", "content": CODE_SYSTEM},
+                    {"role": "user", "content": template.format(snippet=snippet)},
+                    {"role": "assistant", "content": indented_body},
+                ],
+                "source": "handcrafted_raw_function_completion",
+                "sft_type": "function_completion",
+                "normalized": False,
+                "raw_completion_style": True,
             })
 
     return records
@@ -1220,6 +1278,19 @@ def prepare_code(size: str, val_fraction: float) -> None:
     log.info(
         f"Added handcrafted function-completion examples: "
         f"{len(handcrafted_records):,}"
+    )
+
+    raw_completion_base = build_handcrafted_raw_function_completion_records()
+    raw_completion_records = (
+        raw_completion_base * HANDCRAFTED_RAW_FUNCTION_COMPLETION_REPEAT
+    )
+    records.extend(raw_completion_records)
+    type_counts["function_completion"] += len(raw_completion_records)
+    log.info(
+        f"Added handcrafted raw function-completion examples: "
+        f"{len(raw_completion_records):,} "
+        f"({len(raw_completion_base):,} unique × "
+        f"{HANDCRAFTED_RAW_FUNCTION_COMPLETION_REPEAT})"
     )
 
     handcrafted_explanation_base = build_handcrafted_code_explanation_records()
