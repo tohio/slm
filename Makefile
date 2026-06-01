@@ -18,7 +18,7 @@ SIZE    ?= 125m
 GPUS    ?= 1
 WORKERS ?=
 DATE     ?= $(shell date +%Y-%m-%d)
-ARTIFACT_STAGES ?= raw,curated,validated,tokenized,tokenizer
+ARTIFACT_STAGES ?= raw,curated,validated,tokenized,tokenizer,metadata
 
 # DATA_DIR — read from .env if not set in environment.
 DATA_DIR ?= $(shell grep -v '^\#' .env 2>/dev/null | grep '^DATA_DIR=' | head -1 | cut -d= -f2 | tr -d ' ')
