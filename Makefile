@@ -421,12 +421,7 @@ setup-data-dir:
 
 setup-gpu:
 	@echo "==> Running GPU instance setup (DATA_DIR=$(DATA_DIR))..."
-	$(MAKE) restore-size-tokenizer SIZE=$(SIZE) DATA_DIR=$(DATA_DIR)
 	bash infra/setup_gpu_instance.sh --data-dir $(DATA_DIR) --size $(SIZE) $(if $(DATE),--date $(DATE),)
-
-	@echo "==> Restoring size-specific tokenizer and metadata..."
-	mkdir -p "$(DATA_DIR)/runs/$(SIZE)/tokenizer"
-	$(AWS) s3 sync "s3://$(S3_BUCKET)/slm/data/$(SIZE)/$(DATE)/tokenizer/" "$(DATA_DIR)/runs/$(SIZE)/tokenizer/"
 	$(MAKE) restore-size-tokenizer SIZE=$(SIZE) DATA_DIR=$(DATA_DIR)
 	$(MAKE) setup-gpu-metadata SIZE=$(SIZE) DATE=$(DATE) DATA_DIR=$(DATA_DIR) S3_BUCKET=$(S3_BUCKET)
 install:
@@ -676,7 +671,7 @@ help:
 .PHONY: restore-size-tokenizer
 restore-size-tokenizer:
 	@echo "==> Restoring size-specific tokenizer ($(SIZE)) into active tokenizer path..."
-	@test -d "$(DATA_DIR)/runs/$(SIZE)/tokenizer" || (echo "Missing $(DATA_DIR)/runs/$(SIZE)/tokenizer — download tokenizer artifact first" && exit 1)
+	@test -d "$(DATA_DIR)/runs/$(SIZE)/tokenizer" || (echo "Missing $(DATA_DIR)/runs/$(SIZE)/tokenizer — run setup-gpu or artifacts-download first" && exit 1)
 	mkdir -p "$(DATA_DIR)/tokenizer"
 	rsync -a "$(DATA_DIR)/runs/$(SIZE)/tokenizer/" "$(DATA_DIR)/tokenizer/"
 	@echo "  Active tokenizer restored from $(DATA_DIR)/runs/$(SIZE)/tokenizer"
@@ -684,6 +679,10 @@ restore-size-tokenizer:
 .PHONY: setup-gpu-metadata
 setup-gpu-metadata:
 	@echo "==> Restoring metadata artifacts for $(SIZE) ($(DATE))..."
+	@if [ -z "$(DATE)" ]; then \
+		echo "  DATE not set; skipping metadata download"; \
+		exit 0; \
+	fi
 	mkdir -p "$(DATA_DIR)/runs/$(SIZE)/metadata"
 	$(AWS) s3 cp "s3://$(S3_BUCKET)/slm/data/$(SIZE)/$(DATE)/metadata/blend_stats.json" "$(DATA_DIR)/runs/$(SIZE)/metadata/blend_stats.json" || \
 		echo "  metadata/blend_stats.json not found; export will use design-only model card"
