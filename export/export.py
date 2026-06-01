@@ -184,41 +184,24 @@ def _format_eval_table(scores: dict[str, float]) -> str:
     return "\n".join(lines)
 
 
-def _load_blend_stats(size: str) -> dict | None:
-    """
-    Load data/runs/{size}/curated/blend_stats.json if present and matching this size.
+def curated_dir(size: str) -> Path:
+    """Return the local curated artifact directory for a model size."""
+    return Path(os.environ.get("DATA_DIR", "data")) / "runs" / size / "curated"
 
-    Returns the parsed dict, or None if:
-      - file doesn't exist (curator hasn't run, or blend output not on this host)
-      - file is unreadable / malformed
-      - file's `target` field doesn't match the size we're exporting
-        (avoids shipping wrong numbers when blend_stats is from a different scale)
+
+def _load_blend_stats(size: str) -> dict:
+    """Load curation blend stats when available.
+
+    Export may run on GPU instances that only restored tokenizer/tokenized
+    artifacts. Missing curated stats should not block model export.
     """
     blend_stats_path = curated_dir(size) / "blend_stats.json"
+
     if not blend_stats_path.exists():
-        log.info(
-            f"blend_stats.json not found at {blend_stats_path} — "
-            f"model card will use design targets only."
-        )
-        return None
+        return {}
 
-    try:
-        with open(blend_stats_path) as f:
-            stats = json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
-        log.warning(f"Failed to read {blend_stats_path}: {e}")
-        return None
-
-    blend_target = stats.get("target")
-    if blend_target != size:
-        log.warning(
-            f"blend_stats.json target={blend_target!r} does not match "
-            f"--size {size!r}. Falling back to design targets only — "
-            f"re-curate at the matching scale to publish realized numbers."
-        )
-        return None
-
-    return stats
+    with blend_stats_path.open("r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 def _format_data_mix_table(size: str) -> str:
