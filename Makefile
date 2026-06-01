@@ -424,6 +424,11 @@ setup-gpu:
 	$(MAKE) restore-size-tokenizer SIZE=$(SIZE) DATA_DIR=$(DATA_DIR)
 	bash infra/setup_gpu_instance.sh --data-dir $(DATA_DIR) --size $(SIZE) $(if $(DATE),--date $(DATE),)
 
+	@echo "==> Restoring size-specific tokenizer and metadata..."
+	mkdir -p "$(DATA_DIR)/runs/$(SIZE)/tokenizer"
+	$(AWS) s3 sync "s3://$(S3_BUCKET)/slm/data/$(SIZE)/$(DATE)/tokenizer/" "$(DATA_DIR)/runs/$(SIZE)/tokenizer/"
+	$(MAKE) restore-size-tokenizer SIZE=$(SIZE) DATA_DIR=$(DATA_DIR)
+	$(MAKE) setup-gpu-metadata SIZE=$(SIZE) DATE=$(DATE) DATA_DIR=$(DATA_DIR) S3_BUCKET=$(S3_BUCKET)
 install:
 	python3 -m venv .venv
 	.venv/bin/pip install --upgrade pip
@@ -675,3 +680,13 @@ restore-size-tokenizer:
 	mkdir -p "$(DATA_DIR)/tokenizer"
 	rsync -a "$(DATA_DIR)/runs/$(SIZE)/tokenizer/" "$(DATA_DIR)/tokenizer/"
 	@echo "  Active tokenizer restored from $(DATA_DIR)/runs/$(SIZE)/tokenizer"
+
+.PHONY: setup-gpu-metadata
+setup-gpu-metadata:
+	@echo "==> Restoring metadata artifacts for $(SIZE) ($(DATE))..."
+	mkdir -p "$(DATA_DIR)/runs/$(SIZE)/metadata"
+	$(AWS) s3 cp "s3://$(S3_BUCKET)/slm/data/$(SIZE)/$(DATE)/metadata/blend_stats.json" "$(DATA_DIR)/runs/$(SIZE)/metadata/blend_stats.json" || \
+		echo "  metadata/blend_stats.json not found; export will use design-only model card"
+	@if [ -f "$(DATA_DIR)/runs/$(SIZE)/metadata/blend_stats.json" ]; then \
+		echo "  Restored $(DATA_DIR)/runs/$(SIZE)/metadata/blend_stats.json"; \
+	fi

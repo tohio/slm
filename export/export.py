@@ -184,24 +184,36 @@ def _format_eval_table(scores: dict[str, float]) -> str:
     return "\n".join(lines)
 
 
+def metadata_dir(size: str) -> Path:
+    """Return the local metadata artifact directory for a model size."""
+    return Path(os.environ.get("DATA_DIR", "data")) / "runs" / size / "metadata"
+
+
 def curated_dir(size: str) -> Path:
-    """Return the local curated artifact directory for a model size."""
+    """Return the legacy curated artifact directory for a model size."""
     return Path(os.environ.get("DATA_DIR", "data")) / "runs" / size / "curated"
 
 
 def _load_blend_stats(size: str) -> dict:
     """Load curation blend stats when available.
 
-    Export may run on GPU instances that only restored tokenizer/tokenized
-    artifacts. Missing curated stats should not block model export.
+    Preferred location:
+      data/runs/{size}/metadata/blend_stats.json
+
+    Legacy fallback:
+      data/runs/{size}/curated/blend_stats.json
     """
-    blend_stats_path = curated_dir(size) / "blend_stats.json"
+    candidates = [
+        metadata_dir(size) / "blend_stats.json",
+        curated_dir(size) / "blend_stats.json",
+    ]
 
-    if not blend_stats_path.exists():
-        return {}
+    for blend_stats_path in candidates:
+        if blend_stats_path.exists():
+            with blend_stats_path.open("r", encoding="utf-8") as f:
+                return json.load(f)
 
-    with blend_stats_path.open("r", encoding="utf-8") as f:
-        return json.load(f)
+    return {}
 
 
 def _format_data_mix_table(size: str) -> str:
@@ -223,7 +235,7 @@ def _format_data_mix_table(size: str) -> str:
     """
     stats = _load_blend_stats(size)
 
-    if stats is None:
+    if not stats:
         # Design-only fallback: render DATA_MIX percentages without
         # realized numbers, plus a caveat that reality may have drifted.
         lines = [
