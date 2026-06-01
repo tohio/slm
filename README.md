@@ -24,13 +24,13 @@ All three sizes run through the same code path — the only differences are conf
 
 | Size | Curation time | Training time | Rough cost | Suits |
 |---|---|---|---|---|
-| `slm-125m` | 6 hrs 4mins | ~16 hrs | $4.06+ | learning the pipeline, single-GPU runs |
-| `slm-350m` | _TBD_ | _TBD_ | _TBD_ | serious research budget, multi-GPU |
-| `slm-1b` | _TBD_ | _TBD_ | _TBD_ | production-useful small model, GPU cluster |
+| `slm-125m` | 6 hrs 4mins | 7 hrs 05m | $120.20 | learning the pipeline |
+| `slm-350m` | 15hrs | _TBD_ | $18.26| serious research budget |
+| `slm-1b` | _TBD_ | _TBD_ | _TBD_ | production-useful small model |
 
-Curation process ran on `96 vCPU with 384 GiB`
+Curation process ran on `96 vCPU with 384 GiB` with 1TB/2TB/6TB of disk size
 
-Training on single GPU H200 `1 GPU with 141GiB`
+On 125m training on multi `GPU 4 X H200` (564GB VRAM, 176x CPU, 740GB RAM)
 
 Most readers will find `125m` fits their budget. The `1b` path is here for readers with the compute — it uses the same commands and same config structure, and produces a more capable model. The pipeline is designed for all three to work reliably; the choice is about what you can afford, not what you can trust.
 
