@@ -703,7 +703,7 @@ def build_handcrafted_raw_function_completion_records() -> list[dict]:
     Canonical HumanEval prompts are not chat instructions. They provide:
 
         def foo(...):
-            """docstring"""
+            \"\"\"docstring\"\"\"
 
     and expect the model to continue with only the indented function body.
     These examples reinforce that raw completion mode while still using the
