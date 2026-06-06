@@ -8,7 +8,7 @@ completion examples:
     prompt:
         imports
         def foo(...):
-            """docstring"""
+            \"\"\"docstring\"\"\"
 
     completion:
             indented function body only
