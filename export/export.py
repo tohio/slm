@@ -16,7 +16,7 @@ Three variants are exported per model size:
     Variant     Checkpoint                                    Hub repo
     --------    ----------                                    --------
     base        results/runs/{size}/pretrain/final                      <user>/slm-{size}
-    instruct    results/runs/{size}/sft_code/final            <user>/slm-{size}-instruct
+    instruct    results/runs/{size}/sft_code_completion/final            <user>/slm-{size}-instruct
     chat        results/runs/{size}/dpo/final                  <user>/slm-{size}-chat
 
 Data mix and token targets are imported from config/data_mix.py — the
@@ -105,8 +105,8 @@ VARIANTS: dict[str, dict] = {
         "pipeline_tag":  "text-generation",
     },
     "instruct": {
-        "checkpoint":    lambda size: RESULTS_DIR / "runs" / size / "sft_code" / "final",
-        "eval_dir":      lambda size: RESULTS_DIR / "runs" / size / "eval" / "sft_code",
+        "checkpoint":    lambda size: RESULTS_DIR / "runs" / size / "sft_code_completion" / "final",
+        "eval_dir":      lambda size: RESULTS_DIR / "runs" / size / "eval" / "sft_code_completion",
         "hub_suffix":    "-instruct",
         "description":   "instruction-tuned via chat SFT + code SFT",
         "pipeline_tag":  "text-generation",
