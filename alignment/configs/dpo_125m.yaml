@@ -1,7 +1,7 @@
 name: slm-125m-dpo
 wandb_project: slm
 model:
-  base_model_path: $RESULTS_DIR/runs/125m/sft_code/final
+  base_model_path: $RESULTS_DIR/runs/125m/sft_code_completion/final
   max_seq_length: 2048
 dpo:
   beta: 0.1                          # KL penalty — higher = closer to SFT reference

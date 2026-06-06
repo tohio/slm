@@ -96,7 +96,7 @@ endif
 # Note: assumes configs exist at $(PRETRAIN_CONFIG), $(SFT_CHAT_CONFIG), etc.
 # Run `make config-gen` first to auto-generate them tuned for the current GPU.
 
-all: curate validate tokenizer tokenize pretrain prepare-sft sft sft-code prepare-dpo dpo
+all: curate validate tokenizer tokenize pretrain prepare-sft sft sft-code prepare-code-completion sft-code-completion prepare-dpo dpo
 	@echo "Pipeline complete for slm-$(SIZE) on $(GPUS) GPU(s)"
 
 # ── Stage 1: Data curation ────────────────────────────────────────────────────

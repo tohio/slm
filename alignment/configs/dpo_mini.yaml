@@ -1,7 +1,7 @@
 name: slm-mini-dpo
 wandb_project: slm-mini
 model:
-  base_model_path: $RESULTS_DIR/runs/mini/sft_code/final
+  base_model_path: $RESULTS_DIR/runs/mini/sft_code_completion/final
   max_seq_length: 1024
 dpo:
   beta: 0.1

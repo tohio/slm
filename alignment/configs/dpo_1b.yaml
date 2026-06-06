@@ -1,7 +1,7 @@
 name: slm-1b-dpo
 wandb_project: slm
 model:
-  base_model_path: $RESULTS_DIR/runs/1b/sft_code/final
+  base_model_path: $RESULTS_DIR/runs/1b/sft_code_completion/final
   max_seq_length: 4096
 dpo:
   beta: 0.1
