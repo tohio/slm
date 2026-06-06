@@ -46,6 +46,7 @@ import argparse
 import json
 import logging
 import os
+import torch
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -190,6 +191,28 @@ def make_lm(model_path: Path, batch_size: int, device: str, dtype: str):
     precision — AutoModelForCausalLM alone would default to float32.
     """
     from lm_eval.models.huggingface import HFLM
+
+    class SLMHFLM(HFLM):
+        def _model_generate(self, context, max_length: int, stop: list[str], **generation_kwargs):
+            """Use the verified SLM generation path for lm-eval.
+
+            lm-eval's default HFLM generation path can diverge for this custom
+            model and produce unrelated prefixes before HumanEval stop strings.
+            This wrapper keeps canonical lm-eval tasks intact while making
+            generation match SLM inference/model.generate behavior.
+            """
+            input_len = context.shape[1]
+            max_new_tokens = max(1, max_length - input_len)
+            attention_mask = torch.ones_like(context)
+
+            return self.model.generate(
+                input_ids=context,
+                attention_mask=attention_mask,
+                max_new_tokens=max_new_tokens,
+                do_sample=generation_kwargs.get("do_sample", False),
+                eos_token_id=self.tokenizer.eos_token_id,
+                pad_token_id=self.tokenizer.pad_token_id,
+            )
     from transformers import AutoConfig, AutoModelForCausalLM
     from model import SLMConfig, SLMForCausalLM
 
@@ -200,7 +223,7 @@ def make_lm(model_path: Path, batch_size: int, device: str, dtype: str):
     log.info(f"Loading model from {model_path} (dtype={dtype})...")
     log.info(f"Tokenizer from {tokenizer_path}")
 
-    return HFLM(
+    return SLMHFLM(
         pretrained=str(model_path),
         tokenizer=str(tokenizer_path),
         device=device,

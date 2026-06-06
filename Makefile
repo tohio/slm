@@ -306,6 +306,26 @@ sft-code-mini:
 	$(ACCELERATE) finetune/train_sft.py \
 		--config finetune/configs/sft_code_mini.yaml
 
+# ── Stage 5d: Raw code-completion SFT ─────────────────────────────────────────
+
+.PHONY: prepare-code-completion sft-code-completion eval-code-completion
+
+prepare-code-completion:
+	@echo "==> Stage 5d: Prepare raw code-completion data ($(SIZE))"
+	$(PYTHON) finetune/data/prepare_code_completion.py --size $(SIZE)
+
+sft-code-completion:
+	@echo "==> Stage 5e: Raw code-completion SFT ($(SIZE))"
+	$(PYTHON) finetune/train_code_completion.py --config finetune/configs/code_completion_$(SIZE).yaml
+
+eval-code-completion:
+	@echo "==> Stage 7: HumanEval for raw code-completion checkpoint ($(SIZE))"
+	$(PYTHON) eval/eval.py \
+		--model results/runs/$(SIZE)/sft_code_completion/final \
+		--tasks humaneval \
+		--batch-size 1 \
+		--log-samples
+
 # ── Stage 6: DPO ──────────────────────────────────────────────────────────────
 
 prepare-dpo:
@@ -652,6 +672,9 @@ help:
 	@echo "  sft-mini           Stage 5b — mini chat SFT"
 	@echo "  sft-code           Stage 5c — code supervised fine-tuning"
 	@echo "  sft-code-mini      Stage 5c — mini code SFT"
+	@echo "  prepare-code-completion Stage 5d — prepare raw code-completion data"
+	@echo "  sft-code-completion     Stage 5e — raw code-completion supervised fine-tuning"
+	@echo "  eval-code-completion    Stage 7  — HumanEval for raw code-completion checkpoint"
 	@echo "  prepare-dpo        Stage 6a — download DPO datasets"
 	@echo "  dpo                Stage 6b — DPO alignment"
 	@echo "  dpo-mini           Stage 6b — mini DPO"
@@ -689,3 +712,4 @@ setup-gpu-metadata:
 	@if [ -f "$(DATA_DIR)/runs/$(SIZE)/metadata/blend_stats.json" ]; then \
 		echo "  Restored $(DATA_DIR)/runs/$(SIZE)/metadata/blend_stats.json"; \
 	fi
+

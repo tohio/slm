@@ -1,0 +1,20 @@
+model:
+  base_model_path: $RESULTS_DIR/runs/125m/sft_code/final
+  output_dir: $RESULTS_DIR/runs/125m/sft_code_completion
+
+data:
+  train_path: $DATA_DIR/runs/125m/code_completion/train.jsonl
+  val_path: $DATA_DIR/runs/125m/code_completion/val.jsonl
+  max_length: 768
+
+training:
+  micro_batch_size: 8
+  eval_micro_batch_size: 8
+  gradient_accumulation_steps: 4
+  max_updates: 500
+  learning_rate: 1.0e-5
+  weight_decay: 0.01
+  warmup_ratio: 0.05
+  eval_steps: 100
+  save_best: true
+  seed: 42
