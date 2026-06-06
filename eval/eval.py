@@ -291,7 +291,7 @@ def run_evaluation(
 
     lm = make_lm(model_path, batch_size, device, dtype)
 
-    merged_results: dict = {"results": {}, "groups": {}, "config": {}}
+    merged_results: dict = {"results": {}, "groups": {}, "samples": {}, "config": {}}
     failed_tasks: list[str] = []
 
     for task_key in tasks:
@@ -339,6 +339,7 @@ def run_evaluation(
             # and aggregate in "groups"; merge both so metric_score can
             # find group-level scores.
             merged_results["groups"].update(results.get("groups", {}))
+            merged_results["samples"].update(results.get("samples", {}))
             merged_results["config"] = results.get("config", {})
         except Exception:
             log.exception(f"Failed to evaluate {task_key}")
@@ -444,6 +445,7 @@ def save_results(
             "timestamp":    timestamp,
             "results":      results.get("results", {}),
             "groups":       results.get("groups", {}),
+            "samples":      results.get("samples", {}),
             "config":       results.get("config", {}),
         }, f, indent=2, cls=_SafeEncoder)
 
