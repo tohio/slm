@@ -33,13 +33,13 @@ checkpoint directory, so the Hub tables reflect real scores for that
 specific variant.
 
 Remote-code bundling:
-    Export writes the architecture files into checkpoint/slm_remote/ and
-    config.json declares auto_map entries pointing at
-    slm_remote.config.SLMConfig and slm_remote.model.SLMForCausalLM.
+    Export writes the architecture files directly into the checkpoint root and
+    config.json declares auto_map entries pointing at config.SLMConfig and
+    model.SLMForCausalLM.
 
-    The package layout is required because model.py uses relative imports
-    such as `from .block import SLMDecoderBlock`. A flat Hub layout with
-    relative imports breaks Transformers' dynamic remote-code loader.
+    The root layout is required for compatibility with Transformers dynamic
+    remote-code loading in environments that expect auto_map values in the
+    form module.ClassName.
 """
 
 import argparse
@@ -80,12 +80,7 @@ DATA_DIR    = Path(os.environ.get("DATA_DIR", "data"))
 REPO_ROOT   = Path(__file__).resolve().parents[1]
 MODEL_PKG_DIR = REPO_ROOT / "model"
 
-# Remote-code package written into the checkpoint before Hub upload.
-# model.py uses relative imports such as `from .block import ...`, so these
-# files must be uploaded as a real package, not as unrelated flat files.
-REMOTE_CODE_PACKAGE = "slm_remote"
-
-# Architecture source files bundled into checkpoint/<REMOTE_CODE_PACKAGE>/.
+# Architecture source files bundled into the checkpoint root for Hub remote code.
 BUNDLED_SOURCE_FILES = [
     "config.py",
     "model.py",
@@ -192,6 +187,11 @@ def metadata_dir(size: str) -> Path:
 def curated_dir(size: str) -> Path:
     """Return the legacy curated artifact directory for a model size."""
     return Path(os.environ.get("DATA_DIR", "data")) / "runs" / size / "curated"
+
+
+def tokenizer_dir(size: str) -> Path:
+    """Return the tokenizer artifact directory for a model size."""
+    return Path(os.environ.get("DATA_DIR", "data")) / "runs" / size / "tokenizer"
 
 
 def _load_blend_stats(size: str) -> dict:
@@ -556,38 +556,91 @@ def load_tokenizer(tokenizer_path: Path):
     return tokenizer
 
 
-def _bundle_remote_code_package(checkpoint: Path) -> Path:
-    """
-    Copy live architecture source files into checkpoint/<REMOTE_CODE_PACKAGE>/.
 
-    The model source uses package-relative imports, so the Hub upload must
-    contain a real package directory:
-        slm_remote/config.py
-        slm_remote/model.py
-        ...
+def _export_tokenizer_to_checkpoint_root(tokenizer, tokenizer_path: Path, checkpoint: Path) -> None:
+    """
+    Save/copy tokenizer artifacts to the checkpoint root so standard Hub loading works:
+
+        AutoTokenizer.from_pretrained(repo_id, trust_remote_code=True)
+
+    The tokenizer may also exist under checkpoint/tokenizer/, but the Hub root
+    must contain tokenizer.json/tokenizer_config.json/etc. for normal use.
     """
     import shutil
 
-    package_dir = checkpoint / REMOTE_CODE_PACKAGE
-    package_dir.mkdir(parents=True, exist_ok=True)
-    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    tokenizer.save_pretrained(str(checkpoint))
+
+    for filename in [
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "vocab.json",
+        "merges.txt",
+        "special_tokens.json",
+        "special_tokens_map.json",
+        "chat_template.jinja",
+        "slm_tokenizer.json",
+    ]:
+        src = tokenizer_path / filename
+        dst = checkpoint / filename
+        if src.exists():
+            shutil.copy2(src, dst)
+            log.info(f"Copied tokenizer artifact to checkpoint root: {filename}")
+
+    special_tokens_map_path = checkpoint / "special_tokens_map.json"
+    if not special_tokens_map_path.exists():
+        special_tokens_map = {}
+        for key, value in getattr(tokenizer, "special_tokens_map", {}).items():
+            if isinstance(value, list):
+                special_tokens_map[key] = [str(item) for item in value]
+            else:
+                special_tokens_map[key] = str(value)
+
+        with special_tokens_map_path.open("w", encoding="utf-8") as f:
+            json.dump(special_tokens_map, f, indent=2)
+            f.write("\n")
+        log.info("Created special_tokens_map.json from tokenizer.special_tokens_map")
+
+    required = [
+        "tokenizer.json",
+        "tokenizer_config.json",
+    ]
+    missing = [name for name in required if not (checkpoint / name).is_file()]
+    if missing:
+        raise FileNotFoundError(
+            f"Tokenizer export incomplete at checkpoint root. Missing: {missing}"
+        )
+
+    log.info("Tokenizer artifacts exported to checkpoint root")
+
+def _bundle_remote_code_package(checkpoint: Path) -> Path:
+    """
+    Copy live architecture source files into the checkpoint root.
+
+    Transformers remote-code auto_map should use entries like:
+        config.SLMConfig
+        model.SLMForCausalLM
+
+    This root layout avoids nested auto_map values such as
+    slm_remote.model.SLMForCausalLM, which are not accepted by some
+    Transformers dynamic remote-code loaders.
+    """
+    import shutil
 
     for filename in BUNDLED_SOURCE_FILES:
         live_file = MODEL_PKG_DIR / filename
         if not live_file.is_file():
             raise FileNotFoundError(f"Missing live architecture source file: {live_file}")
-        shutil.copy2(live_file, package_dir / filename)
+        shutil.copy2(live_file, checkpoint / filename)
 
     log.info(
-        f"Bundled remote-code package: {package_dir} "
+        f"Bundled remote-code files into checkpoint root "
         f"({len(BUNDLED_SOURCE_FILES)} files)"
     )
-    return package_dir
-
+    return checkpoint
 
 def _validate_bundled_files(checkpoint: Path) -> None:
     """
-    Confirm bundled remote-code package files match the live source.
+    Confirm bundled remote-code files at checkpoint root match live source.
 
     Existence alone is not enough — a stale bundled copy from an earlier
     export can ship buggy code to the Hub silently. Compare bytes against
@@ -595,41 +648,34 @@ def _validate_bundled_files(checkpoint: Path) -> None:
     """
     import hashlib
 
-    package_dir = checkpoint / REMOTE_CODE_PACKAGE
-    if not package_dir.is_dir():
-        raise FileNotFoundError(
-            f"Remote-code package missing from checkpoint: {package_dir}. "
-            f"Run _bundle_remote_code_package() before export."
-        )
-
-    init_file = package_dir / "__init__.py"
-    if not init_file.is_file():
-        raise FileNotFoundError(f"Missing package marker: {init_file}")
-
     missing, mismatched = [], []
+
     for filename in BUNDLED_SOURCE_FILES:
-        ckpt_file = package_dir / filename
+        ckpt_file = checkpoint / filename
         live_file = MODEL_PKG_DIR / filename
+
         if not ckpt_file.is_file():
-            missing.append(str(ckpt_file.relative_to(checkpoint)))
+            missing.append(filename)
             continue
+
         if hashlib.sha256(ckpt_file.read_bytes()).digest() != \
            hashlib.sha256(live_file.read_bytes()).digest():
-            mismatched.append(str(ckpt_file.relative_to(checkpoint)))
+            mismatched.append(filename)
 
     if missing:
         raise FileNotFoundError(
-            f"Architecture files missing from {package_dir}: {missing}."
+            f"Architecture files missing from checkpoint root: {missing}."
         )
+
     if mismatched:
         raise RuntimeError(
             f"Bundled architecture files differ from live source: {mismatched}. "
-            f"Re-run export so {REMOTE_CODE_PACKAGE}/ is refreshed."
+            f"Re-run export so checkpoint root files are refreshed."
         )
 
     log.info(
         f"Bundled remote code validated: "
-        f"{len(BUNDLED_SOURCE_FILES)} files match live source"
+        f"{len(BUNDLED_SOURCE_FILES)} root files match live source"
     )
 
 def _ensure_remote_code_auto_map(checkpoint: Path) -> None:
@@ -637,8 +683,8 @@ def _ensure_remote_code_auto_map(checkpoint: Path) -> None:
     Ensure config.json advertises the bundled custom architecture to
     Transformers AutoConfig / AutoModelForCausalLM.
 
-    Without auto_map, trust_remote_code=True is not enough: Transformers sees
-    model_type="slm" but does not know which remote classes to load.
+    auto_map values use module.ClassName form for compatibility with
+    Transformers dynamic remote-code loading.
     """
     config_path = checkpoint / "config.json"
     if not config_path.is_file():
@@ -648,8 +694,8 @@ def _ensure_remote_code_auto_map(checkpoint: Path) -> None:
         cfg = json.load(f)
 
     expected_auto_map = {
-        "AutoConfig": f"{REMOTE_CODE_PACKAGE}.config.SLMConfig",
-        "AutoModelForCausalLM": f"{REMOTE_CODE_PACKAGE}.model.SLMForCausalLM",
+        "AutoConfig": "config.SLMConfig",
+        "AutoModelForCausalLM": "model.SLMForCausalLM",
     }
 
     current = cfg.get("auto_map")
@@ -661,10 +707,10 @@ def _ensure_remote_code_auto_map(checkpoint: Path) -> None:
 
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
-        f.write("\n")
+        f.write("
+")
 
-    log.info("Injected remote-code auto_map into config.json")
-
+    log.info("Injected root remote-code auto_map into config.json")
 
 def export(
     size: str,
@@ -719,6 +765,8 @@ def export(
         tokenizer_path = tokenizer_dir(size)
     tokenizer = load_tokenizer(tokenizer_path)
     log.info(f"Tokenizer loaded from {tokenizer_path}")
+
+    _export_tokenizer_to_checkpoint_root(tokenizer, tokenizer_path, checkpoint)
 
     eval_scores = load_eval_results(variant, size)
     if eval_scores:
