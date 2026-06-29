@@ -1,226 +1,182 @@
 # finetune
 
-Supervised Fine-Tuning (SFT) pipeline for SLM. Two sequential stages — chat then code — across all three model sizes, using HuggingFace `trl SFTTrainer`.
+Supervised fine-tuning stages for SLM. This folder trains the `instruct`, `code`, and optional raw code-completion variants.
 
 ---
 
-## Pipeline
+## Responsibility
 
-```
-results/slm-{size}/final          (pretrained base)
-        │
-        ▼
-Stage 1: Chat SFT (SmolTalk / smol-smoltalk + response-control examples)
-        │
-        ▼
-results/slm-{size}-chat/final
-        │
-        ▼
-Stage 2: Code SFT (Magicoder-OSS-Instruct)
-        │
-        ▼
-results/slm-{size}-code/final
-```
+`finetune/` owns:
+
+- SFT dataset preparation
+- response-control data generation
+- instruct SFT
+- code SFT
+- optional raw code-completion SFT
+
+DPO chat alignment lives in `alignment/`.
 
 ---
 
-## Datasets
+## Lineage
 
-| Stage | Dataset | Size | Purpose |
-|---|---|---|---|
-| Chat | `teknium/SmolTalk / smol-smoltalk` | ~1M examples | General instruction following |
-| Chat response-control | generated locally by `finetune/data/response_control.py` | 5k examples | Direct answers, factual restraint, concise stopping, simple factual/AI concept behavior |
-| Code | `ise-uiuc/Magicoder-OSS-Instruct-75K` + handcrafted body-only completions | ~75k examples + small handcrafted set | Code generation, code understanding, and HumanEval-style function-body completion |
-
----
-
-## Getting Started
-
-**Step 1 — Prepare data**
-
-```bash
-make prepare-sft
-
-# Or directly
-python finetune/data/prepare_sft.py --stage both
-python finetune/data/prepare_sft.py --stage chat
-python finetune/data/prepare_sft.py --stage code
+```text
+results/runs/<size>/pretrain/final
+  ↓
+results/runs/<size>/sft_instruct/final
+  ├── results/runs/<size>/dpo_chat/final
+  └── results/runs/<size>/sft_code/final
 ```
 
-Per-stage defaults: chat uses `val_fraction=0.02`, code uses `0.05`. Override both with `--val-fraction`.
-
-`make prepare-sft` now prepares both external SFT datasets and local generated examples:
-- Chat SFT = SmolTalk / smol-smoltalk plus 5,000 generated response-control examples.
-- Code SFT = Magicoder-OSS-Instruct plus a small handcrafted body-only function-completion set.
-
-The response-control examples are generated locally by `finetune/data/response_control.py` and are intentionally focused on behavior rather than broad knowledge. They teach the model to answer simple factual questions directly, stop after the answer is complete, avoid unsupported private-company claims, and use concise responses when the prompt calls for them.
-
-**Step 2 — Chat SFT**
-
-```bash
-# 125M
-python finetune/train_sft.py --config finetune/configs/sft_instruct_125m.yaml
-
-# 350M
-python finetune/train_sft.py --config finetune/configs/sft_instruct_350m.yaml
-
-# 1B
-python finetune/train_sft.py --config finetune/configs/sft_instruct_1b.yaml
-
-# Multi-GPU
-accelerate launch finetune/train_sft.py --config finetune/configs/sft_instruct_125m.yaml
-
-# Resume
-python finetune/train_sft.py --config finetune/configs/sft_instruct_125m.yaml --resume
-```
-
-**Step 3 — Code SFT**
-
-```bash
-python finetune/train_sft.py --config finetune/configs/sft_code_125m.yaml
-python finetune/train_sft.py --config finetune/configs/sft_code_350m.yaml
-python finetune/train_sft.py --config finetune/configs/sft_code_1b.yaml
-```
+`dpo_chat` is trained in `alignment/`. `sft_code` is trained here.
 
 ---
 
 ## Files
 
-```
+```text
 finetune/
 ├── configs/
-│   ├── sft_instruct_125m.yaml    chat SFT — 125M, LR=1e-5
-│   ├── sft_instruct_350m.yaml    chat SFT — 350M, LR=8e-6
-│   ├── sft_instruct_1b.yaml      chat SFT — 1B,   LR=5e-6
-│   ├── sft_instruct_mini.yaml    chat SFT — mini pipeline smoke test
-│   ├── sft_code_125m.yaml    code SFT — 125M, LR=5e-6
-│   ├── sft_code_350m.yaml    code SFT — 350M, LR=3e-6
-│   ├── sft_code_1b.yaml      code SFT — 1B,   LR=2e-6
-│   └── sft_code_mini.yaml    code SFT — mini pipeline smoke test
+│   ├── sft_instruct_mini.yaml
+│   ├── sft_instruct_125m.yaml
+│   ├── sft_instruct_350m.yaml
+│   ├── sft_instruct_1b.yaml
+│   ├── sft_code_mini.yaml
+│   ├── sft_code_125m.yaml
+│   ├── sft_code_350m.yaml
+│   ├── sft_code_1b.yaml
+│   ├── code_completion_125m.yaml
+│   ├── code_completion_350m.yaml
+│   └── code_completion_1b.yaml
 ├── data/
-│   ├── prepare_sft.py        download, generate, and format SFT datasets
-│   └── response_control.py   generated response-control chat examples
-└── train_sft.py              trl SFTTrainer entry point
+│   ├── prepare_sft.py
+│   ├── prepare_code_completion.py
+│   └── response_control.py
+├── train_sft.py
+├── train_code_completion.py
+└── README.md
 ```
 
 ---
 
-## Config Summary
+## Commands
 
-| Config | Base model | LR | Epochs | Micro batch | Grad accum | Seq len | Grad ckpt |
-|---|---|---|---|---|---|---|---|
-| `sft_instruct_125m` | `slm-125m/final` | 1e-5 | 2 | 4 | 4 | 2048 | No |
-| `sft_instruct_350m` | `slm-350m/final` | 8e-6 | 2 | 2 | 8 | 2048 | No |
-| `sft_instruct_1b` | `slm-1b/final` | 5e-6 | 2 | 1 | 16 | 4096 | Yes |
-| `sft_code_125m` | `slm-125m-chat/final` | 5e-6 | 2 | 4 | 4 | 2048 | No |
-| `sft_code_350m` | `slm-350m-chat/final` | 3e-6 | 2 | 2 | 8 | 2048 | No |
-| `sft_code_1b` | `slm-1b-chat/final` | 2e-6 | 2 | 1 | 16 | 4096 | Yes |
+Prepare SFT data:
 
-All configs use effective global batch size of 128 and `warmup_ratio=0.03` on a cosine schedule. Grad-accum values shown are for 1 GPU; each config includes scaling comments for 4/8 GPU.
+```bash
+make prepare-sft SIZE=125m
+```
+
+Train instruct SFT:
+
+```bash
+make sft-instruct SIZE=125m GPUS=1
+make sft-instruct-mini SIZE=mini GPUS=1
+make sft-instruct-resume SIZE=125m GPUS=1
+```
+
+Train code SFT:
+
+```bash
+make sft-code SIZE=125m GPUS=1
+make sft-code-mini SIZE=mini GPUS=1
+make sft-code-resume SIZE=125m GPUS=1
+```
+
+Compatibility aliases:
+
+```bash
+make sft SIZE=125m GPUS=1
+make sft-mini SIZE=mini GPUS=1
+```
+
+Raw code-completion path:
+
+```bash
+make prepare-code-completion SIZE=125m
+make sft-code-completion SIZE=125m
+make eval-code-completion SIZE=125m
+```
 
 ---
 
-## Response-Control Examples
+## Inputs
 
-`finetune/data/response_control.py` generates a small local chat-SFT supplement that is mixed into the Chat SFT dataset during `make prepare-sft`.
+Instruct SFT starts from:
 
-The goal is not to teach broad knowledge. The goal is to correct common small-model behavior failures:
+```text
+results/runs/<size>/pretrain/final
+```
 
-| Category | Purpose |
-|---|---|
-| `simple_factual` | Direct factual answers such as capitals, sky color, and short factual responses |
-| `ai_concept` | Clear concise explanations of basic AI concepts |
-| `factual_restraint` | Avoid unsupported claims about private or unverifiable information |
-| `concise_answer` | Stop after the requested answer; avoid filler and over-explanation |
+Code SFT starts from:
 
-The generated records use the same structured `conversations` format as OpenHermes. They are not preformatted text; the tokenizer chat template is applied during training.
+```text
+results/runs/<size>/sft_instruct/final
+```
 
-The response-control supplement contains 5,000 examples. Arithmetic examples are excluded from this SFT supplement because arithmetic behavior is handled by the `synthetic_arithmetic` pretraining source and downstream preference data.
+SFT data preparation uses the tokenizer under:
 
+```text
+data/runs/<size>/tokenizer/
+```
 
 ---
 
-## Chat Template
+## Outputs
 
-All data is formatted into the SLM chat template before training:
-
+```text
+results/runs/<size>/sft_instruct/final
+results/runs/<size>/sft_code/final
+results/runs/<size>/sft_code_completion/final
 ```
-<|system|>You are a helpful assistant.<|endofturn|>
-<|user|>What is the capital of France?<|endofturn|>
-<|assistant|>The capital of France is Paris.<|endofturn|>
-```
-
-The template is applied automatically by `SFTTrainer` via `tokenizer.apply_chat_template()` — `prepare_sft.py` only emits structured `conversations` records, never pre-formatted text. This is required for `assistant_only_loss=True`, which depends on the `{% generation %}` tags baked into the tokenizer's chat template to mask prompt tokens from the loss.
 
 ---
 
-## Checkpoints
+## Instruct SFT
 
-```
-results/
-├── slm-125m-chat/
-│   ├── checkpoint-500/
-│   ├── checkpoint-1000/
-│   └── final/                best checkpoint (lowest eval loss)
-├── slm-125m-code/
-│   └── final/
-├── slm-350m-chat/
-│   └── final/
-...
-```
+Instruct SFT combines a SmolTalk backbone with the local `response_control` data.
 
-`final/` contains the **lowest-eval-loss** checkpoint. This is enforced in `train_sft.py` by `load_best_model_at_end=True` with `metric_for_best_model="eval_loss"`. Because HF Trainer always keeps the best checkpoint in addition to the N most recent (`save_total_limit=3`), disk usage is up to 4 checkpoints per run during training.
+`response_control` reinforces:
+
+- concise direct answers
+- arithmetic
+- simple factual answers
+- factual restraint
+- concept definitions
+- response-format control
+- clean stopping behavior
 
 ---
 
-## Key Design Decisions
+## Code SFT
 
-**Why sequential SFT?** Training code SFT on top of the chat checkpoint preserves instruction-following capability learned in stage 1. The lower LR in code SFT further reduces catastrophic forgetting.
+Code SFT uses the Magicoder-style instruction data path plus local code examples. It reinforces:
 
-**Why 2 epochs?** With ~1M OpenHermes examples and ~75k Magicoder examples, 2 epochs is enough for strong capability gain on GPT-4-generated data without triggering memorization or forgetting of pretraining knowledge — especially at 1B where 3 epochs is consistently over-trained in our runs.
+- simple Python generation
+- function completion
+- write-code versus explain-code distinction
+- code-specific instruction following
 
-**Why `warmup_ratio=0.03`?** A ratio scales cleanly with both dataset size and epoch count; the previous fixed `warmup_steps: 100` was ~0.3% of one epoch at 125M and effectively no warmup at 1B, which caused LR to hit peak before the optimizer stabilized.
+---
 
-**Why SmolTalk / smol-smoltalk?** One of the highest-quality open instruction datasets — generated by GPT-4 with careful filtering. 1M diverse examples covering reasoning, coding, creative writing, and general knowledge.
+## Chat template
 
+SFT examples are formatted using the project tokenizer chat template and special tokens. The template must remain consistent across SFT, DPO, inference, and serving.
 
-**Why response-control examples?** OpenHermes teaches broad instruction following, but small models often over-answer simple prompts, continue after the answer is complete, or hallucinate unsupported factual details. The response-control supplement is a small generated set that targets those behaviors directly without overwhelming the main OpenHermes distribution.
+---
 
+## Tests
 
-**Why Magicoder?** Generates coding problems inspired by real open-source code then produces solutions. More diverse and higher quality than CodeAlpaca. 75k examples is sufficient for strong code SFT at all three model scales.
+```bash
+make test-sft-instruct SIZE=mini
+make test-sft-code SIZE=mini
 
-**Why LR decreases with model size?** Larger models are more sensitive to fine-tuning — a high LR causes catastrophic forgetting of pretraining knowledge. The conservative LRs for 350M and 1B maintain stability.
+make test-sft-instruct SIZE=125m
+make test-sft-code SIZE=125m
+```
 
-**Why gradient checkpointing only for 1B?** At 125M and 350M, activations fit comfortably in H100 memory. At 1B with seq_len=4096, activation memory becomes the bottleneck.
+Compatibility alias:
 
-## SFT Data Policy
-
-SFT uses external backbone datasets plus local custom datasets.
-
-### Chat SFT
-
-Chat SFT no longer uses OpenHermes as the default source. It uses a size-aware
-SmolTalk policy plus local `response_control` examples:
-
-| Model | External backbone | Local custom dataset |
-|---|---|---|
-| `125m` | 50% of `HuggingFaceTB/smol-smoltalk` | `response_control` |
-| `350m` | full `HuggingFaceTB/smol-smoltalk` | `response_control` |
-| `1b` | full `HuggingFaceTB/smoltalk` | `response_control` |
-
-The `response_control` dataset is generated by `finetune/data/response_control.py`
-and targets concise answers, arithmetic, factual restraint, concept definitions,
-disambiguation, and response-format control.
-
-### Code SFT
-
-Code SFT keeps `ise-uiuc/Magicoder-OSS-Instruct-75K` as the backbone. The code
-stage also appends local custom datasets generated in `finetune/data/prepare_sft.py`:
-
-- `handcrafted_simple_code`
-- `handcrafted_function_completion`
-- `handcrafted_code_explanation`
-
-These local examples reinforce simple Python generation, write-only-code
-behavior, function-body completion, and the distinction between explaining code
-and writing code.
+```bash
+make test-sft-chat SIZE=125m
+```

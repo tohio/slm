@@ -16,7 +16,7 @@ Four variants are exported per model size:
     Variant     Checkpoint                                    Hub repo
     --------    ----------                                    --------
     base        results/runs/{size}/pretrain/final                      <user>/slm-{size}
-    instruct    results/runs/{size}/sft_chat/final                      <user>/slm-{size}-instruct
+    instruct    results/runs/{size}/sft_instruct/final                      <user>/slm-{size}-instruct
     chat        results/runs/{size}/dpo_chat/final                           <user>/slm-{size}-chat
     code        results/runs/{size}/sft_code/final                      <user>/slm-{size}-code
 
@@ -27,11 +27,6 @@ render the realized per-source breakdown alongside the design targets,
 so the published card reflects what actually shipped — not just what
 was planned. Falls back to design-only with a caveat note if blend_stats
 is missing or scale-mismatched.
-
-Eval results come from the most recent JSON written by eval/eval.py for
-the matching checkpoint. Each variant is evaluated against its own
-checkpoint directory, so the Hub tables reflect real scores for that
-specific variant.
 
 Remote-code bundling:
     Export writes the architecture files directly into the checkpoint root and
@@ -56,7 +51,6 @@ load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from eval.eval import metric_score                                 # noqa: E402
 from config import (                                                # noqa: E402
     DATA_MIX, CODE_SUBMIX, dataset_link, corpus_tokens_display,
 )
@@ -95,98 +89,29 @@ BUNDLED_SOURCE_FILES = [
 VARIANTS: dict[str, dict] = {
     "base": {
         "checkpoint":    lambda size: RESULTS_DIR / "runs" / size / "pretrain" / "final",
-        "eval_dir":      lambda size: RESULTS_DIR / "runs" / size / "eval" / "pretrain",
         "hub_suffix":    "",
         "description":   "base pretrained model",
         "pipeline_tag":  "text-generation",
     },
     "instruct": {
-        "checkpoint":    lambda size: RESULTS_DIR / "runs" / size / "sft_chat" / "final",
-        "eval_dir":      lambda size: RESULTS_DIR / "runs" / size / "eval" / "sft_chat",
+        "checkpoint":    lambda size: RESULTS_DIR / "runs" / size / "sft_instruct" / "final",
         "hub_suffix":    "-instruct",
-        "description":   "instruction-tuned via chat SFT + response-control",
+        "description":   "instruction-tuned via instruct SFT + response-control",
         "pipeline_tag":  "text-generation",
     },
     "chat": {
-        "checkpoint":    lambda size: RESULTS_DIR / "runs" / size / "dpo" / "final",
-        "eval_dir":      lambda size: RESULTS_DIR / "runs" / size / "eval" / "dpo",
+        "checkpoint":    lambda size: RESULTS_DIR / "runs" / size / "dpo_chat" / "final",
         "hub_suffix":    "-chat",
         "description":   "chat-aligned from instruct via general DPO preference learning",
         "pipeline_tag":  "text-generation",
     },
     "code": {
         "checkpoint":    lambda size: RESULTS_DIR / "runs" / size / "sft_code" / "final",
-        "eval_dir":      lambda size: RESULTS_DIR / "runs" / size / "eval" / "sft_code",
         "hub_suffix":    "-code",
         "description":   "code-specialized from instruct via code SFT",
         "pipeline_tag":  "text-generation",
     },
 }
-
-
-BENCHMARK_META = {
-    "hellaswag":     {"name": "HellaSwag",     "task": "hellaswag",      "metric": "acc_norm", "few_shot": 10},
-    "arc_easy":      {"name": "ARC-Easy",      "task": "arc_easy",       "metric": "acc_norm", "few_shot": 25},
-    "arc_challenge": {"name": "ARC-Challenge", "task": "arc_challenge",  "metric": "acc_norm", "few_shot": 25},
-    "mmlu":          {"name": "MMLU",          "task": "mmlu",           "metric": "acc",      "few_shot": 5},
-    "truthfulqa":    {"name": "TruthfulQA",    "task": "truthfulqa_mc2", "metric": "acc",      "few_shot": 0},
-    "humaneval":     {"name": "HumanEval",     "task": "humaneval",      "metric": "pass@1",   "few_shot": 0},
-}
-
-
-def load_eval_results(variant: str, size: str) -> dict[str, float]:
-    """Load the most recent eval results for this variant's checkpoint."""
-    eval_dir = VARIANTS[variant]["eval_dir"](size)
-    if not eval_dir.exists():
-        return {}
-
-    result_files = sorted(eval_dir.glob("eval_*.json"))
-    if not result_files:
-        return {}
-
-    latest = result_files[-1]
-    try:
-        with open(latest) as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
-        log.warning(f"Failed to read eval results from {latest}: {e}")
-        return {}
-
-    raw_results = data.get("results", {})
-    raw_groups  = data.get("groups", {})
-
-    scores: dict[str, float] = {}
-    for task_key, meta in BENCHMARK_META.items():
-        task_name   = meta["task"]
-        metric      = meta["metric"]
-        task_result = raw_results.get(task_name) or raw_groups.get(task_name)
-        if task_result is None:
-            continue
-        score = metric_score(task_result, metric)
-        if isinstance(score, (int, float)):
-            scores[task_key] = float(score)
-
-    return scores
-
-
-def _format_eval_table(scores: dict[str, float]) -> str:
-    if not scores:
-        return "_Benchmark results will be added after evaluation._"
-
-    lines = [
-        "| Benchmark | Few-shot | Metric | Score |",
-        "|---|---|---|---|",
-    ]
-    for task_key in BENCHMARK_META:
-        if task_key not in scores:
-            continue
-        meta = BENCHMARK_META[task_key]
-        lines.append(
-            f"| {meta['name']} | {meta['few_shot']}-shot | {meta['metric']} | {scores[task_key]:.4f} |"
-        )
-    return "\n".join(lines)
-
-
 def metadata_dir(size: str) -> Path:
     """Return the local metadata artifact directory for a model size."""
     return Path(os.environ.get("DATA_DIR", "data")) / "runs" / size / "metadata"
@@ -357,7 +282,6 @@ def generate_model_card(
     variant: str,
     hub_name: str,
     n_params: int,
-    eval_scores: dict[str, float],
 ) -> str:
     size_upper    = size.upper()
     variant_cfg   = VARIANTS[variant]
@@ -366,7 +290,12 @@ def generate_model_card(
     token_tgt     = corpus_tokens_display(size)
     param_str     = f"{n_params / 1e6:.1f}M ({n_params:,} parameters)"
 
-    base_model_yaml = "" if variant == "base" else f"base_model: {HF_USERNAME}/slm-{size}"
+    if variant == "base":
+        base_model_yaml = ""
+    elif variant in {"chat", "code"}:
+        base_model_yaml = f"base_model: {HF_USERNAME}/slm-{size}-instruct"
+    else:
+        base_model_yaml = f"base_model: {HF_USERNAME}/slm-{size}"
 
     variant_section = {
         "base": f"""\
@@ -410,8 +339,8 @@ Use [`{HF_USERNAME}/slm-{size}-chat`](https://huggingface.co/{HF_USERNAME}/slm-{
 
 | Stage | Dataset | Size |
 |---|---|---|
-| Chat SFT | [OpenHermes-2.5](https://huggingface.co/datasets/teknium/OpenHermes-2.5) | ~1M examples |
-| Response-control SFT | Generated locally by `finetune/data/response_control.py` | 5K examples |
+| Instruct SFT | SmolTalk backbone + local response-control data | prepared by `finetune/data/prepare_sft.py` |
+| Response control | Generated locally by `finetune/data/response_control.py` | local behavior-control examples |
 """,
         "chat": f"""\
 **Pretraining corpus** — {token_tgt} curation target blended across the following sources:
@@ -422,8 +351,8 @@ Use [`{HF_USERNAME}/slm-{size}-chat`](https://huggingface.co/{HF_USERNAME}/slm-{
 
 | Stage | Dataset | Size |
 |---|---|---|
-| Chat SFT | [OpenHermes-2.5](https://huggingface.co/datasets/teknium/OpenHermes-2.5) | ~1M examples |
-| Response-control SFT | Generated locally by `finetune/data/response_control.py` | 5K examples |
+| Instruct SFT | SmolTalk backbone + local response-control data | prepared by `finetune/data/prepare_sft.py` |
+| Response control | Generated locally by `finetune/data/response_control.py` | local behavior-control examples |
 | DPO alignment | [HuggingFaceH4/ultrafeedback_binarized](https://huggingface.co/datasets/HuggingFaceH4/ultrafeedback_binarized) + local general behavior pairs | prepared by `alignment/data/prepare_dpo.py` |
 """,
         "code": f"""\
@@ -435,18 +364,10 @@ Use [`{HF_USERNAME}/slm-{size}-chat`](https://huggingface.co/{HF_USERNAME}/slm-{
 
 | Stage | Dataset | Size |
 |---|---|---|
-| Chat SFT | General chat SFT + response-control | parent checkpoint: instruct |
+| Instruct SFT | SmolTalk backbone + response-control | parent checkpoint: instruct |
 | Code SFT | Magicoder-OSS-Instruct-75K + handcrafted body-only completions | code-specialized branch |
 """,
     }[variant]
-
-    eval_section = f"""
-## Evaluation
-
-Evaluated using [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness).
-
-{_format_eval_table(eval_scores)}
-"""
 
     return f"""---
 license: mit
@@ -476,7 +397,7 @@ built entirely from scratch, from raw web data through to a production-ready ali
 | Variant | Hub | Description |
 |---|---|---|
 | Base | [{HF_USERNAME}/slm-{size}](https://huggingface.co/{HF_USERNAME}/slm-{size}) | Pretrained only |
-| Instruct | [{HF_USERNAME}/slm-{size}-instruct](https://huggingface.co/{HF_USERNAME}/slm-{size}-instruct) | Chat SFT + response-control |
+| Instruct | [{HF_USERNAME}/slm-{size}-instruct](https://huggingface.co/{HF_USERNAME}/slm-{size}-instruct) | Instruct SFT + response-control |
 | Chat | [{HF_USERNAME}/slm-{size}-chat](https://huggingface.co/{HF_USERNAME}/slm-{size}-chat) | Instruct + general DPO |
 
 ## Architecture
@@ -497,8 +418,6 @@ built entirely from scratch, from raw web data through to a production-ready ali
 {training_section}
 
 **Hardware:** NVIDIA H200 (pretraining on 1× H200, fine-tuning on 1× H200)
-{eval_section}
-
 ## Usage
 
 ```python
@@ -768,7 +687,7 @@ def export(
         log.error(f"Checkpoint not found: {checkpoint}")
         log.error(
             f"Run the training pipeline first. For chat variant: "
-            f"make pretrain sft sft-code dpo SIZE={size}"
+            f"make pretrain sft-instruct sft-code dpo-chat SIZE={size}"
         )
         sys.exit(1)
 
@@ -789,15 +708,6 @@ def export(
 
     _export_tokenizer_to_checkpoint_root(tokenizer, tokenizer_path, checkpoint)
 
-    eval_scores = load_eval_results(variant, size)
-    if eval_scores:
-        log.info(f"Eval results loaded: {list(eval_scores.keys())}")
-    else:
-        log.warning(
-            f"No eval results found for variant={variant}, size={size}. "
-            f"Benchmark table will be empty. Run: "
-            f"python eval/eval.py --model {variant_cfg['checkpoint'](size)}"
-        )
 
     if dry_run:
         log.info("Dry run — skipping Hub push")
@@ -807,7 +717,7 @@ def export(
         _bundle_remote_code_package(checkpoint)
         _validate_bundled_files(checkpoint)
         _ensure_remote_code_auto_map(checkpoint)
-        card = generate_model_card(size, variant, hub_name, n_params, eval_scores)
+        card = generate_model_card(size, variant, hub_name, n_params)
         log.info(f"Model card preview ({len(card):,} chars, first 400):")
         log.info(card[:400].replace("\n", "\n  "))
         return
@@ -824,7 +734,7 @@ def export(
     _validate_bundled_files(checkpoint)
     _ensure_remote_code_auto_map(checkpoint)
 
-    model_card = generate_model_card(size, variant, hub_name, n_params, eval_scores)
+    model_card = generate_model_card(size, variant, hub_name, n_params)
     card_path  = checkpoint / "README.md"
     with open(card_path, "w") as f:
         f.write(model_card)

@@ -1,233 +1,107 @@
 # Tests
 
-The test suite validates pipeline outputs at each stage. Tests are scoped to the instance and stage that produced the outputs — data pipeline tests run on the CPU curation instance, GPU pipeline tests run on the training instance.
+The test suite validates pipeline outputs and unit-level invariants. Data pipeline tests run on the CPU curation instance. GPU pipeline tests run on the training instance.
 
 ---
 
 ## Structure
 
-```
+```text
 tests/
-├── conftest.py                         Shared fixtures, DATA_DIR resolution, fasttext mock
-│
-├── data_pipeline/                      CPU curation instance — run after each data stage
-│   ├── test_pipeline_curator.py        Validates make curate-mini outputs (all 17 concrete sources)
-│   ├── test_pipeline_validate.py       Validates make validate outputs
-│   └── test_pipeline_tokenizer.py      Validates make tokenizer outputs
-│
-├── model/                              No pipeline outputs needed — runs anywhere
-│   ├── test_model.py                   Model architecture unit tests
-│   └── test_cache_and_mask.py          KV cache and attention mask correctness
-│
-└── gpu_pipeline/                       GPU training instance — run after each training stage
-    ├── conftest.py                     Adds --size pytest option, derives model dirs
-    ├── test_pipeline_training.py       Validates pretrain outputs (any size)
-    ├── test_pipeline_sft.py            Validates SFT chat + code outputs (any size)
-    └── test_pipeline_dpo.py            Validates DPO outputs (any size)
+├── conftest.py
+├── data_pipeline/
+│   ├── helpers.py
+│   ├── test_pipeline_curator.py
+│   ├── test_pipeline_validate.py
+│   └── test_pipeline_tokenizer.py
+├── gpu_pipeline/
+│   ├── test_pipeline_training.py
+│   ├── test_pipeline_sft.py
+│   └── test_pipeline_dpo.py
+├── model/
+│   ├── test_model.py
+│   └── test_cache_and_mask.py
+├── test_config_gen.py
+└── test_accel_gen.py
 ```
 
 ---
 
-## Workflow
-
-Tests are run immediately after the stage they validate. Each test target is paired with its make stage.
-
-**CPU curation instance:**
+## CPU pipeline tests
 
 ```bash
 make curate-mini   && make test-curator
 make validate      && make test-validate
-make tokenizer     && make test-tokenizer
+make tokenize      && make test-tokenizer
 
-# Or run all data pipeline tests at once
 make test-data-pipeline
 ```
 
-**GPU training instance:**
+These tests validate curated shards, validation outputs, tokenizer files, and tokenized binaries.
 
-The four GPU pipeline test targets (`test-training`, `test-sft-chat`, `test-sft-code`, `test-dpo`) accept `SIZE=<size>` and pass `--size=<size>` through to pytest. A fixture in `tests/conftest.py` derives the checkpoint directory from `--size`. The Makefile default for these targets is `SIZE=mini`, so the standard pipeline-validation flow works with no flag. Full-size artifact checks are explicit opt-in checks after a completed full run:
+---
+
+## GPU pipeline tests
+
+GPU tests default to `mini` unless `SIZE` is supplied explicitly.
 
 ```bash
-# After mini runs (SIZE=mini is the default for these test targets)
-make pretrain-mini  GPUS=1  && make test-training
-make sft-mini       GPUS=1  && make test-sft-chat
-make sft-code-mini  GPUS=1  && make test-sft-code
-make dpo-mini       GPUS=1  && make test-dpo
+make pretrain-mini       GPUS=1 && make test-training
+make sft-instruct-mini   GPUS=1 && make test-sft-instruct
+make sft-code-mini       GPUS=1 && make test-sft-code
+make dpo-chat-mini       GPUS=1 && make test-dpo-chat
 
-# After full runs — pass SIZE explicitly
-make test-training  SIZE=125m
-make test-sft-chat  SIZE=125m
-make test-sft-code  SIZE=125m
-make test-dpo       SIZE=125m
-
-# Run all four at once (also respects SIZE)
 make test-gpu-pipeline
-make test-gpu-pipeline SIZE=125m
 ```
 
-**Model unit tests — no pipeline outputs needed:**
+Full-run checks:
+
+```bash
+make test-training     SIZE=125m
+make test-sft-instruct SIZE=125m
+make test-sft-code     SIZE=125m
+make test-dpo-chat     SIZE=125m
+```
+
+Compatibility aliases:
+
+```bash
+make test-sft-chat SIZE=125m
+make test-dpo SIZE=125m
+```
+
+---
+
+## What each target validates
+
+| Target | Validates |
+|---|---|
+| `test-curator` | raw shards, source stats, curation output structure |
+| `test-validate` | validation output structure and retained document quality |
+| `test-tokenizer` | tokenizer assets, special tokens, tokenized binaries |
+| `test-training` | base checkpoint loading, finite loss, dataset indexing |
+| `test-sft-instruct` | instruct checkpoint loading, chat template preservation, generation |
+| `test-sft-code` | code checkpoint loading and code-token behavior |
+| `test-dpo-chat` | preference data shape, chat DPO checkpoint loading, generation |
+| `test-model` | architecture unit tests |
+| `test-config-gen` | config generation invariants |
+| `test-accel-gen` | Accelerate config rendering |
+
+---
+
+## Unit tests
 
 ```bash
 make test-model
+make test-config-gen
+make test-accel-gen
+make test-unit
 ```
+
+Unit tests do not require pipeline artifacts.
 
 ---
 
-## What Each Test Validates
+## Size behavior
 
-### `test-curator` — after `make curate-mini`
-
-The mini curation run exercises all 17 concrete data sources (12 non-code top-level sources + 5 code sub-sources) with small per-source budgets (a few hundred to a few thousand docs each). This validates that every source loader works, that the filter and dedup stages handle the full source set, and that the cap-and-redistribute blend logic covers any supply shortfall via FineWeb overflow.
-
-| Check | What it catches |
-|---|---|
-| Raw shards exist for all 17 concrete sources | A source loader is broken or didn't run |
-| Source tag in each shard matches its directory | Source wrote to wrong directory or used wrong SOURCE_TAG |
-| `quality.py` `CODE_SOURCES` matches `config.CODE_SOURCES` | Drift between the filter-routing set and the data-mix source of truth |
-| Filtered docs pass quality checks | Filter stage did not run or has a bug |
-| Prose-like non-code filtered docs meet min length (500 chars) | Min length filter not applied to prose-like sources, or generated/template sources incorrectly included |
-| Deduped dirs exist and are non-empty for all 17 concrete sources | Dedup stage failed for one or more sources |
-| No exact duplicates across all deduped output | Exact dedup not working |
-| `train.jsonl` exists and is non-empty | Blend stage failed |
-| `train.jsonl` contains the configured source set | Blend missing a source |
-| `train.jsonl` has no unknown source tags | Corruption or wrong source tag introduced |
-| No short non-code docs in `train.jsonl` | Filtered data not used as blend input |
-| No exact duplicates in `train.jsonl` | Deduped data not used as blend input |
-| `blend_stats.json` exists with required schema | Stats not written or incomplete |
-| `blend_stats.json` per-source includes docs/chars/target_chars/deficit/val_docs | Cap-and-redistribute or val-tracking accounting missing |
-| `blend_stats.json` doc count matches `train.jsonl` | Stats don't match actual output |
-| `blend_stats.json` chars_per_token matches `config.CHARS_PER_TOKEN` | Drift from `config` |
-| Total chars within tolerance of target | Cap-and-redistribute not running or broken |
-| FineWeb has overflow when other sources have deficit | Overflow sink not triggered |
-| Per-source val_docs sum matches val.jsonl line count | Reservoir sample tracking broken |
-
-**The configured source set should appear in `train.jsonl`.** Unlike the previous stack_v2 setup (which depended on SWH and could legitimately produce zero docs during rate-limit windows), stack_v1 has file content inline in the parquet shards and will always produce output if the mini cap is reached. A missing source now indicates a real failure — gated-dataset license not accepted, `HF_TOKEN` misconfigured, or a loader regression — and the test should fail in that case, not skip.
-
-### `test-validate` — after `make validate`
-
-| Check | What it catches |
-|---|---|
-| `validated/train.jsonl` exists | Validation stage failed |
-| Validated output is a subset of curated | Validation adding docs (wrong) |
-| All validated docs pass quality filters | Validator accepting bad docs |
-| Retention rate ≥ 70% | KenLM threshold too aggressive |
-| Train and val keep rates within ~5pp | Blend produced biased val sample |
-| `validation_stats.json` is consistent | Stats not written or wrong |
-
-### `test-tokenizer` — after `make tokenizer`
-
-| Check | What it catches |
-|---|---|
-| All tokenizer files exist | Training incomplete |
-| All 16 special tokens have correct IDs | Special token ordering wrong |
-| Vocab size is 32,000 | Wrong vocab size trained |
-| Encode/decode roundtrip correct | BPE merges or decoder broken |
-| No auto BOS/EOS injection | TemplateProcessing incorrectly set |
-| Fertility < 1.5 tokens/word | Tokenizer encoding inefficiently |
-| Chat template works via `apply_chat_template` | Template not baked in |
-| BOS appears exactly once at start | Template formatting wrong |
-| Generation prompt ends with `<\|assistant\|>` | Template generation prompt wrong |
-| First tokenized ID is BOS | Chat template tokenize-path returns wrong shape |
-
-### `test-training` — after a pretrain run
-
-Defaults to validating `results/runs/mini/pretrain/final`. Pass `SIZE=<size>` to validate any other size's pretrain checkpoint, e.g. `make test-training SIZE=125m` validates `results/slm-125m/final`.
-
-| Check | What it catches |
-|---|---|
-| `results/runs/<size>/pretrain/final/` exists | Training didn't complete |
-| Model files present | Checkpoint not saved |
-| Tokenizer saved alongside model | `shutil.copytree` failed |
-| Config matches `gpt_<size>.yaml` | Wrong config used |
-| Forward pass loss is finite | NaN/Inf during training |
-| Loss < 6.0 on training data | Model not learning (collapse) |
-| Dataset indexing correct | `PretrainingDataset` bug |
-| Labels = input_ids shifted left | Dataset shift bug |
-
-### `test-sft-chat` — after a chat SFT run
-
-Defaults to `results/runs/mini/sft_chat/final`. Pass `SIZE=<size>` to validate other sizes.
-
-| Check | What it catches |
-|---|---|
-| SFT data files exist with correct format | `prepare_sft` not run or broken |
-| All examples end with assistant turn | Data preparation bug |
-| Chat model loads | Checkpoint not saved correctly |
-| Tokenizer has chat template | Template lost during SFT |
-| Forward pass loss finite | Training instability |
-| Generation doesn't crash | `prepare_inputs_for_generation` broken |
-
-### `test-sft-code` — after a code SFT run
-
-Defaults to `results/runs/mini/sft_code/final`. Pass `SIZE=<size>` to validate other sizes.
-
-| Check | What it catches |
-|---|---|
-| Code model loads | Checkpoint not saved |
-| Forward pass loss finite | Training instability |
-| Code special tokens in vocab | Tokenizer not copied correctly |
-
-### `test-dpo` — after a DPO run
-
-Defaults to `results/runs/mini/dpo/final`. Pass `SIZE=<size>` to validate other sizes.
-
-| Check | What it catches |
-|---|---|
-| DPO data has prompt/chosen/rejected fields | `prepare_dpo` format wrong |
-| Chosen ≠ rejected | Identical pairs in dataset |
-| Prompt is list of message dicts | Wrong format for trl DPOTrainer |
-| DPO stats consistent | Stats not written or wrong |
-| DPO model loads | Checkpoint not saved |
-| Forward pass loss finite | Training instability |
-| Generation doesn't crash | Model broken after DPO |
-
-### `test-model` — no pipeline outputs needed
-
-Two files cover the model layer, run together by `make test-model`:
-
-**`test_model.py` — architecture unit tests:**
-
-| Check | What it catches |
-|---|---|
-| RMSNorm output shape and dtype | Implementation bug |
-| SwiGLU output shape, 3 projections, no bias | Architecture deviation |
-| GQA output shape, KV heads < Q heads | GQA not implemented correctly |
-| KV cache correct shape | Cache implementation bug |
-| Forward pass logits shape | Model forward pass broken |
-| Loss finite with labels | Loss computation broken |
-| Weight tying | `tie_weights()` not working |
-| Parameter count ~25M (mini config) | Architecture mismatch vs config |
-| Causal mask — future tokens don't affect past | Causal mask broken (no-cache path) |
-| No bias parameters | Architecture deviation |
-| Save/load roundtrip | Tied weight serialisation bug |
-
-**`test_cache_and_mask.py` — KV cache and mask correctness:**
-
-| Check | What it catches |
-|---|---|
-| Prefill + continue matches full forward | Causal mask offset wrong when `q_len < kv_len` (multi-token prefill with cache) |
-| Token-by-token generation matches full forward | Bug in the `q_len == 1` cache path |
-| Batched forward respects padding mask | `attention_mask` ignored during eval (contaminates batched generation with padded prompts) |
-| Parameter counts within 10% for 125m / 350m / 1b | Config drift in any production tier |
-
----
-
-## Requirements
-
-**No downloads required for any tests.** The fasttext model (`lid.176.ftz`) is mocked in `conftest.py`. KenLM is not used directly in tests. GPU pipeline tests default to `SIZE=mini`. Full-size checks are opt-in by passing `SIZE=125m`, `SIZE=350m`, or `SIZE=1b` after the corresponding run completes. They require CUDA and skip automatically if the model directory for the requested `SIZE` is not present.
-
-**`DATA_DIR` must be set** for data pipeline tests. It is set automatically by `setup.sh` and written to `~/.bashrc`. If tests are skipping unexpectedly, check:
-
-```bash
-echo $DATA_DIR
-```
-
-If empty, run:
-
-```bash
-source ~/.bashrc
-# or
-export DATA_DIR=/data/slm/data
-```
-
-**Dataset gating for `test-curator`.** The mini run exercises gated HuggingFace datasets (FineWeb, the-stack-smol, the-stack-dedup). Before first run, accept Terms of Use on each dataset's HuggingFace page and set `HF_TOKEN` in `.env`.
+The Makefile default pipeline size is `125m`, but GPU pipeline tests intentionally default to `mini` for normal development. Passing `SIZE=125m`, `350m`, or `1b` opts into full-artifact checks.

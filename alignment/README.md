@@ -1,210 +1,154 @@
 # alignment
 
-Direct Preference Optimization (DPO) pipeline for SLM. Aligns the SFT model to human preferences using a blended dataset of three complementary preference sources.
-
-Target library versions: **trl 0.29.x**, **transformers 5.5.x**. See `requirements.txt`.
+Preference-alignment stage for SLM. This folder prepares DPO preference data and trains the `chat` variant from the `instruct` checkpoint.
 
 ---
 
-## Pipeline
+## Responsibility
 
-```
-results/slm-{size}-instruct/final   (SFT model)
-        │
-        ▼
-DPO training (UltraFeedback binarized + local targeted preference pairs)
-        │
-        ▼
-results/slm-{size}-dpo_chat/final         (aligned model)
-```
+`alignment/` owns:
 
----
+- DPO preference dataset preparation
+- chat-alignment configs
+- DPO training
+- chat checkpoint output
 
-## Datasets
-
-| Dataset | Upstream | After cap + length filter | Signal |
-|---|---|---|---|
-| `HuggingFaceH4/ultrafeedback_binarized` | ~170k pairs | ≤50k (shuffled, then capped) | Human preference — helpfulness + harmlessness |
-| `local targeted preference pairs` | ~12k pairs | all kept | Synthetic — GPT-4 vs GPT-3.5 on reasoning tasks |
-| `local targeted preference pairs` | ~7k pairs | all kept | Curated high-quality mix |
-
-`prepare_dpo.py` uses UltraFeedback binarized as the external preference backbone and appends local custom preference pairs.
-
-After blending, a length filter drops any pair where `len(prompt) + max(len(chosen), len(rejected))` exceeds `MAX_TOTAL_TOKENS` (default 2048). See *Length filtering* below.
+It does not train the base model, instruct model, or code model.
 
 ---
 
-## Length filtering
+## Lineage
 
-trl 0.29 supports `DPOConfig.max_prompt_length` and `max_length` at the data collator level, so at training time trl will truncate anything too long. `prepare_dpo.py` additionally pre-filters overlong pairs up front, for three reasons:
-
-1. **Exact counts.** The pre-filter uses the real SLM tokenizer (loaded from `$DATA_DIR/tokenizer`), so the drop decision matches exactly what trl will see. trl's truncation silently drops tokens; the filter means that never happens on the prepared dataset.
-2. **One dataset, all sizes.** The threshold is set to 2048 — the `max_length` of the 125m and 350m configs — so one prepared dataset serves all three model sizes without re-preparation.
-3. **Forward-compatible.** `max_prompt_length` was removed in trl 1.0. If/when we upgrade, the pre-filter becomes the only length guarantee. Building it in now means the upgrade is just a version bump, not a new data prep step.
-
-Drop rates by source are logged during `prepare_dpo.py` and recorded in `$DATA_DIR/dpo/stats.json`.
-
----
-
-## Getting Started
-
-**Step 1 — Prepare data**
-
-```bash
-make prepare-dpo
-
-# Or directly
-python alignment/data/prepare_dpo.py
-
-# Single source
-python alignment/data/prepare_dpo.py --source ultrafeedback
-python alignment/data/prepare_dpo.py --source orca
-python alignment/data/prepare_dpo.py --source argilla
-
-# Regenerate if output already exists
-python alignment/data/prepare_dpo.py --force
+```text
+results/runs/<size>/sft_instruct/final
+  ↓
+DPO training
+  ↓
+results/runs/<size>/dpo_chat/final
 ```
 
-**Step 2 — DPO training**
-
-```bash
-# 125M
-python alignment/train_dpo.py --config alignment/configs/dpo_chat_125m.yaml
-
-# 350M
-python alignment/train_dpo.py --config alignment/configs/dpo_chat_350m.yaml
-
-# 1B
-python alignment/train_dpo.py --config alignment/configs/dpo_chat_1b.yaml
-
-# Multi-GPU
-accelerate launch alignment/train_dpo.py --config alignment/configs/dpo_chat_125m.yaml
-
-# Resume
-python alignment/train_dpo.py --config alignment/configs/dpo_chat_125m.yaml --resume
-```
+The `chat` model is a sibling of the `code` model. Both start from `sft_instruct/final`.
 
 ---
 
 ## Files
 
-```
+```text
 alignment/
 ├── configs/
-│   ├── dpo_chat_125m.yaml     DPO config — 125M, LR=5e-7, beta=0.1
-│   ├── dpo_chat_350m.yaml     DPO config — 350M, LR=3e-7, beta=0.1
-│   ├── dpo_chat_1b.yaml       DPO config — 1B,   LR=2e-7, beta=0.1
-│   └── dpo_chat_mini.yaml     DPO config — mini pipeline smoke test
+│   ├── dpo_chat_mini.yaml
+│   ├── dpo_chat_125m.yaml
+│   ├── dpo_chat_350m.yaml
+│   └── dpo_chat_1b.yaml
 ├── data/
-│   └── prepare_dpo.py    download, blend, and length-filter preference datasets
-└── train_dpo.py          trl DPOTrainer entry point
+│   └── prepare_dpo.py
+├── train_dpo.py
+└── README.md
 ```
 
 ---
 
-## Config Summary
+## Commands
 
-`gradient_accumulation_steps` targets an effective batch size of 64. Adjust based on your GPU count:
-`gradient_accumulation_steps = 64 / (micro_batch_size × num_gpus)`
+Prepare DPO data:
 
-| Config | Base model | LR | Beta | max_prompt_length | Micro batch | Grad accum (1 GPU) | Seq len | Grad ckpt |
-|---|---|---|---|---|---|---|---|---|
-| `dpo_125m` | `slm-125m-instruct/final` | 5e-7 | 0.1 | 1024 | 2 | 32 | 2048 | No |
-| `dpo_350m` | `slm-350m-instruct/final` | 3e-7 | 0.1 | 1024 | 1 | 64 | 2048 | No |
-| `dpo_1b` | `slm-1b-instruct/final` | 2e-7 | 0.1 | 2048 | 1 | 64 | 4096 | Yes |
+```bash
+make prepare-dpo SIZE=125m
+```
 
-All configs run 1 epoch with `warmup_ratio=0.05` on a cosine schedule. `max_length` is taken from `model.max_seq_length`.
+Train chat DPO:
+
+```bash
+make dpo-chat SIZE=125m GPUS=1
+make dpo-chat-mini SIZE=mini GPUS=1
+make dpo-chat-resume SIZE=125m GPUS=1
+```
+
+Compatibility aliases are still available:
+
+```bash
+make dpo SIZE=125m GPUS=1
+make dpo-mini SIZE=mini GPUS=1
+make dpo-resume SIZE=125m GPUS=1
+```
+
+Direct calls:
+
+```bash
+python alignment/data/prepare_dpo.py --size 125m
+accelerate launch alignment/train_dpo.py --config alignment/configs/dpo_chat_125m.yaml
+```
 
 ---
 
-## DPO Data Format
+## Inputs
 
-Each record in `data/dpo/train.jsonl` uses the trl conversational format — prompt, chosen, and rejected are lists of message dicts. `DPOTrainer` calls `apply_chat_template()` on these automatically using the tokenizer's baked-in template, producing consistent formatting with SFT and inference.
+Prepared DPO data expects:
+
+```text
+data/runs/<size>/tokenizer/
+results/runs/<size>/sft_instruct/final
+```
+
+The tokenizer is used for length filtering and formatting. The instruct checkpoint is the policy initialization for DPO.
+
+---
+
+## Outputs
+
+Prepared data and stats are written under the run-specific data directory.
+
+The trained chat checkpoint is written to:
+
+```text
+results/runs/<size>/dpo_chat/final
+```
+
+---
+
+## Data format
+
+DPO records use the standard preference-pair shape:
 
 ```json
 {
-    "prompt": [
-        {"role": "system",    "content": "You are a helpful, harmless, and honest assistant."},
-        {"role": "user",      "content": "What is the capital of France?"}
-    ],
-    "chosen": [
-        {"role": "assistant", "content": "The capital of France is Paris."}
-    ],
-    "rejected": [
-        {"role": "assistant", "content": "I'm not sure, maybe London?"}
-    ],
-    "source": "ultrafeedback_binarized | handcrafted_behavior | targeted_behavior"
+  "prompt": "...",
+  "chosen": "...",
+  "rejected": "...",
+  "source": "..."
 }
 ```
 
----
-
-## Checkpoints
-
-```
-results/
-├── slm-125m-dpo/
-│   ├── checkpoint-200/
-│   ├── checkpoint-400/
-│   └── final/                best checkpoint (lowest eval loss)
-├── slm-350m-dpo/
-│   └── final/
-└── slm-1b-dpo/
-    └── final/
-```
-
-`final/` contains the **lowest-eval-loss** checkpoint. This is enforced in `train_dpo.py` by `load_best_model_at_end=True` with `metric_for_best_model="eval_loss"`. DPO reward margins typically peak early in training and degrade with further steps, so for DPO the best checkpoint is usually *not* the last — best-checkpoint selection matters more here than in SFT.
-
-Because HF Trainer always keeps the best checkpoint in addition to the N most recent (`save_total_limit=3`), disk usage is up to 4 checkpoints per run during training.
+`chosen` and `rejected` must be different responses to the same prompt.
 
 ---
 
-## Key Design Decisions
+## Configs
 
-**Why DPO over PPO?** At small model scale, PPO's actor-critic setup requires simultaneously loading the policy, reference, reward, and value models — at least 4× the memory of a single model. DPO achieves comparable alignment with a single model and no reward model, making it tractable on a single GPU.
+DPO configs are size-specific:
 
-**Why beta=0.1?** Beta controls how far the model is allowed to deviate from the SFT reference. Lower beta = more alignment, less fluency. Higher beta = less alignment, better fluency. 0.1 is the standard starting point used across most DPO papers and production runs.
-
-**Why LR in the 1e-7 range?** DPO is extremely sensitive to learning rate — too high and the model collapses, too low and the alignment signal doesn't propagate. The 1e-7 range is significantly lower than SFT and has been validated across multiple open DPO runs.
-
-**Why 1 epoch?** DPO over-optimizes quickly — after one epoch the reward margin typically saturates and further training degrades model quality. Most production DPO runs use 1–2 epochs.
-
-**Why UltraFeedback binarized?** UltraFeedback binarized is already structured for DPO-style preference training and provides a broad general preference backbone without maintaining a multi-source DPO blend.
-
-**Why both pre-filter and trl's max_prompt_length?** The pre-filter guarantees exact control using the real tokenizer. trl's own `max_prompt_length` is a training-time safety net — any pair that somehow slipped past the pre-filter still gets truncated rather than crashing the trainer. Together they ensure clean training batches on 0.29, and when we upgrade to trl 1.0 (which removes `max_prompt_length`) the pre-filter covers the full responsibility without any config change.
-
-**Why add local targeted preference pairs?** UltraFeedback provides broad helpfulness and preference signal, while local `handcrafted_behavior` and `targeted_behavior` pairs reinforce project-specific failures: factual restraint, concise exact answers, code-output behavior, disambiguation, current-information restraint, and slang/context grounding.
-
-**Why conversational format for prompt/chosen/rejected?** Plain string format requires manually formatting the chat template in `prepare_dpo.py`, which duplicates the template and can drift from `train_tokenizer.py`. The conversational format delegates formatting to `DPOTrainer` via `apply_chat_template()` — the same code path as SFT and inference, guaranteeing consistency.
-
-**Why start from instruct?** DPO learns preference signal on top of the SFT distribution. General DPO starts from the instruct checkpoint. Code SFT is a sibling specialization branch, not the parent of the chat model.
-
-## DPO Data Policy
-
-DPO uses an external preference backbone plus local custom preference datasets.
-
-External backbone:
-
-- `HuggingFaceH4/ultrafeedback_binarized`
-
-Local custom datasets generated in `alignment/data/prepare_dpo.py`:
-
-- `handcrafted_behavior`
-- `targeted_behavior`
-
-`handcrafted_behavior` focuses on factual restraint and unverifiable private
-facts. `targeted_behavior` focuses on concise exact answers, actual code output
-over prose about code, current-information restraint, disambiguation, and
-slang/context grounding.
-
-The output format remains the conversational format expected by TRL's
-`DPOTrainer`:
-
-```json
-{
-  "prompt": [{"role": "system", "content": "..."}, {"role": "user", "content": "..."}],
-  "chosen": [{"role": "assistant", "content": "preferred response"}],
-  "rejected": [{"role": "assistant", "content": "rejected response"}],
-  "source": "ultrafeedback_binarized | handcrafted_behavior | targeted_behavior"
-}
+```text
+alignment/configs/dpo_chat_mini.yaml
+alignment/configs/dpo_chat_125m.yaml
+alignment/configs/dpo_chat_350m.yaml
+alignment/configs/dpo_chat_1b.yaml
 ```
+
+`make config-gen-dpo SIZE=<size> GPUS=<n>` regenerates the active DPO config for the current GPU profile.
+
+---
+
+## Tests
+
+```bash
+make test-dpo-chat SIZE=mini
+make test-dpo-chat SIZE=125m
+```
+
+Compatibility alias:
+
+```bash
+make test-dpo SIZE=125m
+```
+
+The test validates preference data shape and that the chat DPO checkpoint loads and generates.

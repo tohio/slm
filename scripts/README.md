@@ -1,324 +1,102 @@
-# scripts/
+# scripts
 
-Standalone utilities and diagnostics that complement the main pipeline.
-Unlike the staged pipeline in `curator/`, `pretrain/`, `finetune/`, and
-`alignment/`, scripts here are independent — they don't feed into or
-depend on pipeline state, and can be run at any time.
-
-> **Note:** `config_gen/config_gen.py` and `config_gen/accel_gen.py` are also standalone
-> utilities but live alongside the model code rather than here, because
-> they produce artifacts the pipeline consumes (training configs and
-> accelerate launch configs). Scripts in this directory don't produce
-> artifacts other stages rely on.
-
-## Contents
-
-The sections below follow a consistent template:
-
-- **What it does** — one-line summary
-- **When to use it**
-- **How to run** — Make target + direct invocation
-- **What success looks like** — how to know the script worked
-- **GPU sizing notes** (where applicable)
+Utility and diagnostic scripts that sit outside a single pipeline stage.
 
 ---
 
-### `sanity_train.py`
+## Files
 
-**What it does.** Trains either a mini (~22M params) or 125m (~125M params)
-architecture on
-[FineWeb-Edu](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu)
-tokenized with
-[Mistral's tokenizer](https://huggingface.co/mistralai/Mistral-7B-v0.1).
-Bypasses the SLM curator and tokenizer entirely.
+```text
+scripts/
+├── pretrain_hf_125m.py
+├── reinit_special_embeds.py
+├── run_lm_eval.py
+├── sanity_train.py
+└── README.md
+```
 
-**When to use it.** Run before a full pretraining run when you've made
-changes to the model code, training loop, or dependencies, and want
-confidence the core components still learn as expected against a
-known-good reference setup. If `sanity_train.py` learns and the curated
-pipeline doesn't, the issue is in your data or tokenizer — not the model.
+---
 
-**How to run.**
+## `sanity_train.py`
+
+Known-good training diagnostic using a simple Hugging Face data path. Use it to separate model/trainer issues from curation-data issues.
+
+Examples:
 
 ```bash
-make sanity-train          # 125m, 2.5B tokens
-make sanity-train-small    # mini, 500M tokens
-make sanity-train-tiny     # mini, 50M tokens
-
-# Save the trained model — defaults to 125m
-make sanity-train-save
-make sanity-train-save SANITY_SIZE=small
+make sanity-train
+make sanity-train-small
+make sanity-train-tiny
 make sanity-train-save SANITY_SIZE=tiny
-
-# Direct invocation (custom batch size for non-H200 GPUs)
-.venv/bin/python scripts/sanity_train.py --arch 125m --batch-size 8
 ```
 
-By default, no model is saved — only the training log, final eval loss,
-and QA probe results are printed. With `--save` (or via
-`sanity-train-save`), the model is written to `results/sanity-<arch>/`.
+Direct:
 
-**Sizes (timings on H200):**
-
-| Target               | Architecture       | Tokens | Time    | Use case                                |
-|----------------------|--------------------|--------|---------|-----------------------------------------|
-| `sanity-train`       | 125m (~125M params)| 2.5B   | ~90 min | Full diagnostic before a real run       |
-| `sanity-train-small` | mini (~22M params) | 500M   | ~12 min | Quick check; matches what 125m needs    |
-| `sanity-train-tiny`  | mini (~22M params) | 50M    | ~2 min  | Smoke test; "did I just break the loop" |
-
-**What success looks like.** A healthy run produces:
-
-- **Training loss** that decreases steadily (e.g., 10.5 → 3–4 over the run).
-- **Eval loss** that tracks training loss (gap < 0.5 means the model is
-  generalizing, not memorizing).
-- **QA probes** (capital of France, 2+2, etc.) where the model assigns
-  lower loss to the correct continuation than to a wrong one. A score of
-  ≥3/5 is meaningful at this scale.
-- **Generation samples** that produce real English fragments — varied
-  vocabulary, grammatical structure — even if sentence-level meaning is
-  weak.
-
-If training and eval loss diverge sharply, or the QA probes score 0–1,
-the issue is in the model code or training loop. If they pass, those
-components are fine and any failure on the curated pipeline is elsewhere
-(data, tokenizer, or downstream stages).
-
-**GPU sizing notes.** Defaults are tuned for an H200 (141GB HBM3e), where
-batch size 16 fits comfortably for both architectures. For smaller GPUs:
-
-- **H100 (80GB):** drop `--batch-size` to 8 for the 125m arch
-- **A100 (40GB):** drop to 4 for 125m, 8 for mini
-- **Smaller:** pass `--batch-size` explicitly to the script
-
-Note that `sanity_train.py` does **not** use `config_gen/config_gen.py`. The
-sanity script ships its own minimal config tuned for a fixed reference
-setup — the whole point is to be a known-good baseline, so its config
-is held constant rather than auto-tuned per GPU. For real pretraining
-runs, use `make config-gen-pretrain` to size the config to your
-hardware.
+```bash
+python scripts/sanity_train.py --arch 125m --target-tokens 2500000000
+python scripts/sanity_train.py --arch mini --target-tokens 50000000 --save
+```
 
 ---
 
-### `run_lm_eval.py`
+## `run_lm_eval.py`
 
-**What it does.** Wraps the `lm-evaluation-harness` CLI with the SLM
-architecture pre-registered via `AutoConfig.register("slm", SLMConfig)`
-and `AutoModelForCausalLM.register(SLMConfig, SLMForCausalLM)`. Hands
-off to `lm_eval.__main__.cli_evaluate` so all standard `lm_eval` flags
-work unchanged.
+Wrapper for lm-evaluation-harness with the custom SLM architecture.
 
-**When to use it.** Use this for ad-hoc `lm_eval` CLI invocations against
-SLM checkpoints — running a single task with `--limit`, inspecting
-generations with `--log_samples`, testing chat-formatted prompts with
-`--apply_chat_template`, or any other lm_eval flag combination not
-exposed by `eval/eval.py`.
-
-For standard benchmark runs, prefer `make eval-base`, `make eval-instruct`,
-or `make eval-chat` — those use `eval/eval.py` and are sufficient for
-producing the canonical eval JSONs. Reach for this wrapper when you need
-the full surface area of the lm_eval CLI directly.
-
-> **Why a wrapper is needed.** SLM is a custom architecture. lm_eval calls
-> `AutoConfig.from_pretrained` internally before model construction, which
-> raises `KeyError: 'slm'` unless SLM has been registered with the Auto*
-> registries first. Running `python -m lm_eval` directly against an SLM
-> checkpoint will fail; this wrapper handles the registration so the rest
-> of the CLI works transparently.
-
-**How to run.**
+Example:
 
 ```bash
-# Standard invocation — all lm_eval CLI flags work
-.venv/bin/python scripts/run_lm_eval.py \
-  --model hf \
-  --model_args pretrained=results/slm-125m-code/final,dtype=bfloat16 \
-  --tasks humaneval \
-  --num_fewshot 0 \
-  --batch_size 1 \
-  --apply_chat_template \
-  --output_path results/eval/debug_humaneval \
-  --log_samples \
-  --limit 5
-
-# Full eval suite against the DPO checkpoint
-.venv/bin/python scripts/run_lm_eval.py \
-  --model hf \
-  --model_args pretrained=results/slm-125m-dpo_chat/final,dtype=bfloat16 \
-  --tasks hellaswag,arc_easy,arc_challenge,mmlu,truthfulqa,humaneval \
-  --batch_size 1 \
-  --apply_chat_template \
-  --output_path results/eval/slm-125m-dpo-cli \
-  --log_samples
+python scripts/run_lm_eval.py   --model results/runs/125m/dpo_chat/final   --tasks hellaswag,arc_easy   --batch-size 4
 ```
 
-The wrapper accepts every flag `python -m lm_eval` accepts. Anything you
-would pass to lm_eval directly, pass to this script the same way.
-
-**What success looks like.** The script loads the model without
-`KeyError: 'slm'`, runs the requested tasks to completion, and writes
-results to `--output_path`. With `--log_samples`, per-example generations
-are saved alongside results — useful for debugging tasks like HumanEval
-where the score alone doesn't tell you whether the model produced
-plausible code or chat-formatted prose.
-
-A pass@1 of 0.0 on HumanEval is not a wrapper failure — it's the model.
-The wrapper succeeds when the CLI runs to completion and produces
-inspectable output, regardless of the score.
-
-**GPU sizing notes.** Same as your training/eval defaults. The wrapper
-adds no memory overhead beyond what lm_eval itself uses. Pass
-`--batch_size` smaller if you OOM on a smaller GPU.
-
----
----
-
-### `pretrain_hf_125m.py`
-
-**What it does.** Creates a 125M-only clean Hugging Face pretraining baseline
-using `HuggingFaceTB/dclm-edu` by default. It writes the same normal pipeline
-paths used by regular pretraining so downstream SFT, DPO, export, and eval
-commands work without modification.
-
-**When to use it.** Use this when you want to validate the 125M model and
-training stack against already-cleaned Hugging Face pretraining data instead
-of the custom curated corpus. This helps separate model/trainer issues from
-custom data-quality issues.
-
-This script is intentionally **not** a separate training lane. It is a
-destructive data-substitution benchmark for 125M only.
-
-**Destructive behavior.** The script writes normal paths:
-
-```text
-data/curated/train.jsonl
-data/curated/val.jsonl
-data/curated/blend_stats.json
-data/tokenized/...
-results/slm-125m/final
-```
-
-If existing artifacts are found, the script refuses to continue unless you
-choose one of these:
+Prefer the Makefile eval targets for normal use:
 
 ```bash
-# Recommended: move existing artifacts to timestamped backups first.
-.venv/bin/python scripts/pretrain_hf_125m.py --stage prepare --backup-existing
-
-# Dangerous: delete existing artifacts without backup.
-.venv/bin/python scripts/pretrain_hf_125m.py --stage prepare --force --no-backup
-```
-
-Backup locations:
-
-```text
-data/backups/hf_125m_baseline/<timestamp>/
-results/backups/hf_125m_baseline/<timestamp>/
-```
-
-**How to run.**
-
-```bash
-# Prepare only: writes data/curated/train.jsonl, val.jsonl, and blend_stats.json.
-.venv/bin/python scripts/pretrain_hf_125m.py --stage prepare --backup-existing
-
-# Prepare, train tokenizer, tokenize, and pretrain using existing Make targets.
-.venv/bin/python scripts/pretrain_hf_125m.py --stage all --backup-existing
-
-# Smoke-test the script with a tiny budget.
-.venv/bin/python scripts/pretrain_hf_125m.py \
-  --stage prepare \
-  --target-tokens 1000000 \
-  --max-docs 5000 \
-  --backup-existing
-```
-
-Default settings:
-
-| Field | Value |
-|---|---|
-| Dataset | `HuggingFaceTB/dclm-edu` |
-| Size | `125m` only |
-| Target budget | `6.5B` curation tokens |
-| Source tag | `dclm_edu` |
-| Output path | normal `data/curated` and `results/slm-125m` paths |
-
-**What success looks like.** After `--stage prepare`, `data/curated/train.jsonl`,
-`data/curated/val.jsonl`, and `data/curated/blend_stats.json` exist and contain
-records with `source="dclm_edu"`. After `--stage all`, the normal checkpoint
-`results/slm-125m/final` exists, and the usual downstream commands can run:
-
-```bash
-make sft-chat SIZE=125m
-make sft-code SIZE=125m
-make dpo SIZE=125m
+make eval-base SIZE=125m
+make eval-instruct SIZE=125m
 make eval-chat SIZE=125m
+make eval-code SIZE=125m
 ```
-
-**GPU sizing notes.** The prepare stage is CPU/network/disk bound. The tokenizer,
-tokenize, and pretrain stages use the existing Make targets and therefore inherit
-the same GPU requirements as normal 125M pretraining.
 
 ---
 
-### `reinit_special_embeds.py`
+## `pretrain_hf_125m.py`
 
-**What it does.** Re-initializes the chat-template special token embeddings in
-a pretrained checkpoint before SFT:
+Diagnostic pretraining path that uses a Hugging Face dataset with the 125m architecture. It is useful for validating trainer behavior independently from the full curation pipeline.
 
-```text
-<|system|>
-<|user|>
-<|assistant|>
-<|endofturn|>
-```
+---
 
-It uses direct `safetensors` I/O instead of `SLMForCausalLM.from_pretrained()`
-and `SLMForCausalLM.save_pretrained()`.
+## `reinit_special_embeds.py`
 
-**When to use it.** Use this after pretraining and before chat SFT when the
-tokenizer contains chat/control tokens whose embeddings need to be reset to a
-safe initialization. This is especially useful when recovering or patching a
-checkpoint without relying on the custom-model `from_pretrained()` path.
+Reinitializes chat/special-token embeddings before SFT.
 
-**How to run.**
+Normal use:
 
 ```bash
-# Default: patch results/slm-125m/final in place, with a backup.
 make reinit-embeds SIZE=125m
-
-# Direct invocation.
-.venv/bin/python scripts/reinit_special_embeds.py --size 125m
-
-# Explicit recovery from a checkpoint into final.
-.venv/bin/python scripts/reinit_special_embeds.py \
-  --src results/slm-125m/checkpoint-152000 \
-  --dst results/slm-125m/final
-
-# Skip backup only when you are sure.
-.venv/bin/python scripts/reinit_special_embeds.py --size 125m --no-backup
 ```
 
-**What success looks like.** The script prints the special token IDs, verifies
-that only those embedding rows changed, saves `model.safetensors`, and reports
-the patched checkpoint path. If the destination exists and `--no-backup` is not
-used, it creates a timestamped backup before overwriting.
+Direct use:
 
-**GPU sizing notes.** No GPU is required. The script loads weights on CPU and
-writes `model.safetensors` directly.
+```bash
+python scripts/reinit_special_embeds.py --size 125m
+```
 
+Expected input/output:
 
-## Adding new scripts
+```text
+input   results/runs/<size>/pretrain/final
+output  patched checkpoint ready for SFT
+```
 
-Each new script gets a section in this README following the template at
-the top — what / when / how / success / GPU sizing.
+---
 
-Scripts in this directory should be:
+## Adding scripts
 
-- **Self-contained** — minimal assumptions about pipeline state
-- **Documented** — section in this README
-- **Stable** — if a script is experimental or temporary, keep it in a
-  personal branch rather than committing to `main`
+Scripts in this folder should be:
 
-When a script becomes a stable part of a pipeline stage, migrate it into
-the relevant stage directory (for example, `curator/scripts/` or
-`pretrain/data/`).
+- stage-neutral diagnostics, or
+- helpers used across multiple stages, or
+- one-off recovery utilities with clear comments
+
+Stage-owned scripts should stay inside their stage folder.
