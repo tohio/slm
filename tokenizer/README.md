@@ -1,23 +1,21 @@
 # tokenizer
 
-Tokenizer training and tokenizer validation for SLM.
+BPE tokenizer training and tokenizer validation for SLM.
 
 ---
 
-## Responsibility
+## Owns
 
-`tokenizer/` owns:
+- tokenizer training in `train_tokenizer.py`
+- project special-token definitions
+- Hugging Face tokenizer config output
+- tokenizer validation checks in `test_tokenizer.py`
 
-- BPE tokenizer training
-- project special token definitions
-- tokenizer config output
-- tokenizer validation tests
-
-Tokenization of the training corpus lives in `pretrain/data/tokenize_data.py`.
+Corpus tokenization for pretraining lives in `pretrain/data/tokenize_data.py`.
 
 ---
 
-## Files
+## Key files
 
 ```text
 tokenizer/
@@ -30,37 +28,59 @@ tokenizer/
 
 ## Inputs
 
+Default training input:
+
 ```text
 data/runs/<size>/validated/train.jsonl
-data/runs/<size>/validated/val.jsonl
+```
+
+Optional direct input:
+
+```bash
+python tokenizer/train_tokenizer.py --size 125m --input data/runs/125m/validated/train.jsonl
 ```
 
 ---
 
 ## Outputs
 
-```text
-data/runs/<size>/tokenizer/tokenizer.json
-data/runs/<size>/tokenizer/tokenizer_config.json
-```
-
-A compatibility copy may also be restored to:
+Default output directory:
 
 ```text
-data/tokenizer/
+data/runs/<size>/tokenizer/
 ```
+
+Expected files:
+
+```text
+slm_tokenizer.json
+tokenizer.json
+tokenizer_config.json
+vocab.json
+merges.txt
+special_tokens.json
+special_tokens_map.json
+chat_template.jinja
+```
+
+Export copies the required tokenizer files into the checkpoint root before pushing to Hugging Face.
 
 ---
 
 ## Special tokens
 
-Special tokens are defined in `train_tokenizer.py` and asserted during tokenizer training. They include:
+The four structural tokens are fixed first:
 
 ```text
 <PAD>
 <UNK>
 <BOS>
 <EOS>
+```
+
+Additional special tokens:
+
+```text
 <|system|>
 <|user|>
 <|assistant|>
@@ -75,6 +95,8 @@ Special tokens are defined in `train_tokenizer.py` and asserted during tokenizer
 <|endofcontext|>
 ```
 
+Training code can assert the special-token layout. Runtime code resolves token IDs from the loaded tokenizer instead of importing hard-coded IDs.
+
 ---
 
 ## Commands
@@ -85,14 +107,14 @@ Train tokenizer:
 make tokenizer SIZE=125m
 ```
 
-Run tokenizer validation:
+Validate tokenizer:
 
 ```bash
 make tokenizer-test SIZE=125m
 make test-tokenizer SIZE=125m
 ```
 
-Upload tokenizer artifacts through the RUN_ID artifact flow:
+Upload tokenizer artifacts:
 
 ```bash
 make artifacts-upload SIZE=125m ARTIFACT_STAGES="tokenizer,metadata"
@@ -101,18 +123,47 @@ make artifacts-upload SIZE=125m ARTIFACT_STAGES="tokenizer,metadata"
 Direct calls:
 
 ```bash
-python tokenizer/train_tokenizer.py
-python tokenizer/test_tokenizer.py
+python tokenizer/train_tokenizer.py --size 125m
+python tokenizer/train_tokenizer.py --size 125m --vocab-size 32000
+python tokenizer/train_tokenizer.py --size 125m --min-frequency 2
+python tokenizer/test_tokenizer.py --size 125m
 ```
-
----
-
-## Runtime ID resolution
-
-Training code can use tokenizer constants from `train_tokenizer.py`. Runtime code resolves token IDs from the loaded tokenizer via `inference/utils.py` so exported checkpoints cannot silently mis-map special tokens.
 
 ---
 
 ## Chat template
 
-The tokenizer owns the chat template used by SFT, DPO, inference, and serving. Any change to the chat format requires tokenizer and downstream checkpoint compatibility review.
+The tokenizer saves the chat template used by SFT, DPO, inference, and serving.
+
+The template includes assistant-generation markers required by TRL answer-only loss masking. Any chat-template change requires tokenizer, SFT, DPO, inference, export, and serving compatibility review.
+
+---
+
+## BOS/EOS policy
+
+The tokenizer does not automatically inject BOS/EOS through a post-processor. Training and inference code add those tokens explicitly where appropriate.
+
+This avoids corrupting chat-formatted examples with unexpected special tokens.
+
+---
+
+## Pretraining tokenization
+
+After tokenizer training, pretraining tokenization is run from the pretrain folder:
+
+```bash
+make tokenize SIZE=125m
+```
+
+Direct call:
+
+```bash
+python pretrain/data/tokenize_data.py --size 125m --chunk-size 256 --verify
+```
+
+Tokenization writes:
+
+```text
+data/runs/<size>/tokenized/train.bin
+data/runs/<size>/tokenized/val.bin
+```

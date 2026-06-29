@@ -1,78 +1,23 @@
 # curator
 
-Data curation pipeline for SLM pretraining. This folder downloads source datasets, filters documents, deduplicates, blends train/val splits, and prepares reusable artifacts.
+Data curation for SLM pretraining. This folder owns source loading, filtering, deduplication, blending, sampling, and RUN_ID artifact transfer.
 
 ---
 
-## Responsibility
+## Owns
 
-`curator/` owns:
+- source loaders in `curator/sources/`
+- heuristic quality filters in `curator/filters/quality.py`
+- exact and fuzzy dedup in `curator/filters/dedup.py`
+- curation orchestration in `curator/scripts/curate.py`
+- source sampling in `curator/scripts/sample_source.py`
+- artifact upload/download in `curator/scripts/upload_s3.py`
 
-- source loaders
-- quality filtering
-- deduplication
-- source blending
-- train/val split creation
-- artifact upload/download through `upload_s3.py`
-- source sampling for manual inspection
-
-Validation, tokenizer training, and pretraining live in other folders.
+Validation, tokenizer training, tokenization, and model training live in other folders.
 
 ---
 
-## Data flow
-
-```text
-source loaders
-  ↓
-quality filters
-  ↓
-dedup
-  ↓
-blend
-  ↓
-data/runs/<size>/curated/train.jsonl
-data/runs/<size>/curated/val.jsonl
-data/runs/<size>/metadata/blend_stats.json
-```
-
----
-
-## Source mix
-
-The source mix is defined in `config/data_mix.py`.
-
-| Source | Target Share | Notes |
-|---|---:|---|
-| Common Crawl | 5% | direct WARC via trafilatura |
-| FineWeb | 10% | broad web text |
-| FineWeb-Edu | 31.5% | educational/explanatory web text |
-| Wikipedia | 10% | encyclopedia text |
-| pg19 | 2.5% | public-domain books |
-| peS2o | 5% | academic/scientific prose |
-| Nemotron CC Math | 7% | math/STEM text |
-| StackExchange | 1% | Q&A-style web text |
-| Synthetic arithmetic | 0.1475% | arithmetic signal |
-| Synthetic task code | 0.3934% | task-shaped code examples |
-| Educational QA/MCQ math | 0.1475% | math MCQ examples |
-| Educational QA/MCQ general | 0.2459% | general MCQ examples |
-| Factual restraint | 0.0657% | uncertainty/restraint examples |
-| Nemotron Specialized | 12% | specialized supplement |
-| Code total | 15% | split across code sub-sources |
-
----
-
-## Token targets
-
-| Size | Curation target | Epochs | Consumed target |
-|---|---:|---:|---:|
-| `125m` | 10B | 2 | 20B |
-| `350m` | 25B | 2 | 50B |
-| `1b` | 75B | 1 | 75B |
-
----
-
-## Files
+## Key files
 
 ```text
 curator/
@@ -87,15 +32,85 @@ curator/
 └── sources/
 ```
 
+Shared curation settings live in `config/data_mix.py`. Do not duplicate source percentages, token targets, `CHARS_PER_TOKEN`, or Common Crawl crawl settings in curator code.
+
+---
+
+## Data flow
+
+```text
+source loaders
+  ↓
+quality filters
+  ↓
+dedup
+  ↓
+blend + train/val split
+  ↓
+data/runs/<size>/curated/train.jsonl
+data/runs/<size>/curated/val.jsonl
+data/runs/<size>/metadata/blend_stats.json
+```
+
+The blend stage samples validation data from the same shuffled distribution as train.
+
+---
+
+## Source mix
+
+`config/data_mix.py` is the source of truth.
+
+Top-level mix:
+
+| Source | Share |
+|---|---:|
+| Common Crawl | 5.0% |
+| FineWeb | 10.0% |
+| FineWeb-Edu | 31.5% |
+| Wikipedia | 10.0% |
+| PG-19 | 2.5% |
+| peS2o | 5.0% |
+| Nemotron CC Math | 7.0% |
+| StackExchange | 1.0% |
+| Synthetic arithmetic | 0.1475% |
+| Synthetic task code | 0.3934% |
+| Educational QA/MCQ math | 0.1475% |
+| Educational QA/MCQ general | 0.2459% |
+| Factual restraint | 0.0657% |
+| Nemotron Specialized | 12.0% |
+| Code bucket | 15.0% |
+
+Code bucket split:
+
+| Code source | Share of code bucket |
+|---|---:|
+| The Stack v1 dedup | 83.0% |
+| CodeSearchNet | 15.0% |
+| The Stack smol | 1.0% |
+| Jupyter parsed | 0.5% |
+| CoNaLa | 0.5% |
+
+Synthetic/generated supplements have source-specific caps in `config/data_mix.py`. Underfilled synthetic sources overflow first to Nemotron Specialized, then FineWeb-Edu, then FineWeb.
+
+---
+
+## Token targets
+
+| Size | Curation target | Epochs | Consumed target |
+|---|---:|---:|---:|
+| `mini` | 1M | 1 | 1M |
+| `125m` | 10B | 2 | 20B |
+| `350m` | 25B | 2 | 50B |
+| `1b` | 75B | 1 | 75B |
+
 ---
 
 ## Commands
 
-Mini curation:
+Mini run:
 
 ```bash
 make curate-mini
-make test-curator
 ```
 
 Full curation:
@@ -108,37 +123,63 @@ Stage-specific runs:
 
 ```bash
 make curate-download SIZE=125m
-make curate-filter   SIZE=125m WORKERS=62
-make curate-dedup    SIZE=125m WORKERS=62
-make curate-blend    SIZE=125m
+make curate-filter SIZE=125m WORKERS=62
+make curate-dedup SIZE=125m WORKERS=62
+make curate-blend SIZE=125m
 ```
 
-Sample source records:
+Direct calls:
 
 ```bash
-python curator/scripts/sample_source.py --source fineweb_edu --target mini --limit 5
+python curator/scripts/curate.py --target 125m
+python curator/scripts/curate.py --target mini --mini
+python curator/scripts/curate.py --target 125m --stage download
+python curator/scripts/curate.py --target 125m --sources wikipedia,fineweb_edu
+```
+
+---
+
+## Sampling
+
+Use `sample_source.py` to inspect actual records written by a source/stage.
+
+```bash
+python curator/scripts/sample_source.py --size 125m --stage raw --source wikipedia --limit 10
+python curator/scripts/sample_source.py --size 125m --stage filtered --source wikipedia --limit 10
+python curator/scripts/sample_source.py --size 125m --stage deduped --source wikipedia --limit 10
+python curator/scripts/sample_source.py --size 125m --stage curated --source wikipedia --limit 10
+python curator/scripts/sample_source.py --size 125m --stage validated --source wikipedia --limit 10
+```
+
+Valid sample stages:
+
+```text
+raw, filtered, deduped, curated, validated
 ```
 
 ---
 
 ## RUN_ID artifacts
 
-Artifacts are stored by run ID:
+Artifacts are stored by `RUN_ID`, not date.
+
+Local layout:
 
 ```text
 data/runs/<size>/RUN_ID
-data/runs/<size>/raw/
-data/runs/<size>/curated/
-data/runs/<size>/validated/
-data/runs/<size>/tokenized/
-data/runs/<size>/tokenizer/
-data/runs/<size>/metadata/
+data/runs/<size>/<stage>/
 ```
 
 S3 layout:
 
 ```text
 <S3_PREFIX>/<size>/<run_id>/<stage>/
+```
+
+Valid artifact stages:
+
+```text
+raw, curated, validated, tokenized, tokenizer, metadata
 ```
 
 Upload:
@@ -154,52 +195,27 @@ Download:
 make artifacts-download SIZE=125m RUN_ID=125m-20260629-a8f3c9
 ```
 
-Valid stages:
+---
+
+## Outputs
 
 ```text
-raw, curated, validated, tokenized, tokenizer, metadata
-```
-
----
-
-## Quality filters
-
-The quality filter stage removes documents with:
-
-- extreme length
-- low alphabetic content
-- high symbol or boilerplate ratio
-- repeated lines
-- malformed text patterns
-- obvious non-prose content
-
-Validation adds language/perplexity checks after curation.
-
----
-
-## Deduplication
-
-The curator uses exact and fuzzy dedup depending on source type. Generated/template-like sources may use exact dedup only so useful repeated task structure is not collapsed.
-
----
-
-## Blend output
-
-The blend stage writes shuffled train/val JSONL and realized mix metadata.
-
-```text
+data/runs/<size>/raw/
+data/runs/<size>/filtered/
+data/runs/<size>/dedup_scratch/
 data/runs/<size>/curated/train.jsonl
 data/runs/<size>/curated/val.jsonl
 data/runs/<size>/metadata/blend_stats.json
 ```
 
-`blend_stats.json` is the source of truth for realized mix in exported model cards.
+`blend_stats.json` records the realized mix and is used by export for model-card data-mix reporting.
 
 ---
 
-## Operational notes
+## Notes
 
 - Run long curation jobs inside `tmux`.
-- Use a persistent disk for `DATA_DIR`.
-- Use `WORKERS` to control curation parallelism.
-- Restore by `RUN_ID`, not date.
+- Use persistent storage for `DATA_DIR`.
+- Use `WORKERS` to control parallel curation stages.
+- Generated/template-like sources bypass fuzzy MinHash dedup but still run exact dedup.
+- Restore artifacts by `RUN_ID`, not date.
