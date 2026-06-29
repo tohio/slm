@@ -16,16 +16,20 @@ Changes from prior version:
 Env vars:
     S3_BUCKET           — S3 bucket name (required)
     S3_PREFIX           — key prefix (default: slm/data)
+    RUN_ID              — optional explicit artifact run id
     AWS_DEFAULT_REGION  — (default: us-east-1)
 
     AWS credentials: standard boto3 chain — env vars, profile, IAM role.
 """
 
 import argparse
+import json
 import logging
 import os
 import re
+import secrets
 import threading
+from datetime import date
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -49,6 +53,7 @@ DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
 ARTIFACT_STAGES = ("raw", "tokenized", "tokenizer", "metadata")
 OPTIONAL_ARTIFACT_STAGES = ("curated", "validated")
 ALL_ARTIFACT_STAGES = ARTIFACT_STAGES + OPTIONAL_ARTIFACT_STAGES
+RUN_ID_FILENAME = "RUN_ID"
 
 # S3 transfer configuration is built per command so large single-file artifacts
 # can use multipart concurrency. File-level concurrency is still controlled by
@@ -107,10 +112,128 @@ def build_key(prefix: str, relative_path: str) -> str:
     return f"{prefix}/{relative_path.lstrip('/')}"
 
 
-def validate_date(date: str) -> None:
-    """Validate artifact DATE format: YYYY-MM-DD."""
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
-        raise ValueError(f"DATE must be YYYY-MM-DD, got: {date}")
+def _today_iso() -> str:
+    return date.today().isoformat()
+
+
+def _today_compact() -> str:
+    return date.today().strftime("%Y%m%d")
+
+
+def _run_id_path(size: str) -> Path:
+    return DATA_DIR / "runs" / size / RUN_ID_FILENAME
+
+
+def _validate_size(size: str) -> None:
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", size):
+        raise ValueError(f"Invalid size: {size}")
+
+
+def validate_run_id(size: str, run_id: str) -> None:
+    """Validate artifact RUN_ID.
+
+    RUN_ID is intentionally opaque after validation, but generated IDs use:
+      {SIZE}-{YYYYMMDD}-{random_hex}
+    """
+    _validate_size(size)
+    if "/" in run_id or "\\" in run_id or run_id in {"", ".", ".."}:
+        raise ValueError(f"Invalid RUN_ID: {run_id}")
+
+    pattern = rf"{re.escape(size)}-\d{{8}}-[A-Za-z0-9._-]+"
+    if not re.fullmatch(pattern, run_id):
+        raise ValueError(
+            f"RUN_ID must match {size}-YYYYMMDD-<id>, got: {run_id}"
+        )
+
+
+def _read_run_id_record(path: Path) -> dict[str, str] | None:
+    if not path.exists():
+        return None
+
+    raw = path.read_text().strip()
+    if not raw:
+        return None
+
+    try:
+        obj = json.loads(raw)
+        if isinstance(obj, dict):
+            return {
+                "run_id": str(obj.get("run_id", "")),
+                "date": str(obj.get("date", "")),
+            }
+    except json.JSONDecodeError:
+        return {"run_id": raw, "date": ""}
+
+    return None
+
+
+def _write_run_id_record(size: str, run_id: str) -> None:
+    path = _run_id_path(size)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "run_id": run_id,
+        "date": _today_iso(),
+        "size": size,
+    }
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def _new_run_id(size: str) -> str:
+    return f"{size}-{_today_compact()}-{secrets.token_hex(3)}"
+
+
+def resolve_upload_run_id(size: str, provided_run_id: str | None) -> str:
+    """Resolve the run id for artifact upload.
+
+    Rules:
+      1. Explicit RUN_ID wins.
+      2. Today's local RUN_ID file wins.
+      3. Missing/stale local RUN_ID file is replaced.
+    """
+    _validate_size(size)
+
+    if provided_run_id:
+        validate_run_id(size, provided_run_id)
+        _write_run_id_record(size, provided_run_id)
+        return provided_run_id
+
+    path = _run_id_path(size)
+    today = _today_iso()
+    record = _read_run_id_record(path)
+    if record and record.get("date") == today and record.get("run_id"):
+        run_id = record["run_id"]
+        validate_run_id(size, run_id)
+        return run_id
+
+    run_id = _new_run_id(size)
+    _write_run_id_record(size, run_id)
+    return run_id
+
+
+def require_run_id(size: str, run_id: str | None) -> str:
+    if not run_id:
+        raise ValueError("RUN_ID is required for artifact download/restore")
+    validate_run_id(size, run_id)
+    return run_id
+
+
+def _prepare_metadata(size: str, run_id: str) -> None:
+    """Materialize metadata artifacts before upload."""
+    metadata_dir = DATA_DIR / "runs" / size / "metadata"
+    metadata_dir.mkdir(parents=True, exist_ok=True)
+
+    run_payload = {
+        "run_id": run_id,
+        "date": _today_iso(),
+        "size": size,
+    }
+    (metadata_dir / "run_id.json").write_text(
+        json.dumps(run_payload, indent=2, sort_keys=True) + "\n"
+    )
+
+    blend_stats = DATA_DIR / "runs" / size / "curated" / "blend_stats.json"
+    if blend_stats.exists():
+        (metadata_dir / "blend_stats.json").write_text(blend_stats.read_text())
 
 
 def _list_existing_keys(
@@ -347,56 +470,33 @@ def list_prefix(prefix_path: str, bucket: str, prefix: str) -> list[dict]:
 
 # ── Artifact sync ──────────────────────────────────────────────────────────────
 
-def _artifact_paths(size: str, date: str, stage: str) -> tuple[Path, str]:
-    """Return (local_path, s3_prefix) for a named curation/training artifact.
+def _artifact_paths(size: str, run_id: str, stage: str) -> tuple[Path, str]:
+    """Return (local_path, s3_prefix) for a named artifact stage.
 
-    Stage names are intentionally user-facing and stable:
-      - raw:        downloaded source data under data/runs/<size>/raw
-      - tokenized:  pretraining binaries under data/runs/<size>/tokenized
-      - tokenizer:  tokenizer files under data/runs/<size>/tokenizer
-      - metadata:   run metadata under data/runs/<size>/metadata
-      - curated:    optional blended train/val JSONL under data/runs/<size>/curated
-      - validated:  optional validated train/val JSONL under data/runs/<size>/validated
-
-    S3 keys are grouped by size/date so a prior run can be restored exactly:
-      <size>/<date>/<artifact>/...
+    S3 keys are grouped by size/run_id so one logical run restores as a unit:
+      <size>/<run_id>/<stage>/...
     """
     if stage == "raw":
-        return DATA_DIR / "runs" / size / "raw", f"{size}/{date}/raw"
+        return DATA_DIR / "runs" / size / "raw", f"{size}/{run_id}/raw"
     if stage == "curated":
-        return DATA_DIR / "runs" / size / "curated", f"{size}/{date}/curated"
+        return DATA_DIR / "runs" / size / "curated", f"{size}/{run_id}/curated"
     if stage == "validated":
-        return DATA_DIR / "runs" / size / "validated", f"{size}/{date}/validated"
+        return DATA_DIR / "runs" / size / "validated", f"{size}/{run_id}/validated"
     if stage == "tokenized":
-        return DATA_DIR / "runs" / size / "tokenized", f"{size}/{date}/tokenized"
+        return DATA_DIR / "runs" / size / "tokenized", f"{size}/{run_id}/tokenized"
     if stage == "tokenizer":
-        return DATA_DIR / "runs" / size / "tokenizer", f"{size}/{date}/tokenizer"
+        return DATA_DIR / "runs" / size / "tokenizer", f"{size}/{run_id}/tokenizer"
     if stage == "metadata":
-        return DATA_DIR / "runs" / size / "metadata", f"{size}/{date}/metadata"
+        return DATA_DIR / "runs" / size / "metadata", f"{size}/{run_id}/metadata"
     raise ValueError(
         f"Unknown artifact stage: {stage}. "
         f"Valid stages: {','.join(ALL_ARTIFACT_STAGES)}"
     )
 
 
-def _artifact_upload_paths(size: str, date: str, stage: str) -> tuple[Path, str, str]:
-    """Return (local_path, s3_prefix, glob) for artifact uploads.
-
-    The metadata stage is a stable downstream contract:
-      local: data/runs/<size>/curated/blend_stats.json
-      s3:   <size>/<date>/metadata/blend_stats.json
-
-    Curated and validated JSONL stages remain optional archival stages and are
-    not included in ARTIFACT_STAGES by default.
-    """
-    if stage == "metadata":
-        return (
-            DATA_DIR / "runs" / size / "curated",
-            f"{size}/{date}/metadata",
-            "blend_stats.json",
-        )
-
-    src, dst_prefix = _artifact_paths(size, date, stage)
+def _artifact_upload_paths(size: str, run_id: str, stage: str) -> tuple[Path, str, str]:
+    """Return (local_path, s3_prefix, glob) for artifact uploads."""
+    src, dst_prefix = _artifact_paths(size, run_id, stage)
     return src, dst_prefix, "**/*"
 
 
@@ -419,7 +519,7 @@ def _normalize_stages(stages: str | None) -> list[str]:
 
 def upload_artifacts(
     size: str,
-    date: str,
+    run_id: str,
     stages: str | None,
     bucket: str,
     prefix: str,
@@ -427,11 +527,13 @@ def upload_artifacts(
     overwrite: bool = False,
     glob: str = "**/*",
 ) -> dict[str, int]:
-    """Upload selected artifact stages for a size/date."""
+    """Upload selected artifact stages for a size/run_id."""
     totals = {"uploaded": 0, "skipped": 0, "failed": 0}
 
+    _prepare_metadata(size, run_id)
+
     for stage in _normalize_stages(stages):
-        src, dst_prefix, stage_glob = _artifact_upload_paths(size, date, stage)
+        src, dst_prefix, stage_glob = _artifact_upload_paths(size, run_id, stage)
         if not src.exists():
             log.warning(f"Skipping missing artifact stage '{stage}': {src}")
             continue
@@ -461,18 +563,18 @@ def upload_artifacts(
 
 def download_artifacts(
     size: str,
-    date: str,
+    run_id: str,
     stages: str | None,
     bucket: str,
     prefix: str,
     workers: int = 16,
     overwrite: bool = False,
 ) -> dict[str, int]:
-    """Download selected artifact stages for a size/date into local pipeline paths."""
+    """Download selected artifact stages for a size/run_id into local pipeline paths."""
     totals = {"downloaded": 0, "skipped": 0, "failed": 0}
 
     for stage in _normalize_stages(stages):
-        dst, src_prefix = _artifact_paths(size, date, stage)
+        dst, src_prefix = _artifact_paths(size, run_id, stage)
         dst.mkdir(parents=True, exist_ok=True)
 
         log.info(f"Downloading artifact stage '{stage}': {src_prefix} → {dst}")
@@ -520,7 +622,7 @@ def main():
 
     up_artifacts = subparsers.add_parser("artifacts-upload")
     up_artifacts.add_argument("--size", type=str, required=True)
-    up_artifacts.add_argument("--date", type=str, required=True)
+    up_artifacts.add_argument("--run-id", type=str, default=os.environ.get("RUN_ID"))
     up_artifacts.add_argument(
         "--stages",
         type=str,
@@ -533,7 +635,7 @@ def main():
 
     dl_artifacts = subparsers.add_parser("artifacts-download")
     dl_artifacts.add_argument("--size", type=str, required=True)
-    dl_artifacts.add_argument("--date", type=str, required=True)
+    dl_artifacts.add_argument("--run-id", type=str, default=os.environ.get("RUN_ID"))
     dl_artifacts.add_argument(
         "--stages",
         type=str,
@@ -575,10 +677,11 @@ def main():
         print("-" * 92)
         print(f"Total: {len(objects)} objects, {total_size / 1024**3:.2f} GB")
     elif args.command == "artifacts-upload":
-        validate_date(args.date)
+        run_id = resolve_upload_run_id(args.size, args.run_id)
+        log.info(f"Using RUN_ID={run_id}")
         upload_artifacts(
             size=args.size,
-            date=args.date,
+            run_id=run_id,
             stages=args.stages,
             bucket=bucket,
             prefix=prefix,
@@ -587,10 +690,11 @@ def main():
             glob=args.glob,
         )
     elif args.command == "artifacts-download":
-        validate_date(args.date)
+        run_id = require_run_id(args.size, args.run_id)
+        log.info(f"Using RUN_ID={run_id}")
         download_artifacts(
             size=args.size,
-            date=args.date,
+            run_id=run_id,
             stages=args.stages,
             bucket=bucket,
             prefix=prefix,

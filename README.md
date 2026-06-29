@@ -1,31 +1,14 @@
-
-## Model lineage
-
-```text
-base
-  ↓
-instruct = base + chat SFT + response-control
-  ├── chat = instruct + general DPO
-  └── code = instruct + code SFT
-```
-
-General chat DPO starts from `results/runs/<size>/sft_instruct/final`. Code SFT starts from the same instruct checkpoint and writes `results/runs/<size>/sft_code/final`.
-
 # slm
 
-A decoder-only language model trained from scratch — raw web data through to an aligned, serving-ready model. Covers the full lifecycle: data curation, validation, tokenizer training, pretraining, supervised fine-tuning, preference alignment, evaluation, and production serving.
+End-to-end decoder-only language model pipeline: curation, validation, tokenizer training, pretraining, SFT, DPO, evaluation, export, inference, and serving.
 
-> **Status:** This project is under active development. The pipeline is operational at 125m; 350m and 1b runs are pending. Items marked _TBD_ will be filled in as empirical data becomes available.
+Models:
+- `tohio/slm-125m`
+- `tohio/slm-125m-instruct`
+- `tohio/slm-125m-chat`
+- `tohio/slm-125m-code`
 
----
-
-## Overview
-
-Most LLM projects start from a pretrained checkpoint. This one doesn't. SLM is built entirely from scratch — from unstructured web crawl data to an instruction-following, chat-capable model deployed on Kubernetes.
-
-The pipeline is modular and independently runnable at each stage. Every design decision is documented and justified.
-
-**Models:** `tohio/slm-125m` · `tohio/slm-125m-instruct` · `tohio/slm-125m-chat` · `tohio/slm-350m` · `tohio/slm-350m-instruct` · `tohio/slm-350m-chat` · `tohio/slm-1b` · `tohio/slm-1b-instruct` · `tohio/slm-1b-chat`
+The same pipeline structure supports `125m`, `350m`, and `1b` runs.
 
 ![Architecture](docs/architecture.png)
 
@@ -33,39 +16,31 @@ The pipeline is modular and independently runnable at each stage. Every design d
 
 ## Choosing a size
 
-All three sizes run through the same code path — the only differences are config values and target token counts. Choose based on your time and compute budget:
+All model sizes use the same pipeline. Choose based on available compute.
 
-| Size | Curation time | Training time | Rough cost | Suits |
-|---|---|---|---|---|
-| `slm-125m` | 6 hrs 4mins | 7 hrs 05m | $120.20 | learning the pipeline |
-| `slm-350m` | 15hrs | _TBD_ | $18.26| serious research budget |
-| `slm-1b` | _TBD_ | _TBD_ | _TBD_ | production-useful small model |
-
-Curation process ran on `96 vCPU with 384 GiB` with 1TB/2TB/6TB of disk size
-
-On 125m training on multi `GPU 4 X H200` (564GB VRAM, 176x CPU, 740GB RAM)
-
-Most readers will find `125m` fits their budget. The `1b` path is here for readers with the compute — it uses the same commands and same config structure, and produces a more capable model. The pipeline is designed for all three to work reliably; the choice is about what you can afford, not what you can trust.
+| Size | Use case |
+|---|---|
+| `125m` | Pipeline validation, debugging, and low-cost experiments |
+| `350m` | Higher-capacity research runs |
+| `1b` | Larger small-model runs when more compute is available |
 
 ---
 
 ## Architecture
 
-The model is a dense decoder-only transformer with a modern architecture:
+Dense decoder-only Transformer.
 
-| Component | Choice | Rationale |
-|---|---|---|
-| Positional encoding | RoPE | Better length generalisation, relative position awareness |
-| Normalization | RMSNorm | Faster than LayerNorm, modern standard |
-| Activation | SwiGLU | Better gradient flow, used by Llama, Mistral, Qwen |
-| Attention | GQA | Reduces KV memory overhead at inference |
-| Bias | None | Simpler, modern standard |
-| Embeddings | Tied | Reduces parameters, effective at small scale |
-
-**Model sizes:**
+| Component | Choice |
+|---|---|
+| Positional encoding | RoPE |
+| Normalization | RMSNorm |
+| Activation | SwiGLU |
+| Attention | GQA |
+| Bias | None |
+| Embeddings | Tied |
 
 | Model | Layers | Hidden | Q heads | KV heads | Context |
-|---|---|---|---|---|---|
+|---|---:|---:|---:|---:|---:|
 | `slm-125m` | 12 | 768 | 12 | 4 | 2048 |
 | `slm-350m` | 24 | 1024 | 16 | 8 | 2048 |
 | `slm-1b` | 32 | 2048 | 32 | 8 | 4096 |
@@ -76,31 +51,29 @@ The model is a dense decoder-only transformer with a modern architecture:
 
 | Stage | Tool |
 |---|---|
-| Data curation | HuggingFace `datasets` + `datatrove` + custom scripts |
-| Data validation | `datatrove` + KenLM perplexity filtering |
-| Tokenizer | HuggingFace `tokenizers` (BPE, 32k vocab) |
-| Pretraining | HuggingFace `accelerate` + `transformers` |
+| Data curation | Hugging Face Datasets, Datatrove |
+| Data validation | Datatrove, KenLM |
+| Tokenizer | Hugging Face Tokenizers |
+| Pretraining | Accelerate, Transformers |
 | Experiment tracking | Weights & Biases |
-| SFT | HuggingFace `trl` (`SFTTrainer`) |
-| DPO | HuggingFace `trl` (`DPOTrainer`) |
-| Evaluation | `lm-evaluation-harness` |
-| Export | HuggingFace `transformers` |
-| Inference | HuggingFace `transformers` |
-| Serving | `vLLM` on Kubernetes via `ai-infra` |
+| SFT | TRL |
+| DPO | TRL |
+| Evaluation | lm-evaluation-harness |
+| Export | Transformers |
+| Inference | Transformers |
+| Serving | vLLM |
 
 ---
 
 ## Repo Structure
 
-```
+```text
 slm/
 ├── config/
 │   └── data_mix.py
-│
 ├── config_gen/
-│   ├── config_gen.py        utility: auto-generate per-GPU training configs
-│   └── accel_gen.py         utility: auto-generate accelerate launch configs (DDP/FSDP)
-│
+│   ├── config_gen.py
+│   └── accel_gen.py
 ├── model/
 │   ├── config.py
 │   ├── attention.py
@@ -108,128 +81,57 @@ slm/
 │   ├── norm.py
 │   ├── block.py
 │   └── model.py
-│
 ├── curator/
 │   ├── constants.py
 │   ├── sources/
-│   │   ├── common_crawl.py
-│   │   ├── fineweb.py
-│   │   ├── fineweb_edu.py             educational/explanatory FineWeb-Edu source
-│   │   ├── wikipedia.py
-│   │   ├── pg19.py
-│   │   ├── pes2o.py
-│   │   ├── nemotron_cc_math.py
-│   │   ├── stackexchange.py
-│   │   ├── hf_synthetic.py           HF-backed synthetic arithmetic/task-code/QA/restraint sources
-│   │   ├── nemotron_specialized.py   nvidia/Nemotron-Pretraining-Specialized-v1.1
-│   │   ├── nemotron_code_v2.py       nvidia/Nemotron-Pretraining-Code-v2
-│   │   ├── nemotron_cc_code.py       nvidia/Nemotron-CC-Code-v1
-│   │   ├── code_search_net.py
-│   │   ├── stack_smol.py
-│   │   ├── stack_v1.py
-│   │   ├── stack_v2.py          disabled — see file header
-│   │   ├── jupyter.py
-│   │   └── conala.py
 │   ├── filters/
-│   │   ├── quality.py
-│   │   └── dedup.py
 │   └── scripts/
 │       ├── curate.py
-│       ├── sample_source.py        prints actual source/stage records for human review
+│       ├── sample_source.py
 │       └── upload_s3.py
-│
 ├── validation/
 │   └── scripts/
 │       ├── validate.py
 │       └── upload_validated.py
-│
 ├── tokenizer/
 │   ├── train_tokenizer.py
 │   └── test_tokenizer.py
-│
+├── pretrain/
+│   ├── configs/
+│   ├── data/
+│   └── train.py
 ├── finetune/
 │   ├── configs/
 │   ├── data/
-│   │   ├── prepare_sft.py              prepares SmolTalk chat SFT + Magicoder code SFT with local custom add-ons
-│   │   └── response_control.py         generated response-control chat examples
+│   │   ├── prepare_sft.py
+│   │   └── response_control.py
 │   └── train_sft.py
-│
 ├── alignment/
 │   ├── configs/
-│   ├── data/prepare_dpo.py              prepares UltraFeedback DPO + local targeted preference pairs
+│   ├── data/
+│   │   └── prepare_dpo.py
 │   └── train_dpo.py
-│
 ├── eval/
-│   ├── eval.py                    standard benchmark eval via lm-evaluation-harness
-│   ├── sanity_eval.py             behavior sanity eval runner
-│   └── sanity_prompts.jsonl       fixed behavior prompts for sanity eval
-│
+│   ├── eval.py
+│   ├── sanity_eval.py
+│   └── sanity_prompts.jsonl
 ├── export/
 │   └── export.py
-│
 ├── inference/
 │   ├── utils.py
 │   ├── chat.py
 │   └── generate.py
-│
 ├── serve/
 │   ├── manifests/
-│   │   ├── deployment.yaml
-│   │   ├── service.yaml
-│   │   ├── hpa.yaml
-│   │   └── pvc.yaml
 │   └── serve.sh
-│
 ├── scripts/
-│   ├── README.md
-│   ├── pretrain_hf_125m.py       125M clean HF pretraining-data substitution benchmark
-│   ├── reinit_special_embeds.py  reinitializes chat special-token embeddings before SFT
-│   ├── run_lm_eval.py            lm-eval wrapper for custom SLM architecture
-│   └── sanity_train.py           known-good FineWeb-Edu sanity training diagnostic
-│
 ├── tests/
-│   ├── conftest.py
-│   ├── README.md
-│   ├── test_config_gen.py        unit tests for config_gen/config_gen.py
-│   ├── test_accel_gen.py         unit tests for config_gen/accel_gen.py
-│   ├── data_pipeline/
-│   │   ├── test_pipeline_curator.py
-│   │   ├── test_pipeline_validate.py
-│   │   └── test_pipeline_tokenizer.py
-│   ├── model/
-│   │   └── test_model.py
-│   └── gpu_pipeline/
-│       ├── test_pipeline_training.py
-│       ├── test_pipeline_sft.py
-│       └── test_pipeline_dpo.py
-│
-├── notebooks/
-│   ├── 01_model_exploration.ipynb
-│   ├── 02_data_exploration.ipynb
-│   ├── 03_validation_exploration.ipynb
-│   ├── 04_tokenizer_exploration.ipynb
-│   ├── 05_pretrain_exploration.ipynb
-│   ├── 06_sft_exploration.ipynb
-│   ├── 07_dpo_exploration.ipynb
-│   ├── 08_eval_exploration.ipynb
-│   └── 09_inference_exploration.ipynb
-│
 ├── docs/
-│   ├── COMMANDS.md
-│   ├── DISK_SETUP.md
-│   ├── architecture.svg
-│   └── screenshots/
-│
 ├── infra/
 │   ├── setup.sh
 │   └── setup_gpu_instance.sh
-│
 ├── accelerate_configs/
-│   ├── single_gpu.yaml
-│   └── multi_gpu.yaml
-│
 ├── Makefile
-├── pytest.ini
 ├── requirements.txt
 ├── environment.yml
 └── .env.sample
@@ -239,75 +141,90 @@ slm/
 
 ## Getting Started
 
-**Prerequisites**
+### Prerequisites
+
 - Python 3.12+
-- Ubuntu 24.04 (recommended — `setup.sh` targets noble)
-- CUDA-capable GPU (for pretraining stages)
-- AWS account (S3 for data storage)
+- Ubuntu 24.04 recommended
+- AWS account and S3 bucket for data artifacts
 - Weights & Biases account
-- HuggingFace account + token (several sources are gated: BigCode and selected NVIDIA/Nemotron datasets)
+- Hugging Face account and token
+- CUDA-capable GPU for training stages
 
-**Disk setup (separate data volume)**
+Before the first curation run, accept the terms for gated datasets used by the active mix:
+- `bigcode/the-stack-dedup`
+- `bigcode/the-stack-smol`
+- `nvidia/Nemotron-CC-Math-v1`
+- `nvidia/Nemotron-Pretraining-Specialized-v1.1`
 
-If you are attaching a secondary disk for your data directory (recommended for curation — you need 500GB+), mount it before cloning:
+### Install
 
-→ [docs/DISK_SETUP.md](docs/DISK_SETUP.md)
-
-If you are using the boot disk only, skip this step.
-
-**Installation**
-
-On a fresh Ubuntu 24.04 cloud instance (recommended):
 ```bash
-# Clone into /data/slm — requires /data to exist and be writable.
-# If using a separate disk, complete docs/DISK_SETUP.md first.
 git clone https://github.com/tohio/slm.git /data/slm
 cd /data/slm
 
 cp .env.sample .env
-vi .env   # fill in S3_BUCKET, AWS credentials, WANDB_API_KEY, HF_TOKEN, HF_USERNAME, SWH_AUTH_TOKEN
+vi .env
 
 sudo apt install -y make
 
-# Custom data dir — recommended when using a separate disk volume
 make setup-data-dir DATA_DIR=/data/slm/data
-
-# Default data dir (repo/data) — boot disk only
-# make setup
+make install
 ```
 
-Using pip / uv / conda:
-```bash
-make install          # creates .venv and installs all dependencies
-make install-kenlm    # kenlm not on PyPI — curation instance only
+Alternative install paths:
 
-make install-uv       # alternative: uv
-make install-conda    # alternative: conda
+```bash
+make install-uv
+make install-conda
+```
+
+CPU curation prerequisites:
+
+```bash
+make install-kenlm
+make download-fasttext-model DATA_DIR=/data/slm/data
+make download-kenlm-model    DATA_DIR=/data/slm/data
 ```
 
 GPU training instance only:
+
 ```bash
-make install-gpu     # training/eval/serving deps only (no curation deps)
+make install-gpu
 ```
-
-**Accept dataset Terms of Use**
-
-Before the first curation run, accept the terms for any gated Hugging Face
-datasets used by the active mix. The active mix uses BigCode and selected
-NVIDIA/Nemotron datasets.
-
-Required access checks:
-- https://huggingface.co/datasets/bigcode/the-stack-dedup
-- https://huggingface.co/datasets/bigcode/the-stack-smol
-- https://huggingface.co/datasets/nvidia/Nemotron-CC-Math-v1
-- https://huggingface.co/datasets/nvidia/Nemotron-Pretraining-Specialized-v1.1
-
 
 ---
 
 ## Reusable curation artifacts
 
-Curation artifacts are run-scoped and can be uploaded to S3, restored into the pipeline layout, and reused without rerunning every source download. The run layout is:
+Curation artifacts are grouped by `RUN_ID`, not calendar date. A single logical run should use one `RUN_ID` across upload, download, and GPU setup.
+
+Generated run IDs use this format:
+
+```text
+{SIZE}-{YYYYMMDD}-{random_hex}
+```
+
+Example:
+
+```text
+125m-20260629-a8f3c9
+```
+
+`artifacts-upload` resolves the run ID as follows:
+
+```text
+provided RUN_ID wins
+else today's local RUN_ID file wins
+else create a new RUN_ID file for today
+```
+
+The local run ID file is written here:
+
+```text
+data/runs/<size>/RUN_ID
+```
+
+Run layout:
 
 ```text
 data/runs/<size>/raw/<source>/
@@ -315,243 +232,264 @@ data/runs/<size>/curated/
 data/runs/<size>/validated/
 data/runs/<size>/tokenized/
 data/runs/<size>/tokenizer/
+data/runs/<size>/metadata/
 ```
 
-Use one artifact workflow with stage filters:
+S3 layout:
+
+```text
+<S3_PREFIX>/<size>/<run_id>/raw/
+<S3_PREFIX>/<size>/<run_id>/curated/
+<S3_PREFIX>/<size>/<run_id>/validated/
+<S3_PREFIX>/<size>/<run_id>/tokenized/
+<S3_PREFIX>/<size>/<run_id>/tokenizer/
+<S3_PREFIX>/<size>/<run_id>/metadata/
+```
+
+Normal upload:
 
 ```bash
-make artifacts-upload   SIZE=125m DATE=YYYY-MM-DD
-make artifacts-download SIZE=125m DATE=YYYY-MM-DD
-make artifacts-download SIZE=125m DATE=YYYY-MM-DD ARTIFACT_STAGES="raw,curated,validated"
+make artifacts-upload SIZE=125m
 ```
 
-Valid `ARTIFACT_STAGES` values are `raw`, `curated`, `validated`, `tokenized`, and `tokenizer`; specify multiple stages as a comma-separated value. To regenerate one source, restore the run, delete that source directory, and rerun curation. Existing sources on disk are skipped.
+Explicit restore/reuse:
+
+```bash
+make artifacts-download SIZE=125m RUN_ID=125m-20260629-a8f3c9
+make setup-gpu DATA_DIR=/data/slm/data SIZE=125m RUN_ID=125m-20260629-a8f3c9
+```
+
+Valid `ARTIFACT_STAGES` values:
+
+```text
+raw, curated, validated, tokenized, tokenizer, metadata
+```
 
 ---
 
-**Run the full pipeline**
+## Pipeline Commands
+
+### CPU prerequisites
 
 ```bash
-# Custom data dir — recommended when using a separate disk volume
 make setup-data-dir DATA_DIR=/data/slm/data
+make install-kenlm
+make download-fasttext-model DATA_DIR=/data/slm/data
+make download-kenlm-model    DATA_DIR=/data/slm/data
+```
 
-# ── Step 1: Data Curation instance (CPU) ──────────────────────────────────────────
-make download-fasttext-model DATA_DIR=/data/slm/data   # language ID model (~1MB)
-make download-kenlm-model    DATA_DIR=/data/slm/data   # perplexity model (~4GB)
+### Mini curation
 
-# ── Step 2: Validate curation pipeline ───────────────────────────────────────
-# Exercises every curation stage end-to-end on tiny data — all 19 sources.
-# All tests run here — catch issues before spending hours on the full run.
-make curate-mini && make test-curator
-make validate SIZE=mini    && make test-validate  SIZE=mini
+```bash
+make curate-mini
+make test-curator
+
+make validate SIZE=mini
+make test-validate SIZE=mini
+
 make tokenizer SIZE=mini
-make tokenize SIZE=mini    && make test-tokenizer SIZE=mini      # produces train.bin + val.bin
-make artifacts-upload SIZE=mini DATE=YYYY-MM-DD ARTIFACT_STAGES="tokenized,tokenizer"
+make tokenize SIZE=mini
+make test-tokenizer SIZE=mini
 
-# ── Step 3: Full curation ─────────────────────────────────────────────────────
-make curate SIZE=125m WORKERS=62    # Stage 1: 10B curation target; download, filter, dedup, blend
-make validate SIZE=125m             # Stage 2: perplexity filter applied to both splits
-make tokenizer SIZE=125m            # Stage 3: train BPE tokenizer
-make tokenize SIZE=125m             # Stage 4a: tokenize both splits to binary
-make artifacts-upload SIZE=125m DATE=YYYY-MM-DD
+make artifacts-upload SIZE=mini ARTIFACT_STAGES="tokenized,tokenizer,metadata"
+```
 
-# ── Step 4: GPU instance setup ───────────────────────────────────────────────
-# For mini validation — pulls mini tokenized binaries and tokenizer from S3
-make setup-gpu DATA_DIR=/data/slm/data SIZE=mini DATE=YYYY-MM-DD
+### Full curation: 125m
+
+```bash
+make curate SIZE=125m WORKERS=62
+make validate SIZE=125m
+make tokenizer SIZE=125m
+make tokenize SIZE=125m
+make artifacts-upload SIZE=125m
+```
+
+### GPU prerequisites
+
+```bash
+make setup-gpu DATA_DIR=/data/slm/data SIZE=mini RUN_ID=<mini-run-id>
+source ~/.bashrc
+make accelerate-config-single
+```
+
+### Mini training
+
+```bash
+make pretrain-mini SIZE=mini GPUS=1
+make test-training SIZE=mini
+
+make reinit-embeds SIZE=mini
+
+make prepare-sft SIZE=mini
+make sft-instruct-mini SIZE=mini GPUS=1
+make test-sft-instruct SIZE=mini
+
+make sft-code-mini SIZE=mini GPUS=1
+make test-sft-code SIZE=mini
+
+make prepare-dpo SIZE=mini
+make dpo-chat-mini SIZE=mini GPUS=1
+make test-dpo-chat SIZE=mini
+
+make eval-mini SIZE=mini
+```
+
+### Full training: 125m base
+
+```bash
+make setup-gpu DATA_DIR=/data/slm/data SIZE=125m RUN_ID=<125m-run-id>
 source ~/.bashrc
 
-# ── Step 5: Validate training pipeline ───────────────────────────────────────
-# Exercises every training stage end-to-end on a single GPU.
-# Use SIZE=mini explicitly for every prepare/train/eval command.
-# Test targets also receive SIZE=mini so they validate run-scoped mini artifacts.
-make accelerate-config-single       # single GPU for mini validation
+make accelerate-config-single
+make config-gen SIZE=125m GPUS=1
 
-make pretrain-mini  SIZE=mini GPUS=1 && make test-training  SIZE=mini
-make reinit-embeds  SIZE=mini       # Stage 4c: re-init chat special-token embeds before SFT
+make pretrain SIZE=125m GPUS=1
+make reinit-embeds SIZE=125m
 
-make prepare-sft    SIZE=mini
-make sft-mini       SIZE=mini GPUS=1 && make test-sft-chat  SIZE=mini
-make sft-code-mini  SIZE=mini GPUS=1 && make test-sft-code  SIZE=mini
+make eval-base SIZE=125m
+make export-base SIZE=125m
+```
 
-make prepare-dpo    SIZE=mini
-make dpo-mini       SIZE=mini GPUS=1 && make test-dpo       SIZE=mini
+### Post-training: instruct and chat branch
 
-make eval-mini      SIZE=mini
+```bash
+make prepare-sft SIZE=125m
+make sft-instruct SIZE=125m GPUS=1
 
-# ── Step 6: Full training ─────────────────────────────────────────────────────
-# All training configs are auto-generated for the current GPU by `make config-gen`.
-# That writes pretrain, SFT chat, SFT code, and DPO configs in one shot.
-# To skip the auto-tune for a specific stage, edit the YAML by hand — see
-# the "Multi-GPU Config Scaling" section below for the formula.
-# Re-run setup-gpu to pull the 125m tokenized binaries before training.
-make setup-gpu DATA_DIR=/data/slm/data SIZE=125m DATE=YYYY-MM-DD
+make eval-instruct SIZE=125m
+make export-instruct SIZE=125m
 
-make accelerate-config-single          # single GPU — change to: make accelerate-config-multi GPUS=x for multi-GPU
-make config-gen      SIZE=125m GPUS=1  # Stage 4-6: auto-tune pretrain + sft + dpo configs for current GPU
+make prepare-dpo SIZE=125m
+make dpo-chat SIZE=125m GPUS=1
 
-make pretrain        SIZE=125m GPUS=1  # Stage 4b: pretrain from scratch; auto-runs smoke-gen at the end
-make reinit-embeds   SIZE=125m         # Stage 4c: re-init chat special-token embeds before SFT
-make eval-base       SIZE=125m         # Stage 7: evaluate base variant
-make export-base     SIZE=125m         # Stage 8: push base model to Hub
+make eval-chat SIZE=125m
+make eval-sanity-chat SIZE=125m
+make export-chat SIZE=125m
+```
 
-make prepare-sft     SIZE=125m
-make sft             SIZE=125m GPUS=1  # Stage 5b: chat SFT
-make sft-code        SIZE=125m GPUS=1  # Stage 5c: code SFT
-make eval-instruct   SIZE=125m         # Stage 7: evaluate instruct variant
-make export-instruct SIZE=125m         # Stage 8: push instruct model to Hub
+### Post-training: code branch
 
-make prepare-dpo     SIZE=125m
-make dpo             SIZE=125m GPUS=1  # Stage 6b: DPO alignment
-make eval-chat       SIZE=125m         # Stage 7: benchmark eval for chat variant
-make eval-sanity     SIZE=125m         # Stage 7: behavior sanity eval for chat variant
-make export-chat     SIZE=125m         # Stage 8: push chat model to Hub
+```bash
+make sft-code SIZE=125m GPUS=1
 
-make serve                             # Stage 10: launch vLLM server
+make eval-code SIZE=125m
+make eval-sanity-code SIZE=125m
+make export-code SIZE=125m
 ```
 
 For full documentation of every `make` target see [docs/COMMANDS.md](docs/COMMANDS.md).
 
 ---
 
+## Checkpoint Lineage
+
+```text
+pretrain/final
+  ↓
+sft_instruct/final
+  ├── dpo_chat/final
+  └── sft_code/final
+```
+
+Model variants:
+
+| Variant | Path | Hub model |
+|---|---|---|
+| Base | `results/runs/{size}/pretrain/final` | `tohio/slm-{size}` |
+| Instruct | `results/runs/{size}/sft_instruct/final` | `tohio/slm-{size}-instruct` |
+| Chat | `results/runs/{size}/dpo_chat/final` | `tohio/slm-{size}-chat` |
+| Code | `results/runs/{size}/sft_code/final` | `tohio/slm-{size}-code` |
+
+---
+
 ## Tests
 
-Tests validate real pipeline outputs at each stage. Each test target is paired with the make stage that produces the outputs it checks. See [tests/README.md](tests/README.md) for full documentation.
-
-**CPU curation instance:**
+### CPU pipeline tests
 
 ```bash
-make curate-mini   && make test-curator      # validate curation outputs (all 19 sources)
-make validate      && make test-validate     # validate validation outputs
-make tokenize      && make test-tokenizer    # validate tokenizer outputs
+make curate-mini   && make test-curator
+make validate      && make test-validate
+make tokenize      && make test-tokenizer
 
-make test-data-pipeline                      # run all three at once
+make test-data-pipeline
 ```
 
-**GPU training instance:**
+### GPU pipeline tests
 
-GPU pipeline test targets accept `SIZE=<size>` to validate any model size. Default is `mini` and should remain mini-focused for normal development. Pass `SIZE=125m` (or `350m`, `1b`) only after a full run when you explicitly want larger artifact checks.
+GPU pipeline test targets default to `mini`. Pass `SIZE=125m`, `350m`, or `1b` only when validating full-run artifacts.
 
 ```bash
-# After mini runs (default SIZE=mini)
-make pretrain-mini  GPUS=1  && make test-training
-make sft-mini       GPUS=1  && make test-sft-chat
-make sft-code-mini  GPUS=1  && make test-sft-code
-make dpo-mini       GPUS=1  && make test-dpo
+make pretrain-mini       GPUS=1 && make test-training
+make sft-instruct-mini   GPUS=1 && make test-sft-instruct
+make sft-code-mini       GPUS=1 && make test-sft-code
+make dpo-chat-mini       GPUS=1 && make test-dpo-chat
 
-# After full runs
-make test-training  SIZE=125m
-make test-sft-chat  SIZE=125m
-make test-sft-code  SIZE=125m
-make test-dpo       SIZE=125m
-
-make test-gpu-pipeline                               # run all four at once (mini)
+make test-gpu-pipeline
 ```
 
-**Unit tests — no pipeline outputs needed, runs anywhere:**
+Full-run artifact checks:
 
 ```bash
-make test-model           # model architecture
-make test-config-gen      # config generator
-make test-accel-gen       # accelerate config generator
-make test-unit            # all of the above
+make test-training     SIZE=125m
+make test-sft-instruct SIZE=125m
+make test-sft-code     SIZE=125m
+make test-dpo-chat     SIZE=125m
 ```
 
-| Target | Stage | Validates |
-|---|---|---|
-| `test-curator` | `curate-mini` | Raw shards exist for all 19 sources, filter quality, dedup correctness, blend output, stats |
-| `test-validate` | `validate` | Retention rate, subset correctness, quality of retained docs |
-| `test-tokenizer` | `tokenizer` | Special token IDs, roundtrip, fertility, chat template |
-| `test-data-pipeline` | all three above | Runs curator + validate + tokenizer tests |
-| `test-training` | `pretrain` (any size) | Model loads, loss finite and below random init, dataset indexing |
-| `test-sft-chat` | `sft` (any size) | SFT data format, model loads, chat template preserved, generation runs |
-| `test-sft-code` | `sft-code` (any size) | Code model loads, loss finite, code special tokens present |
-| `test-dpo` | `dpo` (any size) | DPO data format, chosen ≠ rejected, model loads, generation runs |
-| `test-gpu-pipeline` | all four above | Runs training + sft-chat + sft-code + dpo tests |
-| `test-model` | none | RMSNorm, SwiGLU, GQA, causal mask, weight tying, parameter count |
-| `test-config-gen` | none | `config_gen/config_gen.py` algorithm, invariants, YAML rendering |
-| `test-accel-gen` | none | `config_gen/accel_gen.py` DDP and FSDP YAML rendering |
-| `test-unit` | none | All unit tests above |
+### Unit tests
+
+```bash
+make test-model
+make test-config-gen
+make test-accel-gen
+make test-unit
+```
+
+| Target | Validates |
+|---|---|
+| `test-curator` | curation outputs |
+| `test-validate` | validation outputs |
+| `test-tokenizer` | tokenizer and tokenized binary outputs |
+| `test-training` | pretraining outputs |
+| `test-sft-instruct` | instruct SFT outputs |
+| `test-sft-code` | code SFT outputs |
+| `test-dpo-chat` | chat DPO outputs |
+| `test-model` | model architecture |
+| `test-config-gen` | training config generation |
+| `test-accel-gen` | accelerate config generation |
 
 ---
 
 ## Multi-GPU Config Scaling
 
-> **The tables below describe the manual scaling formula for reference.**
-> `make config-gen` runs this math automatically and additionally tunes
-> `micro_batch_size` and `gradient_checkpointing` for the actual GPU you're
-> on — its output may differ significantly from these reference values.
-> Use this section to understand the math; use `config-gen` in practice.
-
-The training pipeline uses **pure data parallelism** at all model sizes — no tensor or pipeline parallelism. Adding GPUs splits the batch across them; each GPU keeps a full copy of the model.
-
-The invariant to preserve when changing GPU count is the **global batch size**:
-
-```
-global_batch = micro_batch_size × gradient_accumulation_steps × num_gpus
-```
-
-If you double the GPUs, halve `gradient_accumulation_steps` to keep the global batch (and therefore the model and recipe) identical. For pretrain only, also rescale `max_steps` to preserve the number of training steps over the corpus — `max_steps_new = max_steps_old × old_gpus / new_gpus`.
-
-### Per-size reference tables (pretrain)
-
-The committed configs are written for 1 GPU. For multi-GPU pretraining, scale these values:
-
-**125m** — global batch 32 sequences, 10B curation target × 2 epochs:
-
-| GPUs | gradient_accumulation_steps | max_steps |
-|---|---|---|
-| 1 | 8 | _regenerate with `make config-gen`_ |
-| 4 | 2 | _regenerate with `make config-gen`_ |
-| 8 | 1 | _regenerate with `make config-gen`_ |
-
-**350m** — global batch 128 sequences, 25B curation target × 2 epochs:
-
-| GPUs | gradient_accumulation_steps | max_steps |
-|---|---|---|
-| 1 | 16 | _regenerate with `make config-gen`_ |
-| 4 | 4 | _regenerate with `make config-gen`_ |
-| 8 | 2 | _regenerate with `make config-gen`_ |
-
-**1b** — global batch 128 sequences, 75B curation target × 1 epoch:
-
-| GPUs | gradient_accumulation_steps | max_steps |
-|---|---|---|
-| 1 | 64 | _regenerate with `make config-gen`_ |
-| 4 | 16 | _regenerate with `make config-gen`_ |
-| 8 | 8 | _regenerate with `make config-gen`_ |
-
-### Per-stage scaling fields
-
-| Stage | Config location | Scaling fields |
-|---|---|---|
-| Pretrain | `pretrain/configs/gpt_{size}.yaml` | `gradient_accumulation_steps`, `max_steps` |
-| SFT chat | `finetune/configs/sft_instruct_{size}.yaml` | `gradient_accumulation_steps` |
-| SFT code | `finetune/configs/sft_code_{size}.yaml` | `gradient_accumulation_steps` |
-| DPO | `alignment/configs/dpo_{size}.yaml` | `gradient_accumulation_steps` |
-
-SFT and DPO use `epochs` not `max_steps` — only `gradient_accumulation_steps` needs adjusting for those stages.
-
-### Auto-tune the math (recommended)
-
-`make config-gen-*` reads your GPU model and count and emits configs with the right values automatically — no manual scaling. Same math, just done by the script:
+Generate configs before training:
 
 ```bash
-make config-gen-pretrain SIZE=125m GPUS=8     # writes pretrain/configs/gpt_125m.yaml
-make config-gen-sft      SIZE=125m GPUS=8     # writes BOTH sft_instruct and sft_code
-make config-gen-dpo      SIZE=125m GPUS=8     # writes alignment/configs/dpo_chat_125m.yaml
-make config-gen          SIZE=125m GPUS=8     # convenience: all three
+make config-gen-pretrain SIZE=125m GPUS=8
+make config-gen-sft      SIZE=125m GPUS=8
+make config-gen-dpo      SIZE=125m GPUS=8
+make config-gen          SIZE=125m GPUS=8
 ```
 
-The script also picks `micro_batch_size` based on GPU memory (a bigger H200 fits a bigger micro batch than an A100 40GB), and decides whether to enable gradient checkpointing. For 1b on multi-GPU, prefer FSDP over DDP via `make accel-gen-fsdp GPUS=8`.
+Choose an accelerate config:
 
 ```bash
-make pretrain  SIZE=125m GPUS=8
-make sft       SIZE=125m GPUS=8
-make sft-code  SIZE=125m GPUS=8
-make dpo       SIZE=125m GPUS=8
+make accelerate-config-single
+make accelerate-config-multi GPUS=8
+```
 
-# Override config directly
-make pretrain PRETRAIN_CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
+For FSDP:
+
+```bash
+make accel-gen-fsdp GPUS=8
+```
+
+Use the same `GPUS` value for accelerate setup, config generation, and training:
+
+```bash
+make accelerate-config-multi GPUS=4
+make config-gen SIZE=125m GPUS=4
+make pretrain   SIZE=125m GPUS=4
 ```
 
 ---
@@ -560,142 +498,91 @@ make pretrain PRETRAIN_CONFIG=pretrain/configs/gpt_125m.yaml GPUS=4
 
 ### Source Mix
 
-19 concrete sources total — 14 non-code top-level sources plus 5 code sub-sources that share the 15% code budget. Scale-invariant percentages — the same mix applies at every size. Defined in `config/data_mix.py` and referenced by the curator, export, and notebooks — do not duplicate these numbers elsewhere.
+The source mix is defined in `config/data_mix.py`. It is the source of truth for curation, export, and notebooks.
 
 | Source | Target Share | Notes |
 |---|---:|---|
 | Common Crawl | 5% | direct WARC via trafilatura |
-| FineWeb | 10% | `HuggingFaceFW/fineweb`, broad web and final fallback |
-| FineWeb-Edu | 31.5% | `HuggingFaceFW/fineweb-edu`, educational/explanatory web text |
-| Wikipedia | 10% | `wikimedia/wikipedia` EN |
-| pg19 | 2.5% | public-domain books pre-1919 |
-| peS2o | 5% | `allenai/peS2o` v2 — academic/scientific prose |
-| Nemotron CC Math | 7% | `nvidia/Nemotron-CC-Math-v1`, math/STEM text |
+| FineWeb | 10% | broad web text |
+| FineWeb-Edu | 31.5% | educational/explanatory web text |
+| Wikipedia | 10% | encyclopedia text |
+| pg19 | 2.5% | public-domain books |
+| peS2o | 5% | academic/scientific prose |
+| Nemotron CC Math | 7% | math/STEM text |
 | StackExchange | 1% | Q&A-style web text |
-| Synthetic arithmetic | 0.1475% | `tohio/slm-synthetic-arithmetic`, externally generated arithmetic signal |
-| Synthetic task code | 0.3934% | `tohio/slm-synthetic-task-code`, externally generated task-shaped code examples |
-| Educational QA/MCQ (math) | 0.1475% | `tohio/slm-synthetic-educational-qa-mcq-math`, externally generated mathematical MCQ examples |
-| Educational QA/MCQ (general) | 0.2459% | `tohio/slm-synthetic-educational-qa-mcq-general`, externally generated evidence-grounded MCQ examples |
-| Factual restraint | 0.0657% | `tohio/slm-synthetic-factual-restraint`, externally generated uncertainty/restraint examples |
-| Nemotron Specialized | 12% | `nvidia/Nemotron-Pretraining-Specialized-v1.1`, specialized supplement |
-| Code (total) | 15% | split across 5 code sub-sources (see curator/README.md) |
-
-When supply-constrained sources fall short of their character budget, deficits are routed by source type. Synthetic-source deficits route to Nemotron Specialized first, then FineWeb-Edu, then FineWeb. General source deficits route to FineWeb-Edu first and FineWeb as the final fallback.
-
-
-Synthetic source percentages sum to 1% of the nominal corpus target, then per-size caps bound actual consumption to approximately 100M tokens for `125m`, 200M for `350m`, and 300M for `1b`. The cap split follows the validated 300M-token synthetic inventory profile: task code first, then general MCQ, arithmetic, math MCQ, and factual restraint.
-
-Generated/template-like sources run exact dedup but bypass fuzzy MinHash dedup so useful near-duplicate training signal is not collapsed.
-
-NVIDIA/Nemotron sources are supplemental math and specialized-data sources; FineWeb and FineWeb-Edu remain the broad web base.
+| Synthetic arithmetic | 0.1475% | arithmetic signal |
+| Synthetic task code | 0.3934% | task-shaped code examples |
+| Educational QA/MCQ (math) | 0.1475% | math MCQ examples |
+| Educational QA/MCQ (general) | 0.2459% | general MCQ examples |
+| Factual restraint | 0.0657% | uncertainty/restraint examples |
+| Nemotron Specialized | 12% | specialized supplement |
+| Code (total) | 15% | split across code sub-sources |
 
 ### Run-specific realized mix
 
-The source mix above defines the pretraining target mix. The actual realized mix for each curation run is written to `data/curated/blend_stats.json` at the end of the blend stage.
+Completed curation runs write realized mix metadata to:
 
-Realized percentages can differ slightly from target percentages when a source is supply-bound or filtered/deduplicated more aggressively than expected. Synthetic-source deficits route to Nemotron Specialized first, then FineWeb-Edu, then FineWeb. General source deficits route to FineWeb-Edu first and FineWeb as the final fallback.
+```text
+data/runs/<size>/curated/blend_stats.json
+data/runs/<size>/metadata/blend_stats.json
+```
 
-Use `blend_stats.json` as the source of truth for a completed run. `export.py` reads this file when producing per-model cards.
+Use `blend_stats.json` as the source of truth for completed runs and exported model cards.
 
 ### Token Targets
 
-| Model | Curation target | Expected retained/tokenized | Epochs | Consumed target |
-|---|---:|---:|---:|---:|
-| `slm-125m` | 10B | ~9B+ | 2 | 20B |
-| `slm-350m` | 25B | ~23B+ | 2 | 50B |
-| `slm-1b` | 75B | ~69B+ | 1 | 75B |
-
-`corpus_tokens` is the curator-side target, not a guaranteed final retained/tokenized count; the targets include a retention buffer for filtering, validation, deduplication, source availability, and tokenization losses.
-
-Why 1b uses 1 epoch: at a 75B curation target, one epoch gives the 1B model a materially larger fresh-token budget while avoiding an immediate second pass over finite sources. 125m and 350m retain 2 epochs because their smaller corpus targets are intended for cheaper iteration and validation. 
+| Model | Curation target | Epochs | Consumed target |
+|---|---:|---:|---:|
+| `slm-125m` | 10B | 2 | 20B |
+| `slm-350m` | 25B | 2 | 50B |
+| `slm-1b` | 75B | 1 | 75B |
 
 ### Train / val split
 
-The train and val splits are produced by the curator's blend stage, not at training time. After the blend stage shuffles the corpus, val is sampled uniformly across all sources via reservoir sampling and the rest goes to `train.jsonl`. Validation (KenLM perplexity filtering) and tokenization both process each split independently, so `val.bin` receives the same quality treatment as `train.bin`. At 125m the realized val mix matches train within ±0.25pp per source — see `blend_stats.json`'s `val_docs` field.
-
-Splitting at blend time (rather than at training time) avoids two correctness bugs: runtime splitting silently drifts out of sync with the underlying tokenization, and the tail-of-stream slice isn't a uniform sample when the shuffle is disk-chunked at 1b scale. Splitting right after the blend shuffle — where order is provably random — gives a clean uniform sample and eliminates the staleness concern by construction.
-
-See `curator/README.md` for full details on the mix, sub-source breakdowns, cap-and-redistribute behavior, and scaling beyond 1b.
+The train and val splits are produced by the curator blend stage. Validation and tokenization process each split independently, so `train.bin` and `val.bin` receive the same quality filters.
 
 ---
 
 ## Infrastructure
 
-### Data Curation (CPU) — Stages 1–4a
+The model may fit on smaller GPUs, but full runs can become impractically slow. The recommendations below are for practical end-to-end runs, not minimum loadability.
 
-Runs on CPU instances. No GPU required. Measured/reference hardware is shown below. The pipeline streams everywhere and can run on smaller instances with longer wall time; see `curator/README.md` for practical curation sizing notes.
+### Data curation
 
-| Target | Recommended vCPUs | RAM | Curation runtime |
-|---|---:|---:|---:|
-| `mini` | 4+ | 8 GB+ | 30–60 min |
-| `slm-125m` | 64 | 256 GB | ~16 hrs (measured: 11h25m download + 16m filter + 3h6m dedup + 3m blend) |
-| `slm-350m` | 64+ | 256 GB+ | _TBD — pending 350m run_ |
-| `slm-1b` | 64+ | 256 GB+ | _TBD — pending 1b run_ |
+| Target | Recommended vCPUs | Recommended RAM | Notes |
+|---|---:|---:|---|
+| `mini` | 4+ | 16 GB+ | pipeline validation |
+| `125m` | 64+ | 256–384 GB | recommended full 125m curation |
+| `350m` | 64–96+ | 384 GB+ | larger curation run |
+| `1b` | 96+ | 512 GB+ | largest supported run |
 
-Full curation is strongly recommended on **16+ vCPU** machines. Smaller
-machines can run `curate-mini` and may complete full curation eventually, but
-Common Crawl extraction, validation, and deduplication stages are parallel by
-design and will be slow on 2–8 vCPU instances. Hugging Face dataset downloads
-are streamed for reproducibility and readable logs. For the measured 125M run, 64 vCPU / 256 GiB was used.
+Use a persistent disk for `DATA_DIR`. Run long jobs inside `tmux`.
 
-> Curation throughput varies by network path, disk I/O, CPU generation, and Common Crawl availability. Run `curate-mini` first to estimate local throughput.
+### Training
 
-Run close to `us-east-1` (AWS) or `us-east1` (GCP) to minimise Common Crawl egress latency. Attach a persistent disk (500GB+) for `DATA_DIR` — the pipeline is fully resumable at every stage.
-
-Use `tmux` to keep the pipeline running through session timeouts:
-```bash
-tmux new -s curate
-make curate SIZE=125m WORKERS=62
-# Ctrl+B, D to detach — tmux attach -t curate to reattach
-```
-
-### Training (GPU) — Stages 4b–6
-
-Requires a CUDA-capable GPU instance. The pipeline uses **pure data parallelism** throughout all model sizes — no tensor parallelism or model parallelism is needed. The model is replicated on each GPU and the batch is split across GPUs.
-
-> **Run `make config-gen` before pretrain.** It reads your GPU model and count
-> and emits a tuned `pretrain/configs/gpt_$(SIZE).yaml` — no manual scaling
-> needed for pretraining. SFT and DPO configs still need manual scaling for
-> multi-GPU; see Multi-GPU Config Scaling above.
-
-Runtime varies significantly by GPU type and count. Use `make pretrain-mini GPUS=1` first to validate the training loop and measure your actual throughput before committing to a full run.
-
-| Target | Min VRAM | Notes |
+| Target | Practical GPU recommendation | Notes |
 |---|---|---|
-| `mini` | 8 GB+ | any modern GPU — confirms training loop works |
-| `slm-125m` | 16 GB+ per GPU | fits on any modern data center GPU; ~3–4 hrs on 1× H200 |
-| `slm-350m` | 24 GB+ per GPU | A100 40GB or better recommended |
-| `slm-1b` | 40 GB+ per GPU | A100 80GB / H100 / H200 recommended; gradient checkpointing enabled by `config-gen` when needed |
-
-SFT and DPO runtimes are roughly 20–30% of pretraining time at the same model size. Use spot/preemptible instances — all training loops support `--resume` from the last checkpoint.
+| `mini` | 1× 16 GB+ GPU | training-loop validation only |
+| `125m` | 1× A100 80GB / H100 / H200, or better | practical full 125m run |
+| `350m` | 1–4× A100 80GB / H100 / H200, or better | use multi-GPU if available |
+| `1b` | 4–8× A100 80GB / H100 / H200, or better | prefer FSDP/multi-GPU |
 
 ---
 
 ## Screenshots
 
-| Screenshot | Stage | Description |
-|---|---|---|
-| `docs/screenshots/01_blend_stats.png` | Stage 1 | `blend_stats.json` showing source mix |
-| `docs/screenshots/02_validation_report.png` | Stage 2 | Validation report — total, kept, and rejection breakdown |
-| `docs/screenshots/03_tokenizer_test.png` | Stage 3 | Tokenizer test output — special tokens and fertility score |
-| `docs/screenshots/04_pretrain_loss.png` | Stage 4 | W&B pretraining loss curve |
-| `docs/screenshots/05_sft_loss.png` | Stage 5 | W&B chat SFT loss curve |
-| `docs/screenshots/06_dpo_loss.png` | Stage 6 | W&B DPO loss curve |
-| `docs/screenshots/07_eval_results.png` | Stage 7 | Benchmark results — HellaSwag, ARC, MMLU, TruthfulQA, HumanEval |
-| `docs/screenshots/08_hf_hub.png` | Stage 8 | HuggingFace Hub model page for `tohio/slm-125m` |
-| `docs/screenshots/09_chat_session.png` | Stage 9 | Interactive multi-turn chat session via `inference/chat.py` |
-| `docs/screenshots/10_vllm_curl.png` | Stage 10 | `curl` request to vLLM server with response |
+Example pipeline outputs and run screenshots are available in `docs/screenshots/`.
 
 ---
 
 ## Evaluation
 
-Models are evaluated on standard benchmarks via `lm-evaluation-harness`. Each variant — base, instruct, chat — has its own eval target so the per-variant model cards can carry real benchmark scores:
-
 ```bash
-make eval-base     SIZE=125m   # after pretrain
-make eval-instruct SIZE=125m   # after SFT (chat + code)
-make eval-chat     SIZE=125m   # after DPO (also: make eval)
+make eval-base     SIZE=125m
+make eval-instruct SIZE=125m
+make eval-chat     SIZE=125m
+make eval-code     SIZE=125m
+make eval-sanity   SIZE=125m
 ```
 
 | Benchmark | Measures |
@@ -707,34 +594,34 @@ make eval-chat     SIZE=125m   # after DPO (also: make eval)
 | HumanEval | Python code generation |
 | MBPP | Basic Python programming problems |
 
-**Contamination stance.** None of these benchmarks appear in any training source. HumanEval, MBPP, APPS, HellaSwag, ARC, MMLU, and TruthfulQA are all absent from the curated data — the earlier `codeparrot/apps` source was explicitly dropped to keep APPS clean. Model cards can claim clean eval results without asterisks.
-
 ---
 
 ## Post-training Objective
 
-The post-training pipeline is designed to produce a compact, capable assistant that follows instructions, gives the right level of detail for the task, and remains careful with factual claims. Simple questions should receive direct answers; conceptual or technical questions should receive clear, useful explanations; code requests should produce code when requested. The model should stop once the answer is complete and avoid filler, unsupported elaboration, and task-mode confusion.
+Post-training produces three downstream variants from the pretrained base:
 
-Post-training goals:
-- Follow user instructions and match the requested format.
-- Give direct answers for simple questions and deeper explanations when warranted.
-- Produce code for code-generation requests, not just explanations.
-- Explain code when explanation is requested.
-- Avoid unsupported factual claims and unnecessary elaboration.
-- Stop cleanly once the answer is complete.
+| Variant | Objective |
+|---|---|
+| `instruct` | general instruction following and response control |
+| `chat` | preference-aligned assistant behavior |
+| `code` | code generation and code-specific instruction following |
+
+Behavior goals:
+
+- follow the requested format
+- answer simple questions directly
+- give useful explanations when needed
+- avoid unsupported factual claims
+- produce code when code is requested
+- stop cleanly after the answer is complete
 
 ---
 
 ## Post-training data policy
 
-The post-training data policy uses external backbone datasets plus local custom
-datasets. The external datasets provide broad coverage; the local custom
-datasets patch known behavior gaps.
+### Instruct SFT
 
-### Chat SFT
-
-Chat SFT uses a size-aware SmolTalk backbone plus the local `response_control`
-custom dataset generated by `finetune/data/response_control.py`.
+Instruct SFT uses a SmolTalk backbone plus the local `response_control` dataset generated by `finetune/data/response_control.py`.
 
 | Model | External backbone | Local custom dataset |
 |---|---|---|
@@ -742,128 +629,55 @@ custom dataset generated by `finetune/data/response_control.py`.
 | `slm-350m` | full `HuggingFaceTB/smol-smoltalk` | `response_control` |
 | `slm-1b` | full `HuggingFaceTB/smoltalk` | `response_control` |
 
-`response_control` targets concise answers, arithmetic, factual restraint,
-concept definitions, disambiguation, and response-format control.
+### Chat DPO
+
+Chat DPO starts from the instruct checkpoint and applies general preference alignment.
+
+DPO uses `HuggingFaceH4/ultrafeedback_binarized` plus local targeted preference pairs from `alignment/data/prepare_dpo.py`.
 
 ### Code SFT
 
-Code SFT keeps `ise-uiuc/Magicoder-OSS-Instruct-75K` as the external backbone.
-It also appends local custom datasets generated in `finetune/data/prepare_sft.py`:
+Code SFT starts from the instruct checkpoint and applies code-specific SFT.
 
-- `handcrafted_simple_code`
-- `handcrafted_function_completion`
-- `handcrafted_code_explanation`
-
-These local examples reinforce simple Python generation, write-only-code
-behavior, function-body completion, and the distinction between explaining code
-and writing code.
-
-### DPO
-
-DPO uses `HuggingFaceH4/ultrafeedback_binarized` as the external preference
-backbone. It also appends local custom preference datasets generated in
-`alignment/data/prepare_dpo.py`:
-
-- `handcrafted_behavior`
-- `targeted_behavior`
-
-These local preference pairs target factual restraint, concise exact answers,
-code-output behavior, disambiguation, current-information restraint, and
-slang/context grounding.
-
-
-## Key Design Decisions
-
-**Why from scratch?** Starting from an existing checkpoint is the right production choice. We start from scratch deliberately — it exercises every stage of the pipeline and provides full visibility into how data quality and tokenizer design interact with training dynamics.
-
-**Why a custom tokenizer?** A tokenizer trained on your specific data mix encodes domain patterns more efficiently. Special tokens (`<|system|>`, `<|user|>`, `<|assistant|>`, `<|code|>`, `<|endofturn|>` and more) are baked in from the start with a Jinja2 chat template, giving the model a clean and consistent format across pretraining, SFT, DPO, and inference.
-
-**Why GQA over MHA?** At inference time, KV cache is the primary memory bottleneck. GQA reduces KV heads from 12 to 4 (125m) — a 3× reduction in KV memory with negligible quality loss. Directly improves throughput in vLLM.
-
-**Why DPO over PPO?** At small model scale, PPO's actor-critic setup requires multiple models simultaneously and is sensitive to reward scaling. DPO achieves comparable alignment with a simpler training loop and no separate reward model.
-
-**Why staged post-training?** Post-training is split into independently evaluable stages so behavior regressions are visible immediately. General assistant SFT teaches broad instruction following; response-control SFT teaches appropriate answer depth, factual restraint, and clean stopping; code-generation and function-completion SFT teach the model to emit code when code is requested rather than merely explaining how to code. Preference alignment is applied only after SFT behavior is sane, and is filtered to prefer factual, task-matching, appropriately detailed responses.
-
-**Why per-variant eval targets?** `eval-base`, `eval-instruct`, and `eval-chat` evaluate the three checkpoints written by the pipeline (`results/slm-{size}/final`, `results/slm-{size}-code/final`, `results/slm-{size}-dpo_chat/final`). Running each one writes its own JSON output, which `export.py` then reads when building per-variant model cards on the Hub. A single combined `eval` target would either skip the base and instruct cards or require running them all in series at the end — splitting them out lets eval run inline with each pipeline stage.
-
-**Why 20 concrete data sources?** Distribution coverage. A model pretrained only on web scrape, even filtered, has characteristic weaknesses: poor factual recall on niche topics, no long-range coherence over book-length spans, weak technical/academic prose, weak math reasoning, weak Q+A structure, and weak code. The mix uses 13 non-code top-level sources for prose breadth, educational/explanatory text, arithmetic, QA/MCQ format, factual restraint, and task-code signal, plus 7 code sub-sources for code coverage from Nemotron code, raw files, curated functions, CC code pages, multi-language samples, notebooks, and NL-to-code intent pairs. See [curator/README.md](curator/README.md) for the full mix and sub-source rationale.
-
-**Why scale-invariant mix percentages?** A reader scaling from 125m to 1b changes one number (`corpus_tokens`) and gets proportionally more of everything — no per-scale mix tuning. Supply variance is handled by cap-and-redistribute, not by per-scale knobs.
-
-**Why `rope_theta=500000` across all sizes?** RoPE's base period is the slow axis of the position encoding — larger values give the model room to extrapolate to longer contexts than it was trained on. Using 500000 uniformly across 125m, 350m, and 1b means any size can be length-extended later (via YaRN, dynamic scaling, or similar) without retraining from scratch. The tradeoff at 2048 context (125m, 350m) is negligible — large base values don't hurt in-context quality at short sequence lengths, and consistency across sizes is worth more than micro-optimising each tier. Llama 3 and Qwen follow this same pre-stretched-base pattern.
-
-**Why different epoch counts per scale?** Corpus size versus per-source supply. At 125m (10B curation target), 2 epochs is used for cheaper iteration; at 1b (75B curation target), 1 epoch gives substantially more fresh-token exposure and avoids an immediate second pass over finite sources. Modern small-model training (Llama, Phi, Qwen) follows the single-epoch pattern at scale — fresh tokens outperform repeated ones.
-
-**Why streaming-first curation?** At 1b with a 75B curation target, materializing sources in memory is infeasible on reasonable hardware. FineWeb and stack-v1 require streaming; the other sources use it for consistency. RAM is not the load-bearing scaling axis — vCPU count and network throughput are. This means readers on modest hardware (32 GB RAM) can still run 1b, just slower.
-
-**Why cap-and-redistribute?** Several sources have finite supply at large scales. Rather than add per-scale knobs or accept repetition, deficits route through source-aware overflow chains: local synthetic deficits first use Nemotron Specialized, then FineWeb-Edu, then FineWeb; general deficits use FineWeb-Edu, then FineWeb.
-
-**Why a single `config/` package for locked values?** The data mix, token targets, CHARS_PER_TOKEN, CC_CHARS_PER_SEGMENT, PRETRAIN_VAL_FRACTION, and a few other constants are read by multiple stages (curator, export, pretrain, notebooks, tests). Centralising them in `config/data_mix.py` with an import-time `validate()` keeps every consumer on the same values and verifies that percentages sum to 100 when the module loads.
-
-**Why a separate `config_gen/` package for `config_gen.py`?** The pretrain configs need to be tuned per GPU — `micro_batch_size` that fits on H200 fits trivially on B200 but not on A100 40GB, and the right `gradient_accumulation_steps` depends on both GPU memory and the count. Hand-tuning these for every (size, GPU, num_gpus) combination is error-prone and stale configs silently waste GPU hours. Centralising the math in `config_gen/config_gen.py` — keyed off measured GPU specs and per-size memory profiles — makes "tune for this hardware" a one-line `make config-gen` rather than a careful manual edit. The script intentionally leaves LR, schedule, and architecture untouched: those are recipe decisions, not hardware decisions.
-
-**Why parametrize GPU pipeline tests by `--size`?** A test pinned to `results/slm-mini/final` skips on any larger checkpoint — defeating the purpose after a real run. The four GPU pipeline test targets (`test-training`, `test-sft-chat`, `test-sft-code`, `test-dpo`) accept `SIZE=<size>` and pass `--size=<size>` to pytest, where a fixture in `tests/conftest.py` derives the model directory. Same tests, same Makefile pattern as everything else, no new targets per size.
-
-**Why vLLM for serving?** PagedAttention enables continuous batching and efficient KV cache management. The OpenAI-compatible API means any client built against the OpenAI SDK works out of the box.
-
-**Why datatrove for dedup instead of datasketch?** datasketch's `MinHashLSH` is in-memory — at 350m it requires ~32GB; at 1b ~85GB and may not fit on a single instance. datatrove's disk-based pipeline uses a sort-based approach (signatures → buckets → cluster → filter) where RAM usage is bounded by shard size, not corpus size. Same approach used by FineWeb at trillion-token scale.
-
-**Why HTTPS for Common Crawl instead of S3?** Direct S3 access to the `commoncrawl` bucket fails on EC2 instances with IAM roles attached — the instance role credentials are rejected by the bucket policy. HTTPS via `data.commoncrawl.org` works reliably regardless of instance credentials.
-
-**Why fasttext for language detection?** Language detection runs on every Common Crawl document — tens of millions of pages. `langdetect` is pure Python and adds ~5–10ms per document. fasttext's `lid.176.ftz` model is C-backed, covers 176 languages, and runs ~1000× faster with equivalent accuracy.
+Code SFT uses `ise-uiuc/Magicoder-OSS-Instruct-75K` plus local code examples generated by `finetune/data/prepare_sft.py`.
 
 ---
 
-## Scaling Beyond 1b
+## Key Design Decisions
 
-The pipeline is designed to extend past 1b. Scale-invariant percentages, streaming-first code, and cap-and-redistribute all generalise. As compute gets cheaper and faster, larger sizes become accessible.
-
-To run at 3b or beyond:
-
-1. Add a new entry to `TARGET_CONFIGS` in `config/data_mix.py` with the new `corpus_tokens`, `epochs`, and `cc_crawls` list.
-2. Add a matching entry to `SIZE_PROFILES` in `config_gen/config_gen.py` with `state_gb`, `act_per_seq_gb_*`, `ctx`, `ref_global_batch`, `tokens`, `lr`, `hidden`, `layers`, and head counts. After this, `make config-gen SIZE=3b GPUS=N` produces a tuned pretrain config automatically.
-3. Add hand-written SFT and DPO configs for the new size in `finetune/configs/` and `alignment/configs/`.
-4. Review Wikipedia and pg19 supply: at budgets approaching 40B × 1 epoch, Wikipedia repetition approaches 1.6×. Options: drop Wikipedia's share, add multilingual Wikipedia, or accept the repetition.
-5. Consider adding a second bulk-code source to avoid stack-v1 over-epoching at 5B+ code tokens.
-6. Consider upgrading FineWeb from `sample-100BT` to a larger sample if overflow consumption gets close to 100B.
-
-No core code changes are required for scaling — the target config, source mix, and cap-and-redistribute handle supply variance automatically. See [curator/README.md](curator/README.md) for full details.
+- **From scratch:** trains from curated data instead of starting from an external pretrained checkpoint.
+- **Custom tokenizer:** trained on the project data mix with chat/code special tokens.
+- **Staged post-training:** `instruct`, `chat`, and `code` are separate checkpoints with separate eval/export paths.
+- **DPO alignment:** chat alignment uses DPO instead of PPO.
+- **Streaming-first curation:** large sources are processed without full in-memory materialization.
+- **Config generation:** `config-gen` produces hardware-aware configs for pretraining, SFT, and DPO.
+- **vLLM serving:** exported models are served through an OpenAI-compatible vLLM endpoint.
 
 ---
 
 ## Production Serving
 
-The `serve/manifests/` directory contains Kubernetes manifests deployed via [ai-infra](https://github.com/tohio/ai-infra) using ArgoCD. The vLLM server exposes an OpenAI-compatible REST API:
+The `serve/` directory contains vLLM serving assets. The server exposes an OpenAI-compatible chat completions API.
 
 ```bash
 curl http://slm-service:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "slm-125m",
+    "model": "slm-125m-chat",
     "messages": [{"role": "user", "content": "Hello"}]
   }'
 ```
 
----
-
-## Production Considerations
-
-This project is scoped as a complete end-to-end training pipeline and demonstration. In a larger production system:
-
-- **Data scale** — the curation pipeline runs on a single multi-vCPU CPU node. Larger deployments should run curation as a distributed job over crawl-scale datasets.
-- **Training scale** — multi-node training with FSDP across 8+ nodes for models beyond 1b.
-- **Continual learning** — a data flywheel feeding new curated data back into periodic pretraining runs.
-- **Reward modelling** — a trained reward model enabling online DPO for more sophisticated alignment.
-- **Observability** — per-request latency, token throughput, and generation quality metrics surfaced in Grafana.
+Kubernetes manifests live in `serve/manifests/`.
 
 ---
 
 ## Related Projects
 
-- [ai-infra](https://github.com/tohio/ai-infra) — Kubernetes platform that deploys and operates this model in production
-- [rag-pipeline](https://github.com/tohio/rag-pipeline) — RAG pipeline that can use slm as the base LLM
-- [multi-agent](https://github.com/tohio/multi-agent) — autonomous multi-agent investment research
-- [data-flywheel](https://github.com/tohio/data-flywheel) — self-improving data pipeline feeding into future SLM training runs
+- [ai-infra](https://github.com/tohio/ai-infra) — Kubernetes infrastructure for model serving
+- [rag-pipeline](https://github.com/tohio/rag-pipeline) — RAG pipeline using SLM-compatible models
+- [multi-agent](https://github.com/tohio/multi-agent) — multi-agent research workflows
+- [data-flywheel](https://github.com/tohio/data-flywheel) — data feedback pipeline for future training runs
 
 ---
 

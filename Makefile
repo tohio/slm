@@ -17,16 +17,12 @@
 SIZE    ?= 125m
 GPUS    ?= 1
 WORKERS ?=
-DATE     ?= $(shell date +%Y-%m-%d)
+RUN_ID  ?=
 ARTIFACT_STAGES ?= raw,curated,validated,tokenized,tokenizer,metadata
 
 # DATA_DIR — read from .env if not set in environment.
-DATA_DIR ?= $(shell grep -v '^\#' .env 2>/dev/null | grep '^DATA_DIR=' | head -1 | cut -d= -f2 | tr -d ' ')
-DATA_DIR ?= data
-
-RESULTS_DIR ?= $(shell grep -v '^\#' .env 2>/dev/null | grep '^RESULTS_DIR=' | head -1 | cut -d= -f2 | tr -d ' ')
-RESULTS_DIR ?= results
-
+DATA_DIR := $(or $(shell grep -v '^\#' .env 2>/dev/null | grep '^DATA_DIR=' | head -1 | cut -d= -f2 | tr -d ' '),data)
+RESULTS_DIR := $(or $(shell grep -v '^\#' .env 2>/dev/null | grep '^RESULTS_DIR=' | head -1 | cut -d= -f2 | tr -d ' '),results)
 PYTHON     ?= .venv/bin/python
 _ACCELERATE = .venv/bin/accelerate
 
@@ -90,7 +86,7 @@ endif
         download-kenlm-model download-fasttext-model accelerate-config accelerate-config-single accelerate-config-multi \
         s3-upload s3-download s3-list \
         test-curator test-validate test-tokenizer test-data-pipeline \
-        test-training test-sft-chat test-sft-code test-dpo test-gpu-pipeline test-model test-config-gen test-accel-gen test-unit \
+        test-training test-sft-instruct test-sft-chat test-sft-code test-dpo-chat test-dpo test-gpu-pipeline test-model test-config-gen test-accel-gen test-unit \
         sanity-train sanity-train-small sanity-train-tiny sanity-train-save \
         clean clean-data clean-results clean-logs help
 
@@ -98,8 +94,8 @@ endif
 # Note: assumes configs exist at $(PRETRAIN_CONFIG), $(SFT_CHAT_CONFIG), etc.
 # Run `make config-gen` first to auto-generate them tuned for the current GPU.
 
-all: curate validate tokenizer tokenize pretrain prepare-sft sft prepare-dpo dpo sft-code prepare-code-completion sft-code-completion
-	@echo "Pipeline complete for slm-$(SIZE) on $(GPUS) GPU(s)"
+all: curate validate tokenizer tokenize pretrain prepare-sft sft-instruct prepare-dpo dpo-chat sft-code
+	@echo "Canonical pipeline complete for slm-$(SIZE) on $(GPUS) GPU(s)"
 
 # ── Stage 1: Data curation ────────────────────────────────────────────────────
 
@@ -156,18 +152,19 @@ tokenize:
 	$(PYTHON) pretrain/data/tokenize_data.py --chunk-size 256 --verify
 
 artifacts-upload:
-	@echo "==> Uploading artifacts to S3 (target=$(SIZE), date=$(DATE), stages=$(ARTIFACT_STAGES))"
+	@echo "==> Uploading artifacts to S3 (target=$(SIZE), run_id=$(if $(RUN_ID),$(RUN_ID),auto), stages=$(ARTIFACT_STAGES))"
 	$(PYTHON) curator/scripts/upload_s3.py artifacts-upload \
 		--size $(SIZE) \
-		--date $(DATE) \
+		$(if $(RUN_ID),--run-id $(RUN_ID),) \
 		--stages "$(ARTIFACT_STAGES)" $(WORKERS_FLAG) \
 		--overwrite
 
 artifacts-download:
-	@echo "==> Downloading artifacts from S3 (target=$(SIZE), date=$(DATE), stages=$(ARTIFACT_STAGES))"
+	@test -n "$(RUN_ID)" || (echo "RUN_ID is required for artifacts-download"; exit 1)
+	@echo "==> Downloading artifacts from S3 (target=$(SIZE), run_id=$(RUN_ID), stages=$(ARTIFACT_STAGES))"
 	$(PYTHON) curator/scripts/upload_s3.py artifacts-download \
 		--size $(SIZE) \
-		--date $(DATE) \
+		--run-id $(RUN_ID) \
 		--stages "$(ARTIFACT_STAGES)" $(WORKERS_FLAG)
 
 # ── Config generation ─────────────────────────────────────────────────────────
@@ -190,7 +187,7 @@ config-gen-pretrain:
 		-o $(PRETRAIN_CONFIG)
 
 config-gen-sft:
-	@echo "==> Generating SFT chat + code configs for SIZE=$(SIZE) GPUS=$(GPUS)"
+	@echo "==> Generating SFT instruct + code configs for SIZE=$(SIZE) GPUS=$(GPUS)"
 	$(PYTHON) -m config_gen.config_gen \
 		--stage sft \
 		$(_GPU_FLAG) \
@@ -281,20 +278,26 @@ prepare-sft:
 	@echo "==> Stage 5a: Prepare SFT data ($(SIZE))"
 	$(PYTHON) finetune/data/prepare_sft.py --stage both --size $(SIZE)
 
-sft:
+sft-instruct:
 	@echo "==> Stage 5b: Instruct SFT ($(SIZE), $(GPUS) GPU(s), config=$(SFT_INSTRUCT_CONFIG))"
 	$(ACCELERATE) finetune/train_sft.py \
 		--config $(SFT_INSTRUCT_CONFIG)
+
+sft: sft-instruct
+
 
 sft-instruct-resume:
 	$(ACCELERATE) finetune/train_sft.py \
 		--config $(SFT_INSTRUCT_CONFIG) \
 		--resume
 
-sft-mini:
+sft-instruct-mini:
 	@echo "==> Stage 5b: Mini instruct SFT (pipeline validation)"
 	$(ACCELERATE) finetune/train_sft.py \
 		--config finetune/configs/sft_instruct_mini.yaml
+
+sft-mini: sft-instruct-mini
+
 
 sft-code:
 	@echo "==> Stage 5c: Code SFT ($(SIZE), $(GPUS) GPU(s), config=$(SFT_CODE_CONFIG))"
@@ -369,7 +372,8 @@ eval-base:
 
 eval-instruct:
 	@echo "==> Stage 7: Evaluation (instruct, $(SIZE))"
-	$(PYTHON) eval/eval.py --model results/runs/$(SIZE)/sft_chat/final
+	$(PYTHON) eval/eval.py --model results/runs/$(SIZE)/sft_instruct/final
+
 
 eval-chat:
 	@echo "==> Stage 7: Evaluation (chat, $(SIZE))"
@@ -377,7 +381,8 @@ eval-chat:
 
 eval-code:
 	@echo "==> Stage 7: Evaluation (code, $(SIZE))"
-	$(PYTHON) eval/eval.py --model results/runs/$(SIZE)/sft_instruct/final
+	$(PYTHON) eval/eval.py --model results/runs/$(SIZE)/sft_code/final
+
 
 # Behavior sanity eval targets.
 # These are deterministic generation checks for factuality, task format,
@@ -394,8 +399,9 @@ eval-sanity-base:
 eval-sanity-instruct:
 	@echo "==> Stage 7: Sanity evaluation (instruct, $(SIZE))"
 	$(PYTHON) eval/sanity_eval.py \
-		--model results/runs/$(SIZE)/sft_chat/final \
+		--model results/runs/$(SIZE)/sft_instruct/final \
 		--json-out results/runs/$(SIZE)/eval/sanity/instruct.json
+
 
 eval-sanity-chat:
 	@echo "==> Stage 7: Sanity evaluation (chat, $(SIZE))"
@@ -412,9 +418,10 @@ eval-sanity-code:
 eval-mini:
 	@echo "==> Stage 7: Mini evaluation (pipeline validation)"
 	$(PYTHON) eval/eval.py --model results/runs/$(SIZE)/dpo_chat/final --tasks hellaswag --limit 50 --batch-size 4
+
 # ── Stage 8: Export ───────────────────────────────────────────────────────────
 
-export: export-base export-instruct export-chat export-code export-code
+export: export-base export-instruct export-chat export-code
 	@echo "All variants exported for slm-$(SIZE)"
 
 export-base:
@@ -436,12 +443,14 @@ export-code:
 # ── Stage 10: Serve ───────────────────────────────────────────────────────────
 
 serve:
-	@echo "==> Stage 10: Serve ($(SIZE))"
-	MODEL=tohio/slm-$(SIZE) ./serve/serve.sh
+	@echo "==> Stage 10: Serve chat model ($(SIZE))"
+	MODEL=tohio/slm-$(SIZE)-chat ./serve/serve.sh
+
 
 serve-local:
-	@echo "==> Stage 10: Serve local checkpoint ($(SIZE))"
-	MODEL=results/runs/$(SIZE)/dpo/final ./serve/serve.sh
+	@echo "==> Stage 10: Serve local chat checkpoint ($(SIZE))"
+	MODEL=results/runs/$(SIZE)/dpo_chat/final ./serve/serve.sh
+
 
 # ── S3 utilities ──────────────────────────────────────────────────────────────
 
@@ -465,10 +474,10 @@ setup-data-dir:
 	bash infra/setup.sh --data-dir $(DATA_DIR)
 
 setup-gpu:
-	@echo "==> Running GPU instance setup (DATA_DIR=$(DATA_DIR))..."
-	bash infra/setup_gpu_instance.sh --data-dir $(DATA_DIR) --size $(SIZE) $(if $(DATE),--date $(DATE),)
+	@test -n "$(RUN_ID)" || (echo "RUN_ID is required for setup-gpu"; exit 1)
+	@echo "==> Running GPU instance setup (DATA_DIR=$(DATA_DIR), RUN_ID=$(RUN_ID))..."
+	bash infra/setup_gpu_instance.sh --data-dir $(DATA_DIR) --size $(SIZE) --run-id $(RUN_ID)
 	$(MAKE) restore-size-tokenizer SIZE=$(SIZE) DATA_DIR=$(DATA_DIR)
-	$(MAKE) setup-gpu-metadata SIZE=$(SIZE) DATE=$(DATE) DATA_DIR=$(DATA_DIR) S3_BUCKET=$(S3_BUCKET)
 install:
 	python3 -m venv .venv
 	.venv/bin/pip install --upgrade pip
@@ -476,13 +485,26 @@ install:
 	.venv/bin/pip install orjson fasttext-wheel
 
 install-uv:
-	uv venv && uv pip install -r requirements.txt && uv pip install orjson fasttext-wheel
+	@if ! command -v uv >/dev/null 2>&1; then \
+		echo "uv is not installed. Install uv first: https://docs.astral.sh/uv/"; \
+		exit 1; \
+	fi
+	uv venv --python 3.12
+	uv pip install --upgrade pip
+	uv pip install -r requirements.txt
+	uv pip install orjson fasttext-wheel
+
 
 install-conda:
-	conda create -n slm python=3.12 -y && \
-	conda activate slm && \
-	pip install -r requirements.txt && \
-	pip install orjson fasttext-wheel
+	@if ! command -v conda >/dev/null 2>&1; then \
+		echo "conda is not installed."; \
+		exit 1; \
+	fi
+	conda create -n slm python=3.12 -y
+	conda run -n slm python -m pip install --upgrade pip
+	conda run -n slm pip install -r requirements.txt
+	conda run -n slm pip install orjson fasttext-wheel
+
 
 install-kenlm:
 	.venv/bin/pip install https://github.com/kpu/kenlm/archive/master.zip
@@ -552,19 +574,25 @@ test-training:
 	@echo "==> Validating pretrain outputs (TEST_SIZE=$(TEST_SIZE))..."
 	PIPELINE_TEST_SIZE=$(TEST_SIZE) .venv/bin/pytest tests/gpu_pipeline/test_pipeline_training.py --size=$(TEST_SIZE) -v --tb=short
 
-test-sft-chat:
-	@echo "==> Validating chat SFT outputs (TEST_SIZE=$(TEST_SIZE))..."
+test-sft-instruct:
+	@echo "==> Validating instruct SFT outputs (TEST_SIZE=$(TEST_SIZE))..."
 	PIPELINE_TEST_SIZE=$(TEST_SIZE) .venv/bin/pytest tests/gpu_pipeline/test_pipeline_sft.py::TestChatSFTModel tests/gpu_pipeline/test_pipeline_sft.py::TestSFTData --size=$(TEST_SIZE) -v --tb=short
+
+test-sft-chat: test-sft-instruct
+
 
 test-sft-code:
 	@echo "==> Validating code SFT outputs (TEST_SIZE=$(TEST_SIZE))..."
 	PIPELINE_TEST_SIZE=$(TEST_SIZE) .venv/bin/pytest tests/gpu_pipeline/test_pipeline_sft.py::TestCodeSFTModel --size=$(TEST_SIZE) -v --tb=short
 
-test-dpo:
-	@echo "==> Validating DPO outputs (TEST_SIZE=$(TEST_SIZE))..."
+test-dpo-chat:
+	@echo "==> Validating chat DPO outputs (TEST_SIZE=$(TEST_SIZE))..."
 	PIPELINE_TEST_SIZE=$(TEST_SIZE) .venv/bin/pytest tests/gpu_pipeline/test_pipeline_dpo.py --size=$(TEST_SIZE) -v --tb=short
 
-test-gpu-pipeline: test-training test-sft-chat test-sft-code test-dpo
+test-dpo: test-dpo-chat
+
+
+test-gpu-pipeline: test-training test-sft-instruct test-sft-code test-dpo-chat
 	@echo "==> GPU pipeline tests complete"
 
 test-model:
@@ -633,10 +661,10 @@ help:
 	@echo ""
 	@echo "For full target documentation see: docs/COMMANDS.md"
 	@echo ""
-	@echo "Config generation (run before pretrain/sft/dpo to tune for current GPU):"
+	@echo "Config generation (run before pretrain/sft-instruct/dpo-chat/sft-code):"
 	@echo "  config-gen-pretrain  Auto-generate pretrain/configs/gpt_$(SIZE).yaml"
-	@echo "  config-gen-sft       Auto-generate sft_chat_$(SIZE).yaml + sft_code_$(SIZE).yaml"
-	@echo "  config-gen-dpo       Auto-generate alignment/configs/dpo_$(SIZE).yaml"
+	@echo "  config-gen-sft       Auto-generate sft_instruct_$(SIZE).yaml + sft_code_$(SIZE).yaml"
+	@echo "  config-gen-dpo       Auto-generate alignment/configs/dpo_chat_$(SIZE).yaml"
 	@echo "  config-gen           Convenience: runs all three above"
 	@echo "  accel-gen-ddp        Auto-generate accelerate_configs/multi_gpu.yaml"
 	@echo "  accel-gen-fsdp       Auto-generate accelerate_configs/fsdp.yaml (for 1b runs)"
@@ -662,9 +690,9 @@ help:
 	@echo ""
 	@echo "Tests (GPU — training pipeline, use SIZE=<size>, default mini):"
 	@echo "  test-training            Validate pretrain outputs"
-	@echo "  test-sft-chat            Validate chat SFT outputs"
+	@echo "  test-sft-instruct        Validate instruct SFT outputs"
 	@echo "  test-sft-code            Validate code SFT outputs"
-	@echo "  test-dpo                 Validate DPO outputs"
+	@echo "  test-dpo-chat            Validate chat DPO outputs"
 	@echo "  test-gpu-pipeline        Run all GPU pipeline tests"
 	@echo ""
 	@echo "Tests (unit — no pipeline outputs needed):"
@@ -686,23 +714,23 @@ help:
 	@echo "  validate-upload    Stage 2  — upload validated data to S3"
 	@echo "  tokenizer          Stage 3  — train BPE tokenizer"
 	@echo "  tokenize           Stage 4a — tokenize train + val to binaries"
-	@echo "  artifacts-upload   Upload raw/curated/validated/tokenized/tokenizer artifacts to S3"
-	@echo "  artifacts-download Download raw/curated/validated/tokenized/tokenizer artifacts from S3"
+	@echo "  artifacts-upload   Upload artifacts to S3 using a RUN_ID"
+	@echo "  artifacts-download Download artifacts from S3 using RUN_ID=<run_id>"
 	@echo "  pretrain           Stage 4b — pretrain from scratch (auto-runs smoke-gen)"
 	@echo "  pretrain-mini      Stage 4b — mini pretrain run (auto-runs smoke-gen)"
 	@echo "  smoke-gen          Stage 4b — generate from results/runs/\$$(SIZE)/pretrain/final to spot-check"
 	@echo "  reinit-embeds      Stage 4c — re-init chat special-token embeds before SFT"
 	@echo "  prepare-sft        Stage 5a — download SFT datasets"
-	@echo "  sft                Stage 5b — chat supervised fine-tuning"
-	@echo "  sft-mini           Stage 5b — mini chat SFT"
+	@echo "  sft-instruct       Stage 5b — instruct supervised fine-tuning"
+	@echo "  sft-instruct-mini  Stage 5b — mini instruct SFT"
 	@echo "  sft-code           Stage 5c — code supervised fine-tuning"
 	@echo "  sft-code-mini      Stage 5c — mini code SFT"
 	@echo "  prepare-code-completion Stage 5d — prepare raw code-completion data"
 	@echo "  sft-code-completion     Stage 5e — raw code-completion supervised fine-tuning"
 	@echo "  eval-code-completion    Stage 7  — HumanEval for raw code-completion checkpoint"
 	@echo "  prepare-dpo        Stage 6a — download DPO datasets"
-	@echo "  dpo                Stage 6b — DPO alignment"
-	@echo "  dpo-mini           Stage 6b — mini DPO"
+	@echo "  dpo-chat           Stage 6b — chat DPO alignment"
+	@echo "  dpo-chat-mini      Stage 6b — mini chat DPO"
 	@echo "  eval-base              Stage 7  — benchmark eval for base variant"
 	@echo "  eval-instruct          Stage 7  — benchmark eval for instruct variant"
 	@echo "  eval-chat              Stage 7  — benchmark eval for chat variant"
@@ -721,20 +749,6 @@ restore-size-tokenizer:
 	@echo "==> Restoring size-specific tokenizer ($(SIZE)) into active tokenizer path..."
 	@test -d "$(DATA_DIR)/runs/$(SIZE)/tokenizer" || (echo "Missing $(DATA_DIR)/runs/$(SIZE)/tokenizer — run setup-gpu or artifacts-download first" && exit 1)
 	mkdir -p "$(DATA_DIR)/tokenizer"
-	rsync -a "$(DATA_DIR)/runs/$(SIZE)/tokenizer/" "$(DATA_DIR)/tokenizer/"
+	cp -a "$(DATA_DIR)/runs/$(SIZE)/tokenizer/." "$(DATA_DIR)/tokenizer/"
 	@echo "  Active tokenizer restored from $(DATA_DIR)/runs/$(SIZE)/tokenizer"
-
-.PHONY: setup-gpu-metadata
-setup-gpu-metadata:
-	@echo "==> Restoring metadata artifacts for $(SIZE) ($(DATE))..."
-	@if [ -z "$(DATE)" ]; then \
-		echo "  DATE not set; skipping metadata download"; \
-		exit 0; \
-	fi
-	mkdir -p "$(DATA_DIR)/runs/$(SIZE)/metadata"
-	$(AWS) s3 cp "s3://$(S3_BUCKET)/slm/data/$(SIZE)/$(DATE)/metadata/blend_stats.json" "$(DATA_DIR)/runs/$(SIZE)/metadata/blend_stats.json" || \
-		echo "  metadata/blend_stats.json not found; export will use design-only model card"
-	@if [ -f "$(DATA_DIR)/runs/$(SIZE)/metadata/blend_stats.json" ]; then \
-		echo "  Restored $(DATA_DIR)/runs/$(SIZE)/metadata/blend_stats.json"; \
-	fi
 

@@ -11,10 +11,10 @@
 #   bash infra/setup_gpu_instance.sh
 #   bash infra/setup_gpu_instance.sh --data-dir /mnt/persistent
 #   bash infra/setup_gpu_instance.sh --data-dir /mnt/persistent --skip-data
-#   bash infra/setup_gpu_instance.sh --data-dir /mnt/persistent --size 125m --date 2026-04-12
+#   bash infra/setup_gpu_instance.sh --data-dir /mnt/persistent --size 125m --run-id 125m-20260412-a8f3c9
 #
 # Or via make:
-#   make setup-gpu DATA_DIR=/mnt/persistent SIZE=125m DATE=2026-04-12
+#   make setup-gpu DATA_DIR=/mnt/persistent SIZE=125m RUN_ID=125m-20260412-a8f3c9
 # ─────────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -33,7 +33,7 @@ DATA_DIR="${DATA_DIR:-$REPO_DIR/data}"
 RESULTS_DIR="${RESULTS_DIR:-$REPO_DIR/results}"
 SKIP_DATA=false
 SKIP_PYTHON=false
-TOKENIZE_DATE=""    # empty = auto-detect latest from S3
+RUN_ID="${RUN_ID:-}"
 SIZE="125m"
 
 # ── Arg parsing ───────────────────────────────────────────────────────────────
@@ -43,8 +43,8 @@ while [[ $# -gt 0 ]]; do
         --skip-python)  SKIP_PYTHON=true;        shift ;;
         --data-dir)     DATA_DIR="$2";           shift 2 ;;
         --data-dir=*)   DATA_DIR="${1#*=}";      shift ;;
-        --date)         TOKENIZE_DATE="$2";      shift 2 ;;
-        --date=*)       TOKENIZE_DATE="${1#*=}"; shift ;;
+        --run-id)       RUN_ID="$2";             shift 2 ;;
+        --run-id=*)     RUN_ID="${1#*=}";        shift ;;
         --size)         SIZE="$2";               shift 2 ;;
         --size=*)       SIZE="${1#*=}";          shift ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
@@ -62,6 +62,9 @@ log "Data:     $DATA_DIR"
 log "HF cache: $HF_CACHE_DIR"
 log "Results:  $RESULTS_DIR"
 log "Run data: $RUN_DATA_DIR"
+if [[ -n "$RUN_ID" ]]; then
+    log "Run ID:   $RUN_ID"
+fi
 
 # ── GPU check ─────────────────────────────────────────────────────────────────
 log "GPU check:"
@@ -82,9 +85,9 @@ fi
 
 mkdir -p \
     "$RUN_DATA_DIR/tokenized" \
-    "$RUN_DATA_DIR/sft_chat" \
+    "$RUN_DATA_DIR/sft_instruct" \
     "$RUN_DATA_DIR/sft_code" \
-    "$RUN_DATA_DIR/dpo" \
+    "$RUN_DATA_DIR/dpo_chat" \
     "$DATA_DIR/tokenizer" \
     "$DATA_DIR/models" \
     "$RESULTS_DIR" \
@@ -218,75 +221,53 @@ cp "$REPO_DIR/accelerate_configs/single_gpu.yaml" \
    ~/.cache/huggingface/accelerate/default_config.yaml
 log "  ✓ accelerate configured for single GPU"
 
-# ── Pull tokenized binary from S3 (versioned) ────────────────────────────────
+# ── Pull run-scoped artifacts from S3 ─────────────────────────────────────────
 if [[ "$SKIP_DATA" == "true" ]]; then
-    log "[SKIP] S3 data pull (--skip-data)"
+    log "[SKIP] S3 artifact pull (--skip-data)"
 elif [[ -z "${S3_BUCKET:-}" ]]; then
-    log "WARNING: S3_BUCKET not set in .env — skipping data pull"
-    log "  Run manually: make tokenize-download SIZE=$SIZE DATE=YYYY-MM-DD"
+    log "WARNING: S3_BUCKET not set in .env — skipping artifact pull"
+    log "  Run manually: make artifacts-download SIZE=$SIZE RUN_ID=<run_id> ARTIFACT_STAGES=tokenized,tokenizer,metadata"
+elif [[ -z "$RUN_ID" ]]; then
+    log "ERROR: RUN_ID is required for GPU artifact restore"
+    log "  Example: make setup-gpu DATA_DIR=$DATA_DIR SIZE=$SIZE RUN_ID=${SIZE}-YYYYMMDD-a8f3c9"
+    exit 1
 else
     cd "$REPO_DIR"
-    S3_PREFIX="${S3_PREFIX:-slm/data}"
 
-    if [[ -n "$TOKENIZE_DATE" ]]; then
-        # Explicit date provided — use it directly
-        log "Pulling tokenized binary from S3 (size=$SIZE, date=$TOKENIZE_DATE)..."
-        .venv/bin/python pretrain/data/upload_tokenized.py download \
-            --target "$SIZE" --date "$TOKENIZE_DATE"
-    else
-        # No date — auto-detect the latest versioned prefix for this size
-        log "No date specified — auto-detecting latest tokenized version for size=$SIZE..."
-        LATEST=$(aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/${SIZE}/" \
-            2>/dev/null | awk '{print $2}' | tr -d '/' | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' | sort | tail -1 || true)
+    log "Restoring run-scoped artifacts from S3 (size=$SIZE, run_id=$RUN_ID)..."
+    .venv/bin/python curator/scripts/upload_s3.py artifacts-download \
+        --size "$SIZE" \
+        --run-id "$RUN_ID" \
+        --stages "tokenized,tokenizer,metadata"
 
-        if [[ -z "$LATEST" ]]; then
-            log "WARNING: No versioned tokenized data found at s3://${S3_BUCKET}/${S3_PREFIX}/${SIZE}/"
-            log "  Run manually: make tokenize-download SIZE=$SIZE DATE=YYYY-MM-DD"
-        else
-            log "  Latest version detected: $LATEST"
-            log "Pulling tokenized binary from S3 (size=$SIZE, date=$LATEST)..."
-            .venv/bin/python pretrain/data/upload_tokenized.py download \
-                --target "$SIZE" --date "$LATEST"
-        fi
-    fi
-
-    # Verify the download landed correctly
     TRAIN_BIN="$RUN_DATA_DIR/tokenized/train.bin"
     if [[ -f "$TRAIN_BIN" ]]; then
         BIN_SIZE=$(du -sh "$TRAIN_BIN" | cut -f1)
         log "  ✓ train.bin: $BIN_SIZE"
     else
-        log "  WARNING: train.bin not found at $TRAIN_BIN after download"
-        log "  Run manually: make tokenize-download SIZE=$SIZE DATE=YYYY-MM-DD"
+        log "  ERROR: train.bin not found at $TRAIN_BIN after artifact restore"
+        exit 1
     fi
 
-    # ── Pull tokenizer from S3 ────────────────────────────────────────────────
-    log "Pulling tokenizer from S3..."
-    .venv/bin/python curator/scripts/upload_s3.py download \
-        --src tokenizer --dst "$DATA_DIR/tokenizer"
+    mkdir -p "$DATA_DIR/tokenizer"
+    cp -a "$RUN_DATA_DIR/tokenizer/." "$DATA_DIR/tokenizer/"
 
-    # Verify both tokenizer files are present.
-    # tokenizer.json  — the BPE vocabulary and merge rules.
-    # tokenizer_config.json — HuggingFace metadata including the baked-in
-    #   chat_template. Without this file, apply_chat_template() falls back
-    #   to a generic template and SFT/DPO training will use the wrong format.
     TOKENIZER_FILE="$DATA_DIR/tokenizer/tokenizer.json"
     TOKENIZER_CONFIG="$DATA_DIR/tokenizer/tokenizer_config.json"
 
     if [[ -f "$TOKENIZER_FILE" ]]; then
         log "  ✓ tokenizer.json present"
     else
-        log "  WARNING: tokenizer.json not found after download"
-        log "  Run manually: make tokenizer-download"
+        log "  ERROR: tokenizer.json not found after artifact restore"
+        exit 1
     fi
 
     if [[ -f "$TOKENIZER_CONFIG" ]]; then
         log "  ✓ tokenizer_config.json present (chat_template included)"
     else
-        log "  WARNING: tokenizer_config.json not found after download"
-        log "  This file contains the chat_template — without it apply_chat_template()"
-        log "  will use a generic format that does not match the model's training."
-        log "  Retrain the tokenizer: make tokenizer && make tokenizer-upload"
+        log "  ERROR: tokenizer_config.json not found after artifact restore"
+        log "  This file contains the chat_template and must be restored with the tokenizer."
+        exit 1
     fi
 fi
 
