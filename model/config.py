@@ -22,9 +22,9 @@ Remote-code loading:
             "tohio/slm-125m", trust_remote_code=True,
         )
 
-    For this to work, export/export.py bundles the model source into the
-    Hub repo as a subpackage named `slm_arch` — the auto_map targets below
-    reference that bundled copy, not the training-time `model` package.
+    For this to work, export/export.py bundles the model source files into
+    the Hub repo root. The auto_map targets below point at those root-level
+    modules.
 
     Note:
         This config intentionally exposes AutoConfig and AutoModelForCausalLM,
@@ -106,16 +106,14 @@ class SLMConfig(PretrainedConfig):
     # AutoConfig / AutoModelForCausalLM with trust_remote_code=True can
     # locate our classes inside the Hub repo.
     #
-    # Targets reference `slm_arch.*`, NOT `model.*`, because export.py
-    # bundles the model source into the Hub repo under that subpackage
-    # name to avoid colliding with the generic name `model` on sys.path
-    # where third-party `trust_remote_code` would load it.
+    # Targets reference root-level modules because export.py bundles the
+    # architecture files directly into the checkpoint/Hub repo root.
     #
     # We intentionally do NOT expose AutoModel here. SLMModel is now an
     # internal nn.Module, not a PreTrainedModel. Use AutoModelForCausalLM.
     auto_map = {
-        "AutoConfig": "slm_arch.config.SLMConfig",
-        "AutoModelForCausalLM": "slm_arch.model.SLMForCausalLM",
+        "AutoConfig": "config.SLMConfig",
+        "AutoModelForCausalLM": "model.SLMForCausalLM",
     }
 
     def __init__(

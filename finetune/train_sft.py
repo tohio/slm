@@ -3,7 +3,7 @@ finetune/train_sft.py
 ----------------------
 Supervised Fine-Tuning using HuggingFace trl SFTTrainer.
 
-Runs one SFT stage per invocation. The general instruct checkpoint is produced by chat SFT + response-control. Code SFT is a sibling specialization branch that starts from instruct; it is not the parent of the general chat/DPO model.
+Runs one SFT stage per invocation. The general instruct checkpoint is produced by instruct SFT + response-control. Code SFT is a sibling specialization branch that starts from instruct; it is not the parent of the general chat/DPO model.
 
 Answer-only loss:
     Uses trl's native assistant_only_loss=True in SFTConfig. This requires
@@ -44,17 +44,17 @@ Warmup:
     when GPU count changes — `warmup_steps` baked into YAML would not.
 
 Usage:
-    # Chat SFT
-    python finetune/train_sft.py --config finetune/configs/sft_chat_125m.yaml
+    # Instruct SFT
+    python finetune/train_sft.py --config finetune/configs/sft_instruct_125m.yaml
 
     # Code SFT
     python finetune/train_sft.py --config finetune/configs/sft_code_125m.yaml
 
     # Multi-GPU
-    accelerate launch finetune/train_sft.py --config finetune/configs/sft_chat_125m.yaml
+    accelerate launch finetune/train_sft.py --config finetune/configs/sft_instruct_125m.yaml
 
     # Resume
-    python finetune/train_sft.py --config finetune/configs/sft_chat_125m.yaml --resume
+    python finetune/train_sft.py --config finetune/configs/sft_instruct_125m.yaml --resume
 """
 
 import argparse
@@ -314,7 +314,7 @@ def _size_from_model_name(model_name: str) -> str:
 
 def _sft_output_dir(model_name: str) -> Path:
     size = _size_from_model_name(model_name)
-    return sft_code_dir(size) if model_name.endswith(("-code", "-chat-code")) else sft_chat_dir(size)
+    return sft_code_dir(size) if model_name.endswith(("-code", "-chat-code")) else sft_instruct_dir(size)
 
 
 def main():

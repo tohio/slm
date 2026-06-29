@@ -509,7 +509,7 @@ def main():
             )
 
     log.info("Tokenization complete.")
-    log.info('Next step: make artifacts-upload SIZE=<size> DATE=YYYY-MM-DD ARTIFACT_STAGES="raw,curated,validated,tokenized,tokenizer"')
+    log.info('Next step: make artifacts-upload SIZE=<size> ARTIFACT_STAGES="raw,curated,validated,tokenized,tokenizer,metadata"')
 
 
 if __name__ == "__main__":

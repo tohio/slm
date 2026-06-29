@@ -1,5 +1,5 @@
 """
-Download and format SFT datasets for chat and code fine-tuning.
+Download and format SFT datasets for instruct and code fine-tuning.
 
 Formats all data into the SLM conversation format:
     [
@@ -16,13 +16,13 @@ Chat template application:
     chat template (including {% generation %} tags) and break
     assistant_only_loss=True.
 
-Stage 1 — Chat SFT:
+Stage 1 — Instruct SFT:
     Dataset: size-aware SmolTalk policy
         125m: 50% of HuggingFaceTB/smol-smoltalk
         350m: full HuggingFaceTB/smol-smoltalk
         1b:   full HuggingFaceTB/smoltalk
     Plus:    generated response-control examples from finetune/data/response_control.py
-    Output:  data/runs/<size>/sft_chat/train.jsonl + val.jsonl
+    Output:  data/runs/<size>/sft_instruct/train.jsonl + val.jsonl
 
 Stage 2 — Code SFT:
     Dataset: ise-uiuc/Magicoder-OSS-Instruct-75K
@@ -49,7 +49,7 @@ Output format — one conversation per line:
 
 Usage:
     python finetune/data/prepare_sft.py --stage both --size 125m
-    python finetune/data/prepare_sft.py --stage chat --size 350m
+    python finetune/data/prepare_sft.py --stage instruct --size 350m
     python finetune/data/prepare_sft.py --stage code
 """
 

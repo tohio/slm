@@ -19,7 +19,7 @@ where:
     y_l   = rejected response
     β     = temperature controlling deviation from reference policy
 
-Base model: slm-{size}-instruct (after general chat SFT + response-control)
+Base model: slm-{size}-instruct (after instruct SFT + response-control)
 Dataset:    UltraFeedback binarized + local general-chat handcrafted/targeted preference pairs
 
 Eval batching:
@@ -47,13 +47,13 @@ Target library versions: trl 0.28.x, transformers 5.5.x.
 See requirements.txt for the full compatible stack.
 
 Usage:
-    python alignment/train_dpo.py --config alignment/configs/dpo_125m.yaml
+    python alignment/train_dpo.py --config alignment/configs/dpo_chat_125m.yaml
 
     # Multi-GPU
-    accelerate launch alignment/train_dpo.py --config alignment/configs/dpo_125m.yaml
+    accelerate launch alignment/train_dpo.py --config alignment/configs/dpo_chat_125m.yaml
 
     # Resume
-    python alignment/train_dpo.py --config alignment/configs/dpo_125m.yaml --resume
+    python alignment/train_dpo.py --config alignment/configs/dpo_chat_125m.yaml --resume
 """
 
 import argparse
