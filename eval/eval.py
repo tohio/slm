@@ -36,10 +36,10 @@ lm-eval compatibility:
     We run each benchmark separately so each uses its canonical few-shot count.
 
 Usage:
-    python eval/eval.py --model results/runs/125m/dpo/final
-    python eval/eval.py --model results/runs/125m/dpo/final --tasks hellaswag,arc_easy
+    python eval/eval.py --model results/runs/125m/dpo_chat/final
+    python eval/eval.py --model results/runs/125m/dpo_chat/final --tasks hellaswag,arc_easy
     python eval/eval.py --model results/runs/125m/pretrain/final --tasks all --num-fewshot 0
-    python eval/eval.py --model results/runs/125m/dpo/final --dtype float16
+    python eval/eval.py --model results/runs/125m/dpo_chat/final --dtype float16
 """
 
 import argparse
@@ -149,7 +149,7 @@ def _run_scoped_checkpoint_parts(model_path: Path) -> tuple[str, str] | None:
 def model_display_name(model_path: Path) -> str:
     """
     Compact name for a checkpoint dir.
-    `results/runs/125m/dpo/final` → `slm-125m-dpo`.
+    `results/runs/125m/dpo_chat/final` → `slm-125m-dpo_chat`.
     """
     scoped = _run_scoped_checkpoint_parts(model_path)
     if scoped:

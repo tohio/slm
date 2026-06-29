@@ -3,7 +3,7 @@
 Small behavior sanity eval for SLM checkpoints.
 
 Examples:
-  python eval/sanity_eval.py --model results/runs/125m/dpo/final
+  python eval/sanity_eval.py --model results/runs/125m/dpo_chat/final
   python eval/sanity_eval.py --model tohio/slm-125m-chat --trust-remote-code
   python eval/sanity_eval.py --model results/runs/125m/pretrain/final --prompts eval/sanity_prompts.jsonl
 """

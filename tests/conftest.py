@@ -44,7 +44,7 @@ def pretrain_model_dir(results_dir, model_size):
 
 @pytest.fixture(scope="session")
 def chat_sft_model_dir(results_dir, model_size):
-    return results_dir / "runs" / model_size / "sft_chat" / "final"
+    return results_dir / "runs" / model_size / "sft_instruct" / "final"
 
 
 @pytest.fixture(scope="session")

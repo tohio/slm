@@ -56,7 +56,7 @@ spec:
             # --trust-remote-code is required because SLMConfig and SLMForCausalLM
             # are custom classes not known to the base transformers library.
             # The model is loaded from our own Hub repo, which bundles the
-            # architecture as slm_arch/ alongside the weights — see
+            # architecture files alongside the weights — see
             # export/export.py and model/config.py::auto_map.
             - --trust-remote-code
           ports:

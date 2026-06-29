@@ -25,7 +25,7 @@ Usage:
 
     # From file
     python inference/generate.py \\
-        --model results/runs/125m/dpo/final \\
+        --model results/runs/125m/dpo_chat/final \\
         --input prompts.txt \\
         --output completions.jsonl \\
         --chat

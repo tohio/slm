@@ -49,7 +49,7 @@ def pipeline_path(*parts: str) -> Path:
     if stage == "sft" and rest:
         variant, *tail = rest
         if variant == "chat":
-            return run_data_dir().joinpath("sft_chat", *tail)
+            return run_data_dir().joinpath("sft_instruct", *tail)
         if variant == "code":
             return run_data_dir().joinpath("sft_code", *tail)
 
