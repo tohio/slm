@@ -19,8 +19,8 @@ where:
     y_l   = rejected response
     β     = temperature controlling deviation from reference policy
 
-Base model: slm-{size}-chat-code (after both SFT stages)
-Dataset:    UltraFeedback binarized + local handcrafted/targeted preference pairs
+Base model: slm-{size}-instruct (after general chat SFT + response-control)
+Dataset:    UltraFeedback binarized + local general-chat handcrafted/targeted preference pairs
 
 Eval batching:
     `training.eval_micro_batch_size` controls per-device eval batch size
@@ -347,7 +347,7 @@ def main():
             f"tokenizer_config.json not found at {tokenizer_path} — "
             f"falling back to target-scoped tokenizer"
         )
-        tokenizer_path = tokenizer_dir(config.get("size", "125m"))
+        tokenizer_path = tokenizer_dir(cfg.get("size", "125m"))
 
     log.info(f"Loading tokenizer from {tokenizer_path}...")
     tokenizer = load_tokenizer(tokenizer_path)

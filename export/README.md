@@ -2,13 +2,13 @@
 
 Exports trained SLM checkpoints to the HuggingFace Hub. Registers the custom architecture with AutoConfig and AutoModelForCausalLM, generates a fully populated model card, and pushes weights, tokenizer, and config in a single commit.
 
-Three variants are exported per model size, each to a separate Hub repository:
+Four variants are exported per model size, each to a separate Hub repository:
 
 | Variant | Checkpoint | Hub repo | Description |
 |---|---|---|---|
 | `base` | `results/slm-{size}/final` | `$HF_USERNAME/slm-{size}` | Pretrained only |
-| `instruct` | `results/slm-{size}-chat-code/final` | `$HF_USERNAME/slm-{size}-instruct` | Chat + response-control + code SFT |
-| `chat` | `results/slm-{size}-dpo/final` | `$HF_USERNAME/slm-{size}-chat` | SFT + DPO aligned |
+| `instruct` | `results/slm-{size}-chat-code/final` | `$HF_USERNAME/slm-{size}-instruct` | Chat SFT + response-control |
+| `chat` | `results/slm-{size}-dpo/final` | `$HF_USERNAME/slm-{size}-chat` | Instruct + general DPO |
 
 ---
 

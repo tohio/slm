@@ -1,3 +1,16 @@
+
+## Model lineage
+
+```text
+base
+  ↓
+instruct = base + chat SFT + response-control
+  ├── chat = instruct + general DPO
+  └── code = instruct + code SFT
+```
+
+General chat DPO starts from `results/runs/<size>/sft_chat/final`. Code SFT starts from the same instruct checkpoint and writes `results/runs/<size>/sft_code/final`.
+
 # slm
 
 A decoder-only language model trained from scratch — raw web data through to an aligned, serving-ready model. Covers the full lifecycle: data curation, validation, tokenizer training, pretraining, supervised fine-tuning, preference alignment, evaluation, and production serving.

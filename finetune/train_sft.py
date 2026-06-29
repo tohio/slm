@@ -3,13 +3,7 @@ finetune/train_sft.py
 ----------------------
 Supervised Fine-Tuning using HuggingFace trl SFTTrainer.
 
-Runs two sequential SFT stages:
-    Stage 1: Chat SFT on OpenHermes-2.5 (general instruction following)
-    Stage 2: Code SFT on Magicoder-OSS-Instruct (coding capability)
-
-Sequential fine-tuning preserves capabilities from earlier stages —
-the code SFT uses a lower LR to reduce catastrophic forgetting of
-chat capability learned in stage 1.
+Runs one SFT stage per invocation. The general instruct checkpoint is produced by chat SFT + response-control. Code SFT is a sibling specialization branch that starts from instruct; it is not the parent of the general chat/DPO model.
 
 Answer-only loss:
     Uses trl's native assistant_only_loss=True in SFTConfig. This requires
@@ -320,7 +314,7 @@ def _size_from_model_name(model_name: str) -> str:
 
 def _sft_output_dir(model_name: str) -> Path:
     size = _size_from_model_name(model_name)
-    return sft_code_dir(size) if model_name.endswith("-chat-code") else sft_chat_dir(size)
+    return sft_code_dir(size) if model_name.endswith(("-code", "-chat-code")) else sft_chat_dir(size)
 
 
 def main():
@@ -362,7 +356,7 @@ def main():
             f"tokenizer_config.json not found at {tokenizer_path} — "
             f"falling back to target-scoped tokenizer"
         )
-        tokenizer_path = tokenizer_dir(config.get("size", "125m"))
+        tokenizer_path = tokenizer_dir(cfg.get("size", "125m"))
 
     log.info(f"Loading tokenizer from {tokenizer_path}...")
     tokenizer = load_tokenizer(tokenizer_path)
@@ -446,7 +440,10 @@ def main():
 
     log.info(f"Model saved to {final_dir}")
     log.info("SFT complete.")
-    log.info(f"Next step: {'make dpo' if 'chat-code' in model_name else 'make sft-code'}")
+    if model_name.endswith("-code") or "chat-code" in model_name:
+        log.info("SFT code branch complete. Next optional step: make eval-code or prepare code-specific alignment.")
+    else:
+        log.info("SFT instruct branch complete. Next steps: make dpo for chat alignment or make sft-code for code specialization.")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-name: slm-mini-chat-code
+name: slm-mini-code
 wandb_project: slm-mini
 model:
   base_model_path: $RESULTS_DIR/runs/mini/sft_chat/final
@@ -28,7 +28,7 @@ training:
   report_to:
     - wandb
 optimizer:
-  lr: 5.0e-6                         # lower than chat SFT — preserve chat capability
+  lr: 5.0e-6                         # lower than instruct SFT — preserve chat capability
   weight_decay: 0.01
   beta1: 0.9
   beta2: 0.98

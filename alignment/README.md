@@ -9,7 +9,7 @@ Target library versions: **trl 0.29.x**, **transformers 5.5.x**. See `requiremen
 ## Pipeline
 
 ```
-results/slm-{size}-chat-code/final   (SFT model)
+results/slm-{size}-instruct/final   (SFT model)
         │
         ▼
 DPO training (UltraFeedback binarized + local targeted preference pairs)
@@ -109,9 +109,9 @@ alignment/
 
 | Config | Base model | LR | Beta | max_prompt_length | Micro batch | Grad accum (1 GPU) | Seq len | Grad ckpt |
 |---|---|---|---|---|---|---|---|---|
-| `dpo_125m` | `slm-125m-chat-code/final` | 5e-7 | 0.1 | 1024 | 2 | 32 | 2048 | No |
-| `dpo_350m` | `slm-350m-chat-code/final` | 3e-7 | 0.1 | 1024 | 1 | 64 | 2048 | No |
-| `dpo_1b` | `slm-1b-chat-code/final` | 2e-7 | 0.1 | 2048 | 1 | 64 | 4096 | Yes |
+| `dpo_125m` | `slm-125m-instruct/final` | 5e-7 | 0.1 | 1024 | 2 | 32 | 2048 | No |
+| `dpo_350m` | `slm-350m-instruct/final` | 3e-7 | 0.1 | 1024 | 1 | 64 | 2048 | No |
+| `dpo_1b` | `slm-1b-instruct/final` | 2e-7 | 0.1 | 2048 | 1 | 64 | 4096 | Yes |
 
 All configs run 1 epoch with `warmup_ratio=0.05` on a cosine schedule. `max_length` is taken from `model.max_seq_length`.
 
@@ -177,7 +177,7 @@ Because HF Trainer always keeps the best checkpoint in addition to the N most re
 
 **Why conversational format for prompt/chosen/rejected?** Plain string format requires manually formatting the chat template in `prepare_dpo.py`, which duplicates the template and can drift from `train_tokenizer.py`. The conversational format delegates formatting to `DPOTrainer` via `apply_chat_template()` — the same code path as SFT and inference, guaranteeing consistency.
 
-**Why start from chat-code?** DPO learns preference signal on top of the SFT distribution. Starting from a well-trained SFT model with both chat and code capability ensures the alignment generalizes across both domains.
+**Why start from instruct?** DPO learns preference signal on top of the SFT distribution. General DPO starts from the instruct checkpoint. Code SFT is a sibling specialization branch, not the parent of the chat model.
 
 ## DPO Data Policy
 

@@ -1,4 +1,4 @@
-name: slm-125m-chat-code
+name: slm-125m-code
 wandb_project: slm
 
 model:

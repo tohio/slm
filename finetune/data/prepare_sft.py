@@ -1076,7 +1076,7 @@ def _stratified_response_control_records(records: list[dict], max_records: int) 
     return selected
 
 
-def prepare_chat(size: str, val_fraction: float) -> None:
+def prepare_chat(size: str, val_fraction: float, force: bool = False) -> None:
     """
     Download and format the size-aware SmolTalk chat SFT backbone.
 
@@ -1096,8 +1096,8 @@ def prepare_chat(size: str, val_fraction: float) -> None:
     train_path = out_dir / "train.jsonl"
     val_path   = out_dir / "val.jsonl"
 
-    if train_path.exists() and val_path.exists():
-        log.info(f"Chat SFT data already exists at {out_dir}")
+    if train_path.exists() and val_path.exists() and not force:
+        log.info(f"Chat SFT data already exists at {out_dir}. Use --force to regenerate.")
         return
 
     dataset_name = policy["dataset"]
@@ -1155,9 +1155,11 @@ def prepare_chat(size: str, val_fraction: float) -> None:
             handcrafted_records,
             max_records=handcrafted_max,
         )
-    records = selected_backbone + handcrafted_records
+    manual_control_records = build_manual_instruction_control_records(repeats=5 if size == "mini" else 20)
+    records = selected_backbone + handcrafted_records + manual_control_records
 
     log.info(f"Added generated response-control chat examples: {len(handcrafted_records):,}")
+    log.info(f"Added manual instruction-control chat examples: {len(manual_control_records):,}")
     log.info(f"Processed: {len(records):,} total chat SFT records")
 
     n_val = max(1000, int(len(records) * val_fraction))
@@ -1175,7 +1177,7 @@ def prepare_chat(size: str, val_fraction: float) -> None:
 
 # ── Code SFT — Magicoder-OSS-Instruct ─────────────────────────────────────────
 
-def prepare_code(size: str, val_fraction: float) -> None:
+def prepare_code(size: str, val_fraction: float, force: bool = False) -> None:
     """
     Download and format Magicoder-OSS-Instruct-75K for code SFT.
 
@@ -1194,8 +1196,8 @@ def prepare_code(size: str, val_fraction: float) -> None:
     train_path = out_dir / "train.jsonl"
     val_path   = out_dir / "val.jsonl"
 
-    if train_path.exists() and val_path.exists():
-        log.info(f"Code SFT data already exists at {out_dir}")
+    if train_path.exists() and val_path.exists() and not force:
+        log.info(f"Code SFT data already exists at {out_dir}. Use --force to regenerate.")
         return
 
     log.info("Loading Magicoder-OSS-Instruct-75K...")
@@ -1369,6 +1371,7 @@ def main():
             "350m=full smol-smoltalk, 1b=full smoltalk."
         ),
     )
+    parser.add_argument("--force", action="store_true", help="Regenerate selected SFT data even if train/val files already exist.")
     args = parser.parse_args()
     os.environ["SIZE"] = args.size
 
@@ -1382,12 +1385,12 @@ def main():
             f"({policy['dataset']}, size={args.size}, fraction={policy['fraction']:.2f}) ==="
         )
         frac = args.val_fraction if args.val_fraction is not None else DEFAULT_VAL_FRACTION["chat"]
-        prepare_chat(size=args.size, val_fraction=frac)
+        prepare_chat(size=args.size, val_fraction=frac, force=args.force)
 
     if args.stage in ("code", "both"):
         log.info("=== Preparing Code SFT data (Magicoder-OSS-Instruct) ===")
         frac = args.val_fraction if args.val_fraction is not None else DEFAULT_VAL_FRACTION["code"]
-        prepare_code(size=args.size, val_fraction=frac)
+        prepare_code(size=args.size, val_fraction=frac, force=args.force)
 
     log.info("SFT data preparation complete.")
     log.info(f"Output: {SFT_DIR}")

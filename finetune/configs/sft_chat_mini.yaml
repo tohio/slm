@@ -1,4 +1,4 @@
-name: slm-mini-chat
+name: slm-mini-instruct
 wandb_project: slm-mini
 model:
   base_model_path: $RESULTS_DIR/runs/mini/pretrain/final

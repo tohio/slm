@@ -1,4 +1,4 @@
-name: slm-1b-chat
+name: slm-1b-instruct
 wandb_project: slm
 
 model:

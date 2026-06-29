@@ -11,13 +11,14 @@ AutoModelForCausalLM so the model can be loaded anywhere with:
         "<username>/slm-125m", trust_remote_code=True,
     )
 
-Three variants are exported per model size:
+Four variants are exported per model size:
 
     Variant     Checkpoint                                    Hub repo
     --------    ----------                                    --------
     base        results/runs/{size}/pretrain/final                      <user>/slm-{size}
-    instruct    results/runs/{size}/sft_code_completion/final            <user>/slm-{size}-instruct
-    chat        results/runs/{size}/dpo/final                  <user>/slm-{size}-chat
+    instruct    results/runs/{size}/sft_chat/final                      <user>/slm-{size}-instruct
+    chat        results/runs/{size}/dpo/final                           <user>/slm-{size}-chat
+    code        results/runs/{size}/sft_code/final                      <user>/slm-{size}-code
 
 Data mix and token targets are imported from config/data_mix.py — the
 single source of truth for design intent. The model card additionally
@@ -100,17 +101,24 @@ VARIANTS: dict[str, dict] = {
         "pipeline_tag":  "text-generation",
     },
     "instruct": {
-        "checkpoint":    lambda size: RESULTS_DIR / "runs" / size / "sft_code_completion" / "final",
-        "eval_dir":      lambda size: RESULTS_DIR / "runs" / size / "eval" / "sft_code_completion",
+        "checkpoint":    lambda size: RESULTS_DIR / "runs" / size / "sft_chat" / "final",
+        "eval_dir":      lambda size: RESULTS_DIR / "runs" / size / "eval" / "sft_chat",
         "hub_suffix":    "-instruct",
-        "description":   "instruction-tuned via chat SFT + code SFT",
+        "description":   "instruction-tuned via chat SFT + response-control",
         "pipeline_tag":  "text-generation",
     },
     "chat": {
         "checkpoint":    lambda size: RESULTS_DIR / "runs" / size / "dpo" / "final",
         "eval_dir":      lambda size: RESULTS_DIR / "runs" / size / "eval" / "dpo",
         "hub_suffix":    "-chat",
-        "description":   "chat-aligned via SFT + DPO preference learning",
+        "description":   "chat-aligned from instruct via general DPO preference learning",
+        "pipeline_tag":  "text-generation",
+    },
+    "code": {
+        "checkpoint":    lambda size: RESULTS_DIR / "runs" / size / "sft_code" / "final",
+        "eval_dir":      lambda size: RESULTS_DIR / "runs" / size / "eval" / "sft_code",
+        "hub_suffix":    "-code",
+        "description":   "code-specialized from instruct via code SFT",
         "pipeline_tag":  "text-generation",
     },
 }
@@ -368,16 +376,20 @@ Use [`{HF_USERNAME}/slm-{size}-instruct`](https://huggingface.co/{HF_USERNAME}/s
 [`{HF_USERNAME}/slm-{size}-chat`](https://huggingface.co/{HF_USERNAME}/slm-{size}-chat) for aligned conversation.
 """,
         "instruct": f"""\
-This is the **instruct** variant — the base model supervised fine-tuned on chat and code instruction datasets.
-It follows instructions reliably and can generate Python code.
+This is the **instruct** variant — the base model supervised fine-tuned on general chat and response-control instruction datasets.
+It is the sibling base for both the general chat-DPO branch and the code-specialized branch.
 Use [`{HF_USERNAME}/slm-{size}-chat`](https://huggingface.co/{HF_USERNAME}/slm-{size}-chat) for the DPO-aligned version preferred for open-ended conversation.
 Use [`{HF_USERNAME}/slm-{size}`](https://huggingface.co/{HF_USERNAME}/slm-{size}) for the raw base model.
 """,
         "chat": f"""\
-This is the **chat** variant — the instruct model further aligned via Direct Preference Optimization (DPO).
+This is the **chat** variant — the instruct model further aligned via general Direct Preference Optimization (DPO).
 This is the recommended variant for conversational and assistant use cases.
 Use [`{HF_USERNAME}/slm-{size}-instruct`](https://huggingface.co/{HF_USERNAME}/slm-{size}-instruct) for the SFT-only version.
 Use [`{HF_USERNAME}/slm-{size}`](https://huggingface.co/{HF_USERNAME}/slm-{size}) for the raw base model.
+""",
+        "code": f"""\
+This is the **code** variant — the instruct model further specialized with code SFT.
+Use [`{HF_USERNAME}/slm-{size}-chat`](https://huggingface.co/{HF_USERNAME}/slm-{size}-chat) for general assistant use.
 """,
     }[variant]
 
@@ -400,7 +412,6 @@ Use [`{HF_USERNAME}/slm-{size}`](https://huggingface.co/{HF_USERNAME}/slm-{size}
 |---|---|---|
 | Chat SFT | [OpenHermes-2.5](https://huggingface.co/datasets/teknium/OpenHermes-2.5) | ~1M examples |
 | Response-control SFT | Generated locally by `finetune/data/response_control.py` | 5K examples |
-| Code SFT | [Magicoder-OSS-Instruct-75K](https://huggingface.co/datasets/ise-uiuc/Magicoder-OSS-Instruct-75K) + handcrafted body-only completions | ~75K examples + small handcrafted set |
 """,
         "chat": f"""\
 **Pretraining corpus** — {token_tgt} curation target blended across the following sources:
@@ -413,8 +424,19 @@ Use [`{HF_USERNAME}/slm-{size}`](https://huggingface.co/{HF_USERNAME}/slm-{size}
 |---|---|---|
 | Chat SFT | [OpenHermes-2.5](https://huggingface.co/datasets/teknium/OpenHermes-2.5) | ~1M examples |
 | Response-control SFT | Generated locally by `finetune/data/response_control.py` | 5K examples |
-| Code SFT | [Magicoder-OSS-Instruct-75K](https://huggingface.co/datasets/ise-uiuc/Magicoder-OSS-Instruct-75K) + handcrafted body-only completions | ~75K examples + small handcrafted set |
-| DPO alignment | [Anthropic/hh-rlhf](https://huggingface.co/datasets/Anthropic/hh-rlhf) + [Intel/orca_dpo_pairs](https://huggingface.co/datasets/Intel/orca_dpo_pairs) + [argilla/dpo-mix-7k](https://huggingface.co/datasets/argilla/dpo-mix-7k) | ~60K pairs after filtering |
+| DPO alignment | [HuggingFaceH4/ultrafeedback_binarized](https://huggingface.co/datasets/HuggingFaceH4/ultrafeedback_binarized) + local general behavior pairs | prepared by `alignment/data/prepare_dpo.py` |
+""",
+        "code": f"""\
+**Pretraining corpus** — {token_tgt} curation target blended across the following sources:
+
+{pretrain_table}
+
+**Fine-tuning**
+
+| Stage | Dataset | Size |
+|---|---|---|
+| Chat SFT | General chat SFT + response-control | parent checkpoint: instruct |
+| Code SFT | Magicoder-OSS-Instruct-75K + handcrafted body-only completions | code-specialized branch |
 """,
     }[variant]
 
@@ -454,8 +476,8 @@ built entirely from scratch, from raw web data through to a production-ready ali
 | Variant | Hub | Description |
 |---|---|---|
 | Base | [{HF_USERNAME}/slm-{size}](https://huggingface.co/{HF_USERNAME}/slm-{size}) | Pretrained only |
-| Instruct | [{HF_USERNAME}/slm-{size}-instruct](https://huggingface.co/{HF_USERNAME}/slm-{size}-instruct) | Chat + response-control + code SFT |
-| Chat | [{HF_USERNAME}/slm-{size}-chat](https://huggingface.co/{HF_USERNAME}/slm-{size}-chat) | SFT + DPO aligned |
+| Instruct | [{HF_USERNAME}/slm-{size}-instruct](https://huggingface.co/{HF_USERNAME}/slm-{size}-instruct) | Chat SFT + response-control |
+| Chat | [{HF_USERNAME}/slm-{size}-chat](https://huggingface.co/{HF_USERNAME}/slm-{size}-chat) | Instruct + general DPO |
 
 ## Architecture
 
@@ -707,8 +729,7 @@ def _ensure_remote_code_auto_map(checkpoint: Path) -> None:
 
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
-        f.write("
-")
+        f.write("\n")
 
     log.info("Injected root remote-code auto_map into config.json")
 

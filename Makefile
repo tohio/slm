@@ -96,7 +96,7 @@ endif
 # Note: assumes configs exist at $(PRETRAIN_CONFIG), $(SFT_CHAT_CONFIG), etc.
 # Run `make config-gen` first to auto-generate them tuned for the current GPU.
 
-all: curate validate tokenizer tokenize pretrain prepare-sft sft sft-code prepare-code-completion sft-code-completion prepare-dpo dpo
+all: curate validate tokenizer tokenize pretrain prepare-sft sft prepare-dpo dpo sft-code prepare-code-completion sft-code-completion
 	@echo "Pipeline complete for slm-$(SIZE) on $(GPUS) GPU(s)"
 
 # ── Stage 1: Data curation ────────────────────────────────────────────────────
@@ -280,7 +280,7 @@ prepare-sft:
 	$(PYTHON) finetune/data/prepare_sft.py --stage both --size $(SIZE)
 
 sft:
-	@echo "==> Stage 5b: Chat SFT ($(SIZE), $(GPUS) GPU(s), config=$(SFT_CHAT_CONFIG))"
+	@echo "==> Stage 5b: Instruct SFT ($(SIZE), $(GPUS) GPU(s), config=$(SFT_CHAT_CONFIG))"
 	$(ACCELERATE) finetune/train_sft.py \
 		--config $(SFT_CHAT_CONFIG)
 
@@ -290,7 +290,7 @@ sft-resume:
 		--resume
 
 sft-mini:
-	@echo "==> Stage 5b: Mini chat SFT (pipeline validation)"
+	@echo "==> Stage 5b: Mini instruct SFT (pipeline validation)"
 	$(ACCELERATE) finetune/train_sft.py \
 		--config finetune/configs/sft_chat_mini.yaml
 
@@ -361,11 +361,15 @@ eval-base:
 
 eval-instruct:
 	@echo "==> Stage 7: Evaluation (instruct, $(SIZE))"
-	$(PYTHON) eval/eval.py --model results/runs/$(SIZE)/sft_code/final
+	$(PYTHON) eval/eval.py --model results/runs/$(SIZE)/sft_chat/final
 
 eval-chat:
 	@echo "==> Stage 7: Evaluation (chat, $(SIZE))"
 	$(PYTHON) eval/eval.py --model results/runs/$(SIZE)/dpo/final
+
+eval-code:
+	@echo "==> Stage 7: Evaluation (code, $(SIZE))"
+	$(PYTHON) eval/eval.py --model results/runs/$(SIZE)/sft_code/final
 
 # Behavior sanity eval targets.
 # These are deterministic generation checks for factuality, task format,
@@ -382,7 +386,7 @@ eval-sanity-base:
 eval-sanity-instruct:
 	@echo "==> Stage 7: Sanity evaluation (instruct, $(SIZE))"
 	$(PYTHON) eval/sanity_eval.py \
-		--model results/runs/$(SIZE)/sft_code/final \
+		--model results/runs/$(SIZE)/sft_chat/final \
 		--json-out results/runs/$(SIZE)/eval/sanity/instruct.json
 
 eval-sanity-chat:
@@ -391,12 +395,18 @@ eval-sanity-chat:
 		--model results/runs/$(SIZE)/dpo/final \
 		--json-out results/runs/$(SIZE)/eval/sanity/chat.json
 
+eval-sanity-code:
+	@echo "==> Stage 7: Sanity evaluation (code, $(SIZE))"
+	$(PYTHON) eval/sanity_eval.py \
+		--model results/runs/$(SIZE)/sft_code/final \
+		--json-out results/runs/$(SIZE)/eval/sanity/code.json
+
 eval-mini:
 	@echo "==> Stage 7: Mini evaluation (pipeline validation)"
 	$(PYTHON) eval/eval.py --model results/runs/$(SIZE)/dpo/final --tasks hellaswag --limit 50 --batch-size 4
 # ── Stage 8: Export ───────────────────────────────────────────────────────────
 
-export: export-base export-instruct export-chat
+export: export-base export-instruct export-chat export-code
 	@echo "All variants exported for slm-$(SIZE)"
 
 export-base:
@@ -410,6 +420,10 @@ export-instruct:
 export-chat:
 	@echo "==> Stage 8: Export chat model ($(SIZE))"
 	$(PYTHON) export/export.py --size $(SIZE) --variant chat
+
+export-code:
+	@echo "==> Stage 8: Export code model ($(SIZE))"
+	$(PYTHON) export/export.py --size $(SIZE) --variant code
 
 # ── Stage 10: Serve ───────────────────────────────────────────────────────────
 

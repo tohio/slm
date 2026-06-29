@@ -83,6 +83,8 @@ MAX_TOTAL_TOKENS = 2048
 # drowned out by the large upstream preference datasets.
 HANDCRAFTED_BEHAVIOR_REPEAT = 30
 
+GENERAL_DPO_EXCLUDED_TYPES = {"code_output", "function_completion"}
+
 
 def make_prompt(system: str, user: str) -> list[dict]:
     """Return prompt as a list of message dicts for trl conversational format."""
@@ -549,6 +551,36 @@ def prepare_targeted_behavior_dpo() -> list[dict]:
             "concise_exact_answer",
         ),
         (
+            "What is 12 - 5?",
+            "7",
+            "12 - 5 is 3.",
+            "concise_exact_answer",
+        ),
+        (
+            "What is 20 / 5?",
+            "4",
+            "20 / 5 is 10.",
+            "concise_exact_answer",
+        ),
+        (
+            "Which is larger: 0.8 or 0.75?",
+            "0.8",
+            "0.75 is larger because 75 is greater than 8.",
+            "comparison",
+        ),
+        (
+            "Repeat cat exactly three times.",
+            "cat cat cat",
+            "The word cat repeated exactly three times would be cat.",
+            "format_following",
+        ),
+        (
+            "List exactly three colors.",
+            "red, blue, green",
+            "The first line contains the number of colors. Each following line contains one color.",
+            "format_following",
+        ),
+        (
             "How many states are in the United States?",
             "There are 50 states in the United States.",
             "In the United States, there are two states: New York and California.",
@@ -638,7 +670,12 @@ def prepare_targeted_behavior_dpo() -> list[dict]:
             "dpo_type": dpo_type,
         })
 
-    log.info(f"  targeted_behavior: {len(records):,} kept")
+    before_filter = len(records)
+    records = [rec for rec in records if rec.get("dpo_type") not in GENERAL_DPO_EXCLUDED_TYPES]
+    log.info(
+        f"  targeted_behavior: {len(records):,} kept "
+        f"({before_filter - len(records):,} code-specific pairs excluded from general DPO)"
+    )
     return records
 
 
