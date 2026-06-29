@@ -69,7 +69,7 @@ load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from config.paths import sft_chat_data_dir, sft_code_data_dir, BASE_DATA_DIR
+from config.paths import sft_instruct_data_dir, sft_code_data_dir, BASE_DATA_DIR
 
 from finetune.data.response_control import build_response_control_records
 
@@ -1092,7 +1092,7 @@ def prepare_chat(size: str, val_fraction: float, force: bool = False) -> None:
 
     policy = smoltalk_policy(size)
 
-    out_dir    = sft_chat_data_dir(size)
+    out_dir    = sft_instruct_data_dir(size)
     train_path = out_dir / "train.jsonl"
     val_path   = out_dir / "val.jsonl"
 
@@ -1348,7 +1348,7 @@ def main():
     parser = argparse.ArgumentParser(description="Prepare SFT datasets")
     parser.add_argument(
         "--stage",
-        choices=["chat", "code", "both"],
+        choices=["instruct", "chat", "code", "both"],
         default="both",
         help="Which SFT stage to prepare",
     )
@@ -1378,7 +1378,7 @@ def main():
     global SFT_DIR
     SFT_DIR = DATA_DIR / "runs" / args.size
 
-    if args.stage in ("chat", "both"):
+    if args.stage in ("instruct", "chat", "both"):
         policy = smoltalk_policy(args.size)
         log.info(
             "=== Preparing Chat SFT data "

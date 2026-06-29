@@ -82,7 +82,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 DATA_DIR    = Path(os.environ.get("DATA_DIR", "data"))
-from config.paths import tokenizer_dir, sft_chat_dir, sft_code_dir, BASE_RESULTS_DIR
+from config.paths import tokenizer_dir, sft_instruct_dir, sft_code_dir, BASE_RESULTS_DIR
 
 RESULTS_DIR = BASE_RESULTS_DIR
 

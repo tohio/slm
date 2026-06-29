@@ -81,7 +81,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 DATA_DIR    = Path(os.environ.get("DATA_DIR", "data"))
-from config.paths import tokenizer_dir, dpo_dir, BASE_RESULTS_DIR
+from config.paths import tokenizer_dir, dpo_chat_dir, BASE_RESULTS_DIR
 
 RESULTS_DIR = BASE_RESULTS_DIR
 
@@ -300,7 +300,7 @@ def main():
 
     cfg             = load_config(args.config)
     model_name      = cfg["name"]
-    output_dir      = dpo_dir(_size_from_model_name(model_name))
+    output_dir      = dpo_chat_dir(_size_from_model_name(model_name))
     base_model_path = args.base_model or Path(
         os.path.expandvars(cfg["model"]["base_model_path"])
     )

@@ -131,7 +131,7 @@ the full surface area of the lm_eval CLI directly.
 # Standard invocation — all lm_eval CLI flags work
 .venv/bin/python scripts/run_lm_eval.py \
   --model hf \
-  --model_args pretrained=results/slm-125m-chat-code/final,dtype=bfloat16 \
+  --model_args pretrained=results/slm-125m-code/final,dtype=bfloat16 \
   --tasks humaneval \
   --num_fewshot 0 \
   --batch_size 1 \
@@ -143,7 +143,7 @@ the full surface area of the lm_eval CLI directly.
 # Full eval suite against the DPO checkpoint
 .venv/bin/python scripts/run_lm_eval.py \
   --model hf \
-  --model_args pretrained=results/slm-125m-dpo/final,dtype=bfloat16 \
+  --model_args pretrained=results/slm-125m-dpo_chat/final,dtype=bfloat16 \
   --tasks hellaswag,arc_easy,arc_challenge,mmlu,truthfulqa,humaneval \
   --batch_size 1 \
   --apply_chat_template \

@@ -19,7 +19,7 @@ results/slm-{size}-chat/final
 Stage 2: Code SFT (Magicoder-OSS-Instruct)
         │
         ▼
-results/slm-{size}-chat-code/final
+results/slm-{size}-code/final
 ```
 
 ---
@@ -59,19 +59,19 @@ The response-control examples are generated locally by `finetune/data/response_c
 
 ```bash
 # 125M
-python finetune/train_sft.py --config finetune/configs/sft_chat_125m.yaml
+python finetune/train_sft.py --config finetune/configs/sft_instruct_125m.yaml
 
 # 350M
-python finetune/train_sft.py --config finetune/configs/sft_chat_350m.yaml
+python finetune/train_sft.py --config finetune/configs/sft_instruct_350m.yaml
 
 # 1B
-python finetune/train_sft.py --config finetune/configs/sft_chat_1b.yaml
+python finetune/train_sft.py --config finetune/configs/sft_instruct_1b.yaml
 
 # Multi-GPU
-accelerate launch finetune/train_sft.py --config finetune/configs/sft_chat_125m.yaml
+accelerate launch finetune/train_sft.py --config finetune/configs/sft_instruct_125m.yaml
 
 # Resume
-python finetune/train_sft.py --config finetune/configs/sft_chat_125m.yaml --resume
+python finetune/train_sft.py --config finetune/configs/sft_instruct_125m.yaml --resume
 ```
 
 **Step 3 — Code SFT**
@@ -89,10 +89,10 @@ python finetune/train_sft.py --config finetune/configs/sft_code_1b.yaml
 ```
 finetune/
 ├── configs/
-│   ├── sft_chat_125m.yaml    chat SFT — 125M, LR=1e-5
-│   ├── sft_chat_350m.yaml    chat SFT — 350M, LR=8e-6
-│   ├── sft_chat_1b.yaml      chat SFT — 1B,   LR=5e-6
-│   ├── sft_chat_mini.yaml    chat SFT — mini pipeline smoke test
+│   ├── sft_instruct_125m.yaml    chat SFT — 125M, LR=1e-5
+│   ├── sft_instruct_350m.yaml    chat SFT — 350M, LR=8e-6
+│   ├── sft_instruct_1b.yaml      chat SFT — 1B,   LR=5e-6
+│   ├── sft_instruct_mini.yaml    chat SFT — mini pipeline smoke test
 │   ├── sft_code_125m.yaml    code SFT — 125M, LR=5e-6
 │   ├── sft_code_350m.yaml    code SFT — 350M, LR=3e-6
 │   ├── sft_code_1b.yaml      code SFT — 1B,   LR=2e-6
@@ -109,9 +109,9 @@ finetune/
 
 | Config | Base model | LR | Epochs | Micro batch | Grad accum | Seq len | Grad ckpt |
 |---|---|---|---|---|---|---|---|
-| `sft_chat_125m` | `slm-125m/final` | 1e-5 | 2 | 4 | 4 | 2048 | No |
-| `sft_chat_350m` | `slm-350m/final` | 8e-6 | 2 | 2 | 8 | 2048 | No |
-| `sft_chat_1b` | `slm-1b/final` | 5e-6 | 2 | 1 | 16 | 4096 | Yes |
+| `sft_instruct_125m` | `slm-125m/final` | 1e-5 | 2 | 4 | 4 | 2048 | No |
+| `sft_instruct_350m` | `slm-350m/final` | 8e-6 | 2 | 2 | 8 | 2048 | No |
+| `sft_instruct_1b` | `slm-1b/final` | 5e-6 | 2 | 1 | 16 | 4096 | Yes |
 | `sft_code_125m` | `slm-125m-chat/final` | 5e-6 | 2 | 4 | 4 | 2048 | No |
 | `sft_code_350m` | `slm-350m-chat/final` | 3e-6 | 2 | 2 | 8 | 2048 | No |
 | `sft_code_1b` | `slm-1b-chat/final` | 2e-6 | 2 | 1 | 16 | 4096 | Yes |
@@ -162,7 +162,7 @@ results/
 │   ├── checkpoint-500/
 │   ├── checkpoint-1000/
 │   └── final/                best checkpoint (lowest eval loss)
-├── slm-125m-chat-code/
+├── slm-125m-code/
 │   └── final/
 ├── slm-350m-chat/
 │   └── final/

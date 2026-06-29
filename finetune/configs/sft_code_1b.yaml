@@ -1,15 +1,12 @@
 name: slm-1b-code
 wandb_project: slm
-
 model:
-  base_model_path: $RESULTS_DIR/runs/1b/sft_chat/final
+  base_model_path: $RESULTS_DIR/runs/1b/sft_instruct/final
   max_seq_length: 4096
-
 data:
   train_path: $DATA_DIR/runs/1b/sft_code/train.jsonl
-  val_path:   $DATA_DIR/runs/1b/sft_code/val.jsonl
+  val_path: $DATA_DIR/runs/1b/sft_code/val.jsonl
   packing: false
-
 training:
   warmup_ratio_recipe: 0.03
   epochs: 2
@@ -29,8 +26,7 @@ training:
   seed: 42
   lr_scheduler: cosine
   report_to:
-    - wandb
-
+  - wandb
 optimizer:
   lr: 2.5e-06
   weight_decay: 0.01

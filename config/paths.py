@@ -39,8 +39,13 @@ def tokenized_dir(size: str) -> Path:
     return data_run_dir(size) / "tokenized"
 
 
+def sft_instruct_data_dir(size: str) -> Path:
+    return data_run_dir(size) / "sft_instruct"
+
+
 def sft_chat_data_dir(size: str) -> Path:
-    return data_run_dir(size) / "sft_chat"
+    # Backwards-compatible alias. New code should use sft_instruct_data_dir().
+    return sft_instruct_data_dir(size)
 
 
 def sft_instruct_data_dir(size: str) -> Path:
@@ -52,8 +57,13 @@ def sft_code_data_dir(size: str) -> Path:
     return data_run_dir(size) / "sft_code"
 
 
+def dpo_chat_data_dir(size: str) -> Path:
+    return data_run_dir(size) / "dpo_chat"
+
+
 def dpo_data_dir(size: str) -> Path:
-    return data_run_dir(size) / "dpo"
+    # Backwards-compatible alias. New code should use dpo_chat_data_dir().
+    return dpo_chat_data_dir(size)
 
 
 def dpo_chat_data_dir(size: str) -> Path:
@@ -73,8 +83,13 @@ def pretrain_dir(size: str) -> Path:
     return results_run_dir(size) / "pretrain"
 
 
+def sft_instruct_dir(size: str) -> Path:
+    return results_run_dir(size) / "sft_instruct"
+
+
 def sft_chat_dir(size: str) -> Path:
-    return results_run_dir(size) / "sft_chat"
+    # Backwards-compatible alias. New code should use sft_instruct_dir().
+    return sft_instruct_dir(size)
 
 
 def sft_instruct_dir(size: str) -> Path:
@@ -86,8 +101,13 @@ def sft_code_dir(size: str) -> Path:
     return results_run_dir(size) / "sft_code"
 
 
+def dpo_chat_dir(size: str) -> Path:
+    return results_run_dir(size) / "dpo_chat"
+
+
 def dpo_dir(size: str) -> Path:
-    return results_run_dir(size) / "dpo"
+    # Backwards-compatible alias. New code should use dpo_chat_dir().
+    return dpo_chat_dir(size)
 
 
 def dpo_chat_dir(size: str) -> Path:

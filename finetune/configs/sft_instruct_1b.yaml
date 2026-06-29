@@ -1,21 +1,18 @@
-name: slm-350m-instruct
+name: slm-1b-instruct
 wandb_project: slm
-
 model:
-  base_model_path: $RESULTS_DIR/runs/350m/pretrain/final
-  max_seq_length: 2048
-
+  base_model_path: $RESULTS_DIR/runs/1b/pretrain/final
+  max_seq_length: 4096
 data:
-  train_path: $DATA_DIR/runs/350m/sft_chat/train.jsonl
-  val_path:   $DATA_DIR/runs/350m/sft_chat/val.jsonl
+  train_path: $DATA_DIR/runs/1b/sft_instruct/train.jsonl
+  val_path: $DATA_DIR/runs/1b/sft_instruct/val.jsonl
   packing: false
-
 training:
   warmup_ratio_recipe: 0.03
   epochs: 2
-  micro_batch_size: 16
-  eval_micro_batch_size: 8
-  gradient_accumulation_steps: 8
+  micro_batch_size: 4
+  eval_micro_batch_size: 2
+  gradient_accumulation_steps: 32
   precision: bf16
   gradient_clip_val: 1.0
   gradient_checkpointing: false
@@ -29,10 +26,9 @@ training:
   seed: 42
   lr_scheduler: cosine
   report_to:
-    - wandb
-
+  - wandb
 optimizer:
-  lr: 8e-06
+  lr: 5e-06
   weight_decay: 0.01
   beta1: 0.9
   beta2: 0.98

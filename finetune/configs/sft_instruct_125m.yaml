@@ -1,15 +1,12 @@
 name: slm-125m-instruct
 wandb_project: slm
-
 model:
   base_model_path: $RESULTS_DIR/runs/125m/pretrain/final
   max_seq_length: 2048
-
 data:
-  train_path: $DATA_DIR/runs/125m/sft_chat/train.jsonl
-  val_path:   $DATA_DIR/runs/125m/sft_chat/val.jsonl
+  train_path: $DATA_DIR/runs/125m/sft_instruct/train.jsonl
+  val_path: $DATA_DIR/runs/125m/sft_instruct/val.jsonl
   packing: false
-
 training:
   warmup_ratio_recipe: 0.03
   epochs: 2
@@ -29,8 +26,7 @@ training:
   seed: 42
   lr_scheduler: cosine
   report_to:
-    - wandb
-
+  - wandb
 optimizer:
   lr: 1e-05
   weight_decay: 0.01

@@ -1,17 +1,18 @@
-name: slm-mini-code
+name: slm-mini-chat
 wandb_project: slm-mini
 model:
   base_model_path: $RESULTS_DIR/runs/mini/sft_instruct/final
   max_seq_length: 1024
+dpo:
+  beta: 0.1
+  max_prompt_length: 512
 data:
-  train_path: $DATA_DIR/runs/mini/sft_code/train.jsonl
-  val_path: $DATA_DIR/runs/mini/sft_code/val.jsonl
-  packing: false
-  max_samples: 500
+  train_path: $DATA_DIR/runs/mini/dpo_chat/train.jsonl
+  val_path: $DATA_DIR/runs/mini/dpo_chat/val.jsonl
 training:
   max_steps: 50
-  warmup_ratio_recipe: 0.03
-  micro_batch_size: 2
+  warmup_ratio_recipe: 0.05
+  micro_batch_size: 1
   gradient_accumulation_steps: 2
   precision: bf16
   gradient_clip_val: 1.0
@@ -26,7 +27,7 @@ training:
   report_to:
   - wandb
 optimizer:
-  lr: 5.0e-06
+  lr: 5.0e-07
   weight_decay: 0.01
   beta1: 0.9
   beta2: 0.98

@@ -45,7 +45,7 @@ Run against a local checkpoint:
 
 ```bash
 python eval/sanity_eval.py \
-  --model results/slm-125m-dpo/final \
+  --model results/slm-125m-dpo_chat/final \
   --json-out results/eval/sanity/slm-125m-dpo.json
 ```
 
@@ -78,32 +78,32 @@ make eval SIZE=125m
 make eval-sanity SIZE=125m
 
 # Or directly: standard benchmark eval
-python eval/eval.py --model results/slm-125m-dpo/final
+python eval/eval.py --model results/slm-125m-dpo_chat/final
 
 # Or directly: behavior sanity eval
-python eval/sanity_eval.py --model results/slm-125m-dpo/final
+python eval/sanity_eval.py --model results/slm-125m-dpo_chat/final
 
 # Quick benchmark subset (hellaswag + arc_easy + arc_challenge — faster, no code exec)
-python eval/eval.py --model results/slm-125m-dpo/final --tasks quick
+python eval/eval.py --model results/slm-125m-dpo_chat/final --tasks quick
 
 # Specific benchmark tasks
-python eval/eval.py --model results/slm-125m-dpo/final --tasks hellaswag,arc_easy,mmlu
+python eval/eval.py --model results/slm-125m-dpo_chat/final --tasks hellaswag,arc_easy,mmlu
 
 # Limit benchmark examples (smoke test)
-python eval/eval.py --model results/slm-125m-dpo/final --tasks quick --limit 100
+python eval/eval.py --model results/slm-125m-dpo_chat/final --tasks quick --limit 100
 
 # Override benchmark few-shot count for all tasks
-python eval/eval.py --model results/slm-125m-dpo/final --num-fewshot 0
+python eval/eval.py --model results/slm-125m-dpo_chat/final --num-fewshot 0
 
 # Override benchmark precision (default bfloat16)
-python eval/eval.py --model results/slm-125m-dpo/final --dtype float16
+python eval/eval.py --model results/slm-125m-dpo_chat/final --dtype float16
 
 # Debug a weird benchmark result by saving per-example inputs/outputs
-python eval/eval.py --model results/slm-125m-dpo/final --tasks mmlu --log-samples
+python eval/eval.py --model results/slm-125m-dpo_chat/final --tasks mmlu --log-samples
 
 # Save sanity eval results
 python eval/sanity_eval.py \
-  --model results/slm-125m-dpo/final \
+  --model results/slm-125m-dpo_chat/final \
   --json-out results/eval/sanity/slm-125m-dpo.json
 
 # Run sanity eval against the exported Hub model
@@ -113,11 +113,11 @@ python eval/sanity_eval.py \
 
 # Compare base vs aligned on standard benchmarks
 python eval/eval.py --model results/slm-125m/final       --tasks all
-python eval/eval.py --model results/slm-125m-dpo/final   --tasks all
+python eval/eval.py --model results/slm-125m-dpo_chat/final   --tasks all
 
 # Compare base vs aligned on sanity behavior
 python eval/sanity_eval.py --model results/slm-125m/final
-python eval/sanity_eval.py --model results/slm-125m-dpo/final
+python eval/sanity_eval.py --model results/slm-125m-dpo_chat/final
 ```
 
 `eval.py` exits with status 1 if any task fails, so it composes correctly with `make` and CI chains.
@@ -146,7 +146,7 @@ Results are saved to `results/eval/<model_name>/eval_<UTC_timestamp>Z.json`:
 results/eval/
 ├── slm-125m/
 │   └── eval_20260415_120000Z.json
-├── slm-125m-chat-code/
+├── slm-125m-code/
 │   └── eval_20260415_130000Z.json
 └── slm-125m-dpo/
     └── eval_20260415_140000Z.json

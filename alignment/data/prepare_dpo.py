@@ -59,7 +59,7 @@ load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from config.paths import dpo_data_dir, BASE_DATA_DIR
+from config.paths import dpo_chat_data_dir, BASE_DATA_DIR
 
 logging.basicConfig(
     level=logging.INFO,
@@ -69,7 +69,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 DATA_DIR = BASE_DATA_DIR
-DPO_DIR = dpo_data_dir(os.environ.get("SIZE", "125m"))
+DPO_DIR = dpo_chat_data_dir(os.environ.get("SIZE", "125m"))
 
 DEFAULT_SYSTEM = "You are a helpful, harmless, and honest assistant."
 
@@ -82,6 +82,22 @@ MAX_TOTAL_TOKENS = 2048
 # Repeat them in the DPO blend so targeted safety/restraint failures are not
 # drowned out by the large upstream preference datasets.
 HANDCRAFTED_BEHAVIOR_REPEAT = 30
+
+
+GENERAL_CHAT_DPO_EXCLUDED_TYPES = {"code_output", "function_completion"}
+
+
+def filter_general_chat_dpo_records(records: list[dict]) -> list[dict]:
+    """Drop code-specialized preference pairs from general chat DPO."""
+    kept = [
+        r for r in records
+        if r.get("dpo_type") not in GENERAL_CHAT_DPO_EXCLUDED_TYPES
+    ]
+    dropped = len(records) - len(kept)
+    if dropped:
+        log.info(f"General chat DPO filter: dropped {dropped:,} code-specialized pair(s)")
+    return kept
+
 
 GENERAL_DPO_EXCLUDED_TYPES = {"code_output", "function_completion"}
 
@@ -746,7 +762,7 @@ def main():
         args.val_fraction = min(args.val_fraction, 0.10)
 
     global DPO_DIR
-    DPO_DIR = dpo_data_dir(args.size)
+    DPO_DIR = dpo_chat_data_dir(args.size)
 
     train_path = DPO_DIR / "train.jsonl"
     val_path   = DPO_DIR / "val.jsonl"
@@ -788,6 +804,8 @@ def main():
             f"{len(handcrafted):,} base records × {HANDCRAFTED_BEHAVIOR_REPEAT} "
             f"= {len(handcrafted) * HANDCRAFTED_BEHAVIOR_REPEAT:,} records"
         )
+
+    all_records = filter_general_chat_dpo_records(all_records)
 
     log.info(f"Total records before length filter: {len(all_records):,}")
 

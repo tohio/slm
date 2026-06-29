@@ -7,8 +7,8 @@ Four variants are exported per model size, each to a separate Hub repository:
 | Variant | Checkpoint | Hub repo | Description |
 |---|---|---|---|
 | `base` | `results/slm-{size}/final` | `$HF_USERNAME/slm-{size}` | Pretrained only |
-| `instruct` | `results/slm-{size}-chat-code/final` | `$HF_USERNAME/slm-{size}-instruct` | Chat SFT + response-control |
-| `chat` | `results/slm-{size}-dpo/final` | `$HF_USERNAME/slm-{size}-chat` | Instruct + general DPO |
+| `instruct` | `results/slm-{size}-code/final` | `$HF_USERNAME/slm-{size}-instruct` | Chat SFT + response-control |
+| `chat` | `results/slm-{size}-dpo_chat/final` | `$HF_USERNAME/slm-{size}-chat` | Instruct + general DPO |
 
 ---
 
@@ -22,8 +22,8 @@ HF_USERNAME=<your-hub-username>    # required — export aborts if unset
 # Run evaluation before export — each variant's checkpoint is evaluated
 # separately, and the model card for each variant embeds its own scores.
 python eval/eval.py --model results/slm-125m/final
-python eval/eval.py --model results/slm-125m-chat-code/final
-python eval/eval.py --model results/slm-125m-dpo/final
+python eval/eval.py --model results/slm-125m-code/final
+python eval/eval.py --model results/slm-125m-dpo_chat/final
 # Or: make eval-all SIZE=125m
 ```
 

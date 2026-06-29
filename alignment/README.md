@@ -15,7 +15,7 @@ results/slm-{size}-instruct/final   (SFT model)
 DPO training (UltraFeedback binarized + local targeted preference pairs)
         │
         ▼
-results/slm-{size}-dpo/final         (aligned model)
+results/slm-{size}-dpo_chat/final         (aligned model)
 ```
 
 ---
@@ -69,19 +69,19 @@ python alignment/data/prepare_dpo.py --force
 
 ```bash
 # 125M
-python alignment/train_dpo.py --config alignment/configs/dpo_125m.yaml
+python alignment/train_dpo.py --config alignment/configs/dpo_chat_125m.yaml
 
 # 350M
-python alignment/train_dpo.py --config alignment/configs/dpo_350m.yaml
+python alignment/train_dpo.py --config alignment/configs/dpo_chat_350m.yaml
 
 # 1B
-python alignment/train_dpo.py --config alignment/configs/dpo_1b.yaml
+python alignment/train_dpo.py --config alignment/configs/dpo_chat_1b.yaml
 
 # Multi-GPU
-accelerate launch alignment/train_dpo.py --config alignment/configs/dpo_125m.yaml
+accelerate launch alignment/train_dpo.py --config alignment/configs/dpo_chat_125m.yaml
 
 # Resume
-python alignment/train_dpo.py --config alignment/configs/dpo_125m.yaml --resume
+python alignment/train_dpo.py --config alignment/configs/dpo_chat_125m.yaml --resume
 ```
 
 ---
@@ -91,10 +91,10 @@ python alignment/train_dpo.py --config alignment/configs/dpo_125m.yaml --resume
 ```
 alignment/
 ├── configs/
-│   ├── dpo_125m.yaml     DPO config — 125M, LR=5e-7, beta=0.1
-│   ├── dpo_350m.yaml     DPO config — 350M, LR=3e-7, beta=0.1
-│   ├── dpo_1b.yaml       DPO config — 1B,   LR=2e-7, beta=0.1
-│   └── dpo_mini.yaml     DPO config — mini pipeline smoke test
+│   ├── dpo_chat_125m.yaml     DPO config — 125M, LR=5e-7, beta=0.1
+│   ├── dpo_chat_350m.yaml     DPO config — 350M, LR=3e-7, beta=0.1
+│   ├── dpo_chat_1b.yaml       DPO config — 1B,   LR=2e-7, beta=0.1
+│   └── dpo_chat_mini.yaml     DPO config — mini pipeline smoke test
 ├── data/
 │   └── prepare_dpo.py    download, blend, and length-filter preference datasets
 └── train_dpo.py          trl DPOTrainer entry point

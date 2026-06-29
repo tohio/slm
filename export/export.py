@@ -17,7 +17,7 @@ Four variants are exported per model size:
     --------    ----------                                    --------
     base        results/runs/{size}/pretrain/final                      <user>/slm-{size}
     instruct    results/runs/{size}/sft_chat/final                      <user>/slm-{size}-instruct
-    chat        results/runs/{size}/dpo/final                           <user>/slm-{size}-chat
+    chat        results/runs/{size}/dpo_chat/final                           <user>/slm-{size}-chat
     code        results/runs/{size}/sft_code/final                      <user>/slm-{size}-code
 
 Data mix and token targets are imported from config/data_mix.py — the
@@ -968,6 +968,7 @@ Examples:
   python export/export.py --size 125m --variant base
   python export/export.py --size 125m --variant instruct
   python export/export.py --size 125m --variant chat
+  python export/export.py --size 125m --variant code
   python export/export.py --size 125m --variant chat --dry-run
         """,
     )
@@ -977,7 +978,7 @@ Examples:
         type=str,
         required=True,
         choices=list(VARIANTS.keys()),
-        help="base (pretrain only) | instruct (SFT) | chat (SFT + DPO)",
+        help="base | instruct | chat | code",
     )
     parser.add_argument("--model",   type=Path, default=None,
                         help="Override checkpoint path (defaults to variant mapping)")

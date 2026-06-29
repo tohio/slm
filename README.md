@@ -9,7 +9,7 @@ instruct = base + chat SFT + response-control
   └── code = instruct + code SFT
 ```
 
-General chat DPO starts from `results/runs/<size>/sft_chat/final`. Code SFT starts from the same instruct checkpoint and writes `results/runs/<size>/sft_code/final`.
+General chat DPO starts from `results/runs/<size>/sft_instruct/final`. Code SFT starts from the same instruct checkpoint and writes `results/runs/<size>/sft_code/final`.
 
 # slm
 
@@ -525,7 +525,7 @@ The committed configs are written for 1 GPU. For multi-GPU pretraining, scale th
 | Stage | Config location | Scaling fields |
 |---|---|---|
 | Pretrain | `pretrain/configs/gpt_{size}.yaml` | `gradient_accumulation_steps`, `max_steps` |
-| SFT chat | `finetune/configs/sft_chat_{size}.yaml` | `gradient_accumulation_steps` |
+| SFT chat | `finetune/configs/sft_instruct_{size}.yaml` | `gradient_accumulation_steps` |
 | SFT code | `finetune/configs/sft_code_{size}.yaml` | `gradient_accumulation_steps` |
 | DPO | `alignment/configs/dpo_{size}.yaml` | `gradient_accumulation_steps` |
 
@@ -537,8 +537,8 @@ SFT and DPO use `epochs` not `max_steps` — only `gradient_accumulation_steps` 
 
 ```bash
 make config-gen-pretrain SIZE=125m GPUS=8     # writes pretrain/configs/gpt_125m.yaml
-make config-gen-sft      SIZE=125m GPUS=8     # writes BOTH sft_chat and sft_code
-make config-gen-dpo      SIZE=125m GPUS=8     # writes alignment/configs/dpo_125m.yaml
+make config-gen-sft      SIZE=125m GPUS=8     # writes BOTH sft_instruct and sft_code
+make config-gen-dpo      SIZE=125m GPUS=8     # writes alignment/configs/dpo_chat_125m.yaml
 make config-gen          SIZE=125m GPUS=8     # convenience: all three
 ```
 
@@ -784,7 +784,7 @@ slang/context grounding.
 
 **Why staged post-training?** Post-training is split into independently evaluable stages so behavior regressions are visible immediately. General assistant SFT teaches broad instruction following; response-control SFT teaches appropriate answer depth, factual restraint, and clean stopping; code-generation and function-completion SFT teach the model to emit code when code is requested rather than merely explaining how to code. Preference alignment is applied only after SFT behavior is sane, and is filtered to prefer factual, task-matching, appropriately detailed responses.
 
-**Why per-variant eval targets?** `eval-base`, `eval-instruct`, and `eval-chat` evaluate the three checkpoints written by the pipeline (`results/slm-{size}/final`, `results/slm-{size}-chat-code/final`, `results/slm-{size}-dpo/final`). Running each one writes its own JSON output, which `export.py` then reads when building per-variant model cards on the Hub. A single combined `eval` target would either skip the base and instruct cards or require running them all in series at the end — splitting them out lets eval run inline with each pipeline stage.
+**Why per-variant eval targets?** `eval-base`, `eval-instruct`, and `eval-chat` evaluate the three checkpoints written by the pipeline (`results/slm-{size}/final`, `results/slm-{size}-code/final`, `results/slm-{size}-dpo_chat/final`). Running each one writes its own JSON output, which `export.py` then reads when building per-variant model cards on the Hub. A single combined `eval` target would either skip the base and instruct cards or require running them all in series at the end — splitting them out lets eval run inline with each pipeline stage.
 
 **Why 20 concrete data sources?** Distribution coverage. A model pretrained only on web scrape, even filtered, has characteristic weaknesses: poor factual recall on niche topics, no long-range coherence over book-length spans, weak technical/academic prose, weak math reasoning, weak Q+A structure, and weak code. The mix uses 13 non-code top-level sources for prose breadth, educational/explanatory text, arithmetic, QA/MCQ format, factual restraint, and task-code signal, plus 7 code sub-sources for code coverage from Nemotron code, raw files, curated functions, CC code pages, multi-language samples, notebooks, and NL-to-code intent pairs. See [curator/README.md](curator/README.md) for the full mix and sub-source rationale.
 

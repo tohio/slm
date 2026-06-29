@@ -32,9 +32,11 @@ _ACCELERATE = .venv/bin/accelerate
 
 CONFIG ?=
 PRETRAIN_CONFIG ?= $(if $(CONFIG),$(CONFIG),pretrain/configs/gpt_$(SIZE).yaml)
-SFT_CHAT_CONFIG ?= finetune/configs/sft_chat_$(SIZE).yaml
+SFT_INSTRUCT_CONFIG ?= finetune/configs/sft_instruct_$(SIZE).yaml
 SFT_CODE_CONFIG ?= finetune/configs/sft_code_$(SIZE).yaml
-DPO_CONFIG      ?= alignment/configs/dpo_$(SIZE).yaml
+DPO_CHAT_CONFIG ?= alignment/configs/dpo_chat_$(SIZE).yaml
+SFT_CHAT_CONFIG ?= $(SFT_INSTRUCT_CONFIG)
+DPO_CONFIG      ?= $(DPO_CHAT_CONFIG)
 
 ACCELERATE = $(_ACCELERATE) launch --num_processes $(GPUS) --num_machines 1 --mixed_precision bf16 --dynamo_backend no
 
@@ -81,9 +83,9 @@ endif
         tokenizer tokenizer-test tokenize artifacts-upload artifacts-download \
         config-gen config-gen-pretrain config-gen-sft config-gen-dpo \
         accel-gen-ddp accel-gen-fsdp \
-        pretrain pretrain-mini pretrain-smoke pretrain-resume reinit-embeds smoke-gen prepare-sft sft sft-mini sft-resume sft-code sft-code-mini sft-code-resume \
-        prepare-dpo dpo dpo-mini dpo-resume eval eval-base eval-instruct eval-chat eval-sanity eval-sanity-base eval-sanity-instruct eval-sanity-chat eval-mini serve serve-local \
-        export export-base export-instruct export-chat \
+        pretrain pretrain-mini pretrain-smoke pretrain-resume reinit-embeds smoke-gen prepare-sft sft sft-instruct sft-mini sft-instruct-mini sft-resume sft-instruct-resume sft-code sft-code-mini sft-code-resume \
+        prepare-dpo dpo-chat dpo-chat-resume dpo-chat-mini dpo dpo-mini dpo-resume eval eval-base eval-instruct eval-chat eval-code eval-sanity eval-sanity-base eval-sanity-instruct eval-sanity-chat eval-sanity-code eval-mini serve serve-local \
+        export export-base export-instruct export-chat export-code \
         setup setup-data-dir setup-gpu install install-gpu install-uv install-conda install-kenlm install-orjson \
         download-kenlm-model download-fasttext-model accelerate-config accelerate-config-single accelerate-config-multi \
         s3-upload s3-download s3-list \
@@ -280,19 +282,19 @@ prepare-sft:
 	$(PYTHON) finetune/data/prepare_sft.py --stage both --size $(SIZE)
 
 sft:
-	@echo "==> Stage 5b: Instruct SFT ($(SIZE), $(GPUS) GPU(s), config=$(SFT_CHAT_CONFIG))"
+	@echo "==> Stage 5b: Instruct SFT ($(SIZE), $(GPUS) GPU(s), config=$(SFT_INSTRUCT_CONFIG))"
 	$(ACCELERATE) finetune/train_sft.py \
-		--config $(SFT_CHAT_CONFIG)
+		--config $(SFT_INSTRUCT_CONFIG)
 
-sft-resume:
+sft-instruct-resume:
 	$(ACCELERATE) finetune/train_sft.py \
-		--config $(SFT_CHAT_CONFIG) \
+		--config $(SFT_INSTRUCT_CONFIG) \
 		--resume
 
 sft-mini:
 	@echo "==> Stage 5b: Mini instruct SFT (pipeline validation)"
 	$(ACCELERATE) finetune/train_sft.py \
-		--config finetune/configs/sft_chat_mini.yaml
+		--config finetune/configs/sft_instruct_mini.yaml
 
 sft-code:
 	@echo "==> Stage 5c: Code SFT ($(SIZE), $(GPUS) GPU(s), config=$(SFT_CODE_CONFIG))"
@@ -335,20 +337,26 @@ prepare-dpo:
 	@echo "==> Stage 6a: Prepare DPO data ($(SIZE))"
 	$(PYTHON) alignment/data/prepare_dpo.py --size $(SIZE)
 
-dpo:
-	@echo "==> Stage 6b: DPO alignment ($(SIZE), $(GPUS) GPU(s), config=$(DPO_CONFIG))"
+dpo-chat:
+	@echo "==> Stage 6b: Chat DPO alignment ($(SIZE), $(GPUS) GPU(s), config=$(DPO_CHAT_CONFIG))"
 	$(ACCELERATE) alignment/train_dpo.py \
-		--config $(DPO_CONFIG)
+		--config $(DPO_CHAT_CONFIG)
 
-dpo-resume:
+dpo-chat-resume:
 	$(ACCELERATE) alignment/train_dpo.py \
-		--config $(DPO_CONFIG) \
+		--config $(DPO_CHAT_CONFIG) \
 		--resume
 
-dpo-mini:
-	@echo "==> Stage 6b: Mini DPO (pipeline validation)"
+dpo-chat-mini:
+	@echo "==> Stage 6b: Mini chat DPO (pipeline validation)"
 	$(ACCELERATE) alignment/train_dpo.py \
-		--config alignment/configs/dpo_mini.yaml
+		--config alignment/configs/dpo_chat_mini.yaml
+
+dpo: dpo-chat
+
+dpo-resume: dpo-chat-resume
+
+dpo-mini: dpo-chat-mini
 
 # ── Stage 7: Evaluation ───────────────────────────────────────────────────────
 
@@ -365,11 +373,11 @@ eval-instruct:
 
 eval-chat:
 	@echo "==> Stage 7: Evaluation (chat, $(SIZE))"
-	$(PYTHON) eval/eval.py --model results/runs/$(SIZE)/dpo/final
+	$(PYTHON) eval/eval.py --model results/runs/$(SIZE)/dpo_chat/final
 
 eval-code:
 	@echo "==> Stage 7: Evaluation (code, $(SIZE))"
-	$(PYTHON) eval/eval.py --model results/runs/$(SIZE)/sft_code/final
+	$(PYTHON) eval/eval.py --model results/runs/$(SIZE)/sft_instruct/final
 
 # Behavior sanity eval targets.
 # These are deterministic generation checks for factuality, task format,
@@ -392,7 +400,7 @@ eval-sanity-instruct:
 eval-sanity-chat:
 	@echo "==> Stage 7: Sanity evaluation (chat, $(SIZE))"
 	$(PYTHON) eval/sanity_eval.py \
-		--model results/runs/$(SIZE)/dpo/final \
+		--model results/runs/$(SIZE)/dpo_chat/final \
 		--json-out results/runs/$(SIZE)/eval/sanity/chat.json
 
 eval-sanity-code:
@@ -403,10 +411,10 @@ eval-sanity-code:
 
 eval-mini:
 	@echo "==> Stage 7: Mini evaluation (pipeline validation)"
-	$(PYTHON) eval/eval.py --model results/runs/$(SIZE)/dpo/final --tasks hellaswag --limit 50 --batch-size 4
+	$(PYTHON) eval/eval.py --model results/runs/$(SIZE)/dpo_chat/final --tasks hellaswag --limit 50 --batch-size 4
 # ── Stage 8: Export ───────────────────────────────────────────────────────────
 
-export: export-base export-instruct export-chat export-code
+export: export-base export-instruct export-chat export-code export-code
 	@echo "All variants exported for slm-$(SIZE)"
 
 export-base:
