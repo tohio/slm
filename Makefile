@@ -31,7 +31,6 @@ PRETRAIN_CONFIG ?= $(if $(CONFIG),$(CONFIG),pretrain/configs/gpt_$(SIZE).yaml)
 SFT_INSTRUCT_CONFIG ?= finetune/configs/sft_instruct_$(SIZE).yaml
 SFT_CODE_CONFIG ?= finetune/configs/sft_code_$(SIZE).yaml
 DPO_CHAT_CONFIG ?= alignment/configs/dpo_chat_$(SIZE).yaml
-SFT_CHAT_CONFIG ?= $(SFT_INSTRUCT_CONFIG)
 DPO_CONFIG      ?= $(DPO_CHAT_CONFIG)
 
 ACCELERATE = $(_ACCELERATE) launch --num_processes $(GPUS) --num_machines 1 --mixed_precision bf16 --dynamo_backend no
@@ -91,7 +90,7 @@ endif
         clean clean-data clean-results clean-logs help
 
 # ── Full pipeline ──────────────────────────────────────────────────────────────
-# Note: assumes configs exist at $(PRETRAIN_CONFIG), $(SFT_CHAT_CONFIG), etc.
+# Note: assumes configs exist at $(PRETRAIN_CONFIG), $(SFT_INSTRUCT_CONFIG), etc.
 # Run `make config-gen` first to auto-generate them tuned for the current GPU.
 
 all: curate validate tokenizer tokenize pretrain prepare-sft sft-instruct prepare-dpo dpo-chat sft-code
@@ -194,7 +193,7 @@ config-gen-sft:
 		--size $(SIZE) \
 		--gpus $(GPUS) \
 		$(_MODE_FLAG) \
-		-o $(SFT_CHAT_CONFIG) \
+		-o $(SFT_INSTRUCT_CONFIG) \
 		--output-code $(SFT_CODE_CONFIG)
 
 config-gen-dpo:
@@ -751,4 +750,3 @@ restore-size-tokenizer:
 	mkdir -p "$(DATA_DIR)/tokenizer"
 	cp -a "$(DATA_DIR)/runs/$(SIZE)/tokenizer/." "$(DATA_DIR)/tokenizer/"
 	@echo "  Active tokenizer restored from $(DATA_DIR)/runs/$(SIZE)/tokenizer"
-

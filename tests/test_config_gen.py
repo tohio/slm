@@ -15,17 +15,17 @@ from config_gen.config_gen import (
     DPO_PROFILES,
     GPU_SPECS,
     MODES,
-    SFT_CHAT_PROFILES,
+    SFT_INSTRUCT_PROFILES,
     SFT_CODE_PROFILES,
     SIZE_PROFILES,
     _round_down_pow2,
     compute_dpo_config,
     compute_pretrain_config,
-    compute_sft_chat_config,
+    compute_sft_instruct_config,
     compute_sft_code_config,
     render_dpo_yaml,
     render_pretrain_yaml,
-    render_sft_chat_yaml,
+    render_sft_instruct_yaml,
     render_sft_code_yaml,
     render_plan,
 )
@@ -85,24 +85,24 @@ class TestPretrainInvariants:
         assert cfg.actual_global_batch == SIZE_PROFILES[size].ref_global_batch
 
 
-# ── SFT chat ─────────────────────────────────────────────────────────────────
+# ── SFT instruct ─────────────────────────────────────────────────────────────────
 
-class TestSFTChat:
+class TestSFTInstruct:
     def test_125m_h200_1gpu_global_batch(self):
-        cfg = compute_sft_chat_config("h200", "125m", 1)
+        cfg = compute_sft_instruct_config("h200", "125m", 1)
         assert cfg.actual_global_batch == 128
 
     def test_global_batch_hits_reference_across_grid(self):
-        for size in SFT_CHAT_PROFILES:
+        for size in SFT_INSTRUCT_PROFILES:
             for gpus in [1, 4, 8]:
-                cfg = compute_sft_chat_config("h200", size, gpus)
-                ref = SFT_CHAT_PROFILES[size].ref_global_batch
+                cfg = compute_sft_instruct_config("h200", size, gpus)
+                ref = SFT_INSTRUCT_PROFILES[size].ref_global_batch
                 assert cfg.actual_global_batch == ref, \
                     f"{size}/{gpus}: ref={ref}, got={cfg.actual_global_batch}"
 
     def test_unknown_size_raises(self):
         with pytest.raises(ValueError, match="Unknown SFT size"):
-            compute_sft_chat_config("h200", "huge", 1)
+            compute_sft_instruct_config("h200", "huge", 1)
 
 
 # ── SFT code ─────────────────────────────────────────────────────────────────
@@ -116,10 +116,10 @@ class TestSFTCode:
                 assert cfg.actual_global_batch == ref
 
     def test_chat_and_code_diverge_on_lr(self):
-        """Chat and code use different LRs — make sure profiles aren't aliased."""
-        for size in SFT_CHAT_PROFILES:
-            assert SFT_CHAT_PROFILES[size].lr > SFT_CODE_PROFILES[size].lr, \
-                f"chat LR should exceed code LR for {size}"
+        """Instruct and code use different LRs — make sure profiles aren't aliased."""
+        for size in SFT_INSTRUCT_PROFILES:
+            assert SFT_INSTRUCT_PROFILES[size].lr > SFT_CODE_PROFILES[size].lr, \
+                f"instruct LR should exceed code LR for {size}"
 
 
 # ── DPO ──────────────────────────────────────────────────────────────────────
@@ -144,7 +144,7 @@ class TestDPO:
     def test_dpo_state_exceeds_sft(self):
         """DPO state must include the reference model — should exceed SFT for the same size."""
         for size in DPO_PROFILES:
-            assert DPO_PROFILES[size].state_gb > SFT_CHAT_PROFILES[size].state_gb
+            assert DPO_PROFILES[size].state_gb > SFT_INSTRUCT_PROFILES[size].state_gb
 
 
 # ── Modes ────────────────────────────────────────────────────────────────────
@@ -158,19 +158,19 @@ class TestModes:
 
     def test_aggressive_fits_at_least_as_much_on_tight_gpu(self):
         """1b SFT on A100-40 — modes must produce different micro_batch values."""
-        c = compute_sft_chat_config("a100_40", "1b", 1, mode_name="conservative")
-        b = compute_sft_chat_config("a100_40", "1b", 1, mode_name="balanced")
-        a = compute_sft_chat_config("a100_40", "1b", 1, mode_name="aggressive")
+        c = compute_sft_instruct_config("a100_40", "1b", 1, mode_name="conservative")
+        b = compute_sft_instruct_config("a100_40", "1b", 1, mode_name="balanced")
+        a = compute_sft_instruct_config("a100_40", "1b", 1, mode_name="aggressive")
         assert c.micro_batch_size <= b.micro_batch_size <= a.micro_batch_size
 
     def test_conservative_uses_smaller_vram_budget(self):
-        c = compute_sft_chat_config("a100_40", "1b", 1, mode_name="conservative")
-        a = compute_sft_chat_config("a100_40", "1b", 1, mode_name="aggressive")
+        c = compute_sft_instruct_config("a100_40", "1b", 1, mode_name="conservative")
+        a = compute_sft_instruct_config("a100_40", "1b", 1, mode_name="aggressive")
         assert c.vram_budget_gb < a.vram_budget_gb
 
     def test_aggressive_allows_non_power_of_two(self):
         """Aggressive mode disables power-of-2 rounding — should sometimes pick odd numbers."""
-        a = compute_sft_chat_config("a100_40", "1b", 1, mode_name="aggressive")
+        a = compute_sft_instruct_config("a100_40", "1b", 1, mode_name="aggressive")
         # Won't always be non-pow2, but the mode allows it
         # Strict assertion: the mode flag is set
         assert MODES["aggressive"].power_of_two_only is False
@@ -221,7 +221,7 @@ class TestUserOverrides:
         assert cfg.gradient_checkpointing is False
 
     def test_force_ckpt_off_sft(self):
-        cfg = compute_sft_chat_config("h200", "125m", 1, force_ckpt=False)
+        cfg = compute_sft_instruct_config("h200", "125m", 1, force_ckpt=False)
         assert cfg.gradient_checkpointing is False
 
     def test_target_global_batch(self):
@@ -253,7 +253,7 @@ class TestValidation:
         (lambda: compute_pretrain_config("h200", "huge", 1), "Unknown pretrain size"),
         (lambda: compute_pretrain_config("h200", "125m", 0), "num_gpus"),
         (lambda: compute_pretrain_config("h200", "125m", 1, mode_name="extreme"), "Unknown mode"),
-        (lambda: compute_sft_chat_config("h200", "huge", 1), "Unknown SFT size"),
+        (lambda: compute_sft_instruct_config("h200", "huge", 1), "Unknown SFT size"),
         (lambda: compute_dpo_config("h200", "huge", 1), "Unknown DPO size"),
     ])
     def test_raises_value_error(self, compute, err_match):
@@ -271,21 +271,21 @@ class TestRendering:
         assert d["training"]["micro_batch_size"] == cfg.micro_batch_size
         assert d["training"]["max_steps"] == cfg.max_steps
 
-    def test_sft_chat_yaml_parses(self):
-        cfg = compute_sft_chat_config("h200", "125m", 1)
-        d = yaml.safe_load(render_sft_chat_yaml(cfg))
-        assert d["name"] == "slm-125m-chat"
+    def test_sft_instruct_yaml_parses(self):
+        cfg = compute_sft_instruct_config("h200", "125m", 1)
+        d = yaml.safe_load(render_sft_instruct_yaml(cfg))
+        assert d["name"] == "slm-125m-instruct"
         assert d["training"]["micro_batch_size"] == cfg.micro_batch_size
-        assert d["model"]["max_seq_length"] == SFT_CHAT_PROFILES["125m"].max_seq_length
-        assert d["data"]["train_path"] == "$DATA_DIR/sft/chat/train.jsonl"
+        assert d["model"]["max_seq_length"] == SFT_INSTRUCT_PROFILES["125m"].max_seq_length
+        assert d["data"]["train_path"] == "$DATA_DIR/runs/125m/sft_instruct/train.jsonl"
 
     def test_sft_code_yaml_parses(self):
         cfg = compute_sft_code_config("h200", "125m", 1)
         d = yaml.safe_load(render_sft_code_yaml(cfg))
-        assert d["name"] == "slm-125m-chat-code"
-        assert d["data"]["train_path"] == "$DATA_DIR/sft/code/train.jsonl"
-        # Code chains off chat
-        assert "chat" in d["model"]["base_model_path"]
+        assert d["name"] == "slm-125m-code"
+        assert d["data"]["train_path"] == "$DATA_DIR/runs/125m/sft_code/train.jsonl"
+        # Code chains off instruct
+        assert "sft_instruct" in d["model"]["base_model_path"]
 
     def test_dpo_yaml_parses(self):
         cfg = compute_dpo_config("h200", "125m", 1)
@@ -300,9 +300,9 @@ class TestRendering:
         d = yaml.safe_load(render_pretrain_yaml(cfg))
         assert d["optimizer"]["lr"] == SIZE_PROFILES["125m"].lr
 
-        cfg = compute_sft_chat_config("h200", "125m", 1)
-        d = yaml.safe_load(render_sft_chat_yaml(cfg))
-        assert d["optimizer"]["lr"] == SFT_CHAT_PROFILES["125m"].lr
+        cfg = compute_sft_instruct_config("h200", "125m", 1)
+        d = yaml.safe_load(render_sft_instruct_yaml(cfg))
+        assert d["optimizer"]["lr"] == SFT_INSTRUCT_PROFILES["125m"].lr
 
         cfg = compute_dpo_config("h200", "125m", 1)
         d = yaml.safe_load(render_dpo_yaml(cfg))
@@ -324,7 +324,7 @@ class TestWarnings:
         assert "DPO is LR-sensitive" in joined
 
     def test_sft_measurement_warning_present(self):
-        cfg = compute_sft_chat_config("h200", "125m", 1)
+        cfg = compute_sft_instruct_config("h200", "125m", 1)
         joined = " ".join(cfg.warnings)
         assert "analytical" in joined.lower()
 

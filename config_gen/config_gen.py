@@ -35,7 +35,7 @@ Three tuning modes:
 
 Stages:
     pretrain        writes pretrain/configs/gpt_<size>.yaml
-    sft             writes finetune/configs/sft_chat_<size>.yaml AND sft_code_<size>.yaml
+    sft             writes finetune/configs/sft_instruct_<size>.yaml AND sft_code_<size>.yaml
     dpo             writes alignment/configs/dpo_<size>.yaml
 
 Usage:
@@ -239,7 +239,7 @@ SIZE_PROFILES: dict[str, PretrainProfile] = {
 }
 
 
-# SFT chat profiles.
+# SFT instruct profiles.
 #   125m: calibrated against a real OOM event at micro=64 (see commit history).
 #         state_gb bumped from pretrain (~2.0) to capture TRL's overhead from
 #         label tensors, masking buffers, and a longer-lived logits tensor
@@ -247,7 +247,7 @@ SIZE_PROFILES: dict[str, PretrainProfile] = {
 #   350m / 1b: extrapolated from pretrain by adding ~10% to activations to
 #              capture the same TRL tax 125m exhibited. NOT measured —
 #              re-measure on first real run for each size.
-SFT_CHAT_PROFILES: dict[str, SFTProfile] = {
+SFT_INSTRUCT_PROFILES: dict[str, SFTProfile] = {
     "125m": SFTProfile(
         state_gb=2.0, act_per_seq_gb_no_ckpt=3.9, act_per_seq_gb_ckpt=1.3,
         max_seq_length=2048, ref_global_batch=64, lr=1.0e-5, epochs=2,
@@ -609,12 +609,12 @@ def _compute_sft_config_with_profile(
     )
 
 
-def compute_sft_chat_config(gpu_key: str, size: str, num_gpus: int,
+def compute_sft_instruct_config(gpu_key: str, size: str, num_gpus: int,
                             mode_name: str = "balanced",
                             target_global_batch: Optional[int] = None,
                             force_ckpt: Optional[bool] = None) -> GeneratedConfig:
-    if size not in SFT_CHAT_PROFILES:
-        raise ValueError(f"Unknown SFT size '{size}'. Choices: {sorted(SFT_CHAT_PROFILES)}")
+    if size not in SFT_INSTRUCT_PROFILES:
+        raise ValueError(f"Unknown SFT size '{size}'. Choices: {sorted(SFT_INSTRUCT_PROFILES)}")
     if gpu_key not in GPU_SPECS:
         raise ValueError(f"Unknown GPU '{gpu_key}'.")
     if num_gpus < 1:
@@ -623,7 +623,7 @@ def compute_sft_chat_config(gpu_key: str, size: str, num_gpus: int,
         raise ValueError(f"Unknown mode '{mode_name}'.")
     return _compute_sft_config_with_profile(
         gpu_key, size, num_gpus, mode_name,
-        SFT_CHAT_PROFILES[size], target_global_batch, force_ckpt, "chat",
+        SFT_INSTRUCT_PROFILES[size], target_global_batch, force_ckpt, "chat",
     )
 
 
@@ -910,13 +910,13 @@ optimizer:
 """
 
 
-def render_sft_chat_yaml(cfg: GeneratedConfig) -> str:
-    profile = SFT_CHAT_PROFILES[cfg.size]
+def render_sft_instruct_yaml(cfg: GeneratedConfig) -> str:
+    profile = SFT_INSTRUCT_PROFILES[cfg.size]
     return _render_sft_yaml(
         cfg, profile,
         base_model_path=f"$RESULTS_DIR/runs/{cfg.size}/pretrain/final",
-        train_path=f"$DATA_DIR/runs/{cfg.size}/sft_chat/train.jsonl",
-        val_path=f"$DATA_DIR/runs/{cfg.size}/sft_chat/val.jsonl",
+        train_path=f"$DATA_DIR/runs/{cfg.size}/sft_instruct/train.jsonl",
+        val_path=f"$DATA_DIR/runs/{cfg.size}/sft_instruct/val.jsonl",
         out_name="chat",
     )
 
@@ -925,7 +925,7 @@ def render_sft_code_yaml(cfg: GeneratedConfig) -> str:
     profile = SFT_CODE_PROFILES[cfg.size]
     return _render_sft_yaml(
         cfg, profile,
-        base_model_path=f"$RESULTS_DIR/runs/{cfg.size}/sft_chat/final",
+        base_model_path=f"$RESULTS_DIR/runs/{cfg.size}/sft_instruct/final",
         train_path=f"$DATA_DIR/runs/{cfg.size}/sft_code/train.jsonl",
         val_path=f"$DATA_DIR/runs/{cfg.size}/sft_code/val.jsonl",
         out_name="chat-code",
@@ -1127,7 +1127,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 print(render_plan(cfg), file=sys.stderr)
 
         elif args.stage == "sft":
-            chat = compute_sft_chat_config(
+            chat = compute_sft_instruct_config(
                 gpu_key=gpu_key, size=args.size, num_gpus=args.gpus,
                 mode_name=mode_name,
                 target_global_batch=args.target_global_batch,
@@ -1143,11 +1143,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             code_out = args.output_code
             if chat_out and not code_out:
                 # Default: sibling file with sft_code_ prefix
-                code_out = chat_out.parent / chat_out.name.replace("sft_chat_", "sft_code_")
+                code_out = chat_out.parent / chat_out.name.replace("sft_instruct_", "sft_code_")
                 if code_out == chat_out:
                     # Fallback if naming convention isn't followed
                     code_out = chat_out.with_name(chat_out.stem + "_code" + chat_out.suffix)
-            _write_or_print(render_sft_chat_yaml(chat), chat_out, args.quiet)
+            _write_or_print(render_sft_instruct_yaml(chat), chat_out, args.quiet)
             _write_or_print(render_sft_code_yaml(code), code_out, args.quiet)
             if not args.quiet:
                 print(render_plan(chat), file=sys.stderr)
