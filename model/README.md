@@ -4,9 +4,14 @@ Decoder-only Transformer implementation for SLM.
 
 ---
 
-## Responsibility
+## Owns
 
-`model/` owns the architecture used for training, export, inference, and serving.
+- `model/config.py` — `SLMConfig`
+- `model/model.py` — `SLMModel` and `SLMForCausalLM`
+- `model/block.py` — decoder block
+- `model/attention.py` — GQA attention and RoPE
+- `model/mlp.py` — SwiGLU MLP
+- `model/norm.py` — RMSNorm
 
 ---
 
@@ -14,53 +19,52 @@ Decoder-only Transformer implementation for SLM.
 
 | Component | Choice |
 |---|---|
-| Positional encoding | RoPE |
+| Model type | dense decoder-only causal LM |
+| Position encoding | RoPE |
 | Normalization | RMSNorm |
-| Activation | SwiGLU |
-| Attention | GQA |
-| Bias | None |
-| Embeddings | Tied |
+| Block style | pre-norm with residual connections |
+| MLP | SwiGLU |
+| Attention | grouped-query attention |
+| Bias | none |
+| Embeddings | tied input/output embeddings |
+| Cache | generation KV cache support |
 
 ---
 
-## Model sizes
+## Configured sizes
 
 | Size | Layers | Hidden | Q heads | KV heads | Context |
 |---|---:|---:|---:|---:|---:|
+| `mini` | 6 | 384 | 6 | 2 | 1024 |
 | `125m` | 12 | 768 | 12 | 4 | 2048 |
 | `350m` | 24 | 1024 | 16 | 8 | 2048 |
 | `1b` | 32 | 2048 | 32 | 8 | 4096 |
 
----
-
-## Files
-
-```text
-model/
-├── config.py
-├── attention.py
-├── mlp.py
-├── norm.py
-├── block.py
-├── model.py
-└── README.md
-```
+Size-specific training configs live in `pretrain/configs/`.
 
 ---
 
 ## Key classes
 
-- `SLMConfig` defines architecture and tokenizer/model metadata.
-- `SLMForCausalLM` implements the causal language model.
-- Blocks use Pre-LN style normalization with residual connections.
-- Attention uses grouped-query attention.
-- MLP uses SwiGLU.
+- `SLMConfig` extends `transformers.PretrainedConfig`.
+- `SLMModel` is the internal decoder stack and is a plain `nn.Module`.
+- `SLMForCausalLM` is the Hugging Face `PreTrainedModel` wrapper used for training, export, inference, and serving.
+
+Use `AutoModelForCausalLM`, not `AutoModel`, for exported checkpoints.
 
 ---
 
-## Hub loading
+## Attention
 
-Exported models bundle these source files for `trust_remote_code=True`.
+`attention.py` implements grouped-query attention with RoPE.
+
+RoPE caches are rebuilt lazily in float32 and are not persisted in checkpoints. This avoids stale or low-precision RoPE buffers when loading or casting models.
+
+---
+
+## Export and remote code
+
+Exported models bundle the live architecture files into the checkpoint root so Hub loading works with:
 
 ```python
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -69,6 +73,15 @@ model_id = "tohio/slm-125m-chat"
 
 tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
 model = AutoModelForCausalLM.from_pretrained(model_id, trust_remote_code=True)
+```
+
+The exported `config.json` must advertise:
+
+```json
+{
+  "AutoConfig": "config.SLMConfig",
+  "AutoModelForCausalLM": "model.SLMForCausalLM"
+}
 ```
 
 ---

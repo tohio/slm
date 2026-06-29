@@ -1,59 +1,69 @@
 # pretrain
 
-Pretraining stage for SLM. This folder tokenizes validated text into binary train/val files and trains the base decoder-only model from scratch.
+Base-model pretraining for SLM. This folder owns corpus tokenization, memory-mapped datasets, base training, checkpoint resume, and smoke generation.
 
 ---
 
-## Responsibility
+## Owns
 
-`pretrain/` owns:
+- `pretrain/data/tokenize_data.py` — validated JSONL to tokenized `.bin`
+- `pretrain/data/dataset.py` — memory-mapped train/val dataset
+- `pretrain/train.py` — Hugging Face Trainer pretraining entry point
+- `pretrain/configs/` — size-specific base training configs
 
-- tokenized dataset construction
-- pretraining configs
-- base model training
-- checkpoint resume
-- smoke generation after pretraining
-
-Post-training lives in `finetune/` and `alignment/`.
+Post-training is handled by `finetune/` and `alignment/`.
 
 ---
 
-## Files
+## Configs
 
 ```text
-pretrain/
-├── configs/
-│   ├── gpt_mini.yaml
-│   ├── gpt_smoke.yaml
-│   ├── gpt_125m.yaml
-│   ├── gpt_350m.yaml
-│   └── gpt_1b.yaml
-├── data/
-│   ├── dataset.py
-│   ├── tokenize_data.py
-│   └── upload_tokenized.py
-├── train.py
-└── README.md
+pretrain/configs/gpt_smoke.yaml
+pretrain/configs/gpt_mini.yaml
+pretrain/configs/gpt_125m.yaml
+pretrain/configs/gpt_350m.yaml
+pretrain/configs/gpt_1b.yaml
+```
+
+Generate/update configs for the current hardware:
+
+```bash
+make config-gen-pretrain SIZE=125m GPUS=1
+make config-gen SIZE=125m GPUS=1
 ```
 
 ---
 
 ## Inputs
 
-Tokenization reads validated JSONL splits and the trained tokenizer:
+Tokenization reads:
 
 ```text
 data/runs/<size>/validated/train.jsonl
 data/runs/<size>/validated/val.jsonl
-data/runs/<size>/tokenizer/tokenizer.json
-data/runs/<size>/tokenizer/tokenizer_config.json
+data/runs/<size>/tokenizer/
 ```
 
-Pretraining reads tokenized binaries:
+Training reads:
 
 ```text
 data/runs/<size>/tokenized/train.bin
 data/runs/<size>/tokenized/val.bin
+data/runs/<size>/tokenized/train.json
+data/runs/<size>/tokenized/val.json
+```
+
+`train.json` and `val.json` store tokenization metadata, including tokenizer fingerprint checks used to prevent stale tokenized artifacts.
+
+---
+
+## Outputs
+
+```text
+data/runs/<size>/tokenized/train.bin
+data/runs/<size>/tokenized/val.bin
+results/runs/<size>/pretrain/checkpoints/
+results/runs/<size>/pretrain/final
 ```
 
 ---
@@ -64,13 +74,6 @@ Tokenize:
 
 ```bash
 make tokenize SIZE=125m
-```
-
-Generate configs:
-
-```bash
-make config-gen-pretrain SIZE=125m GPUS=1
-make config-gen SIZE=125m GPUS=1
 ```
 
 Train:
@@ -84,67 +87,43 @@ make pretrain-resume SIZE=125m GPUS=1
 Smoke generation:
 
 ```bash
+make pretrain-smoke SIZE=125m
 make smoke-gen SIZE=125m
 ```
 
-Before post-training:
+Before SFT:
 
 ```bash
 make reinit-embeds SIZE=125m
 ```
 
+Direct calls:
+
+```bash
+python pretrain/data/tokenize_data.py --size 125m --verify
+accelerate launch pretrain/train.py --config pretrain/configs/gpt_125m.yaml
+python pretrain/train.py --config pretrain/configs/gpt_125m.yaml --resume
+```
+
 ---
 
-## Outputs
+## Dataset behavior
+
+`dataset.py` memory maps flat token arrays and slices fixed-length windows for causal LM training.
+
+The train/val split is created before tokenization by the curator blend stage. Pretraining does not create its own runtime split.
+
+---
+
+## Checkpoint contract
+
+The final base checkpoint is:
 
 ```text
-results/runs/<size>/pretrain/checkpoints/
 results/runs/<size>/pretrain/final
 ```
 
-The base export target publishes:
-
-```text
-tohio/slm-<size>
-```
-
----
-
-## Config generation
-
-`make config-gen-pretrain` tunes pretraining config fields for the current GPU and GPU count.
-
-```bash
-make config-gen-pretrain SIZE=125m GPUS=4 GPU=h200
-make config-gen-pretrain SIZE=1b GPUS=8 GPU=b200 MODE=aggressive
-```
-
-Accelerate config must match the GPU count:
-
-```bash
-make accelerate-config-single
-make accelerate-config-multi GPUS=4
-make accel-gen-fsdp GPUS=8
-```
-
----
-
-## Tokenized data format
-
-`tokenize_data.py` writes contiguous token ID arrays to `.bin` files. Training uses memory-mapped access so large datasets do not need to fit in RAM.
-
-Expected files:
-
-```text
-train.bin
-val.bin
-```
-
----
-
-## Val split
-
-The train/val split is produced before tokenization by the curator blend stage. Tokenization processes both splits independently.
+This checkpoint is the parent for instruct SFT.
 
 ---
 
@@ -154,5 +133,3 @@ The train/val split is produced before tokenization by the curator blend stage. 
 make test-training SIZE=mini
 make test-training SIZE=125m
 ```
-
-`test-training` validates that the model loads, loss is finite, dataset indexing works, and the checkpoint path is usable.

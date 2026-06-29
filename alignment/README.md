@@ -1,49 +1,56 @@
 # alignment
 
-Preference-alignment stage for SLM. This folder prepares DPO preference data and trains the `chat` variant from the `instruct` checkpoint.
+DPO preference alignment for the SLM chat variant.
 
 ---
 
-## Responsibility
+## Owns
 
-`alignment/` owns:
+- `alignment/data/prepare_dpo.py` — DPO preference dataset preparation
+- `alignment/train_dpo.py` — DPO training with TRL
+- `alignment/configs/` — size-specific chat DPO configs
 
-- DPO preference dataset preparation
-- chat-alignment configs
-- DPO training
-- chat checkpoint output
-
-It does not train the base model, instruct model, or code model.
+This folder trains `dpo_chat` only. Base, instruct, and code training live in other folders.
 
 ---
 
-## Lineage
+## Configs
+
+```text
+alignment/configs/dpo_chat_mini.yaml
+alignment/configs/dpo_chat_125m.yaml
+alignment/configs/dpo_chat_350m.yaml
+alignment/configs/dpo_chat_1b.yaml
+```
+
+Generate/update DPO configs:
+
+```bash
+make config-gen-dpo SIZE=125m GPUS=1
+```
+
+---
+
+## Inputs
 
 ```text
 results/runs/<size>/sft_instruct/final
-  ↓
-DPO training
-  ↓
-results/runs/<size>/dpo_chat/final
+data/runs/<size>/tokenizer/
 ```
 
-The `chat` model is a sibling of the `code` model. Both start from `sft_instruct/final`.
+Prepared DPO data:
+
+```text
+data/runs/<size>/dpo_chat/train.jsonl
+data/runs/<size>/dpo_chat/val.jsonl
+```
 
 ---
 
-## Files
+## Outputs
 
 ```text
-alignment/
-├── configs/
-│   ├── dpo_chat_mini.yaml
-│   ├── dpo_chat_125m.yaml
-│   ├── dpo_chat_350m.yaml
-│   └── dpo_chat_1b.yaml
-├── data/
-│   └── prepare_dpo.py
-├── train_dpo.py
-└── README.md
+results/runs/<size>/dpo_chat/final
 ```
 
 ---
@@ -64,7 +71,17 @@ make dpo-chat-mini SIZE=mini GPUS=1
 make dpo-chat-resume SIZE=125m GPUS=1
 ```
 
-Compatibility aliases are still available:
+Direct calls:
+
+```bash
+python alignment/data/prepare_dpo.py --size 125m --source all
+python alignment/data/prepare_dpo.py --size 125m --source ultrafeedback
+python alignment/data/prepare_dpo.py --size 125m --source handcrafted
+accelerate launch alignment/train_dpo.py --config alignment/configs/dpo_chat_125m.yaml
+python alignment/train_dpo.py --config alignment/configs/dpo_chat_125m.yaml --resume
+```
+
+Compatibility aliases:
 
 ```bash
 make dpo SIZE=125m GPUS=1
@@ -72,69 +89,43 @@ make dpo-mini SIZE=mini GPUS=1
 make dpo-resume SIZE=125m GPUS=1
 ```
 
-Direct calls:
-
-```bash
-python alignment/data/prepare_dpo.py --size 125m
-accelerate launch alignment/train_dpo.py --config alignment/configs/dpo_chat_125m.yaml
-```
-
 ---
 
-## Inputs
+## Preference data
 
-Prepared DPO data expects:
-
-```text
-data/runs/<size>/tokenizer/
-results/runs/<size>/sft_instruct/final
-```
-
-The tokenizer is used for length filtering and formatting. The instruct checkpoint is the policy initialization for DPO.
-
----
-
-## Outputs
-
-Prepared data and stats are written under the run-specific data directory.
-
-The trained chat checkpoint is written to:
-
-```text
-results/runs/<size>/dpo_chat/final
-```
-
----
-
-## Data format
-
-DPO records use the standard preference-pair shape:
+`prepare_dpo.py` writes conversational preference records for TRL `DPOTrainer`:
 
 ```json
 {
-  "prompt": "...",
-  "chosen": "...",
-  "rejected": "...",
-  "source": "..."
+  "prompt": [
+    {"role": "system", "content": "..."},
+    {"role": "user", "content": "..."}
+  ],
+  "chosen": [
+    {"role": "assistant", "content": "preferred response"}
+  ],
+  "rejected": [
+    {"role": "assistant", "content": "rejected response"}
+  ],
+  "source": "ultrafeedback_binarized"
 }
 ```
 
-`chosen` and `rejected` must be different responses to the same prompt.
+Sources:
+
+```text
+HuggingFaceH4/ultrafeedback_binarized
+handcrafted_behavior
+targeted_behavior
+```
+
+The CLI exposes `--source all`, `--source ultrafeedback`, and `--source handcrafted`.
 
 ---
 
-## Configs
+## Length filtering
 
-DPO configs are size-specific:
-
-```text
-alignment/configs/dpo_chat_mini.yaml
-alignment/configs/dpo_chat_125m.yaml
-alignment/configs/dpo_chat_350m.yaml
-alignment/configs/dpo_chat_1b.yaml
-```
-
-`make config-gen-dpo SIZE=<size> GPUS=<n>` regenerates the active DPO config for the current GPU profile.
+`prepare_dpo.py` filters pairs with the actual SLM tokenizer before training. The default ceiling is based on the smallest DPO context budget so the same prepared dataset can be reused across model sizes.
 
 ---
 
@@ -150,5 +141,3 @@ Compatibility alias:
 ```bash
 make test-dpo SIZE=125m
 ```
-
-The test validates preference data shape and that the chat DPO checkpoint loads and generates.
