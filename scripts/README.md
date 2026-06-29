@@ -1,6 +1,8 @@
 # scripts
 
-Utility and diagnostic scripts that sit outside a single pipeline stage.
+Stage-neutral utility and diagnostic scripts.
+
+Stage-owned scripts should stay in their stage folder. This folder is for helpers used across stages or diagnostics that intentionally sit outside the main pipeline.
 
 ---
 
@@ -21,7 +23,7 @@ scripts/
 
 Known-good training diagnostic using a simple Hugging Face data path. Use it to separate model/trainer issues from curation-data issues.
 
-Examples:
+Make targets:
 
 ```bash
 make sanity-train
@@ -30,23 +32,74 @@ make sanity-train-tiny
 make sanity-train-save SANITY_SIZE=tiny
 ```
 
-Direct:
+Direct examples:
 
 ```bash
 python scripts/sanity_train.py --arch 125m --target-tokens 2500000000
 python scripts/sanity_train.py --arch mini --target-tokens 50000000 --save
 ```
 
+Useful options:
+
+```text
+--arch
+--target-tokens
+--batch-size
+--lr
+--warmup-steps
+--log-every
+--eval-every
+--scratch-dir
+--save
+--reuse-tokens
+```
+
+---
+
+## `reinit_special_embeds.py`
+
+Reinitializes chat-template special-token embeddings before SFT.
+
+Normal use:
+
+```bash
+make reinit-embeds SIZE=125m
+```
+
+Direct use:
+
+```bash
+python scripts/reinit_special_embeds.py --size 125m
+python scripts/reinit_special_embeds.py   --src results/runs/125m/pretrain/checkpoint-152000   --dst results/runs/125m/pretrain/final
+```
+
+Options:
+
+```text
+--size
+--src
+--dst
+--no-backup
+```
+
+Default input/output:
+
+```text
+input/output  results/runs/<size>/pretrain/final
+```
+
+The script uses direct safetensors I/O and avoids `SLMForCausalLM.from_pretrained()` / `save_pretrained()` for checkpoint safety.
+
 ---
 
 ## `run_lm_eval.py`
 
-Wrapper for lm-evaluation-harness with the custom SLM architecture.
+Wrapper for lm-evaluation-harness with the local SLM architecture pre-registered.
 
 Example:
 
 ```bash
-python scripts/run_lm_eval.py   --model results/runs/125m/dpo_chat/final   --tasks hellaswag,arc_easy   --batch-size 4
+python scripts/run_lm_eval.py   --model hf   --model_args pretrained=results/runs/125m/sft_code/final,dtype=bfloat16   --tasks humaneval   --num_fewshot 0   --batch_size 1   --apply_chat_template   --output_path results/eval/debug_humaneval   --log_samples   --limit 5
 ```
 
 Prefer the Makefile eval targets for normal use:
@@ -66,37 +119,12 @@ Diagnostic pretraining path that uses a Hugging Face dataset with the 125m archi
 
 ---
 
-## `reinit_special_embeds.py`
-
-Reinitializes chat/special-token embeddings before SFT.
-
-Normal use:
-
-```bash
-make reinit-embeds SIZE=125m
-```
-
-Direct use:
-
-```bash
-python scripts/reinit_special_embeds.py --size 125m
-```
-
-Expected input/output:
-
-```text
-input   results/runs/<size>/pretrain/final
-output  patched checkpoint ready for SFT
-```
-
----
-
 ## Adding scripts
 
 Scripts in this folder should be:
 
-- stage-neutral diagnostics, or
-- helpers used across multiple stages, or
+- stage-neutral diagnostics
+- helpers used across multiple stages
 - one-off recovery utilities with clear comments
 
-Stage-owned scripts should stay inside their stage folder.
+Stage-specific production scripts belong in the owning stage folder.

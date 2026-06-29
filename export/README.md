@@ -1,18 +1,19 @@
 # export
 
-Export trained SLM variants to Hugging Face Hub with bundled remote-code files, tokenizer assets, model cards, and eval metadata.
+Hugging Face export for SLM variants.
+
+Export packages checkpoint weights, tokenizer files, custom model source files, config metadata, and a model card. It does not run evaluation and model cards do not include benchmark tables.
 
 ---
 
-## Responsibility
+## Owns
 
-`export/` owns:
-
-- variant checkpoint validation
+- `export/export.py` — export entry point
+- variant-to-checkpoint mapping
 - Hub repo naming
+- tokenizer root packaging
+- remote-code bundling
 - model-card generation
-- remote-code bundling for custom `SLMConfig` / `SLMForCausalLM`
-- tokenizer packaging
 
 ---
 
@@ -29,70 +30,117 @@ Export trained SLM variants to Hugging Face Hub with bundled remote-code files, 
 
 ## Commands
 
+Make targets:
+
 ```bash
-make export-base     SIZE=125m
+make export-base SIZE=125m
 make export-instruct SIZE=125m
-make export-chat     SIZE=125m
-make export-code     SIZE=125m
-make export          SIZE=125m
+make export-chat SIZE=125m
+make export-code SIZE=125m
+make export SIZE=125m
 ```
 
-Direct invocation:
+Direct calls:
 
 ```bash
 python export/export.py --size 125m --variant base
 python export/export.py --size 125m --variant instruct
 python export/export.py --size 125m --variant chat
 python export/export.py --size 125m --variant code
+python export/export.py --size 125m --variant chat --dry-run
 ```
 
 ---
 
-## Prerequisites
+## Environment
 
-Set Hub credentials:
+Required for Hub push:
 
 ```bash
 HF_USERNAME=tohio
 HF_TOKEN=...
 ```
 
-Run eval before export so model cards can include variant-specific scores:
-
-```bash
-make eval-base     SIZE=125m
-make eval-instruct SIZE=125m
-make eval-chat     SIZE=125m
-make eval-code     SIZE=125m
-```
+`.env` is loaded by `export/export.py`.
 
 ---
 
-## Model card inputs
+## What export writes
 
-Export reads:
+Before pushing, export updates the checkpoint directory with:
 
 ```text
-config/data_mix.py
-data/runs/<size>/metadata/blend_stats.json
-data/runs/<size>/curated/blend_stats.json
-results/runs/<size>/eval/
+README.md
+tokenizer.json
+tokenizer_config.json
+special_tokens_map.json
+config.py
+model.py
+block.py
+attention.py
+mlp.py
+norm.py
 ```
 
-The metadata path is preferred. The curated path is a legacy fallback.
+Tokenizer files are saved/copied to the checkpoint root so standard Hub loading works without `subfolder="tokenizer"`.
+
+Remote-code files are copied to the checkpoint root and `config.json` is updated with:
+
+```json
+{
+  "AutoConfig": "config.SLMConfig",
+  "AutoModelForCausalLM": "model.SLMForCausalLM"
+}
+```
 
 ---
 
-## What gets pushed
+## Model card policy
 
-Each Hub repo contains:
+Model cards include:
 
-- model weights
-- tokenizer files
-- config files
-- bundled `model/` source files required for `trust_remote_code=True`
-- generated model card
-- eval metadata when available
+- model family and variant
+- architecture summary
+- pretraining data-mix table
+- fine-tuning/alignment summary
+- usage example
+- limitations
+
+Model cards do not include evaluation or benchmark tables.
+
+---
+
+## Data-mix metadata
+
+Export loads realized curation stats from:
+
+```text
+data/runs/<size>/metadata/blend_stats.json
+```
+
+Legacy fallback:
+
+```text
+data/runs/<size>/curated/blend_stats.json
+```
+
+If no blend stats are available, export falls back to the design mix from `config/data_mix.py`.
+
+---
+
+## Validation
+
+Export performs a short generation hygiene check before pushing. This is packaging validation, not benchmark evaluation.
+
+The check catches obviously broken checkpoints such as:
+
+- missing tokenizer files
+- missing architecture files
+- missing `auto_map`
+- empty generation
+- highly repetitive generation
+
+Use `--dry-run` to validate packaging without pushing to the Hub.
 
 ---
 

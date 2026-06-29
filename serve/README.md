@@ -4,6 +4,13 @@ vLLM serving assets for SLM. The server exposes an OpenAI-compatible API for exp
 
 ---
 
+## Owns
+
+- `serve/serve.sh` — local vLLM launch wrapper
+- `serve/manifests/` — Kubernetes deployment assets
+
+---
+
 ## Files
 
 ```text
@@ -19,15 +26,38 @@ serve/
 
 ---
 
-## Local serving
+## Make targets
 
-Default:
+Serve exported Hub chat model:
+
+```bash
+make serve SIZE=125m
+```
+
+Serve local chat checkpoint:
+
+```bash
+make serve-local SIZE=125m
+```
+
+The Makefile passes:
+
+```text
+MODEL=tohio/slm-<size>-chat
+MODEL=results/runs/<size>/dpo_chat/final
+```
+
+---
+
+## Direct local serving
+
+Default direct script behavior serves `tohio/slm-125m`:
 
 ```bash
 ./serve/serve.sh
 ```
 
-Serve a Hub model:
+Serve a Hub chat model:
 
 ```bash
 ./serve/serve.sh --model tohio/slm-125m-chat
@@ -63,7 +93,9 @@ MAX_MODEL_LEN=2048 ./serve/serve.sh --model tohio/slm-1b-chat
 
 ---
 
-## Query the API
+## API examples
+
+Chat completion:
 
 ```bash
 curl http://localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
@@ -109,7 +141,7 @@ print(response.choices[0].message.content)
 
 ## Kubernetes manifests
 
-Manifests live in `serve/manifests/` and can be deployed directly or through the external `ai-infra` repo.
+Manifests live in `serve/manifests/`.
 
 ```bash
 kubectl create namespace inference

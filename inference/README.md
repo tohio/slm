@@ -4,33 +4,17 @@ Local inference utilities for SLM checkpoints and exported Hub models.
 
 ---
 
-## Responsibility
+## Owns
 
-`inference/` owns:
-
-- interactive chat CLI
-- raw prompt generation
-- chat-template formatting
-- special-token resolution at runtime
-- stopping behavior for generation
+- `inference/chat.py` — interactive chat CLI
+- `inference/generate.py` — batch/raw prompt generation
+- `inference/utils.py` — model/tokenizer loading and special-token resolution
 
 Serving through vLLM lives in `serve/`.
 
 ---
 
-## Files
-
-```text
-inference/
-├── chat.py
-├── generate.py
-├── utils.py
-└── README.md
-```
-
----
-
-## Checkpoint names
+## Model references
 
 Local checkpoints:
 
@@ -52,29 +36,39 @@ tohio/slm-<size>-code
 
 ---
 
-## Chat CLI
+## Interactive chat
 
-Local chat checkpoint:
+Local checkpoint:
 
 ```bash
 python inference/chat.py --model results/runs/125m/dpo_chat/final
 ```
 
-Hub chat model:
+Hub model:
 
 ```bash
 python inference/chat.py --model tohio/slm-125m-chat
 ```
 
-Custom system prompt:
+Custom generation settings:
 
 ```bash
-python inference/chat.py   --model tohio/slm-125m-chat   --system "You are a concise assistant."
+python inference/chat.py   --model tohio/slm-125m-chat   --system "You are a concise assistant."   --max-new-tokens 256   --temperature 0.7   --top-p 0.9
+```
+
+Interactive commands:
+
+```text
+/help
+/reset
+/system <prompt>
+/history
+/quit
 ```
 
 ---
 
-## Batch / prompt generation
+## Batch generation
 
 Raw base-model completion:
 
@@ -88,26 +82,36 @@ Chat-formatted generation:
 echo "Explain attention in one sentence." | python inference/generate.py   --model results/runs/125m/dpo_chat/final   --chat   --max-new-tokens 80
 ```
 
-From a file:
+File input/output:
 
 ```bash
-python inference/generate.py   --model tohio/slm-125m-chat   --input prompts.txt   --chat
+python inference/generate.py   --model tohio/slm-125m-chat   --input prompts.txt   --output completions.jsonl   --chat
+```
+
+Common options:
+
+```text
+--max-new-tokens
+--temperature
+--top-p
+--top-k
+--greedy
+--batch-size
+--chat
+--no-bos
+--trust-remote-code
+--device
 ```
 
 ---
 
-## Special tokens
+## Token behavior
 
-Runtime code resolves special token IDs from the loaded tokenizer instead of importing training-time constants. This prevents silent token ID drift when loading exported checkpoints.
-
----
-
-## BOS / chat behavior
-
+- Runtime code resolves token IDs from the loaded tokenizer.
 - Raw completion prepends BOS by default.
 - `--no-bos` disables BOS for continuation-style generation.
-- `--chat` formats the prompt as a user message with the tokenizer chat template.
-- Chat/instruct models should normally be used with `--chat` or `chat.py`.
+- `--chat` wraps prompts as user messages with the tokenizer chat template.
+- Chat, instruct, and code variants should normally use `--chat` or `chat.py`.
 
 ---
 
