@@ -27,6 +27,23 @@ Use persistent storage for `DATA_DIR` and run long jobs inside `tmux`.
 
 ---
 
+## Storage
+
+Use a separate persistent disk for full runs.
+
+Recommended starting points:
+
+| Run | Storage |
+|---|---:|
+| `mini` | boot disk is fine |
+| `125m` | 1 TB+ |
+| `350m` | 1–2 TB+ |
+| `1b` | 2 TB+ |
+
+See `docs/DISK_SETUP.md` for mounting a secondary disk at `/data`.
+
+---
+
 ## GPU training
 
 | Size | Practical GPU recommendation | Notes |
@@ -38,38 +55,13 @@ Use persistent storage for `DATA_DIR` and run long jobs inside `tmux`.
 
 ---
 
-## Pipeline validation run
+## Config generation
+
+Generate configs for the actual GPU count before training:
 
 ```bash
-make setup-gpu DATA_DIR=/data/slm/data SIZE=mini RUN_ID=<mini-run-id>
-make accelerate-config-single
-
-make pretrain-mini SIZE=mini GPUS=1
-make reinit-embeds SIZE=mini
-make prepare-sft SIZE=mini
-make sft-instruct-mini SIZE=mini GPUS=1
-make sft-code-mini SIZE=mini GPUS=1
-make prepare-dpo SIZE=mini
-make dpo-chat-mini SIZE=mini GPUS=1
-make eval-mini SIZE=mini
-```
-
----
-
-## Full 125m run
-
-```bash
-make setup-gpu DATA_DIR=/data/slm/data SIZE=125m RUN_ID=<125m-run-id>
 make accelerate-config-single
 make config-gen SIZE=125m GPUS=1
-
-make pretrain SIZE=125m GPUS=1
-make reinit-embeds SIZE=125m
-make prepare-sft SIZE=125m
-make sft-instruct SIZE=125m GPUS=1
-make sft-code SIZE=125m GPUS=1
-make prepare-dpo SIZE=125m
-make dpo-chat SIZE=125m GPUS=1
 ```
 
 For multi-GPU:
@@ -77,12 +69,20 @@ For multi-GPU:
 ```bash
 make accelerate-config-multi GPUS=4
 make config-gen SIZE=125m GPUS=4
-make pretrain SIZE=125m GPUS=4
 ```
+
+For larger runs with FSDP:
+
+```bash
+make accel-gen-fsdp GPUS=8
+make config-gen SIZE=1b GPUS=8
+```
+
+Use the same `GPUS` value for Accelerate setup, config generation, and training.
 
 ---
 
-## Data parallelism
+## Batch scaling
 
 The training pipeline uses data parallelism. Each GPU holds a model replica and the batch is split across GPUs.
 
@@ -96,18 +96,7 @@ Use `make config-gen` instead of hand-editing configs whenever possible.
 
 ---
 
-## FSDP
-
-For larger runs, especially `1b`, use FSDP config generation:
-
-```bash
-make accel-gen-fsdp GPUS=8
-make config-gen SIZE=1b GPUS=8
-```
-
----
-
-## Resume
+## Resume targets
 
 ```bash
 make pretrain-resume SIZE=125m GPUS=1
@@ -124,3 +113,5 @@ make dpo-chat-resume SIZE=125m GPUS=1
 watch -n 2 nvidia-smi
 nvtop
 ```
+
+Detailed command sequences are in `docs/COMMANDS.md`.

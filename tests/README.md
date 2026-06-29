@@ -1,6 +1,8 @@
 # Tests
 
-The test suite validates pipeline outputs and unit-level invariants. Data pipeline tests run on the CPU curation instance. GPU pipeline tests run on the training instance.
+The test suite validates pipeline artifacts and unit-level invariants.
+
+Data pipeline tests run on the CPU/data instance. GPU pipeline tests run on the training instance.
 
 ---
 
@@ -27,13 +29,37 @@ tests/
 
 ---
 
-## CPU pipeline tests
+## Size behavior
+
+Test targets use `TEST_SIZE`.
+
+Default behavior:
+
+```text
+make test-*        -> TEST_SIZE=mini
+make test-* SIZE=125m -> TEST_SIZE=125m
+```
+
+This keeps normal development on `mini` and makes full-artifact checks explicit.
+
+---
+
+## Data pipeline tests
 
 ```bash
-make curate-mini   && make test-curator
-make validate      && make test-validate
-make tokenize      && make test-tokenizer
+make test-curator
+make test-validate
+make test-tokenizer
+make test-data-pipeline
+```
 
+Typical mini sequence:
+
+```bash
+make curate-mini
+make validate SIZE=mini
+make tokenizer SIZE=mini
+make tokenize SIZE=mini
 make test-data-pipeline
 ```
 
@@ -43,24 +69,31 @@ These tests validate curated shards, validation outputs, tokenizer files, and to
 
 ## GPU pipeline tests
 
-GPU tests default to `mini` unless `SIZE` is supplied explicitly.
+```bash
+make test-training
+make test-sft-instruct
+make test-sft-code
+make test-dpo-chat
+make test-gpu-pipeline
+```
+
+Typical mini sequence:
 
 ```bash
-make pretrain-mini       GPUS=1 && make test-training
-make sft-instruct-mini   GPUS=1 && make test-sft-instruct
-make sft-code-mini       GPUS=1 && make test-sft-code
-make dpo-chat-mini       GPUS=1 && make test-dpo-chat
-
+make pretrain-mini SIZE=mini GPUS=1
+make sft-instruct-mini SIZE=mini GPUS=1
+make sft-code-mini SIZE=mini GPUS=1
+make dpo-chat-mini SIZE=mini GPUS=1
 make test-gpu-pipeline
 ```
 
 Full-run checks:
 
 ```bash
-make test-training     SIZE=125m
+make test-training SIZE=125m
 make test-sft-instruct SIZE=125m
-make test-sft-code     SIZE=125m
-make test-dpo-chat     SIZE=125m
+make test-sft-code SIZE=125m
+make test-dpo-chat SIZE=125m
 ```
 
 Compatibility aliases:
@@ -76,15 +109,15 @@ make test-dpo SIZE=125m
 
 | Target | Validates |
 |---|---|
-| `test-curator` | raw shards, source stats, curation output structure |
-| `test-validate` | validation output structure and retained document quality |
+| `test-curator` | curation output structure and source stats |
+| `test-validate` | validation outputs and retained document quality |
 | `test-tokenizer` | tokenizer assets, special tokens, tokenized binaries |
 | `test-training` | base checkpoint loading, finite loss, dataset indexing |
 | `test-sft-instruct` | instruct checkpoint loading, chat template preservation, generation |
-| `test-sft-code` | code checkpoint loading and code-token behavior |
+| `test-sft-code` | code checkpoint loading and code-oriented generation |
 | `test-dpo-chat` | preference data shape, chat DPO checkpoint loading, generation |
-| `test-model` | architecture unit tests |
-| `test-config-gen` | config generation invariants |
+| `test-model` | architecture construction, masks, cache behavior |
+| `test-config-gen` | generated training config invariants |
 | `test-accel-gen` | Accelerate config rendering |
 
 ---
@@ -99,9 +132,3 @@ make test-unit
 ```
 
 Unit tests do not require pipeline artifacts.
-
----
-
-## Size behavior
-
-The Makefile default pipeline size is `125m`, but GPU pipeline tests intentionally default to `mini` for normal development. Passing `SIZE=125m`, `350m`, or `1b` opts into full-artifact checks.

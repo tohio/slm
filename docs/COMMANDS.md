@@ -1,6 +1,6 @@
-# SLM Pipeline — Command Reference
+# SLM command reference
 
-This file documents the Makefile-facing command surface. The Makefile is the command source of truth.
+This file documents the Makefile command surface. The Makefile is the source of truth.
 
 Default variables:
 
@@ -26,97 +26,91 @@ make <target> RUN_ID=125m-20260629-a8f3c9
 
 ## Setup
 
-### Local / CPU setup
-
 ```bash
 make setup
 make setup-data-dir DATA_DIR=/data/slm/data
 make install
-make install-kenlm
-make download-fasttext-model DATA_DIR=/data/slm/data
-make download-kenlm-model    DATA_DIR=/data/slm/data
-```
-
-### Alternative environments
-
-```bash
+make install-gpu
 make install-uv
 make install-conda
 ```
 
-### GPU setup
-
-GPU setup restores tokenized artifacts by `RUN_ID`.
+Validation prerequisites:
 
 ```bash
-make install-gpu
-make setup-gpu DATA_DIR=/data/slm/data SIZE=125m RUN_ID=125m-20260629-a8f3c9
-source ~/.bashrc
+make install-kenlm
+make download-fasttext-model DATA_DIR=/data/slm/data
+make download-kenlm-model DATA_DIR=/data/slm/data
 ```
 
-`RUN_ID` is required for `setup-gpu`.
+GPU restore:
+
+```bash
+make setup-gpu DATA_DIR=/data/slm/data SIZE=125m RUN_ID=125m-20260629-a8f3c9
+```
+
+`setup-gpu` requires `RUN_ID` when restoring tokenized artifacts from S3.
 
 ---
 
-## Stage 1 — Curation
+## Curation
 
 ```bash
 make curate-mini
 make curate SIZE=125m WORKERS=62
 ```
 
-Stage-specific curation targets:
+Stage-specific curation:
 
 ```bash
 make curate-download SIZE=125m
-make curate-filter   SIZE=125m WORKERS=62
-make curate-dedup    SIZE=125m WORKERS=62
-make curate-blend    SIZE=125m
+make curate-filter SIZE=125m WORKERS=62
+make curate-dedup SIZE=125m WORKERS=62
+make curate-blend SIZE=125m
 ```
 
-Legacy direct upload target:
+Legacy direct upload:
 
 ```bash
 make curate-upload SIZE=125m
 ```
 
-The preferred reusable artifact interface is `artifacts-upload`.
+Prefer `artifacts-upload` for reusable run artifacts.
 
 ---
 
-## Stage 2 — Validation
+## Validation
 
 ```bash
 make validate SIZE=125m
 make validate-datatrove SIZE=125m
 ```
 
-`validate-upload` is retained for legacy direct upload workflows. Prefer `artifacts-upload` for reusable run artifacts.
+Legacy direct upload:
+
+```bash
+make validate-upload SIZE=125m
+```
+
+Prefer `artifacts-upload` for reusable run artifacts.
 
 ---
 
-## Stage 3 — Tokenizer and Tokenization
-
-Train the tokenizer:
+## Tokenizer and tokenization
 
 ```bash
 make tokenizer SIZE=125m
 make tokenizer-test SIZE=125m
-```
-
-Tokenize validated train/val splits:
-
-```bash
 make tokenize SIZE=125m
 ```
 
 ---
 
-## Reusable Artifacts
+## Artifacts
 
-Artifacts are grouped by `RUN_ID`, not date.
+Artifacts are grouped by `RUN_ID`.
 
-Upload artifacts:
+Upload:
 
 ```bash
 make artifacts-upload SIZE=125m
@@ -124,7 +118,7 @@ make artifacts-upload SIZE=125m RUN_ID=125m-20260629-a8f3c9
 make artifacts-upload SIZE=125m ARTIFACT_STAGES="tokenized,tokenizer,metadata"
 ```
 
-Download artifacts:
+Download:
 
 ```bash
 make artifacts-download SIZE=125m RUN_ID=125m-20260629-a8f3c9
@@ -137,55 +131,64 @@ Valid stages:
 raw, curated, validated, tokenized, tokenizer, metadata
 ```
 
+Legacy S3 helpers:
+
+```bash
+make s3-upload SIZE=125m
+make s3-download SIZE=125m
+make s3-list SIZE=125m
+```
+
 ---
 
-## Config Generation
+## Config generation
 
-Generate stage configs for the current GPU and GPU count:
+Stage configs:
 
 ```bash
 make config-gen-pretrain SIZE=125m GPUS=1
-make config-gen-sft      SIZE=125m GPUS=1
-make config-gen-dpo      SIZE=125m GPUS=1
-make config-gen          SIZE=125m GPUS=1
+make config-gen-sft SIZE=125m GPUS=1
+make config-gen-dpo SIZE=125m GPUS=1
+make config-gen SIZE=125m GPUS=1
 ```
 
-Override GPU detection:
+Hardware override:
 
 ```bash
 make config-gen SIZE=125m GPUS=4 GPU=h200
 make config-gen SIZE=1b GPUS=8 GPU=b200 MODE=aggressive
 ```
 
-Generate Accelerate configs:
+Accelerate configs:
 
 ```bash
-make accel-gen-ddp  GPUS=8
-make accel-gen-fsdp GPUS=8
 make accelerate-config-single
 make accelerate-config-multi GPUS=4
+make accel-gen-ddp GPUS=8
+make accel-gen-fsdp GPUS=8
 ```
 
 Use the same `GPUS` value for Accelerate setup, config generation, and training.
 
 ---
 
-## Stage 4 — Pretraining
+## Pretraining
 
 ```bash
 make pretrain-mini SIZE=mini GPUS=1
-make pretrain      SIZE=125m GPUS=1
+make pretrain SIZE=125m GPUS=1
 make pretrain-resume SIZE=125m GPUS=1
+make pretrain-smoke SIZE=125m
 make smoke-gen SIZE=125m
 ```
 
-Checkpoint output:
+Output:
 
 ```text
 results/runs/<size>/pretrain/final
 ```
 
-Before post-training:
+Before SFT:
 
 ```bash
 make reinit-embeds SIZE=125m
@@ -193,9 +196,9 @@ make reinit-embeds SIZE=125m
 
 ---
 
-## Stage 5 — SFT
+## SFT
 
-Prepare SFT data:
+Prepare data:
 
 ```bash
 make prepare-sft SIZE=125m
@@ -224,7 +227,7 @@ make sft-code-resume SIZE=125m GPUS=1
 make sft-code-mini SIZE=mini GPUS=1
 ```
 
-Raw code-completion SFT:
+Raw code-completion path:
 
 ```bash
 make prepare-code-completion SIZE=125m
@@ -232,7 +235,7 @@ make sft-code-completion SIZE=125m
 make eval-code-completion SIZE=125m
 ```
 
-Checkpoint outputs:
+Outputs:
 
 ```text
 results/runs/<size>/sft_instruct/final
@@ -242,15 +245,15 @@ results/runs/<size>/sft_code_completion/final
 
 ---
 
-## Stage 6 — DPO
+## DPO
 
-Prepare DPO data:
+Prepare data:
 
 ```bash
 make prepare-dpo SIZE=125m
 ```
 
-Chat DPO:
+Train:
 
 ```bash
 make dpo-chat SIZE=125m GPUS=1
@@ -262,11 +265,11 @@ Compatibility aliases:
 
 ```bash
 make dpo SIZE=125m GPUS=1
-make dpo-mini SIZE=mini GPUS=1
 make dpo-resume SIZE=125m GPUS=1
+make dpo-mini SIZE=mini GPUS=1
 ```
 
-Checkpoint output:
+Output:
 
 ```text
 results/runs/<size>/dpo_chat/final
@@ -274,39 +277,41 @@ results/runs/<size>/dpo_chat/final
 
 ---
 
-## Stage 7 — Evaluation
+## Evaluation
+
+Benchmark evaluation is optional.
 
 ```bash
-make eval-base     SIZE=125m
+make eval-base SIZE=125m
 make eval-instruct SIZE=125m
-make eval-chat     SIZE=125m
-make eval-code     SIZE=125m
-make eval          SIZE=125m
-make eval-mini     SIZE=mini
+make eval-chat SIZE=125m
+make eval-code SIZE=125m
+make eval SIZE=125m
+make eval-mini SIZE=mini
 ```
 
 Sanity evaluation:
 
 ```bash
-make eval-sanity-base     SIZE=125m
+make eval-sanity-base SIZE=125m
 make eval-sanity-instruct SIZE=125m
-make eval-sanity-chat     SIZE=125m
-make eval-sanity-code     SIZE=125m
-make eval-sanity          SIZE=125m
+make eval-sanity-chat SIZE=125m
+make eval-sanity-code SIZE=125m
+make eval-sanity SIZE=125m
 ```
 
-`eval` and `eval-sanity` default to the final chat-aligned variant.
+`eval` and `eval-sanity` default to the chat variant.
 
 ---
 
-## Stage 8 — Export
+## Export
 
 ```bash
-make export-base     SIZE=125m
+make export-base SIZE=125m
 make export-instruct SIZE=125m
-make export-chat     SIZE=125m
-make export-code     SIZE=125m
-make export          SIZE=125m
+make export-chat SIZE=125m
+make export-code SIZE=125m
+make export SIZE=125m
 ```
 
 Hub names:
@@ -320,20 +325,18 @@ tohio/slm-<size>-code
 
 ---
 
-## Stage 10 — Serving
+## Serving
 
 ```bash
 make serve SIZE=125m
 make serve-local SIZE=125m
 ```
 
-`serve` uses the exported Hub chat model. `serve-local` uses the local chat checkpoint.
-
 ---
 
 ## Tests
 
-CPU/data tests:
+Data pipeline:
 
 ```bash
 make test-curator
@@ -342,7 +345,7 @@ make test-tokenizer
 make test-data-pipeline
 ```
 
-GPU tests:
+GPU pipeline:
 
 ```bash
 make test-training
@@ -370,11 +373,22 @@ make test-unit
 
 ---
 
+## Diagnostics
+
+```bash
+make sanity-train
+make sanity-train-small
+make sanity-train-tiny
+make sanity-train-save SANITY_SIZE=tiny
+```
+
+---
+
 ## Cleanup
 
 ```bash
-make clean
 make clean-data SIZE=125m
 make clean-results
 make clean-logs
+make clean
 ```
