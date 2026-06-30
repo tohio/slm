@@ -48,11 +48,6 @@ def sft_chat_data_dir(size: str) -> Path:
     return sft_instruct_data_dir(size)
 
 
-def sft_instruct_data_dir(size: str) -> Path:
-    """Alias for the general instruction-SFT data directory."""
-    return sft_chat_data_dir(size)
-
-
 def sft_code_data_dir(size: str) -> Path:
     return data_run_dir(size) / "sft_code"
 
@@ -64,11 +59,6 @@ def dpo_chat_data_dir(size: str) -> Path:
 def dpo_data_dir(size: str) -> Path:
     # Backwards-compatible alias. New code should use dpo_chat_data_dir().
     return dpo_chat_data_dir(size)
-
-
-def dpo_chat_data_dir(size: str) -> Path:
-    """Alias for the general chat-DPO data directory."""
-    return dpo_data_dir(size)
 
 
 def dpo_code_data_dir(size: str) -> Path:
@@ -92,11 +82,6 @@ def sft_chat_dir(size: str) -> Path:
     return sft_instruct_dir(size)
 
 
-def sft_instruct_dir(size: str) -> Path:
-    """Alias for the general instruction-SFT checkpoint directory."""
-    return sft_chat_dir(size)
-
-
 def sft_code_dir(size: str) -> Path:
     return results_run_dir(size) / "sft_code"
 
@@ -108,11 +93,6 @@ def dpo_chat_dir(size: str) -> Path:
 def dpo_dir(size: str) -> Path:
     # Backwards-compatible alias. New code should use dpo_chat_dir().
     return dpo_chat_dir(size)
-
-
-def dpo_chat_dir(size: str) -> Path:
-    """Alias for the general chat-DPO checkpoint directory."""
-    return dpo_dir(size)
 
 
 def dpo_code_dir(size: str) -> Path:
