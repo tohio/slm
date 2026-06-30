@@ -69,23 +69,21 @@ Token targets are defined in `config/data_mix.py`. Hardware guidance is in `HARD
 Core local setup:
 
 ```bash
+git clone https://github.com/tohio/slm.git
+cd slm/
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.sample .env
 ```
 
-Configure `.env` before running the pipeline:
+Common environment variables:
 
 ```bash
 DATA_DIR=data
 RESULTS_DIR=results
-
-# Required for gated Hugging Face datasets and Hub export
 HF_TOKEN=...
-HF_USERNAME=tohio
-
-# Required for artifact upload/download and GPU restore
+HF_USERNAME=
 S3_BUCKET=...
 S3_PREFIX=...
 ```
