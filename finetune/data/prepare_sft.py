@@ -1155,11 +1155,9 @@ def prepare_chat(size: str, val_fraction: float, force: bool = False) -> None:
             handcrafted_records,
             max_records=handcrafted_max,
         )
-    manual_control_records = build_manual_instruction_control_records(repeats=5 if size == "mini" else 20)
-    records = selected_backbone + handcrafted_records + manual_control_records
+    records = selected_backbone + handcrafted_records
 
     log.info(f"Added generated response-control chat examples: {len(handcrafted_records):,}")
-    log.info(f"Added manual instruction-control chat examples: {len(manual_control_records):,}")
     log.info(f"Processed: {len(records):,} total chat SFT records")
 
     n_val = max(1000, int(len(records) * val_fraction))
