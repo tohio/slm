@@ -121,7 +121,6 @@ class SLMModel(nn.Module):
         use_cache: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        cache_position: Optional[torch.LongTensor] = None,
     ) -> BaseModelOutputWithPast:
         use_cache = use_cache if use_cache is not None else self.config.use_cache
         return_dict = return_dict if return_dict is not None else getattr(
@@ -467,7 +466,6 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         use_cache: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        cache_position: Optional[torch.LongTensor] = None,
     ) -> CausalLMOutputWithPast:
         outputs = self.model(
             input_ids=input_ids,
@@ -477,7 +475,6 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
             use_cache=use_cache,
             output_hidden_states=output_hidden_states,
             return_dict=True,
-            cache_position=cache_position,
         )
 
         hidden_states = outputs.last_hidden_state
@@ -499,39 +496,6 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
         )
-
-    def prepare_inputs_for_generation(
-        self,
-        input_ids: torch.LongTensor,
-        past_key_values: Optional[Union[Cache, list]] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        **kwargs,
-    ) -> dict:
-        """
-        Called by HuggingFace generate() at each decoding step.
-
-        Slices input_ids to only positions that have not yet been processed.
-        """
-        if cache_position is not None:
-            input_ids = input_ids[:, -cache_position.shape[0]:]
-        elif past_key_values is not None:
-            input_ids = input_ids[:, -1:]
-
-        if inputs_embeds is not None and past_key_values is None:
-            model_inputs = {"inputs_embeds": inputs_embeds}
-        else:
-            model_inputs = {"input_ids": input_ids}
-
-        model_inputs.update({
-            "past_key_values": past_key_values,
-            "use_cache": kwargs.get("use_cache", True),
-            "attention_mask": attention_mask,
-            "cache_position": cache_position,
-        })
-
-        return model_inputs
 
     def _reorder_cache(
         self,

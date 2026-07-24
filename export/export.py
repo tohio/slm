@@ -834,15 +834,44 @@ def _validate_model(model, tokenizer, config) -> None:
     if isinstance(endofturn_id, int) and endofturn_id >= 0 and endofturn_id not in eos_ids:
         eos_ids.append(endofturn_id)
 
+    generation_kwargs = {
+        "attention_mask": attention_mask,
+        "max_new_tokens": 32,
+        "do_sample": False,
+        "repetition_penalty": 1.1,
+        "pad_token_id": special_ids.pad,
+        "eos_token_id": eos_ids,
+    }
+
     with torch.no_grad():
         output = model.generate(
             input_ids,
-            attention_mask=attention_mask,
-            max_new_tokens=32,
-            do_sample=False,
-            repetition_penalty=1.1,
-            pad_token_id=special_ids.pad,
-            eos_token_id=eos_ids,
+            use_cache=True,
+            **generation_kwargs,
+        )
+        uncached_output = model.generate(
+            input_ids,
+            use_cache=False,
+            **generation_kwargs,
+        )
+
+    if not torch.equal(output, uncached_output):
+        cached_new = output[0][input_length:].tolist()
+        uncached_new = uncached_output[0][input_length:].tolist()
+        mismatch = next(
+            (
+                index
+                for index, (cached_id, uncached_id) in enumerate(
+                    zip(cached_new, uncached_new)
+                )
+                if cached_id != uncached_id
+            ),
+            min(len(cached_new), len(uncached_new)),
+        )
+        raise RuntimeError(
+            "Validation failed: cached and uncached greedy generation diverged "
+            f"at generated token {mismatch}. Refusing to export a checkpoint "
+            "with unreliable KV-cache generation."
         )
 
     new_tokens = output[0][input_length:].tolist()

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import pytest
 import torch
+from transformers.cache_utils import DynamicCache
 
 from model.config import CONFIGS, SLMConfig
 from model.model import SLMForCausalLM
@@ -102,6 +103,60 @@ def test_token_by_token_generation_matches_full_forward():
 
     stepped = torch.cat(step_logits, dim=1)
     torch.testing.assert_close(full, stepped, atol=1e-4, rtol=1e-4)
+
+
+# ── HuggingFace generate() cache integration ──────────────────────────────────
+
+def test_empty_dynamic_cache_does_not_truncate_prefill():
+    """
+    Transformers creates an empty DynamicCache before the first generation
+    forward. The full prompt must still reach the model on that prefill step.
+
+    Treating a non-None but empty cache as populated truncates the prompt to its
+    final token and makes cached generation diverge immediately.
+    """
+    config = _tiny_config()
+    model = SLMForCausalLM(config).eval()
+    prompt = torch.randint(0, config.vocab_size, (1, 10))
+    attention_mask = torch.ones_like(prompt)
+    empty_cache = DynamicCache(config=config)
+
+    model_inputs = model.prepare_inputs_for_generation(
+        prompt,
+        next_sequence_length=None,
+        past_key_values=empty_cache,
+        attention_mask=attention_mask,
+        is_first_iteration=True,
+        use_cache=True,
+    )
+
+    assert model_inputs["input_ids"].shape[1] == prompt.shape[1]
+
+
+def test_generate_cached_matches_uncached():
+    """
+    Greedy generation with and without the KV cache must produce the same token
+    sequence. This covers the full GenerationMixin integration rather than
+    only direct forward calls with manually managed cache tuples.
+    """
+    torch.manual_seed(0)
+    config = _tiny_config()
+    model = SLMForCausalLM(config).eval()
+    prompt = torch.randint(4, config.vocab_size, (1, 10))
+    attention_mask = torch.ones_like(prompt)
+    generation_kwargs = {
+        "attention_mask": attention_mask,
+        "max_new_tokens": 8,
+        "do_sample": False,
+        "pad_token_id": config.pad_token_id,
+        "eos_token_id": None,
+    }
+
+    with torch.no_grad():
+        cached = model.generate(prompt, use_cache=True, **generation_kwargs)
+        uncached = model.generate(prompt, use_cache=False, **generation_kwargs)
+
+    assert torch.equal(cached, uncached)
 
 
 # ── Batched inference with padding (Bug #2 regression) ────────────────────────
