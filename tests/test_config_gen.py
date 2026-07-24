@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from model.config import CONFIGS as MODEL_CONFIGS
 from config_gen.config_gen import (
     DPO_PROFILES,
     GPU_SPECS,
@@ -266,6 +267,10 @@ class TestValidation:
 # ── Rendering ────────────────────────────────────────────────────────────────
 
 class TestRendering:
+    @pytest.mark.parametrize("size", sorted(SIZE_PROFILES))
+    def test_model_preset_rope_matches_pretrain_profile(self, size):
+        assert MODEL_CONFIGS[size].rope_theta == SIZE_PROFILES[size].rope_theta
+
     def test_checked_in_125m_layers_match_profile(self):
         config_path = (
             Path(__file__).resolve().parents[1]

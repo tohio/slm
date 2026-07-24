@@ -74,6 +74,7 @@ class SLMConfig(PretrainedConfig):
             num_attention_heads=12,
             num_key_value_heads=4,
             max_position_embeddings=2048,
+            rope_theta=500000.0,
         )
 
         # 350M config
@@ -85,6 +86,7 @@ class SLMConfig(PretrainedConfig):
             num_attention_heads=16,
             num_key_value_heads=8,
             max_position_embeddings=2048,
+            rope_theta=500000.0,
         )
 
         # 1B config
@@ -216,7 +218,7 @@ SLM_125M = SLMConfig(
     num_attention_heads=12,
     num_key_value_heads=4,
     max_position_embeddings=2048,
-    rope_theta=10000.0,
+    rope_theta=500000.0,
 )
 
 SLM_350M = SLMConfig(
@@ -226,7 +228,7 @@ SLM_350M = SLMConfig(
     num_attention_heads=16,
     num_key_value_heads=8,
     max_position_embeddings=2048,
-    rope_theta=10000.0,
+    rope_theta=500000.0,
 )
 
 SLM_1B = SLMConfig(
