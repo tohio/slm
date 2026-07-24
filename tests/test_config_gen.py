@@ -8,6 +8,8 @@ Run with:
     pytest tests/test_config_gen.py -v
 """
 
+from pathlib import Path
+
 import pytest
 import yaml
 
@@ -264,6 +266,18 @@ class TestValidation:
 # ── Rendering ────────────────────────────────────────────────────────────────
 
 class TestRendering:
+    def test_checked_in_125m_layers_match_profile(self):
+        config_path = (
+            Path(__file__).resolve().parents[1]
+            / "pretrain"
+            / "configs"
+            / "gpt_125m.yaml"
+        )
+        checked_in = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+        assert checked_in["model"]["num_hidden_layers"] == 16
+        assert checked_in["model"]["num_hidden_layers"] == SIZE_PROFILES["125m"].layers
+
     def test_pretrain_yaml_parses(self):
         cfg = compute_pretrain_config("h200", "350m", 4)
         d = yaml.safe_load(render_pretrain_yaml(cfg))
