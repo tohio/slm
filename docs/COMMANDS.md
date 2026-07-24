@@ -252,6 +252,11 @@ Prepare data:
 make prepare-dpo SIZE=125m
 ```
 
+The pinned source and preference-quality contract are configured in
+`alignment/configs/dpo_data_sources.yaml`. Prepared data includes a manifest;
+changing the contract requires an intentional
+`alignment/data/prepare_dpo.py --force` run.
+
 Train:
 
 ```bash

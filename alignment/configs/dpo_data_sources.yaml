@@ -1,0 +1,34 @@
+version: 1
+seed: 42
+validation_fraction: 0.05
+
+# Temporary public preference source. Replace this contract when the separately
+# maintained synthetic DPO dataset has been regenerated and validated.
+quality:
+  max_invalid_fraction: 0.05
+  max_duplicate_fraction: 0.05
+  min_unique_prompt_ratio: 0.90
+  max_reverse_conflicts: 0
+  min_token_retention_ratio: 0.80
+
+source:
+  dataset: HuggingFaceH4/ultrafeedback_binarized
+  split: train_prefs
+  revision: 3949bf5f8c17c394422ccfab0c31ea9c20bdeb85
+  format: conversational_preference
+  source: ultrafeedback_binarized
+  max_records_by_size:
+    mini: 1000
+    125m: 10000
+    350m: 10000
+    1b: 10000
+  max_prompt_tokens_by_size:
+    mini: 512
+    125m: 1024
+    350m: 1024
+    1b: 1024
+  max_total_tokens_by_size:
+    mini: 1024
+    125m: 2048
+    350m: 2048
+    1b: 2048

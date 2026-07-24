@@ -11,10 +11,11 @@ Checks:
     - DPO model checkpoint exists and loads
     - Forward pass produces finite loss
     - Model can generate responses
-    - DPO data stats file exists and is consistent
+    - DPO data manifest exists and is consistent
 """
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -33,6 +34,26 @@ def load_model_and_tokenizer(model_dir: Path):
     return model, tokenizer
 
 
+def assistant_only_batch(tokenizer, messages):
+    batch = tokenizer.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=False,
+        return_dict=True,
+        return_tensors="pt",
+        return_assistant_tokens_mask=True,
+    )
+    mask = batch.pop("assistant_masks")
+    if not isinstance(mask, torch.Tensor):
+        mask = torch.tensor(mask)
+    labels = batch["input_ids"].clone()
+    labels[mask == 0] = -100
+    assert (labels == -100).any()
+    assert (labels != -100).any()
+    batch["labels"] = labels
+    return batch
+
+
 # ── DPO data ───────────────────────────────────────────────────────────────────
 
 class TestDPOData:
@@ -45,8 +66,8 @@ class TestDPOData:
         assert pipeline_path("dpo", "val.jsonl").exists()
 
     @requires_stage("prepare-dpo")
-    def test_dpo_stats_exists(self):
-        assert pipeline_path("dpo", "stats.json").exists()
+    def test_dpo_manifest_exists(self):
+        assert pipeline_path("dpo", "manifest.json").exists()
 
     @requires_stage("prepare-dpo")
     def test_dpo_records_have_required_fields(self):
@@ -92,15 +113,39 @@ class TestDPOData:
         assert "content" in prompt[0]
 
     @requires_stage("prepare-dpo")
-    def test_dpo_stats_consistent(self):
-        stats_path = pipeline_path("dpo", "stats.json")
-        with open(stats_path) as f:
-            stats = json.load(f)
-        assert stats["train"] + stats["val"] == stats["total"], (
-            "DPO stats: train + val != total"
-        )
-        assert stats["train"] > 0
-        assert stats["val"] > 0
+    def test_dpo_manifest_is_consistent(self):
+        manifest = json.loads(pipeline_path("dpo", "manifest.json").read_text())
+        assert manifest["contract"]["source"]["revision"]
+        assert manifest["split"]["train_pairs"] > 0
+        assert manifest["split"]["validation_pairs"] > 0
+        assert manifest["split"]["prompt_overlap"] == 0
+        assert manifest["quality"]["reverse_conflicts"] == 0
+        assert manifest["token_filter"]["retention_ratio"] >= \
+            manifest["contract"]["quality"]["min_token_retention_ratio"]
+
+    @requires_stage("prepare-dpo")
+    def test_dpo_prompt_sets_are_disjoint(self):
+        def prompts(path):
+            values = set()
+            with open(path) as handle:
+                for line in handle:
+                    prompt = json.loads(line)["prompt"]
+                    normalized = [
+                        {
+                            "role": turn["role"],
+                            "content": re.sub(
+                                r"\s+", " ", turn["content"].strip().lower()
+                            ),
+                        }
+                        for turn in prompt
+                    ]
+                    values.add(json.dumps(normalized, sort_keys=True))
+            return values
+
+        train = prompts(pipeline_path("dpo", "train.jsonl"))
+        validation = prompts(pipeline_path("dpo", "val.jsonl"))
+        assert train and validation
+        assert train.isdisjoint(validation)
 
 
 # ── DPO model ──────────────────────────────────────────────────────────────────
@@ -135,13 +180,10 @@ class TestDPOModel:
             {"role": "user", "content": "What is the capital of France?"},
             {"role": "assistant", "content": "The capital of France is Paris."},
         ]
-        text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
-        encoding = tokenizer(text, return_tensors="pt", truncation=True, max_length=128)
-        input_ids = encoding["input_ids"]
-        labels = input_ids.clone()
+        batch = assistant_only_batch(tokenizer, messages)
 
         with torch.no_grad():
-            out = model(input_ids, labels=labels)
+            out = model(**batch)
         assert torch.isfinite(out.loss), f"DPO model loss not finite: {out.loss}"
 
     def test_dpo_model_generation_does_not_crash(self, dpo_model_dir):

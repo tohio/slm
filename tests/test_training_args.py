@@ -53,7 +53,11 @@ def test_dpo_config_coerces_yaml_numeric_values(tmp_path: Path):
             "beta1": "0.9",
             "beta2": "0.98",
         },
-        "dpo": {"beta": 0.1},
+        "dpo": {
+            "beta": 0.1,
+            "loss_type": "sigmoid",
+            "precompute_ref_log_probs": True,
+        },
         "model": {"max_seq_length": 64},
     }
 
@@ -70,3 +74,7 @@ def test_dpo_config_coerces_yaml_numeric_values(tmp_path: Path):
     assert args.adam_beta1 == 0.9
     assert args.adam_beta2 == 0.98
     assert args.max_length == 64
+    assert args.loss_type == ["sigmoid"]
+    assert args.precompute_ref_log_probs is True
+    assert args.remove_unused_columns is True
+    assert args.warmup_steps == 1

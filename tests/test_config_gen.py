@@ -388,7 +388,9 @@ class TestRendering:
         assert d["data"]["train_path"] == \
             "$DATA_DIR/runs/125m/dpo_chat/train.jsonl"
         assert d["dpo"]["beta"] == DPO_PROFILES["125m"].dpo_beta
-        assert d["dpo"]["max_prompt_length"] == DPO_PROFILES["125m"].max_prompt_length
+        assert d["dpo"]["loss_type"] == "sigmoid"
+        assert d["dpo"]["precompute_ref_log_probs"] is True
+        assert d["data"]["min_retention_ratio"] == 0.99
 
     def test_recipe_lr_preserved(self):
         """Script must NEVER touch the LR — it's a recipe value."""

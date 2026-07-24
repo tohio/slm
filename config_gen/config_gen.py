@@ -15,7 +15,7 @@ Hardware-driven (script computes):
 
 Recipe-driven (preserved verbatim from the profile):
     learning_rate, weight_decay, betas, epochs, warmup_ratio,
-    max_seq_length, dpo.beta, dpo.max_prompt_length, paths, etc.
+    max_seq_length, DPO objective settings, paths, etc.
 
 Token vocabulary used in this file:
     corpus_tokens     curation-side corpus target for a model size. This is
@@ -36,7 +36,7 @@ Three tuning modes:
 Stages:
     pretrain        writes pretrain/configs/gpt_<size>.yaml
     sft             writes finetune/configs/sft_instruct_<size>.yaml AND sft_code_<size>.yaml
-    dpo             writes alignment/configs/dpo_<size>.yaml
+    dpo             writes alignment/configs/dpo_chat_<size>.yaml
 
 Usage:
     python -m config_gen.config_gen --stage pretrain --gpu h200 --size 125m --gpus 1
@@ -204,7 +204,6 @@ class DPOProfile:
     epochs: int
     warmup_ratio: float
     dpo_beta: float
-    max_prompt_length: int
     weight_decay: float = 0.01
     beta1: float = 0.9
     beta2: float = 0.98
@@ -301,19 +300,19 @@ DPO_PROFILES: dict[str, DPOProfile] = {
         state_gb=2.3, act_per_seq_gb_no_ckpt=7.6, act_per_seq_gb_ckpt=2.6,
         max_seq_length=2048, ref_global_batch=16,
         lr=5.0e-7, epochs=1, warmup_ratio=0.05,
-        dpo_beta=0.1, max_prompt_length=1024,
+        dpo_beta=0.1,
     ),
     "350m": DPOProfile(
         state_gb=5.8, act_per_seq_gb_no_ckpt=10.0, act_per_seq_gb_ckpt=3.4,
         max_seq_length=2048, ref_global_batch=16,
         lr=3.0e-7, epochs=1, warmup_ratio=0.05,
-        dpo_beta=0.1, max_prompt_length=1024,
+        dpo_beta=0.1,
     ),
     "1b": DPOProfile(
         state_gb=16.5, act_per_seq_gb_no_ckpt=28.0, act_per_seq_gb_ckpt=9.0,
         max_seq_length=4096, ref_global_batch=16,
         lr=2.0e-7, epochs=1, warmup_ratio=0.05,
-        dpo_beta=0.1, max_prompt_length=2048,
+        dpo_beta=0.1,
     ),
 }
 
@@ -948,10 +947,15 @@ model:
 data:
   train_path: $DATA_DIR/runs/{cfg.size}/dpo_chat/train.jsonl
   val_path:   $DATA_DIR/runs/{cfg.size}/dpo_chat/val.jsonl
+  min_retention_ratio: 0.99
 
 dpo:
   beta: {profile.dpo_beta}
-  max_prompt_length: {profile.max_prompt_length}
+  loss_type: sigmoid
+  label_smoothing: 0.0
+  f_divergence_type: reverse_kl
+  disable_dropout: true
+  precompute_ref_log_probs: true
 
 training:
   # micro × accum × gpus = {cfg.micro_batch_size} × {cfg.gradient_accumulation_steps} × {cfg.num_gpus} = {cfg.actual_global_batch} pairs/step

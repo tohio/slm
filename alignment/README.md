@@ -1,99 +1,47 @@
-# alignment
+# DPO alignment
 
-DPO preference alignment for the SLM chat variant.
+This directory consumes external preference data and trains the chat-aligned
+SLM branch with Direct Preference Optimization. Synthetic preference generation
+and repair belong to the separate `slm-synthetic-data` repository.
 
----
+## Data contract
 
-## Owns
+`configs/dpo_data_sources.yaml` pins the Hub dataset, split, immutable
+revision, deterministic row cap, token budgets, and quality thresholds.
 
-- `alignment/data/prepare_dpo.py` — DPO preference dataset preparation
-- `alignment/train_dpo.py` — DPO training with TRL
-- `alignment/configs/` — size-specific chat DPO configs
+The temporary source is
+`HuggingFaceH4/ultrafeedback_binarized@3949bf5f8c17c394422ccfab0c31ea9c20bdeb85`.
+The 125M, 350M, and 1B recipes consume the same deterministic 10,000-row
+population with identical 1,024/2,048 prompt/total token budgets. `mini`
+consumes 1,000 rows with smaller budgets.
 
-This folder trains `dpo_chat` only. Base, instruct, and code training live in other folders.
+To replace UltraFeedback later, update only `configs/dpo_data_sources.yaml`.
+This repository should not create, repeat, or silently repair synthetic
+preference pairs. The `conversational_preference` adapter accepts either
+string responses or assistant-message lists under `chosen` and `rejected`.
 
----
-
-## Configs
-
-```text
-alignment/configs/dpo_chat_mini.yaml
-alignment/configs/dpo_chat_125m.yaml
-alignment/configs/dpo_chat_350m.yaml
-alignment/configs/dpo_chat_1b.yaml
-```
-
-Generate/update DPO configs:
-
-```bash
-make config-gen-dpo SIZE=125m GPUS=1
-```
-
----
-
-## Inputs
-
-```text
-results/runs/<size>/sft_instruct/final
-data/runs/<size>/tokenizer/
-```
-
-Prepared DPO data:
-
-```text
-data/runs/<size>/dpo_chat/train.jsonl
-data/runs/<size>/dpo_chat/val.jsonl
-```
-
----
-
-## Outputs
-
-```text
-results/runs/<size>/dpo_chat/final
-```
-
----
-
-## Commands
-
-Prepare DPO data:
+Prepare data:
 
 ```bash
 make prepare-dpo SIZE=125m
 ```
 
-Train chat DPO:
+Existing unmanifested or mismatched data requires intentional replacement:
 
 ```bash
-make dpo-chat SIZE=125m GPUS=1
-make dpo-chat-mini SIZE=mini GPUS=1
-make dpo-chat-resume SIZE=125m GPUS=1
+python alignment/data/prepare_dpo.py --size 125m --force
 ```
 
-Direct calls:
+Prepared output:
 
-```bash
-python alignment/data/prepare_dpo.py --size 125m --source all
-python alignment/data/prepare_dpo.py --size 125m --source ultrafeedback
-python alignment/data/prepare_dpo.py --size 125m --source handcrafted
-accelerate launch alignment/train_dpo.py --config alignment/configs/dpo_chat_125m.yaml
-python alignment/train_dpo.py --config alignment/configs/dpo_chat_125m.yaml --resume
+```text
+data/runs/<size>/dpo_chat/
+  train.jsonl
+  val.jsonl
+  manifest.json
 ```
 
-Compatibility aliases:
-
-```bash
-make dpo SIZE=125m GPUS=1
-make dpo-mini SIZE=mini GPUS=1
-make dpo-resume SIZE=125m GPUS=1
-```
-
----
-
-## Preference data
-
-`prepare_dpo.py` writes conversational preference records for TRL `DPOTrainer`:
+Records use TRL’s conversational preference schema:
 
 ```json
 {
@@ -101,43 +49,68 @@ make dpo-resume SIZE=125m GPUS=1
     {"role": "system", "content": "..."},
     {"role": "user", "content": "..."}
   ],
-  "chosen": [
-    {"role": "assistant", "content": "preferred response"}
-  ],
-  "rejected": [
-    {"role": "assistant", "content": "rejected response"}
-  ],
-  "source": "ultrafeedback_binarized"
+  "chosen": [{"role": "assistant", "content": "preferred response"}],
+  "rejected": [{"role": "assistant", "content": "rejected response"}],
+  "source": "ultrafeedback_binarized",
+  "dpo_type": "general_preference"
 }
 ```
 
-Sources:
+Preparation uses the target tokenizer’s exact chat rendering. It rejects
+prefix mismatches, over-budget pairs, identical responses, excessive
+duplicates, and reversed preferences. Splitting is grouped by the normalized
+complete prompt, guaranteeing zero prompt overlap. File and tokenizer hashes
+are recorded in the manifest.
+
+## Training
+
+DPO starts from:
 
 ```text
-HuggingFaceH4/ultrafeedback_binarized
-handcrafted_behavior
-targeted_behavior
+results/runs/<size>/sft_instruct/final
 ```
 
-The CLI exposes `--source all`, `--source ultrafeedback`, and `--source handcrafted`.
-
----
-
-## Length filtering
-
-`prepare_dpo.py` filters pairs with the actual SLM tokenizer before training. The default ceiling is based on the smallest DPO context budget so the same prepared dataset can be reused across model sizes.
-
----
-
-## Tests
+Commands:
 
 ```bash
+make dpo-chat SIZE=125m GPUS=1
+make dpo-chat-resume SIZE=125m GPUS=1
+make dpo-chat-mini SIZE=mini GPUS=1
+```
+
+The recipe explicitly uses standard sigmoid DPO, `beta: 0.1`, reverse KL,
+zero label smoothing, and disabled dropout. Reference log probabilities are
+precomputed from the untouched initial policy. This preserves a fixed SFT
+reference while avoiding a second resident model during optimization.
+
+Before optimization, the runner validates the model/tokenizer contract, data
+and tokenizer hashes, preference schema, split isolation, TRL preprocessing
+retention, non-empty completions, and evaluation/checkpoint cadence.
+
+Run those checks without a reference pass or optimization:
+
+```bash
+python alignment/train_dpo.py \
+  --config alignment/configs/dpo_chat_125m.yaml \
+  --preflight-only
+```
+
+The lowest-validation-loss checkpoint is saved to:
+
+```text
+results/runs/<size>/dpo_chat/final
+```
+
+`final/` also contains `dpo_run_audit.json` and `dpo_data_manifest.json`.
+
+## Validation
+
+```bash
+python -m pytest \
+  tests/test_dpo_data_contract.py \
+  tests/test_training_args.py \
+  tests/test_trl_smoke.py \
+  -q
+
 make test-dpo-chat SIZE=mini
-make test-dpo-chat SIZE=125m
-```
-
-Compatibility alias:
-
-```bash
-make test-dpo SIZE=125m
 ```

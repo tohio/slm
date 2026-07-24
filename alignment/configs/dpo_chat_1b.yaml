@@ -5,18 +5,25 @@ model:
   max_seq_length: 4096
 dpo:
   beta: 0.1
-  max_prompt_length: 2048
+  loss_type: sigmoid
+  label_smoothing: 0.0
+  f_divergence_type: reverse_kl
+  disable_dropout: true
+  precompute_ref_log_probs: true
 data:
   train_path: $DATA_DIR/runs/1b/dpo_chat/train.jsonl
   val_path: $DATA_DIR/runs/1b/dpo_chat/val.jsonl
+  min_retention_ratio: 0.99
 training:
   epochs: 1
   warmup_ratio_recipe: 0.05
   micro_batch_size: 1
+  eval_micro_batch_size: 1
   gradient_accumulation_steps: 16
   precision: bf16
   gradient_clip_val: 1.0
   gradient_checkpointing: true
+  torch_compile: false
   eval_steps: 200
   save_steps: 200
   save_total_limit: 3

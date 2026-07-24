@@ -1,7 +1,5 @@
 """One-step synthetic SFT/DPO integration tests for the pinned TRL stack."""
 
-from copy import deepcopy
-
 import torch
 from datasets import Dataset
 from tokenizers import Tokenizer
@@ -137,12 +135,17 @@ def test_one_step_sft_and_dpo(tmp_path):
         gradient_checkpointing=False,
         use_cpu=True,
         disable_tqdm=True,
+        precompute_ref_log_probs=True,
     )
-    dpo_result = DPOTrainer(
+    dpo_trainer = DPOTrainer(
         model=policy,
-        ref_model=deepcopy(policy),
+        ref_model=None,
         args=dpo_args,
         train_dataset=Dataset.from_list(dpo_rows),
         processing_class=tokenizer,
-    ).train()
+    )
+    assert dpo_trainer.ref_model is None
+    assert "ref_chosen_logps" in dpo_trainer.train_dataset.column_names
+    assert "ref_rejected_logps" in dpo_trainer.train_dataset.column_names
+    dpo_result = dpo_trainer.train()
     assert torch.isfinite(torch.tensor(dpo_result.training_loss))

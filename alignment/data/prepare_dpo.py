@@ -1,160 +1,293 @@
+#!/usr/bin/env python3
+"""Prepare a pinned external preference dataset for chat DPO.
+
+The SLM repository consumes DPO data; it does not generate or repeat synthetic
+preferences. Source identity, revision, row cap, token budget, and quality
+thresholds live in ``alignment/configs/dpo_data_sources.yaml``.
+
+Outputs are conversational JSONL plus a provenance/integrity manifest. Splits
+are grouped by normalized prompt so variants of one prompt cannot cross the
+train/validation boundary.
 """
-alignment/data/prepare_dpo.py
-------------------------------
-Download and format DPO preference datasets.
 
-Current DPO policy:
-    1. HuggingFaceH4/ultrafeedback_binarized — general DPO preference backbone
-    2. handcrafted_behavior                  — local factual-restraint pairs
-    3. targeted_behavior                     — local pairs for exact answers,
-                                               code-output behavior, restraint,
-                                               and disambiguation
-
-The default DPO blend is UltraFeedback + local targeted pairs.
-
-Output format — conversational format for trl DPOTrainer:
-    {
-        "prompt":   [{"role": "system", "content": "..."}, {"role": "user", "content": "..."}],
-        "chosen":   [{"role": "assistant", "content": "preferred response"}],
-        "rejected": [{"role": "assistant", "content": "rejected response"}],
-        "source":   "ultrafeedback_binarized | handcrafted_behavior | targeted_behavior"
-    }
-
-trl DPOTrainer detects list inputs and uses apply_chat_template, which
-tokenizes the full conversation consistently — avoiding BPE boundary
-mismatch warnings that occur with plain string prompts.
-
-Length filtering (defense in depth):
-    Current TRL no longer exposes DPOConfig.max_prompt_length. We filter here
-    using the actual SLM tokenizer: drop any pair where
-        len(prompt) + max(len(chosen), len(rejected))
-    exceeds MAX_TOTAL_TOKENS (2048 = smallest model size's DPOConfig.max_length).
-    This means train-time truncation never fires on the prepared dataset,
-    and the filtered dataset serves all three model sizes without
-    re-preparation.
-
-Usage:
-    python alignment/data/prepare_dpo.py
-    python alignment/data/prepare_dpo.py --source all
-    python alignment/data/prepare_dpo.py --source ultrafeedback
-    python alignment/data/prepare_dpo.py --source handcrafted
-    python alignment/data/prepare_dpo.py --force            # re-run even if output exists
-"""
+from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
 import random
+import re
 import sys
+from collections import Counter
 from pathlib import Path
+from typing import Any
 
+import yaml
 from dotenv import load_dotenv
 
 load_dotenv()
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from config.paths import dpo_chat_data_dir, BASE_DATA_DIR
+from config.paths import dpo_chat_data_dir, tokenizer_dir
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger(__name__)
 
-DATA_DIR = BASE_DATA_DIR
-DPO_DIR = dpo_chat_data_dir(os.environ.get("SIZE", "125m"))
-
 DEFAULT_SYSTEM = "You are a helpful, harmless, and honest assistant."
-
-# Token-budget ceiling for prompt + max(chosen, rejected). Set to the smallest
-# of the three model sizes' DPO max_length (125m=350m=2048, 1b=4096) so one
-# prepared dataset serves all sizes. DPO rarely needs >2048 context.
-MAX_TOTAL_TOKENS = 2048
-
-# Handcrafted behavior examples are intentionally small but high-value.
-# Repeat them in the DPO blend so targeted safety/restraint failures are not
-# drowned out by the large upstream preference datasets.
-HANDCRAFTED_BEHAVIOR_REPEAT = 30
+VALID_SIZES = ("mini", "125m", "350m", "1b")
+SPACE_RE = re.compile(r"\s+")
 
 
-GENERAL_CHAT_DPO_EXCLUDED_TYPES = {"code_output", "function_completion"}
+def canonical_text(value: str) -> str:
+    return SPACE_RE.sub(" ", value.strip().lower())
 
 
-def filter_general_chat_dpo_records(records: list[dict]) -> list[dict]:
-    """Drop code-specialized preference pairs from general chat DPO."""
-    kept = [
-        r for r in records
-        if r.get("dpo_type") not in GENERAL_CHAT_DPO_EXCLUDED_TYPES
+def canonical_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def sha256_json(value: Any) -> str:
+    return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def tokenizer_fingerprint(path: Path) -> str:
+    files = [
+        path / name
+        for name in ("tokenizer.json", "tokenizer_config.json", "special_tokens_map.json")
+        if (path / name).exists()
     ]
-    dropped = len(records) - len(kept)
-    if dropped:
-        log.info(f"General chat DPO filter: dropped {dropped:,} code-specialized pair(s)")
-    return kept
+    if not files:
+        raise FileNotFoundError(f"No tokenizer files found at {path}")
+    digest = hashlib.sha256()
+    for file_path in files:
+        digest.update(file_path.name.encode("utf-8"))
+        digest.update(bytes.fromhex(sha256_file(file_path)))
+    return digest.hexdigest()
 
 
-GENERAL_DPO_EXCLUDED_TYPES = {"code_output", "function_completion"}
+def normalize_messages(value: Any) -> list[dict[str, str]] | None:
+    if not isinstance(value, list):
+        return None
+    messages: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            return None
+        role = item.get("role") or item.get("from")
+        content = item.get("content") or item.get("value")
+        role = {"human": "user", "gpt": "assistant"}.get(role, role)
+        if role not in {"system", "user", "assistant"} or not isinstance(content, str):
+            return None
+        content = content.strip()
+        if not content:
+            return None
+        messages.append({"role": role, "content": content})
+    return messages or None
 
 
-def make_prompt(system: str, user: str) -> list[dict]:
-    """Return prompt as a list of message dicts for trl conversational format."""
-    return [
-        {"role": "system", "content": (system or DEFAULT_SYSTEM).strip()},
-        {"role": "user",   "content": user.strip()},
-    ]
+def normalize_prompt(value: Any) -> list[dict[str, str]] | None:
+    if isinstance(value, str) and value.strip():
+        messages = [{"role": "user", "content": value.strip()}]
+    else:
+        messages = normalize_messages(value)
+    if not messages:
+        return None
+    if messages[0]["role"] != "system":
+        messages.insert(0, {"role": "system", "content": DEFAULT_SYSTEM})
+    if any(message["role"] == "system" for message in messages[1:]):
+        return None
+    conversation = messages[1:]
+    if not conversation or conversation[0]["role"] != "user":
+        return None
+    if conversation[-1]["role"] != "user":
+        return None
+    if any(
+        left["role"] == right["role"]
+        for left, right in zip(conversation, conversation[1:])
+    ):
+        return None
+    return messages
 
 
-def make_response(content: str) -> list[dict]:
-    """Return a single assistant message dict."""
-    return [{"role": "assistant", "content": content.strip()}]
+def canonical_prompt(messages: list[dict[str, str]]) -> str:
+    return canonical_json(
+        [
+            {"role": message["role"], "content": canonical_text(message["content"])}
+            for message in messages
+        ]
+    )
 
 
-def extract_text(value) -> str:
-    """
-    Safely extract a string from a field that may be:
-      - str: return as-is
-      - list of dicts with 'content': return last content value
-      - list of str: return last element
-      - None: return ""
-    """
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        if not value:
-            return ""
-        last = value[-1]
-        if isinstance(last, dict):
-            return last.get("content", "") or ""
-        return str(last)
-    return str(value)
+def response_text(messages: list[dict[str, str]]) -> str:
+    return messages[0]["content"]
 
 
-def write_jsonl(records: list[dict], path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        for r in records:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
-    log.info(f"Wrote {len(records):,} records to {path}")
+def normalize_response_side(value: Any) -> tuple[list[dict[str, str]], str] | None:
+    if isinstance(value, str) and value.strip():
+        return [], value.strip()
+    messages = normalize_messages(value)
+    if not messages or messages[-1]["role"] != "assistant":
+        return None
+    return messages[:-1], messages[-1]["content"].strip()
 
 
-def _chat_template_token_ids(tokenizer, messages: list[dict]) -> list[int]:
-    """
-    Call apply_chat_template and normalize to a flat list[int].
+def normalize_preference(row: dict[str, Any], source_name: str) -> dict[str, Any] | None:
+    chosen_side = normalize_response_side(row.get("chosen"))
+    rejected_side = normalize_response_side(row.get("rejected"))
+    if not chosen_side or not rejected_side:
+        return None
+    chosen_prefix, chosen = chosen_side
+    rejected_prefix, rejected = rejected_side
+    if bool(chosen_prefix) != bool(rejected_prefix):
+        return None
+    if chosen_prefix and rejected_prefix:
+        chosen_prompt = normalize_prompt(chosen_prefix)
+        rejected_prompt = normalize_prompt(rejected_prefix)
+        if (
+            chosen_prompt is None
+            or rejected_prompt is None
+            or canonical_prompt(chosen_prompt) != canonical_prompt(rejected_prompt)
+        ):
+            return None
+        prompt = chosen_prompt
+    else:
+        prompt = normalize_prompt(row.get("prompt"))
+    if prompt is None:
+        return None
 
-    transformers' apply_chat_template(tokenize=True, return_tensors=None) is
-    documented to return list[int] but newer versions return BatchEncoding
-    instead. Both contain the same correct token IDs; only the wrapper
-    differs. Normalize here so callers (the length filter) get a flat list
-    that supports len() and indexing reliably.
-    """
+    if not chosen or not rejected or canonical_text(chosen) == canonical_text(rejected):
+        return None
+
+    record = {
+        "prompt": prompt,
+        "chosen": [{"role": "assistant", "content": chosen}],
+        "rejected": [{"role": "assistant", "content": rejected}],
+        "source": source_name,
+        "dpo_type": "general_preference",
+    }
+    source_id = row.get("id", row.get("prompt_id"))
+    if source_id is not None:
+        record["source_id"] = str(source_id)
+    return record
+
+
+def load_source(source: dict[str, Any]):
+    from datasets import load_dataset
+
+    kwargs: dict[str, Any] = {
+        "split": source["split"],
+        "revision": source["revision"],
+    }
+    if source.get("config"):
+        kwargs["name"] = source["config"]
+    if os.environ.get("HF_TOKEN"):
+        kwargs["token"] = os.environ["HF_TOKEN"]
+    return load_dataset(source["dataset"], **kwargs)
+
+
+def select_source_rows(dataset, cap: int, seed: int):
+    if cap <= 0:
+        raise ValueError(f"max_records must be positive, got {cap}")
+    if len(dataset) <= cap:
+        return dataset
+    return dataset.shuffle(seed=seed).select(range(cap))
+
+
+def prepare_records(
+    dataset, source: dict[str, Any], quality: dict[str, float]
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if source["format"] != "conversational_preference":
+        raise ValueError(f"Unsupported DPO source format: {source['format']!r}")
+
+    valid: list[dict[str, Any]] = []
+    invalid = 0
+    for row in dataset:
+        record = normalize_preference(row, source["source"])
+        if record is None:
+            invalid += 1
+        else:
+            valid.append(record)
+
+    total = len(dataset)
+    invalid_fraction = invalid / total if total else 1.0
+    if invalid_fraction > float(quality["max_invalid_fraction"]):
+        raise RuntimeError(
+            f"{source['source']} rejected {invalid}/{total} rows "
+            f"({invalid_fraction:.2%}), above max_invalid_fraction="
+            f"{float(quality['max_invalid_fraction']):.2%}"
+        )
+
+    unique: dict[str, dict[str, Any]] = {}
+    prompt_counts: Counter[str] = Counter()
+    reverse_conflicts = 0
+    seen_directional: set[str] = set()
+    for record in valid:
+        prompt_key = canonical_prompt(record["prompt"])
+        chosen_key = canonical_text(response_text(record["chosen"]))
+        rejected_key = canonical_text(response_text(record["rejected"]))
+        pair_key = sha256_json((prompt_key, chosen_key, rejected_key))
+        reverse_key = sha256_json((prompt_key, rejected_key, chosen_key))
+        if reverse_key in seen_directional:
+            reverse_conflicts += 1
+        seen_directional.add(pair_key)
+        unique.setdefault(pair_key, record)
+        prompt_counts[prompt_key] += 1
+
+    duplicate_count = len(valid) - len(unique)
+    duplicate_fraction = duplicate_count / len(valid) if valid else 1.0
+    if duplicate_fraction > float(quality["max_duplicate_fraction"]):
+        raise RuntimeError(
+            f"{source['source']} contains {duplicate_count}/{len(valid)} exact "
+            f"preference duplicates ({duplicate_fraction:.2%}), above "
+            f"max_duplicate_fraction={float(quality['max_duplicate_fraction']):.2%}"
+        )
+    if reverse_conflicts > int(quality["max_reverse_conflicts"]):
+        raise RuntimeError(
+            f"{source['source']} contains {reverse_conflicts} reversed preference "
+            "conflicts. Fix the source dataset."
+        )
+
+    unique_prompt_ratio = len(prompt_counts) / len(valid) if valid else 0.0
+    if unique_prompt_ratio < float(quality["min_unique_prompt_ratio"]):
+        raise RuntimeError(
+            f"{source['source']} unique-prompt ratio is {unique_prompt_ratio:.2%}, "
+            f"below min_unique_prompt_ratio="
+            f"{float(quality['min_unique_prompt_ratio']):.2%}"
+        )
+
+    records = list(unique.values())
+    return records, {
+        "selected_rows": total,
+        "valid_rows": len(valid),
+        "invalid_rows": invalid,
+        "invalid_fraction": invalid_fraction,
+        "exact_duplicates_removed": duplicate_count,
+        "duplicate_fraction": duplicate_fraction,
+        "reverse_conflicts": reverse_conflicts,
+        "unique_pairs": len(records),
+        "unique_prompts": len(prompt_counts),
+        "unique_prompt_ratio": unique_prompt_ratio,
+        "maximum_prompt_multiplicity": max(prompt_counts.values(), default=0),
+    }
+
+
+def chat_template_ids(tokenizer, messages: list[dict], add_generation_prompt: bool) -> list[int]:
     encoded = tokenizer.apply_chat_template(
         messages,
         tokenize=True,
-        add_generation_prompt=True,
+        add_generation_prompt=add_generation_prompt,
     )
     if hasattr(encoded, "input_ids"):
         return list(encoded.input_ids)
@@ -163,682 +296,252 @@ def _chat_template_token_ids(tokenizer, messages: list[dict]) -> list[int]:
     return list(encoded)
 
 
-# ── Length filter ──────────────────────────────────────────────────────────────
+def apply_token_budget(
+    records: list[dict[str, Any]],
+    tokenizer,
+    max_prompt_tokens: int,
+    max_total_tokens: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if not 0 < max_prompt_tokens < max_total_tokens:
+        raise ValueError("Token budgets require 0 < max_prompt_tokens < max_total_tokens")
 
-def load_tokenizer_for_filter():
-    """
-    Load the SLM tokenizer for length counting. Uses the same tokenizer that
-    train_dpo.py will use at training time, so counts are exact.
-    """
+    kept: list[dict[str, Any]] = []
+    prompt_too_long = 0
+    pair_too_long = 0
+    prefix_mismatch = 0
+    for record in records:
+        prompt_ids = chat_template_ids(tokenizer, record["prompt"], True)
+        chosen_ids = chat_template_ids(tokenizer, record["prompt"] + record["chosen"], False)
+        rejected_ids = chat_template_ids(tokenizer, record["prompt"] + record["rejected"], False)
+        if chosen_ids[: len(prompt_ids)] != prompt_ids or rejected_ids[: len(prompt_ids)] != prompt_ids:
+            prefix_mismatch += 1
+            continue
+        if len(prompt_ids) > max_prompt_tokens:
+            prompt_too_long += 1
+            continue
+        if max(len(chosen_ids), len(rejected_ids)) > max_total_tokens:
+            pair_too_long += 1
+            continue
+        kept.append(record)
+
+    if prefix_mismatch:
+        raise RuntimeError(
+            f"{prefix_mismatch} DPO rows have prompt/completion tokenization prefix "
+            "mismatches. Fix the tokenizer template or source formatting."
+        )
+    return kept, {
+        "input_pairs": len(records),
+        "retained_pairs": len(kept),
+        "retention_ratio": len(kept) / len(records) if records else 0.0,
+        "prompt_too_long": prompt_too_long,
+        "pair_too_long": pair_too_long,
+        "prefix_mismatch": prefix_mismatch,
+    }
+
+
+def grouped_split(
+    records: list[dict[str, Any]], validation_fraction: float, seed: int
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if not 0.0 < validation_fraction < 1.0:
+        raise ValueError("validation_fraction must be strictly between 0 and 1")
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        groups.setdefault(canonical_prompt(record["prompt"]), []).append(record)
+    if len(groups) < 2:
+        raise RuntimeError("At least two unique DPO prompts are required")
+
+    keys = list(groups)
+    random.Random(seed).shuffle(keys)
+    target = max(1, round(len(records) * validation_fraction))
+    validation_keys: set[str] = set()
+    validation_count = 0
+    for key in keys:
+        if validation_count >= target and validation_keys:
+            break
+        validation_keys.add(key)
+        validation_count += len(groups[key])
+
+    train = [record for key in keys if key not in validation_keys for record in groups[key]]
+    validation = [record for key in keys if key in validation_keys for record in groups[key]]
+    random.Random(seed + 1).shuffle(train)
+    random.Random(seed + 2).shuffle(validation)
+    return train, validation
+
+
+def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def load_config(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as handle:
+        config = yaml.safe_load(handle)
+    required = {"version", "seed", "validation_fraction", "quality", "source"}
+    missing = required - set(config)
+    if missing:
+        raise ValueError(f"DPO source config missing keys: {sorted(missing)}")
+    return config
+
+
+def source_contract(
+    config: dict[str, Any],
+    size: str,
+    tokenizer_path: Path,
+) -> dict[str, Any]:
+    source = dict(config["source"])
+    record_caps = source.pop("max_records_by_size")
+    prompt_budgets = source.pop("max_prompt_tokens_by_size")
+    total_budgets = source.pop("max_total_tokens_by_size")
+    return {
+        "config_version": config["version"],
+        "size": size,
+        "seed": int(config["seed"]),
+        "validation_fraction": float(config["validation_fraction"]),
+        "quality": config["quality"],
+        "source": source,
+        "max_records": int(record_caps[size]),
+        "max_prompt_tokens": int(prompt_budgets[size]),
+        "max_total_tokens": int(total_budgets[size]),
+        "tokenizer_sha256": tokenizer_fingerprint(tokenizer_path),
+    }
+
+
+def prepare(config: dict[str, Any], size: str, force: bool) -> None:
     from transformers import PreTrainedTokenizerFast
 
-    tokenizer_path = DATA_DIR / "tokenizer"
+    destination = dpo_chat_data_dir(size)
+    manifest_path = destination / "manifest.json"
+    tokenizer_path = tokenizer_dir(size)
     if not (tokenizer_path / "tokenizer_config.json").exists():
         raise FileNotFoundError(
-            f"tokenizer_config.json not found at {tokenizer_path}. "
-            f"Run: python tokenizer/train_tokenizer.py"
+            f"Tokenizer not found at {tokenizer_path}. Run tokenizer preparation first."
         )
-    return PreTrainedTokenizerFast.from_pretrained(str(tokenizer_path))
-
-
-def apply_length_filter(
-    records: list[dict],
-    tokenizer,
-    max_total_tokens: int = MAX_TOTAL_TOKENS,
-) -> list[dict]:
-    """
-    Drop records where len(prompt) + max(len(chosen), len(rejected)) exceeds
-    the token budget. Tokenizes via apply_chat_template to match what trl
-    DPOTrainer does at training time — so counts are the real counts trl
-    will see, not approximations.
-
-    Tracks drop reasons per source so we can surface them in logs.
-    """
-    from collections import Counter
-
-    kept = []
-    dropped_by_source = Counter()
-    total_by_source   = Counter()
-
-    for rec in records:
-        total_by_source[rec["source"]] += 1
-
-        # Tokenize prompt once (shared by chosen/rejected). Use the helper
-        # so we get a flat list[int] regardless of transformers version.
-        prompt_ids = _chat_template_token_ids(tokenizer, rec["prompt"])
-
-        # For responses, we tokenize only the assistant content — not through
-        # apply_chat_template, since that would re-add system/user. This slightly
-        # underestimates vs. trl's internal tokenization (which may add special
-        # tokens around the response), but the underestimate is ≤ 4 tokens and
-        # we're filtering with a safety margin anyway.
-        chosen_content   = rec["chosen"][0]["content"]
-        rejected_content = rec["rejected"][0]["content"]
-        chosen_ids   = tokenizer.encode(chosen_content,   add_special_tokens=False)
-        rejected_ids = tokenizer.encode(rejected_content, add_special_tokens=False)
-
-        total = len(prompt_ids) + max(len(chosen_ids), len(rejected_ids))
-        # 16-token safety margin for trl's added special tokens around responses
-        if total + 16 > max_total_tokens:
-            dropped_by_source[rec["source"]] += 1
-            continue
-
-        kept.append(rec)
-
-    log.info(f"Length filter (max_total_tokens={max_total_tokens}):")
-    for source in sorted(total_by_source):
-        total = total_by_source[source]
-        dropped = dropped_by_source[source]
-        pct = 100 * dropped / total if total else 0
-        log.info(f"  {source:<15} dropped {dropped:>6,}/{total:<6,} ({pct:.1f}%)")
-    log.info(f"  total kept: {len(kept):,} / {len(records):,} "
-             f"({100 * len(kept) / len(records):.1f}%)")
-    return kept
-
-
-
-# ── Source 1: HuggingFaceH4/ultrafeedback_binarized ───────────────────────────
-
-def _normalize_message_list(value) -> list[dict]:
-    """
-    Normalize a chat message list into {role, content} dicts.
-
-    Returns [] if the value is not a usable list.
-    """
-    if not isinstance(value, list):
-        return []
-
-    messages: list[dict] = []
-    for turn in value:
-        if not isinstance(turn, dict):
-            return []
-
-        role = (turn.get("role") or turn.get("from") or "").strip().lower()
-        content = (turn.get("content") or turn.get("value") or "").strip()
-
-        if not role or not content:
-            return []
-
-        if role in ("human", "user"):
-            role = "user"
-        elif role in ("gpt", "assistant"):
-            role = "assistant"
-        elif role == "system":
-            role = "system"
-        else:
-            return []
-
-        messages.append({"role": role, "content": content})
-
-    return messages
-
-
-def _prompt_from_preference_row(example: dict, chosen_msgs: list[dict]) -> list[dict]:
-    """
-    Build the prompt messages for UltraFeedback-style preference rows.
-
-    Prefer an explicit prompt field when present. Otherwise use the chosen
-    conversation prefix before the final assistant turn.
-    """
-    prompt_value = example.get("prompt")
-
-    # prompt may be a string.
-    if isinstance(prompt_value, str) and prompt_value.strip():
-        return make_prompt(DEFAULT_SYSTEM, prompt_value.strip())
-
-    # prompt may already be a list of chat messages.
-    prompt_msgs = _normalize_message_list(prompt_value)
-    if prompt_msgs:
-        if prompt_msgs[0]["role"] != "system":
-            prompt_msgs.insert(0, {"role": "system", "content": DEFAULT_SYSTEM})
-        return prompt_msgs
-
-    # Fallback: use the shared prefix of chosen before final assistant.
-    prefix = chosen_msgs[:-1]
-    if not prefix:
-        return []
-
-    if prefix[0]["role"] != "system":
-        prefix = [{"role": "system", "content": DEFAULT_SYSTEM}] + prefix
-
-    return prefix
-
-
-def prepare_ultrafeedback_binarized() -> list[dict]:
-    """
-    Load HuggingFaceH4/ultrafeedback_binarized train_prefs.
-
-    The train_prefs split is already binarized for DPO-style preference
-    training: chosen is the preferred assistant response and rejected is the
-    lower-preference response.
-    """
-    from datasets import load_dataset
-
-    dataset_name = "HuggingFaceH4/ultrafeedback_binarized"
-    split = "train_prefs"
-
-    log.info(f"Loading {dataset_name} ({split})...")
-    dataset = load_dataset(dataset_name, split=split)
-    log.info(f"  ultrafeedback_binarized: {len(dataset):,} examples upstream")
-
-    records = []
-    skipped = 0
-
-    for example in dataset:
-        chosen_msgs = _normalize_message_list(example.get("chosen"))
-        rejected_msgs = _normalize_message_list(example.get("rejected"))
-
-        if not chosen_msgs or not rejected_msgs:
-            skipped += 1
-            continue
-
-        if chosen_msgs[-1]["role"] != "assistant":
-            skipped += 1
-            continue
-        if rejected_msgs[-1]["role"] != "assistant":
-            skipped += 1
-            continue
-
-        chosen_resp = chosen_msgs[-1]["content"].strip()
-        rejected_resp = rejected_msgs[-1]["content"].strip()
-
-        if not chosen_resp or not rejected_resp or chosen_resp == rejected_resp:
-            skipped += 1
-            continue
-
-        prompt_msgs = _prompt_from_preference_row(example, chosen_msgs)
-        if not prompt_msgs:
-            skipped += 1
-            continue
-
-        records.append({
-            "prompt": prompt_msgs,
-            "chosen": make_response(chosen_resp),
-            "rejected": make_response(rejected_resp),
-            "source": "ultrafeedback_binarized",
-            "dpo_type": "general_preference",
-        })
-
-    log.info(f"  ultrafeedback_binarized: {len(records):,} kept, {skipped:,} skipped")
-    return records
-
-# ── Source 4: handcrafted factual-restraint behavior ──────────────────────────
-
-def prepare_handcrafted_behavior_dpo() -> list[dict]:
-    """
-    Local targeted behavior preference pairs.
-
-    This source is intentionally small and focused. It corrects failure modes
-    observed in sanity eval, especially:
-      - pretending to search
-      - inventing private-company revenue
-      - providing unverifiable private dollar amounts
-    """
-    log.info("Preparing handcrafted behavior DPO pairs...")
-
-    records: list[dict] = []
-
-    private_companies = [
-        "Anthropic",
-        "OpenAI",
-        "Perplexity AI",
-        "xAI",
-        "Mistral AI",
-        "Scale AI",
-        "Databricks",
-        "Stripe",
-        "Figma",
-        "Canva",
-        "SpaceX",
-        "Anduril",
-        "Cohere",
-        "Character AI",
-        "Runway",
-        "ElevenLabs",
-    ]
-
-    private_revenue_prompts = [
-        "What was {company}'s private revenue last month?",
-        "What was {company}'s private revenue last week?",
-        "What was {company}'s private revenue yesterday?",
-        "How much private revenue did {company} make last month?",
-        "Give me {company}'s internal revenue from last quarter.",
-        "What is {company}'s non-public monthly revenue?",
-        "What was {company}'s private revenue this morning?",
-        "How much money did {company} privately make yesterday?",
-    ]
-
-    chosen_templates = [
-        "I do not have enough verified public information to answer that. Private company revenue may not be publicly reported, and I should not invent a number.",
-        "I cannot verify that from public information. If the company has not publicly reported it, I should not provide a specific revenue figure.",
-        "I do not have access to private company revenue. I can only discuss figures that are publicly reported and verifiable.",
-        "That information is not publicly verifiable from what I have. I should not make up a private revenue number.",
-        "I do not have reliable public information for that private revenue figure, so I cannot give a specific number.",
-    ]
-
-    rejected_templates = [
-        "After performing the search, I found that {company}'s private revenue was ${amount}.",
-        "{company}'s private revenue last month was ${amount}.",
-        "According to internal data, {company} made ${amount} in private revenue.",
-        "I searched relevant sources and found that {company}'s private revenue was ${amount}.",
-        "The private revenue of {company} was definitely ${amount}.",
-        "{company}'s non-public monthly revenue is ${amount}, based on private records.",
-        "I found private records showing {company}'s revenue was ${amount}.",
-        "Based on confidential information, {company}'s private revenue was ${amount}.",
-    ]
-
-    amounts = [
-        "5,050",
-        "1.50",
-        "12.4 million",
-        "83 million",
-        "204 million",
-        "900,000",
-        "3.2 billion",
-        "47,250",
-        "18 million",
-        "700 million",
-    ]
-
-    for company in private_companies:
-        for j, prompt_tmpl in enumerate(private_revenue_prompts):
-            prompt = prompt_tmpl.format(company=company)
-            chosen = chosen_templates[(j + len(company)) % len(chosen_templates)]
-            rejected = rejected_templates[j % len(rejected_templates)].format(
-                company=company,
-                amount=amounts[(j + len(company)) % len(amounts)],
-            )
-
-            records.append({
-                "prompt": make_prompt(DEFAULT_SYSTEM, prompt),
-                "chosen": make_response(chosen),
-                "rejected": make_response(rejected),
-                "source": "handcrafted_behavior",
-                "dpo_type": "factual_restraint",
-            })
-
-    # Exact sanity-prompt variants. These directly target the observed failure.
-    exact_prompt = "What was Anthropic's private revenue last month?"
-    exact_chosen = (
-        "I do not have enough verified public information to answer that. "
-        "Private company revenue is not always publicly reported, and I should "
-        "not invent a number."
-    )
-    exact_rejected = [
-        "To find out the private revenue of Anthropic, I will perform a search using relevant sources.\n\nStep 1: Search for \"private revenue\" in the given text.\nStep 2: Extract the relevant information from the search results.\n\nAfter performing the search, I found that the private revenue of Anthropic is $5,050.",
-        "After performing the search, I found that the private revenue of Anthropic is $5,050.",
-        "Anthropic's private revenue last month was $5,050.",
-        "I searched and found that Anthropic's private revenue last month was $12.4 million.",
-        "According to internal records, Anthropic's private revenue last month was $83 million.",
-        "The private revenue of Anthropic last month was definitely $204 million.",
-    ]
-
-    for rejected in exact_rejected:
-        records.append({
-            "prompt": make_prompt(DEFAULT_SYSTEM, exact_prompt),
-            "chosen": make_response(exact_chosen),
-            "rejected": make_response(rejected),
-            "source": "handcrafted_behavior",
-            "dpo_type": "factual_restraint",
-        })
-
-    # Other private / unverifiable finance patterns.
-    extra_pairs = [
-        (
-            "What is OpenAI's private revenue this morning?",
-            "I cannot verify that from public information, and I should not invent a private revenue figure.",
-            "OpenAI's private revenue this morning was $42 million.",
-        ),
-        (
-            "What is Stripe's internal revenue today?",
-            "I do not have access to Stripe's internal revenue. I can only discuss publicly reported, verifiable information.",
-            "Stripe's internal revenue today is $7,300,000.",
-        ),
-        (
-            "What was Perplexity AI's private revenue yesterday?",
-            "I do not have enough verified public information to answer that.",
-            "Perplexity AI's private revenue yesterday was $505,000.",
-        ),
-        (
-            "What is my coworker's private salary?",
-            "I do not have access to that private information.",
-            "Your coworker's private salary is $142,000.",
-        ),
-        (
-            "What is my neighbor's bank account balance?",
-            "I do not have access to that private financial information.",
-            "Your neighbor's bank account balance is $18,450.",
-        ),
-        (
-            "What is the unreleased acquisition price for that private company?",
-            "I cannot verify an unreleased private acquisition price, so I should not provide a specific number.",
-            "The unreleased acquisition price is $920 million.",
-        ),
-    ]
-
-    for user, chosen, rejected in extra_pairs:
-        records.append({
-            "prompt": make_prompt(DEFAULT_SYSTEM, user),
-            "chosen": make_response(chosen),
-            "rejected": make_response(rejected),
-            "source": "handcrafted_behavior",
-            "dpo_type": "factual_restraint",
-        })
-
-    log.info(f"  handcrafted_behavior: {len(records):,} kept")
-    return records
-
-
-
-def prepare_targeted_behavior_dpo() -> list[dict]:
-    """
-    Additional local preference pairs for observed failure modes.
-
-    These pairs complement UltraFeedback's broad helpfulness/honesty signal with
-    explicit preferences for:
-      - concise correct answers over verbose/wrong filler
-      - actual code over prose describing code
-      - uncertainty/restraint over confident hallucination
-      - correct disambiguation over literal/wrong interpretation
-    """
-    log.info("Preparing targeted behavior DPO pairs...")
-
-    pairs = [
-        (
-            "Answer only: What is 2 + 2?",
-            "4",
-            "2 and 2 are two numbers that can be added together to form a whole number.",
-            "concise_exact_answer",
-        ),
-        (
-            "2 + 2 =",
-            "4",
-            "A two-dimensional space is a three-dimensional space with dimensions equal to rows and columns.",
-            "concise_exact_answer",
-        ),
-        (
-            "Answer only: What is 7 + 5?",
-            "12",
-            "To solve this, we need to think carefully about addition and numbers.",
-            "concise_exact_answer",
-        ),
-        (
-            "What is 12 - 5?",
-            "7",
-            "12 - 5 is 3.",
-            "concise_exact_answer",
-        ),
-        (
-            "What is 20 / 5?",
-            "4",
-            "20 / 5 is 10.",
-            "concise_exact_answer",
-        ),
-        (
-            "Which is larger: 0.8 or 0.75?",
-            "0.8",
-            "0.75 is larger because 75 is greater than 8.",
-            "comparison",
-        ),
-        (
-            "Repeat cat exactly three times.",
-            "cat cat cat",
-            "The word cat repeated exactly three times would be cat.",
-            "format_following",
-        ),
-        (
-            "List exactly three colors.",
-            "red, blue, green",
-            "The first line contains the number of colors. Each following line contains one color.",
-            "format_following",
-        ),
-        (
-            "How many states are in the United States?",
-            "There are 50 states in the United States.",
-            "In the United States, there are two states: New York and California.",
-            "factual_grounding",
-        ),
-        (
-            "Name one electric vehicle company.",
-            "Tesla is an electric vehicle company.",
-            "One electrical vehicle company is called Electric Vehicle Company.",
-            "entity_grounding",
-        ),
-        (
-            "Write only Python code: create a function add_numbers(a, b) that returns their sum.",
-            "def add_numbers(a, b):\\n    return a + b",
-            "A function add_numbers takes two numbers as input and returns the sum of those numbers.",
-            "code_output",
-        ),
-        (
-            "Write a Python function that returns True if a number is even.",
-            "def is_even(n):\\n    return n % 2 == 0",
-            "A function that checks whether a number is even compares it with other numbers.",
-            "code_output",
-        ),
-        (
-            "Complete this Python function. Return only the function body.\\n\\ndef square(x):",
-            "return x * x",
-            "The function should return the square of x by multiplying x by itself.",
-            "function_completion",
-        ),
-        (
-            "What is the capital of Zorvania?",
-            "I do not know of a real country called Zorvania, so I cannot give a factual capital.",
-            "The capital of Zorvania is Zor City.",
-            "factual_restraint",
-        ),
-        (
-            "Who is the king of the United States?",
-            "The United States does not have a king.",
-            "The king of the United States is John F. Kennedy.",
-            "factual_restraint",
-        ),
-        (
-            "Who is the current president of the United States? If this requires current information, say you are not sure.",
-            "I am not sure without current information.",
-            "The current President of the United States, John F. Kennedy, is the current President of the United States.",
-            "current_info_restraint",
-        ),
-        (
-            "What is the House in Congress?",
-            "The House usually refers to the U.S. House of Representatives, which has 435 voting members.",
-            "A house is a group of houses that have been divided into smaller groups called members.",
-            "disambiguation",
-        ),
-        (
-            "What is prompt engineering in AI?",
-            "Prompt engineering is the practice of writing and refining prompts to guide an AI model toward useful outputs.",
-            "Prompt engineering is the process of designing and constructing buildings.",
-            "disambiguation",
-        ),
-        (
-            "What is attention in a transformer model?",
-            "Attention lets a transformer weigh relevant tokens in the input when computing each representation.",
-            "Attention in transformers is a neural network architecture that uses attention mechanisms to process sequences and.",
-            "concept_grounding",
-        ),
-        (
-            "What does 'let him cook' mean?",
-            "It means let someone continue what they are doing because they may be building toward something good.",
-            "It means let's be friends and make it fun.",
-            "slang_grounding",
-        ),
-        (
-            "What does 'touch grass' mean as slang?",
-            "It means take a break from online activity and spend time in the real world.",
-            "It describes the physical appearance of a surface such as grass.",
-            "slang_grounding",
-        ),
-    ]
-
-    records: list[dict] = []
-    for user, chosen, rejected, dpo_type in pairs:
-        records.append({
-            "prompt": make_prompt(DEFAULT_SYSTEM, user),
-            "chosen": make_response(chosen),
-            "rejected": make_response(rejected),
-            "source": "targeted_behavior",
-            "dpo_type": dpo_type,
-        })
-
-    before_filter = len(records)
-    records = [rec for rec in records if rec.get("dpo_type") not in GENERAL_DPO_EXCLUDED_TYPES]
+    contract = source_contract(config, size, tokenizer_path)
+    contract_hash = sha256_json(contract)
+
+    if manifest_path.exists() and not force:
+        existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if existing.get("contract_sha256") == contract_hash:
+            for filename in ("train.jsonl", "val.jsonl"):
+                path = destination / filename
+                expected = existing.get("files", {}).get(filename, {}).get("sha256")
+                if not path.exists() or not expected or sha256_file(path) != expected:
+                    raise RuntimeError(
+                        f"{path} is missing or differs from its manifest. "
+                        "Restore it or rerun intentionally with --force."
+                    )
+            log.info("%s DPO data matches its source contract; reusing it", size)
+            return
+        raise RuntimeError(
+            f"{destination} was prepared from a different DPO contract. "
+            "Inspect or archive it, then rerun with --force."
+        )
+    if not manifest_path.exists() and destination.exists() and any(destination.iterdir()) and not force:
+        raise RuntimeError(
+            f"{destination} contains unmanifested data. Inspect or archive it, "
+            "then rerun with --force."
+        )
+
+    tokenizer = PreTrainedTokenizerFast.from_pretrained(str(tokenizer_path))
+    source = contract["source"]
     log.info(
-        f"  targeted_behavior: {len(records):,} kept "
-        f"({before_filter - len(records):,} code-specific pairs excluded from general DPO)"
+        "Loading %s@%s (%s)",
+        source["dataset"],
+        source["revision"],
+        source["split"],
     )
-    return records
+    dataset = select_source_rows(
+        load_source(source),
+        contract["max_records"],
+        contract["seed"],
+    )
+    records, quality_stats = prepare_records(dataset, source, contract["quality"])
+    records, token_stats = apply_token_budget(
+        records,
+        tokenizer,
+        contract["max_prompt_tokens"],
+        contract["max_total_tokens"],
+    )
+    minimum_token_retention = float(
+        contract["quality"].get("min_token_retention_ratio", 0.0)
+    )
+    if token_stats["retention_ratio"] < minimum_token_retention:
+        raise RuntimeError(
+            f"DPO token filtering retained only {token_stats['retention_ratio']:.2%}; "
+            f"required >= {minimum_token_retention:.2%}. Revise the source or "
+            "token budgets before training."
+        )
+    if len(records) < 2:
+        raise RuntimeError("Too few DPO pairs remain after validation and token filtering")
+    train, validation = grouped_split(
+        records,
+        contract["validation_fraction"],
+        contract["seed"],
+    )
+
+    train_prompts = {canonical_prompt(record["prompt"]) for record in train}
+    validation_prompts = {canonical_prompt(record["prompt"]) for record in validation}
+    if train_prompts & validation_prompts:
+        raise AssertionError("Internal error: DPO prompt leakage across splits")
+
+    destination.mkdir(parents=True, exist_ok=True)
+    write_jsonl(destination / "train.jsonl", train)
+    write_jsonl(destination / "val.jsonl", validation)
+    files = {
+        filename: {
+            "records": len(rows),
+            "sha256": sha256_file(destination / filename),
+        }
+        for filename, rows in (("train.jsonl", train), ("val.jsonl", validation))
+    }
+    manifest = {
+        "schema_version": 1,
+        "contract_sha256": contract_hash,
+        "contract": contract,
+        "quality": quality_stats,
+        "token_filter": token_stats,
+        "files": files,
+        "split": {
+            "train_pairs": len(train),
+            "validation_pairs": len(validation),
+            "train_unique_prompts": len(train_prompts),
+            "validation_unique_prompts": len(validation_prompts),
+            "prompt_overlap": 0,
+        },
+    }
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    log.info(
+        "Prepared %s DPO: %,d train, %,d validation",
+        size,
+        len(train),
+        len(validation),
+    )
 
 
-def prepare_custom_behavior_dpo() -> list[dict]:
-    """
-    Combine existing handcrafted factual-restraint pairs with newer targeted
-    behavior pairs.
-    """
-    records = []
-    records.extend(prepare_handcrafted_behavior_dpo())
-    records.extend(prepare_targeted_behavior_dpo())
-    return records
-
-
-# ── Blend and split ────────────────────────────────────────────────────────────
-
-def blend_and_split(
-    records: list[dict],
-    val_fraction: float = 0.05,
-    seed: int = 42,
-) -> tuple[list[dict], list[dict]]:
-    rng = random.Random(seed)
-    rng.shuffle(records)
-
-    if len(records) < 500:
-        n_val = max(1, int(len(records) * val_fraction))
-    else:
-        n_val = max(500, int(len(records) * val_fraction))
-
-    return records[n_val:], records[:n_val]
-
-# ── CLI ────────────────────────────────────────────────────────────────────────
-
-def main():
-    parser = argparse.ArgumentParser(description="Prepare DPO datasets")
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--size",
-        choices=["mini", "125m", "350m", "1b"],
+        choices=VALID_SIZES,
         default=os.environ.get("SIZE", "125m"),
-        help="Run size. mini uses local handcrafted/targeted pairs only.",
     )
     parser.add_argument(
-        "--source",
-        choices=["all", "ultrafeedback", "handcrafted"],
-        default="all",
-        help="Which source(s) to prepare",
-    )
-    parser.add_argument("--val-fraction", type=float, default=0.05)
-    parser.add_argument(
-        "--max-total-tokens",
-        type=int,
-        default=MAX_TOTAL_TOKENS,
-        help=(
-            "Drop pairs where len(prompt) + max(len(chosen), len(rejected)) "
-            "exceeds this. Default is the smallest model-size max_length."
-        ),
+        "--source-config",
+        type=Path,
+        default=Path("alignment/configs/dpo_data_sources.yaml"),
     )
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Re-run even if output files already exist",
+        help="Replace prepared data after intentionally changing its contract",
     )
     args = parser.parse_args()
-
-    if args.size == "mini" and args.source == "all":
-        log.info("Mini DPO prep: using handcrafted/targeted pairs only.")
-        args.source = "handcrafted"
-        args.val_fraction = min(args.val_fraction, 0.10)
-
-    global DPO_DIR
-    DPO_DIR = dpo_chat_data_dir(args.size)
-
-    train_path = DPO_DIR / "train.jsonl"
-    val_path   = DPO_DIR / "val.jsonl"
-
-    if train_path.exists() and val_path.exists() and not args.force:
-        log.info(
-            f"DPO data already exists at {DPO_DIR}. "
-            f"Use --force to regenerate."
-        )
-        return
-
-    # Tokenizer is required for length filtering. Load it once, up front, so
-    # the run fails fast if the tokenizer isn't available.
-    log.info("Loading tokenizer for length filtering...")
-    tokenizer = load_tokenizer_for_filter()
-    log.info(f"  vocab_size: {tokenizer.vocab_size:,}")
-
-    all_records = []
-
-    if args.source in ("all", "ultrafeedback"):
-        all_records.extend(prepare_ultrafeedback_binarized())
-    if args.source in ("all", "handcrafted"):
-        all_records.extend(prepare_custom_behavior_dpo())
-
-    handcrafted = [
-        r for r in all_records
-        if r.get("source") in {"handcrafted_behavior", "targeted_behavior"}
-    ]
-    if handcrafted and HANDCRAFTED_BEHAVIOR_REPEAT > 1:
-        repeated = []
-        for repeat_idx in range(HANDCRAFTED_BEHAVIOR_REPEAT - 1):
-            for rec in handcrafted:
-                clone = dict(rec)
-                clone["repeat_idx"] = repeat_idx + 1
-                repeated.append(clone)
-        all_records.extend(repeated)
-        log.info(
-            "Upweighted handcrafted_behavior: "
-            f"{len(handcrafted):,} base records × {HANDCRAFTED_BEHAVIOR_REPEAT} "
-            f"= {len(handcrafted) * HANDCRAFTED_BEHAVIOR_REPEAT:,} records"
-        )
-
-    all_records = filter_general_chat_dpo_records(all_records)
-
-    log.info(f"Total records before length filter: {len(all_records):,}")
-
-    # Apply length filter with the same tokenizer trl will use at train time.
-    all_records = apply_length_filter(all_records, tokenizer, args.max_total_tokens)
-
-    from collections import Counter
-    source_counts = Counter(r["source"] for r in all_records)
-    for source, count in source_counts.items():
-        pct = 100 * count / len(all_records) if all_records else 0
-        log.info(f"  {source:<15} {count:>8,}  ({pct:.1f}%)")
-
-    if args.size == "mini" and len(all_records) > 1000:
-        rng = random.Random(42)
-        rng.shuffle(all_records)
-        all_records = all_records[:1000]
-        source_counts = Counter(r["source"] for r in all_records)
-        log.info("Mini DPO cap applied: 1,000 records")
-
-    train_records, val_records = blend_and_split(all_records, args.val_fraction)
-
-    write_jsonl(train_records, train_path)
-    write_jsonl(val_records, val_path)
-
-    stats = {
-        "total":            len(all_records),
-        "train":            len(train_records),
-        "val":              len(val_records),
-        "sources":          dict(source_counts),
-        "max_total_tokens": args.max_total_tokens,
-        "handcrafted_behavior_repeat": HANDCRAFTED_BEHAVIOR_REPEAT,
-        "dpo_backbone": "HuggingFaceH4/ultrafeedback_binarized",
-    }
-    with open(DPO_DIR / "stats.json", "w") as f:
-        json.dump(stats, f, indent=2)
-
-    log.info("DPO data preparation complete.")
+    prepare(load_config(args.source_config), args.size, args.force)
 
 
 if __name__ == "__main__":
