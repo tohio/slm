@@ -41,11 +41,38 @@ def pytest_addoption(parser):
         default="mini",
         help="Model size to validate: mini | 125m | 350m | 1b",
     )
+    parser.addoption(
+        "--require-artifacts",
+        action="store_true",
+        default=False,
+        help=(
+            "Fail instead of skip when a requested pipeline artifact is "
+            "missing. Makefile artifact-test targets enable this."
+        ),
+    )
 
 
 @pytest.fixture(scope="session")
 def model_size(request):
     return request.config.getoption("--size")
+
+
+@pytest.fixture(scope="session")
+def require_artifacts(request):
+    return request.config.getoption("--require-artifacts")
+
+
+def skip_or_fail_missing_artifact(
+    path: Path,
+    instruction: str,
+    *,
+    required: bool,
+) -> None:
+    """Keep exploratory pytest runs optional but make named gates strict."""
+    message = f"Artifact not found at {path} — {instruction}"
+    if required:
+        pytest.fail(message)
+    pytest.skip(message)
 
 
 @pytest.fixture(scope="session")

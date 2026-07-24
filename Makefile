@@ -20,6 +20,12 @@ WORKERS ?=
 FORCE   ?=
 RUN_ID  ?=
 ARTIFACT_STAGES ?= raw,curated,validated,tokenized,tokenizer,metadata
+COMPARE_SMOL_MODEL ?= HuggingFaceTB/SmolLM2-135M
+COMPARE_TOHIO_MODEL ?= $(EXPORTS_DIR)/125m/base
+COMPARE_OUTPUT_DIR ?= $(RESULTS_DIR)/diagnostics/sft-comparison
+COMPARE_TRAIN_EXAMPLES ?= 32
+COMPARE_EVAL_EXAMPLES ?= 32
+COMPARE_MAX_STEPS ?= 60
 
 # DATA_DIR — read from .env if not set in environment.
 DATA_DIR := $(or $(shell grep -v '^\#' .env 2>/dev/null | grep '^DATA_DIR=' | head -1 | cut -d= -f2 | tr -d ' '),data)
@@ -89,7 +95,8 @@ endif
         setup setup-data-dir setup-gpu install install-gpu test-upgrade-gpu install-uv install-conda install-kenlm install-orjson \
         download-kenlm-model download-fasttext-model accelerate-config accelerate-config-single accelerate-config-multi \
         test-curator test-validate test-tokenizer test-data-pipeline \
-        test-training test-sft-instruct test-sft-chat test-sft-code test-dpo-chat test-dpo test-gpu-pipeline test-model test-export test-data-unit test-training-args test-config-gen test-accel-gen test-unit \
+        test-training test-sft-instruct test-sft-chat test-sft-code test-dpo-chat test-dpo test-gpu-pipeline test-model test-export test-data-unit test-training-args test-config-gen test-accel-gen test-comparison test-unit test-gpu-gate test-artifacts \
+        compare-sft-preflight compare-sft \
         sanity-train sanity-train-small sanity-train-tiny sanity-train-save \
         clean clean-data clean-results clean-logs help
 
@@ -524,9 +531,7 @@ install-gpu:
 	.venv/bin/pip install -r requirements-gpu.txt
 	.venv/bin/python infra/verify_environment.py --require-cuda
 
-test-upgrade-gpu:
-	@echo "==> Running one-shot CUDA 13 / compile / cache acceptance test..."
-	.venv/bin/python infra/gpu_smoke.py
+test-upgrade-gpu: test-gpu-gate
 
 download-kenlm-model:
 	@echo "==> Downloading KenLM English model (~4GB)..."
@@ -581,22 +586,22 @@ test-data-pipeline: test-curator test-validate test-tokenizer
 # command line also sets TEST_SIZE to that size for full-artifact checks.
 test-training:
 	@echo "==> Validating pretrain outputs (TEST_SIZE=$(TEST_SIZE))..."
-	PIPELINE_TEST_SIZE=$(TEST_SIZE) .venv/bin/pytest tests/gpu_pipeline/test_pipeline_training.py --size=$(TEST_SIZE) -v --tb=short
+	PIPELINE_TEST_SIZE=$(TEST_SIZE) .venv/bin/pytest tests/gpu_pipeline/test_pipeline_training.py --size=$(TEST_SIZE) --require-artifacts -v --tb=short
 
 test-sft-instruct:
 	@echo "==> Validating instruct SFT outputs (TEST_SIZE=$(TEST_SIZE))..."
-	PIPELINE_TEST_SIZE=$(TEST_SIZE) .venv/bin/pytest tests/gpu_pipeline/test_pipeline_sft.py::TestChatSFTModel tests/gpu_pipeline/test_pipeline_sft.py::TestSFTData --size=$(TEST_SIZE) -v --tb=short
+	PIPELINE_TEST_SIZE=$(TEST_SIZE) .venv/bin/pytest tests/gpu_pipeline/test_pipeline_sft.py::TestChatSFTModel tests/gpu_pipeline/test_pipeline_sft.py::TestSFTData --size=$(TEST_SIZE) --require-artifacts -v --tb=short
 
 test-sft-chat: test-sft-instruct
 
 
 test-sft-code:
 	@echo "==> Validating code SFT outputs (TEST_SIZE=$(TEST_SIZE))..."
-	PIPELINE_TEST_SIZE=$(TEST_SIZE) .venv/bin/pytest tests/gpu_pipeline/test_pipeline_sft.py::TestCodeSFTModel --size=$(TEST_SIZE) -v --tb=short
+	PIPELINE_TEST_SIZE=$(TEST_SIZE) .venv/bin/pytest tests/gpu_pipeline/test_pipeline_sft.py::TestCodeSFTModel --size=$(TEST_SIZE) --require-artifacts -v --tb=short
 
 test-dpo-chat:
 	@echo "==> Validating chat DPO outputs (TEST_SIZE=$(TEST_SIZE))..."
-	PIPELINE_TEST_SIZE=$(TEST_SIZE) .venv/bin/pytest tests/gpu_pipeline/test_pipeline_dpo.py --size=$(TEST_SIZE) -v --tb=short
+	PIPELINE_TEST_SIZE=$(TEST_SIZE) .venv/bin/pytest tests/gpu_pipeline/test_pipeline_dpo.py --size=$(TEST_SIZE) --require-artifacts -v --tb=short
 
 test-dpo: test-dpo-chat
 
@@ -618,7 +623,8 @@ test-data-unit:
 
 test-training-args:
 	@echo "==> Running Transformers/TRL compatibility tests..."
-	.venv/bin/pytest tests/test_training_args.py tests/test_trl_smoke.py -v --tb=short
+	.venv/bin/python infra/verify_environment.py
+	.venv/bin/pytest tests/test_environment_contract.py tests/test_training_args.py tests/test_trl_smoke.py -v --tb=short
 
 test-config-gen:
 	@echo "==> Running config_gen unit tests..."
@@ -628,8 +634,38 @@ test-accel-gen:
 	@echo "==> Running accel_gen unit tests..."
 	.venv/bin/pytest tests/test_accel_gen.py -v --tb=short
 
-test-unit: test-model test-export test-data-unit test-training-args test-config-gen test-accel-gen
+test-comparison:
+	@echo "==> Running controlled-comparison harness unit tests..."
+	.venv/bin/pytest tests/test_sft_comparison.py -v --tb=short
+
+test-unit: test-model test-export test-data-unit test-training-args test-config-gen test-accel-gen test-comparison
 	@echo "==> Unit tests complete"
+
+test-gpu-gate:
+	@echo "==> Validating the installed GPU stack without datasets or checkpoints..."
+	.venv/bin/python infra/verify_environment.py --require-cuda
+	.venv/bin/python infra/gpu_smoke.py
+
+test-artifacts: test-data-pipeline test-gpu-pipeline
+	@echo "==> Existing pipeline artifact validation complete"
+
+# Diagnostic comparison. Preflight loads checkpoints only and is the required
+# cheap gate before the opt-in training run.
+compare-sft-preflight:
+	$(PYTHON) scripts/sft_model_comparison.py \
+		--smol-model "$(COMPARE_SMOL_MODEL)" \
+		--tohio-model "$(COMPARE_TOHIO_MODEL)" \
+		--output-dir "$(COMPARE_OUTPUT_DIR)" \
+		--preflight-only
+
+compare-sft:
+	$(PYTHON) scripts/sft_model_comparison.py \
+		--smol-model "$(COMPARE_SMOL_MODEL)" \
+		--tohio-model "$(COMPARE_TOHIO_MODEL)" \
+		--train-examples $(COMPARE_TRAIN_EXAMPLES) \
+		--eval-examples $(COMPARE_EVAL_EXAMPLES) \
+		--max-steps $(COMPARE_MAX_STEPS) \
+		--output-dir "$(COMPARE_OUTPUT_DIR)"
 
 # ── Sanity check ──────────────────────────────────────────────────────────────
 
@@ -725,7 +761,14 @@ help:
 	@echo "  test-training-args       Transformers/TRL argument compatibility tests"
 	@echo "  test-config-gen          Config generator unit tests"
 	@echo "  test-accel-gen           Accelerate config generator unit tests"
+	@echo "  test-comparison          Controlled SFT comparison unit tests"
 	@echo "  test-unit                All unit tests above"
+	@echo "  test-gpu-gate            Bounded CUDA/compile/cache test; no datasets"
+	@echo "  test-artifacts           Strictly validate existing mini/full artifacts"
+	@echo ""
+	@echo "Controlled model comparison:"
+	@echo "  compare-sft-preflight    Check vocab, parameters, prompt sensitivity, cache"
+	@echo "  compare-sft              Run the opt-in controlled SFT response comparison"
 	@echo ""
 	@echo "Sanity check (model + training code only):"
 	@echo "  sanity-train             125m arch, 2.5B tokens"

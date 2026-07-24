@@ -22,6 +22,7 @@ import pytest
 import torch
 
 from tests.data_pipeline.helpers import requires_stage, pipeline_path
+from tests.conftest import skip_or_fail_missing_artifact
 
 
 def load_model_and_tokenizer(model_dir: Path):
@@ -32,6 +33,20 @@ def load_model_and_tokenizer(model_dir: Path):
     model = SLMForCausalLM.from_pretrained(str(model_dir))
     tokenizer = PreTrainedTokenizerFast.from_pretrained(str(model_dir / "tokenizer"))
     return model, tokenizer
+
+
+@pytest.fixture(scope="module")
+def dpo_artifact(dpo_model_dir, require_artifacts):
+    if not dpo_model_dir.exists():
+        skip_or_fail_missing_artifact(
+            dpo_model_dir,
+            "run 'make dpo-chat SIZE=<size>' first",
+            required=require_artifacts,
+        )
+    artifact = load_model_and_tokenizer(dpo_model_dir)
+    artifact[0].eval()
+    yield artifact
+    del artifact
 
 
 def assistant_only_batch(tokenizer, messages):
@@ -150,31 +165,23 @@ class TestDPOData:
 
 # ── DPO model ──────────────────────────────────────────────────────────────────
 
+@requires_stage("dpo")
 class TestDPOModel:
-    @pytest.fixture(autouse=True)
-    def _skip_if_no_model(self, dpo_model_dir):
-        if not dpo_model_dir.exists():
-            pytest.skip(
-                f"DPO model not found at {dpo_model_dir} — "
-                f"run 'make dpo SIZE=<size>' first"
-            )
-
-    def test_dpo_model_dir_exists(self, dpo_model_dir):
+    def test_dpo_model_dir_exists(self, dpo_model_dir, dpo_artifact):
         assert dpo_model_dir.exists()
 
-    def test_dpo_model_loads(self, dpo_model_dir):
-        model, tokenizer = load_model_and_tokenizer(dpo_model_dir)
+    def test_dpo_model_loads(self, dpo_artifact):
+        model, tokenizer = dpo_artifact
         assert model is not None
 
-    def test_dpo_tokenizer_has_chat_template(self, dpo_model_dir):
-        _, tokenizer = load_model_and_tokenizer(dpo_model_dir)
+    def test_dpo_tokenizer_has_chat_template(self, dpo_artifact):
+        _, tokenizer = dpo_artifact
         assert getattr(tokenizer, "chat_template", None), (
             "DPO model tokenizer has no chat_template"
         )
 
-    def test_dpo_model_forward_pass_finite_loss(self, dpo_model_dir):
-        model, tokenizer = load_model_and_tokenizer(dpo_model_dir)
-        model.eval()
+    def test_dpo_model_forward_pass_finite_loss(self, dpo_artifact):
+        model, tokenizer = dpo_artifact
 
         messages = [
             {"role": "user", "content": "What is the capital of France?"},
@@ -186,19 +193,19 @@ class TestDPOModel:
             out = model(**batch)
         assert torch.isfinite(out.loss), f"DPO model loss not finite: {out.loss}"
 
-    def test_dpo_model_generation_does_not_crash(self, dpo_model_dir):
-        model, tokenizer = load_model_and_tokenizer(dpo_model_dir)
-        model.eval()
-
+    def test_dpo_model_generation_and_cache_parity(self, dpo_artifact):
+        model, tokenizer = dpo_artifact
         messages = [{"role": "user", "content": "Hello."}]
         text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         encoding = tokenizer(text, return_tensors="pt")
 
+        kwargs = {
+            "max_new_tokens": 4,
+            "do_sample": False,
+            "pad_token_id": tokenizer.pad_token_id or 0,
+        }
         with torch.no_grad():
-            output = model.generate(
-                **encoding,
-                max_new_tokens=10,
-                do_sample=False,
-                pad_token_id=tokenizer.pad_token_id or 0,
-            )
-        assert output.shape[1] > encoding["input_ids"].shape[1]
+            cached = model.generate(**encoding, use_cache=True, **kwargs)
+            uncached = model.generate(**encoding, use_cache=False, **kwargs)
+        assert cached.shape[1] > encoding["input_ids"].shape[1]
+        assert torch.equal(cached, uncached)

@@ -22,19 +22,35 @@ import torch
 import yaml
 
 from tests.data_pipeline.helpers import pipeline_path, requires_stage
+from tests.conftest import skip_or_fail_missing_artifact
+
+
+@pytest.fixture(scope="module")
+def pretrain_artifact(
+    pretrain_model_dir,
+    require_artifacts,
+):
+    if not pretrain_model_dir.exists():
+        skip_or_fail_missing_artifact(
+            pretrain_model_dir,
+            "run 'make pretrain SIZE=<size>' first",
+            required=require_artifacts,
+        )
+
+    from model.model import SLMForCausalLM
+
+    model = SLMForCausalLM.from_pretrained(str(pretrain_model_dir)).eval()
+    yield model
+    del model
 
 
 @requires_stage("pretrain")
 class TestPretrainOutputs:
     @pytest.fixture(autouse=True)
-    def _skip_if_no_model(self, pretrain_model_dir):
-        if not pretrain_model_dir.exists():
-            pytest.skip(
-                f"Pretrain model not found at {pretrain_model_dir} — "
-                f"run 'make pretrain SIZE=<size>' first"
-            )
+    def _require_loaded_artifact(self, pretrain_artifact):
+        """Apply optional/strict missing-artifact policy to every class test."""
 
-    def test_final_dir_exists(self, pretrain_model_dir):
+    def test_final_dir_exists(self, pretrain_model_dir, pretrain_artifact):
         assert pretrain_model_dir.exists()
 
     def test_model_files_exist(self, pretrain_model_dir):
@@ -48,25 +64,15 @@ class TestPretrainOutputs:
             "pretrain/train.py should copy tokenizer to final/"
         )
 
-    def test_model_loads(self, pretrain_model_dir):
-        from transformers import AutoConfig
-        from model.config import SLMConfig
-        from model.model import SLMForCausalLM
+    def test_model_loads(self, pretrain_artifact):
+        assert pretrain_artifact is not None
 
-        AutoConfig.register("slm", SLMConfig)
-        model = SLMForCausalLM.from_pretrained(str(pretrain_model_dir))
-        assert model is not None
-
-    def test_config_matches_yaml(self, pretrain_model_dir, model_size):
+    def test_config_matches_yaml(self, pretrain_artifact, model_size):
         """
         Verify the saved config matches the source YAML for this size.
         Reads pretrain/configs/gpt_<size>.yaml as ground truth so the test
         works for any size, not just mini.
         """
-        from model.config import SLMConfig
-        from model.model import SLMForCausalLM
-        from transformers import AutoConfig
-
         yaml_path = Path(f"pretrain/configs/gpt_{model_size}.yaml")
         if not yaml_path.exists():
             pytest.skip(f"Config YAML not found: {yaml_path}")
@@ -75,9 +81,7 @@ class TestPretrainOutputs:
             yaml_cfg = yaml.safe_load(f)
         expected = yaml_cfg["model"]
 
-        AutoConfig.register("slm", SLMConfig)
-        model = SLMForCausalLM.from_pretrained(str(pretrain_model_dir))
-        cfg = model.config
+        cfg = pretrain_artifact.config
 
         # Map YAML field names to SLMConfig attributes. Only check fields
         # that are present in the YAML — keeps the test forward-compatible
@@ -97,19 +101,34 @@ class TestPretrainOutputs:
                     f"{cfg_attr}: expected {expected[yaml_key]}, got {actual}"
                 )
 
-    def test_forward_pass_loss_finite(self, pretrain_model_dir):
-        from transformers import AutoConfig
-        from model.config import SLMConfig
-        from model.model import SLMForCausalLM
-        AutoConfig.register("slm", SLMConfig)
-        model = SLMForCausalLM.from_pretrained(str(pretrain_model_dir))
-        model.eval()
-
-        input_ids = torch.randint(0, 32000, (1, 32))
+    def test_forward_pass_loss_finite(self, pretrain_artifact):
+        model = pretrain_artifact
+        input_ids = torch.randint(0, model.config.vocab_size, (1, 32))
         labels = input_ids.clone()
         with torch.no_grad():
             out = model(input_ids, labels=labels)
         assert torch.isfinite(out.loss), f"Loss is not finite: {out.loss}"
+
+    def test_cached_and_uncached_greedy_generation_match(
+        self,
+        pretrain_artifact,
+    ):
+        model = pretrain_artifact
+        input_ids = torch.randint(
+            4,
+            model.config.vocab_size,
+            (1, 8),
+        )
+        kwargs = {
+            "max_new_tokens": 4,
+            "do_sample": False,
+            "eos_token_id": None,
+            "pad_token_id": model.config.pad_token_id,
+        }
+        with torch.no_grad():
+            cached = model.generate(input_ids, use_cache=True, **kwargs)
+            uncached = model.generate(input_ids, use_cache=False, **kwargs)
+        assert torch.equal(cached, uncached)
 
     def test_loss_decreases_from_random_init(self, pretrain_model_dir):
         """

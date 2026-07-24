@@ -14,6 +14,7 @@ scripts/
 ├── reinit_special_embeds.py
 ├── run_lm_eval.py
 ├── sanity_train.py
+├── sft_model_comparison.py
 └── README.md
 ```
 
@@ -116,6 +117,24 @@ make eval-code SIZE=125m
 ## `pretrain_hf_125m.py`
 
 Diagnostic pretraining path that uses a Hugging Face dataset with the 125m architecture. It is useful for validating trainer behavior independently from the full curation pipeline.
+
+---
+
+## `sft_model_comparison.py`
+
+Fail-fast comparison of SmolLM2-135M and a native SLM-125M export. It checks
+checkpoint integrity, prompt sensitivity, and cached/uncached parity before an
+optional controlled completion-only SFT run.
+
+```bash
+make export-base-local SIZE=125m
+make compare-sft-preflight
+make compare-sft
+```
+
+The harness uses `trust_remote_code=False` for both models. It owns tokenization
+and labels so both trainers receive the same selected record identities without
+silent preprocessing drops. Tokenizer-specific token totals are reported.
 
 ---
 

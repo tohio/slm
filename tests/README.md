@@ -1,93 +1,48 @@
 # Tests
 
-The test suite validates pipeline artifacts and unit-level invariants.
+The suite is layered so expensive training is not repeated merely to test it.
+Tests either exercise cheap synthetic inputs or validate artifacts produced by
+the real pipeline run.
 
-Data pipeline tests run on the CPU/data instance. GPU pipeline tests run on the training instance.
+## Test policy
 
----
+| Gate | Command | Cost | Run when |
+|---|---|---:|---|
+| CPU/unit | `make test-unit` | Minutes, no pipeline artifacts | Every change |
+| GPU stack | `make test-gpu-gate` | Bounded synthetic compile/train/generate | Once per GPU image or dependency upgrade |
+| Data artifacts | `make test-data-pipeline SIZE=mini` | Reads existing artifacts | After the mini data pipeline |
+| Training artifacts | Stage-specific `make test-* SIZE=<size>` | Loads existing checkpoints | Immediately after that real stage |
+| Model comparison preflight | `make compare-sft-preflight` | Two checkpoint loads, no dataset | Before any comparison training |
+| SFT response comparison | `make compare-sft` | Two opt-in fine-tunes | Only after preflight passes |
 
-## Structure
+Full pretraining, SFT, and DPO are not test-suite prerequisites. A completed
+real run is the artifact under test; do not launch a second full run just to
+validate it.
 
-```text
-tests/
-├── conftest.py
-├── data_pipeline/
-│   ├── helpers.py
-│   ├── test_pipeline_curator.py
-│   ├── test_pipeline_validate.py
-│   └── test_pipeline_tokenizer.py
-├── gpu_pipeline/
-│   ├── test_pipeline_training.py
-│   ├── test_pipeline_sft.py
-│   └── test_pipeline_dpo.py
-├── model/
-│   ├── test_model.py
-│   └── test_cache_and_mask.py
-├── test_config_gen.py
-└── test_accel_gen.py
-```
-
----
-
-## Size behavior
-
-Test targets use `TEST_SIZE`.
-
-Default behavior:
-
-```text
-make test-*        -> TEST_SIZE=mini
-make test-* SIZE=125m -> TEST_SIZE=125m
-```
-
-This keeps normal development on `mini` and makes full-artifact checks explicit.
-
----
-
-## Data pipeline tests
+## Mandatory cheap gates
 
 ```bash
-make test-curator
-make test-validate
-make test-tokenizer
-make test-data-pipeline
+make test-unit
 ```
 
-Typical mini sequence:
+This covers architecture and cache behavior, native export conversion, data
+contracts, config generation, exact dependency pins, and one-step synthetic
+SFT/DPO integration.
+
+On each new GPU image:
 
 ```bash
-make curate-mini
-make validate SIZE=mini
-make tokenizer SIZE=mini
-make tokenize SIZE=mini
-make test-data-pipeline
+make test-gpu-gate
 ```
 
-These tests validate curated shards, validation outputs, tokenizer files, and tokenized binaries.
+The GPU gate verifies the pinned CUDA runtime and driver, native SM support,
+BF16, eager backward/optimizer behavior, `torch.compile`, and cached versus
+uncached generation. It downloads no datasets and loads no trained checkpoint.
 
----
+## Artifact tests
 
-## GPU pipeline tests
-
-```bash
-make test-training
-make test-sft-instruct
-make test-sft-code
-make test-dpo-chat
-make test-gpu-pipeline
-```
-
-Typical mini sequence:
-
-```bash
-make pretrain-mini SIZE=mini GPUS=1
-make sft-instruct-mini SIZE=mini GPUS=1
-make sft-code-mini SIZE=mini GPUS=1
-make dpo-chat-mini SIZE=mini GPUS=1
-make test-gpu-pipeline
-```
-
-Full-run checks:
+Artifact targets are strict: a missing requested checkpoint is a failure, not
+a successful run containing only skipped tests.
 
 ```bash
 make test-training SIZE=125m
@@ -96,39 +51,68 @@ make test-sft-code SIZE=125m
 make test-dpo-chat SIZE=125m
 ```
 
-Compatibility aliases:
+Use the matching target immediately after its actual pipeline stage. For a
+cheap end-to-end rehearsal, create mini artifacts once and validate them:
 
 ```bash
-make test-sft-chat SIZE=125m
-make test-dpo SIZE=125m
+make curate-mini
+make validate SIZE=mini
+make tokenizer SIZE=mini
+make tokenize SIZE=mini
+make pretrain-mini SIZE=mini GPUS=1
+make sft-instruct-mini SIZE=mini GPUS=1
+make sft-code-mini SIZE=mini GPUS=1
+make dpo-chat-mini SIZE=mini GPUS=1
+make test-artifacts SIZE=mini
 ```
 
----
+Direct exploratory `pytest` calls may still skip absent stage artifacts.
+Makefile artifact targets pass `--require-artifacts` and therefore fail.
 
-## What each target validates
+## Controlled model comparison
 
-| Target | Validates |
-|---|---|
-| `test-curator` | curation output structure and source stats |
-| `test-validate` | validation outputs and retained document quality |
-| `test-tokenizer` | tokenizer assets, special tokens, tokenized binaries |
-| `test-training` | base checkpoint loading, finite loss, dataset indexing |
-| `test-sft-instruct` | instruct checkpoint loading, chat template preservation, generation |
-| `test-sft-code` | code checkpoint loading and code-oriented generation |
-| `test-dpo-chat` | preference data shape, chat DPO checkpoint loading, generation |
-| `test-model` | architecture construction, masks, cache behavior |
-| `test-config-gen` | generated training config invariants |
-| `test-accel-gen` | Accelerate config rendering |
-
----
-
-## Unit tests
+The comparison has a cheap, fail-fast gate:
 
 ```bash
-make test-model
-make test-config-gen
-make test-accel-gen
-make test-unit
+make export-base-local SIZE=125m
+make compare-sft-preflight
 ```
 
-Unit tests do not require pipeline artifacts.
+The default Tohio input is the native export at
+`results/exports/125m/base`; neither model loads remote code. Preflight checks
+parameter/vocabulary integrity, prompt sensitivity, and cached/uncached greedy
+parity before data is downloaded or training starts.
+
+Only after preflight succeeds:
+
+```bash
+make compare-sft
+```
+
+Override its bounded defaults explicitly when needed:
+
+```bash
+make compare-sft \
+  COMPARE_TRAIN_EXAMPLES=32 \
+  COMPARE_EVAL_EXAMPLES=32 \
+  COMPARE_MAX_STEPS=200
+```
+
+The harness uses the same pinned UltraChat record identities, split, order,
+optimizer updates, and completion-only objective for both models. Token IDs
+cannot be identical across different tokenizers, so it reports each model's
+sequence and supervised-token totals instead of claiming equal token exposure.
+Canonical response output is uncached; cache correctness is a separate
+preflight invariant.
+
+## Test locations
+
+```text
+tests/
+├── data_pipeline/       # existing curation/validation/tokenizer artifacts
+├── gpu_pipeline/        # existing pretrain/SFT/DPO artifacts
+├── model/               # CPU architecture, masking, and cache invariants
+├── test_export.py       # native Transformers export
+├── test_trl_smoke.py    # one-step synthetic SFT and DPO
+└── test_sft_comparison.py
+```
