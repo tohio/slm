@@ -4,16 +4,18 @@ curator/filters/dedup.py
 Disk-based MinHash deduplication using datatrove.
 
 Two-stage pipeline per source:
-    1. Exact dedup (SHA-256 8-byte prefix, streaming) — cross-source index.
+    1. Exact dedup (SHA-256 16-byte prefix, streaming) — cross-source index.
     2. Fuzzy dedup (datatrove's 4-stage MinHash LSH) — bounded RAM.
 
-Peak RAM at any stage: O(shard_size), not O(corpus_size). Scales to 125m,
-350m, and 1b with the same memory footprint.
+MinHash stages are disk-backed and bounded by shard/task size. Exact
+cross-source dedup intentionally keeps one 16-byte digest per unique document
+in a Python set, so that stage is O(unique documents) in RAM; Python object and
+hash-table overhead is additional to the raw digest payload reported below.
 
 Hash compaction:
-    seen_hashes stores 8-byte binary prefixes of SHA-256 rather than
-    64-character hex strings. At 80M docs that's ~640MB vs ~5GB.
-    Collision probability at 80M docs: ~1 in 2.3 × 10^10.
+    seen_hashes stores 16-byte binary prefixes of SHA-256 rather than
+    64-character hex strings. At 80M docs the raw digest payload is ~1.28GB
+    and the birthday-bound collision probability is approximately 9.4e-24.
 
 References:
     datatrove minhash: https://github.com/huggingface/datatrove
@@ -43,14 +45,25 @@ from tqdm import tqdm
 
 log = logging.getLogger(__name__)
 
+MINHASH_CONTRACT = {
+    "precision": 64,
+    "num_buckets": 14,
+    "hashes_per_bucket": 8,
+    "n_grams": 5,
+}
 MINHASH_CONFIG = MinhashConfig(
-    hash_config=HashConfig(precision=64),
-    num_buckets=14,
-    hashes_per_bucket=8,
-    n_grams=5,
+    hash_config=HashConfig(precision=MINHASH_CONTRACT["precision"]),
+    num_buckets=MINHASH_CONTRACT["num_buckets"],
+    hashes_per_bucket=MINHASH_CONTRACT["hashes_per_bucket"],
+    n_grams=MINHASH_CONTRACT["n_grams"],
 )
 
-JACCARD_THRESHOLD = 0.8
+# With 14 bands × 8 hashes, the LSH candidate probability is
+# 1 - (1 - s**8)**14. Its 50% crossover is ~0.685. Datatrove's MinHash
+# pipeline is probabilistic; this is not a strict Jaccard cutoff.
+MINHASH_LSH_CROSSOVER = (
+    1 - (0.5 ** (1 / MINHASH_CONTRACT["num_buckets"]))
+) ** (1 / MINHASH_CONTRACT["hashes_per_bucket"])
 
 
 def _default_workers() -> int:
@@ -87,12 +100,12 @@ def normalize(text: str) -> str:
 
 def exact_hash(text: str) -> bytes:
     """
-    First 8 bytes of SHA-256 of normalized text.
+    First 16 bytes of SHA-256 of normalized text.
 
-    Returns binary bytes (not hex) — 8× smaller in the seen_hashes set.
-    Collision probability at 80M docs: ~1 in 2.3 × 10^10.
+    A 128-bit prefix keeps the exact-dedup false-positive risk negligible
+    while remaining much more compact than Python hex strings.
     """
-    return hashlib.sha256(normalize(text).encode("utf-8")).digest()[:8]
+    return hashlib.sha256(normalize(text).encode("utf-8")).digest()[:16]
 
 
 # ── Exact dedup pre-pass ───────────────────────────────────────────────────────
@@ -112,22 +125,38 @@ def exact_dedup_jsonl(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     total = kept = exact_dupes = 0
 
-    with open(input_path, "rb", buffering=8 * 1024 * 1024) as fin, \
-         open(output_path, "wb", buffering=8 * 1024 * 1024) as fout:
-        for line in fin:
-            total += 1
-            try:
-                record = orjson.loads(line)
-            except Exception:
-                continue
-            h = exact_hash(record.get("text", ""))
-            if h in seen_hashes:
-                exact_dupes += 1
-                continue
-            seen_hashes.add(h)
-            fout.write(orjson.dumps(record))
-            fout.write(b"\n")
-            kept += 1
+    tmp_path = output_path.with_name(
+        f".{output_path.name}.{os.getpid()}.tmp"
+    )
+    parse_errors = 0
+    try:
+        with open(input_path, "rb", buffering=8 * 1024 * 1024) as fin, \
+             open(tmp_path, "wb", buffering=8 * 1024 * 1024) as fout:
+            for line in fin:
+                total += 1
+                try:
+                    record = orjson.loads(line)
+                except Exception:
+                    parse_errors += 1
+                    continue
+                h = exact_hash(record.get("text", ""))
+                if h in seen_hashes:
+                    exact_dupes += 1
+                    continue
+                seen_hashes.add(h)
+                fout.write(orjson.dumps(record))
+                fout.write(b"\n")
+                kept += 1
+            fout.flush()
+            os.fsync(fout.fileno())
+        if parse_errors:
+            raise RuntimeError(
+                f"{input_path}: {parse_errors:,} invalid JSONL records"
+            )
+        tmp_path.replace(output_path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
     return {"total": total, "kept": kept, "exact_duplicates": exact_dupes}
 
@@ -140,14 +169,21 @@ def _scan_hashes_into(input_path: Path, seen_hashes: set[bytes]) -> int:
     when restarting a partially-completed dedup run.
     """
     added = 0
+    parse_errors = 0
     with open(input_path, "rb", buffering=8 * 1024 * 1024) as fin:
         for line in fin:
             try:
                 record = orjson.loads(line)
             except Exception:
+                parse_errors += 1
                 continue
             seen_hashes.add(exact_hash(record.get("text", "")))
             added += 1
+    if parse_errors:
+        raise RuntimeError(
+            f"{input_path}: {parse_errors:,} invalid JSONL records while "
+            f"reconstructing the exact-dedup index"
+        )
     return added
 
 
@@ -276,18 +312,17 @@ class Deduplicator:
     Args:
         working_dir: Scratch directory for datatrove state.
         workers:     CPU workers. Default: cpu_count - 2.
-        threshold:   Jaccard similarity threshold. Default: 0.8.
+        MinHash uses the probabilistic LSH contract described by
+        MINHASH_CONFIG; it does not expose a strict Jaccard threshold.
     """
 
     def __init__(
         self,
         working_dir: Path,
         workers: int | None = None,
-        threshold: float = JACCARD_THRESHOLD,
     ):
         self.working_dir = Path(working_dir)
         self.workers = workers or _default_workers()
-        self.threshold = threshold
         self.seen_hashes: set[bytes] = set()
         self._stats: dict[str, dict] = {}
 
@@ -326,6 +361,18 @@ class Deduplicator:
             f"removed {agg['exact_duplicates']:,} exact duplicates"
         )
         return agg
+
+    def index_source_input(self, input_dir: Path) -> int:
+        """Rebuild the cross-source exact-hash index from a source input.
+
+        The fresh-run index contains every unique exact hash seen before fuzzy
+        filtering. Reconstructing from final fuzzy output would omit records
+        removed by MinHash and make resumed cross-source behavior differ.
+        """
+        added = 0
+        for shard in sorted(Path(input_dir).glob("*.jsonl")):
+            added += _scan_hashes_into(shard, self.seen_hashes)
+        return added
 
     def minhash_dedup_source(
         self, src_dir: Path, dst_dir: Path, source_name: str
@@ -383,10 +430,12 @@ class Deduplicator:
         log.info(f"Deduplication complete for {source_name} → {dst_dir}")
 
     def report(self) -> str:
-        hash_mem_mb = len(self.seen_hashes) * 8 / 1024 / 1024
+        hash_mem_mb = len(self.seen_hashes) * 16 / 1024 / 1024
         return (
             f"Deduplication report:\n"
             f"  Exact hash index size: {len(self.seen_hashes):>10,} documents\n"
-            f"  Hash index memory:     {hash_mem_mb:>10.1f} MB\n"
+            f"  Raw digest payload:    {hash_mem_mb:>10.1f} MB\n"
+            f"  MinHash LSH crossover: {MINHASH_LSH_CROSSOVER:>10.3f}\n"
+            f"  (Python set/index overhead is additional)\n"
             f"  (Fuzzy dedup stats available in datatrove logs)"
         )

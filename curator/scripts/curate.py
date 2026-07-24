@@ -4,7 +4,7 @@ curator/scripts/curate.py
 Main data curation pipeline.
 
 Orchestrates configured data sources through quality filtering, deduplication,
-blending, and upload. Produces train.jsonl + val.jsonl ready for tokenizer
+and blending. Produces train.jsonl + val.jsonl ready for tokenizer
 training and model pretraining. The val split is sampled uniformly from
 the shuffled blend output, so it represents the same distribution as train.
 
@@ -13,7 +13,7 @@ Pipeline:
     2. Apply quality filters
     3. Deduplicate (exact SHA-256 + datatrove disk-based MinHash LSH)
     4. Blend sources to target token ratios (with cap-and-redistribute)
-    5. Upload to S3
+    Artifact transfer is a separate RUN_ID-scoped command.
 
 Data mix + token targets are defined in config/data_mix.py and imported
 here. Do not add local copies of the source list, percentages, token
@@ -58,7 +58,6 @@ Usage:
 """
 
 import argparse
-import json
 import logging
 import math
 import os
@@ -66,7 +65,6 @@ import random
 import shutil
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from datetime import datetime
 from pathlib import Path
 
 import orjson
@@ -88,6 +86,9 @@ from config import (
     NON_CODE_SOURCES,
     CODE_SOURCES,
     ALL_SOURCES,
+    SYNTHETIC_SOURCES,
+    PROSE_HEURISTIC_SKIP_SOURCES,
+    DEDUP_PRIORITY,
     TARGET_CONFIGS,
     CHARS_PER_TOKEN,
     CC_CHARS_PER_SEGMENT,
@@ -106,16 +107,31 @@ from config.paths import (
     data_run_dir, raw_dir, filtered_dir, dedup_scratch_dir, curated_dir,
 )
 
-from curator.filters.dedup import Deduplicator
-from curator.filters.quality import QualityFilter
+from curator.filters.dedup import (
+    MINHASH_CONTRACT,
+    MINHASH_LSH_CROSSOVER,
+    Deduplicator,
+)
+from curator.filters.quality import QualityFilter, require_fasttext_model
+from curator.state import (
+    MANIFEST_NAME,
+    atomic_write_json,
+    code_fingerprint,
+    file_snapshot,
+    manifest_matches,
+    manifest_outputs_match,
+    stable_digest,
+    tree_signature,
+    write_manifest,
+)
 
 from curator.sources.common_crawl import CommonCrawlSource
+from curator.sources.hf import resolve_dataset_revision
 from curator.sources.fineweb import FineWebSource
 from curator.sources.fineweb_edu import FineWebEduSource
 from curator.sources.wikipedia import WikipediaSource
 from curator.sources.pg19 import PG19Source
 from curator.sources.pes2o import PeS2oSource
-from curator.sources.open_web_math import OpenWebMathSource
 from curator.sources.stackexchange import StackExchangeSource
 from curator.sources.hf_synthetic import (
     SyntheticArithmeticSource,
@@ -131,12 +147,6 @@ from curator.sources.jupyter import JupyterSource
 from curator.sources.conala import ConalaSource
 from curator.sources.nemotron_cc_math import NemotronCCMathSource
 from curator.sources.nemotron_specialized import NemotronSpecializedSource
-from curator.sources.nemotron_code_v2 import NemotronCodeV2Source
-from curator.sources.nemotron_cc_code import NemotronCCCodeSource
-
-from curator.scripts.upload_s3 import (
-    upload_directory, download_prefix, get_bucket_and_prefix,
-)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -187,26 +197,12 @@ def configure_data_dirs(target: str) -> None:
 # Fuzzy MinHash dedup collapses them aggressively, which destroys the intended
 # amplified signal. These sources still run exact dedup, but bypass fuzzy
 # MinHash so near-duplicate templates remain available as training signal.
-SKIP_FUZZY_DEDUP_SOURCES = {
-    "synthetic_arithmetic",
-    "synthetic_task_code",
-    "educational_qa_mcq_math",
-    "educational_qa_mcq_general",
-    "factual_restraint",
-}
+SKIP_FUZZY_DEDUP_SOURCES = SYNTHETIC_SOURCES
 
 # Synthetic sources are externally generated and published to Hugging Face.
 # They are controlled behavior supplements, not bulk reservoirs. If they
 # underfill, use the scalable specialized synthetic source first, then cleaner
 # educational web text, and only then the broad FineWeb fallback.
-SYNTHETIC_SOURCES = {
-    "synthetic_arithmetic",
-    "synthetic_task_code",
-    "educational_qa_mcq_math",
-    "educational_qa_mcq_general",
-    "factual_restraint",
-}
-
 SYNTHETIC_OVERFLOW_CHAIN = (
     "nemotron_specialized",
     "fineweb_edu",
@@ -312,7 +308,6 @@ def stage_source_stats(sources: list[str] | None = None) -> None:
 #   wikipedia     — very clean upstream, lower attrition expected
 #   pg19          — char-capped in _derive_max_chars; docs cap is safety only
 #   pes2o         — abstracts only (~1.4K chars), supply-bound at 350m+
-#   open_web_math — math notation challenges, harsher attrition
 #   stackexchange — mostly well-formed, moderate attrition
 #   stack_v1      — large files, MinHash dedup is heavy → 5× inflation
 #   stack_smol    — small curated subset, lower attrition
@@ -324,7 +319,7 @@ def stage_source_stats(sources: list[str] | None = None) -> None:
 # their full corpus; deficit routes to OVERFLOW_SINK like any other shortfall.
 #
 # Several other sources also become supply-bound at 1b (wikipedia, pg19,
-# open_web_math, stack_smol). The cap is still set so that downloads at
+# stack_smol). The cap is still set so that downloads at
 # smaller scales remain bounded; at 1b the upstream supply binds first
 # and the deficit routes to OVERFLOW_SINK by design.
 
@@ -336,7 +331,6 @@ _AVG_CHARS_PER_DOC: dict[str, int] = {
     "pes2o":         1_400,
     "nemotron_cc_math": 4_000,
     "nemotron_specialized": 2_200,
-    "open_web_math": 8_000,
     "stackexchange": 1_700,
     "stack_v1":      5_500,
     "stack_smol":    10_000,
@@ -351,7 +345,6 @@ _DOWNLOAD_INFLATION: dict[str, float] = {
     "pes2o":         5.0,
     "nemotron_cc_math": 2.0,
     "nemotron_specialized": 1.6,
-    "open_web_math": 5.0,
     "stackexchange": 5.0,
     "stack_v1":      5.0,
     "stack_smol":    5.0,
@@ -362,7 +355,7 @@ _DOWNLOAD_INFLATION: dict[str, float] = {
 
 def _source_target_chars(name: str, target: str) -> int | None:
     """Return target chars for a concrete source, applying supplemental caps."""
-    target_tokens = TARGET_CONFIGS[target]["total_tokens"]
+    target_tokens = TARGET_CONFIGS[target]["corpus_tokens"]
     if name in _TOP_LEVEL_SHARE:
         share = _TOP_LEVEL_SHARE[name]
     elif name in _CODE_SUB_SHARE:
@@ -449,18 +442,42 @@ def compute_cc_segments(total_tokens: int) -> int:
 
 
 def compute_source_char_targets(target: str) -> dict[str, int]:
-    """Compute character budgets for all concrete sources with caps applied."""
+    """Compute complete character budgets with fixed-supply caps redistributed.
+
+    Supplemental caps reduce a source's nominal share, but they must not reduce
+    the corpus target. The capped amount is reassigned to the configured
+    scalable overflow sink before any source is staged.
+    """
     targets: dict[str, int] = {}
+    uncapped_total = 0
     for source in _TOP_LEVEL_SHARE:
         if source == "code":
             continue
+        uncapped_total += int(
+            TARGET_CONFIGS[target]["corpus_tokens"]
+            * _TOP_LEVEL_SHARE[source]
+            * CHARS_PER_TOKEN
+        )
         chars = _source_target_chars(source, target)
         if chars is not None:
             targets[source] = chars
     for code_source in _CODE_SUB_SHARE:
+        uncapped_total += int(
+            TARGET_CONFIGS[target]["corpus_tokens"]
+            * _TOP_LEVEL_SHARE["code"]
+            * _CODE_SUB_SHARE[code_source]
+            * CHARS_PER_TOKEN
+        )
         chars = _source_target_chars(code_source, target)
         if chars is not None:
             targets[code_source] = chars
+
+    cap_shortfall = uncapped_total - sum(targets.values())
+    if cap_shortfall < 0:
+        raise RuntimeError(
+            f"Source targets exceed uncapped target by {-cap_shortfall:,} chars"
+        )
+    targets[OVERFLOW_SINK] += cap_shortfall
     return targets
 
 
@@ -491,9 +508,10 @@ def _build_source(
     mini: bool,
     target: str,
     workers: int,
+    raw_root: Path | None = None,
 ) -> object:
     """Construct a source instance with mini caps applied when mini=True."""
-    raw_dir = RAW_DIR / name
+    raw_dir = (raw_root or RAW_DIR) / name
 
     # Resolve the doc cap:
     #   - mini: from MINI_OVERRIDES (per-source small caps for pipeline testing)
@@ -524,7 +542,7 @@ def _build_source(
         if mini:
             max_segments = MINI_OVERRIDES.get(name)
         else:
-            max_segments = compute_cc_segments(cfg["total_tokens"])
+            max_segments = compute_cc_segments(cfg["corpus_tokens"])
 
         # Common Crawl is a two-stage pipeline:
         #   - download_workers are network-bound HTTPS WARC reads
@@ -574,7 +592,18 @@ def _build_source(
     if name == "fineweb":
         return FineWebSource(output_dir=raw_dir, max_docs=cap)
     if name == "fineweb_edu":
-        return FineWebEduSource(output_dir=raw_dir, max_docs=cap)
+        # The 10BT sample is too small to absorb filtering/dedup headroom at
+        # 350m and 1b. Keep small runs cheap and use the 100BT sample where
+        # the requested retained share exceeds the small sample's safe range.
+        edu_config = (
+            "sample-100BT" if target in {"350m", "1b"} and not mini
+            else "sample-10BT"
+        )
+        return FineWebEduSource(
+            output_dir=raw_dir,
+            config=edu_config,
+            max_docs=cap,
+        )
     if name == "wikipedia":
         return WikipediaSource(output_dir=raw_dir, max_docs=cap)
     if name == "pg19":
@@ -587,8 +616,6 @@ def _build_source(
         return PG19Source(output_dir=raw_dir, max_docs=cap, max_chars=char_cap)
     if name == "pes2o":
         return PeS2oSource(output_dir=raw_dir, max_docs=cap)
-    if name == "open_web_math":
-        return OpenWebMathSource(output_dir=raw_dir, max_docs=cap)
     if name == "nemotron_cc_math":
         return NemotronCCMathSource(output_dir=raw_dir, max_docs=cap)
 
@@ -611,12 +638,6 @@ def _build_source(
         return CodeSearchNetSource(output_dir=raw_dir, max_docs=cap)
     if name == "stack_smol":
         return StackSmolSource(output_dir=raw_dir, max_docs=cap)
-    if name == "nemotron_code_v2":
-        return NemotronCodeV2Source(output_dir=raw_dir, max_docs=cap)
-
-    if name == "nemotron_cc_code":
-        return NemotronCCCodeSource(output_dir=raw_dir, max_docs=cap)
-
     if name == "stack_v1":
         return StackV1Source(output_dir=raw_dir, max_docs=cap)
     if name == "jupyter":
@@ -632,34 +653,131 @@ def stage_download(
     mini: bool = False,
     workers: int | None = None,
     sources: list[str] | None = None,
+    force: bool = False,
 ) -> None:
-    """Download every source in DATA_MIX + CODE_SUBMIX."""
+    """Download each source into an isolated staging directory.
+
+    A raw source is reusable only when its completion manifest matches the
+    source contract. Downloads never append to an unverified final directory.
+    This intentionally restarts an interrupted source rather than guessing a
+    filtered-stream cursor from the number of output shards.
+    """
     n_workers = workers or default_workers()
     log.info(f"=== Stage 1: Download (target={target}, mini={mini}) ===")
 
     selected_sources = sources or list(ALL_SOURCES)
 
     if not mini and "common_crawl" in selected_sources:
-        cc_segments = compute_cc_segments(TARGET_CONFIGS[target]["total_tokens"])
+        cc_segments = compute_cc_segments(TARGET_CONFIGS[target]["corpus_tokens"])
         log.info(
             f"Common Crawl: computed {cc_segments} segments from "
-            f"{TARGET_CONFIGS[target]['total_tokens']:,} tokens × "
+            f"{TARGET_CONFIGS[target]['corpus_tokens']:,} tokens × "
             f"{_TOP_LEVEL_SHARE['common_crawl']:.2%} × {CHARS_PER_TOKEN} chars/tok "
             f"÷ {CC_CHARS_PER_SEGMENT:,} chars/segment"
         )
 
     for name in selected_sources:
-        log.info(f"Downloading {name}...")
-        source = _build_source(name, mini=mini, target=target, workers=n_workers)
-        try:
-            source.download()
-        except Exception:
-            log.exception(f"{name}: download failed — continuing with remaining sources")
+        final_dir = RAW_DIR / name
+        partial_root = RAW_DIR / ".partial"
+        partial_dir = partial_root / name
+
+        contract_source = _build_source(
+            name,
+            mini=mini,
+            target=target,
+            workers=n_workers,
+            raw_root=RAW_DIR,
+        )
+        dataset_name = (
+            getattr(contract_source, "DATASET_NAME", None)
+            or getattr(contract_source, "HF_REPO", None)
+        )
+        dataset_revision = (
+            resolve_dataset_revision(dataset_name) if dataset_name else None
+        )
+        contract = {
+            "source": name,
+            "target": target,
+            "mini": mini,
+            "implementation": (
+                f"{contract_source.__class__.__module__}."
+                f"{contract_source.__class__.__qualname__}"
+            ),
+            "implementation_sha256": code_fingerprint(
+                contract_source.__class__,
+                resolve_dataset_revision,
+            ),
+            "settings": {
+                key: value
+                for key, value in vars(contract_source).items()
+                if key not in {"output_dir", "tmp_dir"}
+            },
+            "dataset": dataset_name,
+            "dataset_revision": dataset_revision,
+            "dataset_config": getattr(
+                contract_source,
+                "DATASET_CONFIG",
+                getattr(contract_source, "CONFIG_NAME", None),
+            ),
+        }
+
+        if manifest_matches(
+            final_dir,
+            stage="download",
+            contract=contract,
+            input_signature=None,
+        ):
+            log.info(f"{name}: verified raw manifest matches — reusing")
             continue
+
+        if final_dir.exists() and any(final_dir.iterdir()) and not force:
+            raise RuntimeError(
+                f"{name}: raw output exists without a matching completion "
+                f"manifest: {final_dir}. Re-run with --force to rebuild this "
+                f"source safely; existing data is left untouched."
+            )
+
+        if partial_dir.exists():
+            log.warning(f"{name}: removing incomplete staging directory {partial_dir}")
+            shutil.rmtree(partial_dir)
+        partial_dir.mkdir(parents=True, exist_ok=True)
+
+        log.info(f"Downloading {name} into isolated staging...")
+        source = _build_source(
+            name,
+            mini=mini,
+            target=target,
+            workers=n_workers,
+            raw_root=partial_root,
+        )
+        output_files = source.download()
+        shards = sorted(partial_dir.glob("*.jsonl"))
+        if not shards:
+            raise RuntimeError(
+                f"{name}: download returned without producing JSONL shards "
+                f"(reported {len(output_files or [])} output files)"
+            )
+
+        write_manifest(
+            partial_dir,
+            stage="download",
+            contract=contract,
+            input_signature=None,
+        )
+
+        backup_dir = RAW_DIR / f".{name}.previous"
+        if backup_dir.exists():
+            shutil.rmtree(backup_dir)
+        if final_dir.exists():
+            final_dir.replace(backup_dir)
         try:
-            log.info(f"{name} stats: {source.stats()}")
-        except Exception as e:
-            log.warning(f"{name}: stats() failed — {e}")
+            partial_dir.replace(final_dir)
+        except Exception:
+            if backup_dir.exists() and not final_dir.exists():
+                backup_dir.replace(final_dir)
+            raise
+        if backup_dir.exists():
+            shutil.rmtree(backup_dir)
 
 
 # ── Stage 2: Filter ────────────────────────────────────────────────────────────
@@ -677,27 +795,36 @@ def _filter_shard(args: tuple[Path, Path]) -> str:
     """Filter a single JSONL shard. Runs in a subprocess."""
     shard, dst_dir = args
     out_path = dst_dir / shard.name
-    if out_path.exists():
-        return f"skip:{shard.name}"
+    tmp_path = out_path.with_name(f".{out_path.name}.{os.getpid()}.tmp")
 
     qf = _worker_qf or QualityFilter()
+    qf.reset_stats()
     parse_errors = 0
-    with open(shard, "rb", buffering=8 * 1024 * 1024) as fin, \
-         open(out_path, "wb", buffering=8 * 1024 * 1024) as fout:
-        for line in fin:
-            try:
-                record = orjson.loads(line)
-            except Exception:
-                parse_errors += 1
-                continue
-            kept, _ = qf.check(record)
-            if kept:
-                fout.write(orjson.dumps(record))
-                fout.write(b"\n")
+    try:
+        with open(shard, "rb", buffering=8 * 1024 * 1024) as fin, \
+             open(tmp_path, "wb", buffering=8 * 1024 * 1024) as fout:
+            for line in fin:
+                try:
+                    record = orjson.loads(line)
+                except Exception:
+                    parse_errors += 1
+                    continue
+                kept, _ = qf.check(record)
+                if kept:
+                    fout.write(orjson.dumps(record))
+                    fout.write(b"\n")
+            fout.flush()
+            os.fsync(fout.fileno())
+        if parse_errors:
+            raise RuntimeError(
+                f"{shard}: encountered {parse_errors:,} invalid JSONL records"
+            )
+        tmp_path.replace(out_path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
     report = qf.report()
-    if parse_errors:
-        report = f"{report} | parse_errors={parse_errors} in {shard.name}"
     return report
 
 
@@ -708,42 +835,89 @@ def stage_filter(workers: int | None = None, sources: list[str] | None = None) -
 
     selected_sources = sources or list(ALL_SOURCES)
 
+    fasttext_path = Path(os.environ.get("DATA_DIR", "data")) / "models" / "lid.176.ftz"
+    prose_sources = [
+        source for source in selected_sources
+        if source not in PROSE_HEURISTIC_SKIP_SOURCES
+    ]
+    if prose_sources and not fasttext_path.exists():
+        raise RuntimeError(
+            f"FastText language model is required for prose filtering but "
+            f"was not found at {fasttext_path}. Run "
+            f"'make download-fasttext-model' before filtering."
+        )
+    if prose_sources:
+        require_fasttext_model()
+
+    filter_contract = {
+        "implementation_sha256": code_fingerprint(QualityFilter),
+        "quality_config": vars(QualityFilter().config),
+        "fasttext_model": (
+            file_snapshot([fasttext_path], root=fasttext_path.parent)[0]
+            if fasttext_path.exists()
+            else None
+        ),
+    }
     all_work: list[tuple[Path, Path]] = []
+    pending_sources: dict[str, tuple[Path, str]] = {}
     for source in selected_sources:
         src_dir = RAW_DIR / source
         dst_dir = FILTERED_DIR / source
-        dst_dir.mkdir(parents=True, exist_ok=True)
 
         shards = sorted(src_dir.glob("*.jsonl"))
         if not shards:
-            log.warning(f"No shards in {src_dir} — skipping")
+            raise RuntimeError(f"Required raw source has no shards: {src_dir}")
+        if not manifest_outputs_match(src_dir):
+            raise RuntimeError(
+                f"Required raw source is not manifest-complete: {src_dir}"
+            )
+        input_signature = tree_signature(src_dir)
+        source_contract = {**filter_contract, "source": source}
+        if manifest_matches(
+            dst_dir,
+            stage="filter",
+            contract=source_contract,
+            input_signature=input_signature,
+        ):
+            log.info(f"  {source}: verified filtered manifest matches — reusing")
             continue
+
+        if dst_dir.exists():
+            log.warning(f"  {source}: replacing stale/incomplete filtered output")
+            shutil.rmtree(dst_dir)
+        dst_dir.mkdir(parents=True, exist_ok=True)
 
         log.info(f"  {source}: {len(shards)} shards queued")
         all_work.extend((shard, dst_dir) for shard in shards)
+        pending_sources[source] = (dst_dir, input_signature)
 
     if not all_work:
-        log.warning("No shards found across any source — skipping filter")
+        log.info("All selected sources have verified filtered outputs")
         return
 
     # Sort largest-first so stragglers don't tail the run
     all_work.sort(key=lambda p: p[0].stat().st_size, reverse=True)
 
     log.info(f"Filtering {len(all_work)} shards with {n_workers} workers...")
-    skipped = processed = 0
+    processed = 0
 
     with ProcessPoolExecutor(
         max_workers=n_workers,
         initializer=_init_filter_worker,
     ) as executor:
         for report in executor.map(_filter_shard, all_work, chunksize=16):
-            if report.startswith("skip:"):
-                skipped += 1
-            else:
-                processed += 1
-                log.debug(report)
+            processed += 1
+            log.debug(report)
 
-    log.info(f"Filter complete — processed: {processed}, skipped: {skipped}")
+    for source, (dst_dir, input_signature) in pending_sources.items():
+        write_manifest(
+            dst_dir,
+            stage="filter",
+            contract={**filter_contract, "source": source},
+            input_signature=input_signature,
+        )
+
+    log.info(f"Filter complete — processed: {processed}")
 
 
 # ── Stage 3: Deduplicate ───────────────────────────────────────────────────────
@@ -755,20 +929,71 @@ def stage_dedup(workers: int | None = None, sources: list[str] | None = None) ->
     working_dir = DEDUP_SCRATCH_DIR
     dedup = Deduplicator(working_dir=working_dir, workers=n_workers)
 
-    selected_sources = sources or list(ALL_SOURCES)
+    selected_set = set(sources or ALL_SOURCES)
+    if set(DEDUP_PRIORITY) != set(ALL_SOURCES):
+        missing = sorted(set(ALL_SOURCES) - set(DEDUP_PRIORITY))
+        unknown = sorted(set(DEDUP_PRIORITY) - set(ALL_SOURCES))
+        raise RuntimeError(
+            f"DEDUP_PRIORITY drifted from ALL_SOURCES; "
+            f"missing={missing}, unknown={unknown}"
+        )
+    selected_sources = [
+        source for source in DEDUP_PRIORITY if source in selected_set
+    ]
 
+    prior_dedup_signatures: list[dict[str, str]] = []
     for source in selected_sources:
         src_dir = FILTERED_DIR / source
         dst_dir = FILTERED_DIR / f"{source}_deduped"
 
-        shards = list(src_dir.glob("*.jsonl"))
+        shards = sorted(src_dir.glob("*.jsonl"))
         if not shards:
-            log.warning(f"No filtered shards in {src_dir} — skipping")
+            raise RuntimeError(f"Required filtered source has no shards: {src_dir}")
+        if not manifest_outputs_match(src_dir):
+            raise RuntimeError(
+                f"Required filtered source is not manifest-complete: {src_dir}"
+            )
+
+        input_signature = tree_signature(src_dir)
+        contract = {
+            "source": source,
+            "implementation_sha256": code_fingerprint(Deduplicator),
+            "exact_hash": "sha256-normalized-prefix-128",
+            "cross_source_priority": DEDUP_PRIORITY,
+            "prior_exact_inputs": prior_dedup_signatures,
+            "fuzzy_enabled": source not in SKIP_FUZZY_DEDUP_SOURCES,
+            "minhash": {
+                **MINHASH_CONTRACT,
+                "lsh_probability_50pct": MINHASH_LSH_CROSSOVER,
+            },
+        }
+
+        if manifest_matches(
+            dst_dir,
+            stage="dedup",
+            contract=contract,
+            input_signature=input_signature,
+        ):
+            indexed = dedup.index_source_input(src_dir)
+            log.info(
+                f"  {source}: verified dedup manifest matches — reusing and "
+                f"indexed {indexed:,} retained documents"
+            )
+            prior_dedup_signatures.append(
+                {
+                    "source": source,
+                    "input_signature": input_signature,
+                }
+            )
             continue
 
-        if dst_dir.exists() and list(dst_dir.glob("*.jsonl")):
-            log.info(f"  {source}: already deduped — skipping")
-            continue
+        if dst_dir.exists():
+            log.warning(f"  {source}: replacing stale/incomplete dedup output")
+            shutil.rmtree(dst_dir)
+        scratch_dir = working_dir / source
+        if scratch_dir.exists():
+            log.warning(f"  {source}: removing stale dedup scratch")
+            shutil.rmtree(scratch_dir)
 
         if source in SKIP_FUZZY_DEDUP_SOURCES:
             log.info(
@@ -783,12 +1008,24 @@ def stage_dedup(workers: int | None = None, sources: list[str] | None = None) ->
                 shutil.copy2(shard, dst_dir / shard.name)
 
             shutil.rmtree(scratch_dir, ignore_errors=True)
-            continue
+        else:
+            dedup.deduplicate_source(
+                src_dir=src_dir,
+                dst_dir=dst_dir,
+                source_name=source,
+            )
 
-        dedup.deduplicate_source(
-            src_dir=src_dir,
-            dst_dir=dst_dir,
-            source_name=source,
+        write_manifest(
+            dst_dir,
+            stage="dedup",
+            contract=contract,
+            input_signature=input_signature,
+        )
+        prior_dedup_signatures.append(
+            {
+                "source": source,
+                "input_signature": input_signature,
+            }
         )
 
     log.info(dedup.report())
@@ -820,8 +1057,10 @@ def _write_staging(args: tuple) -> tuple[str, int, int]:
                 for line in fin:
                     try:
                         record = orjson.loads(line)
-                    except Exception:
-                        continue
+                    except Exception as exc:
+                        raise RuntimeError(
+                            f"Invalid deduplicated JSONL record in {shard}"
+                        ) from exc
                     record = flatten_datatrove_record(record)
                     text = record.get("text", "")
                     chars += len(text)
@@ -857,8 +1096,10 @@ def _append_overflow(args: tuple) -> tuple[int, int]:
         for line in fin:
             try:
                 record = orjson.loads(line)
-            except Exception:
-                continue
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Invalid blend staging JSONL record in {staging_path}"
+                ) from exc
             already_chars += len(record.get("text", ""))
 
     shards = sorted(Path(src_dir).glob("*.jsonl"))
@@ -874,8 +1115,10 @@ def _append_overflow(args: tuple) -> tuple[int, int]:
                 for line in fin:
                     try:
                         record = orjson.loads(line)
-                    except Exception:
-                        continue
+                    except Exception as exc:
+                        raise RuntimeError(
+                            f"Invalid deduplicated JSONL record in {shard}"
+                        ) from exc
                     record = flatten_datatrove_record(record)
                     text_len = len(record.get("text", ""))
                     chars_seen += text_len
@@ -1004,6 +1247,7 @@ def _shuffle_chunked_from_sources(
     total_lines: int,
     source_doc_counts: dict[str, int],
     chunk_lines: int = 500_000,
+    interleave_block_lines: int = 1_024,
 ) -> tuple[int, int, dict[str, int]]:
     """
     Single-pass shuffle: weighted-interleave reads + reservoir sample for val.
@@ -1028,9 +1272,10 @@ def _shuffle_chunked_from_sources(
 
       Pass 1 — weighted-interleave reads. Open all staging files at once.
                At each step pick a source with probability proportional to
-               its remaining line count, read one line from that source.
-               This produces a stream where any window's source mix matches
-               the global mix.
+               its remaining line count, then read a small block from that
+               source. The train chunk is shuffled before it is written, so
+               1,024-line scheduling blocks preserve mixed chunks while
+               avoiding one Python weighted-choice call per document.
 
                Each line then enters the val reservoir or the train chunk
                buffer. Reservoir uses Vitter's Algorithm R: every line in
@@ -1103,44 +1348,53 @@ def _shuffle_chunked_from_sources(
         # whose remaining count is undercounted still gets drained.
         weights = [max(1, remaining[s]) for s in active]
         chosen = rng.choices(active, weights=weights, k=1)[0]
+        block_size = min(
+            interleave_block_lines,
+            max(1, remaining[chosen]),
+        )
+        exhausted = False
+        for _ in range(block_size):
+            line = handles[chosen].readline()
+            if not line:
+                exhausted = True
+                break
 
-        line = handles[chosen].readline()
-        if not line:
-            # Source exhausted — close handle, drop from active list.
+            remaining[chosen] = max(0, remaining[chosen] - 1)
+            seen += 1
+
+            # Reservoir sampling (Vitter Algorithm R) remains per-document,
+            # so every record has exactly n_val / total_lines inclusion
+            # probability regardless of scheduling block size.
+            if seen <= n_val:
+                val_reservoir.append(line)
+                val_source_reservoir.append(chosen)
+            else:
+                j = rng.randint(1, seen)
+                if j <= n_val:
+                    displaced_line = val_reservoir[j - 1]
+                    val_reservoir[j - 1] = line
+                    val_source_reservoir[j - 1] = chosen
+                    train_buf.append(displaced_line)
+                else:
+                    train_buf.append(line)
+
+            if len(train_buf) >= chunk_lines:
+                _flush_chunk()
+
+        if exhausted:
             handles[chosen].close()
             try:
                 staging_paths[chosen].unlink()
             except FileNotFoundError:
                 pass
             active.remove(chosen)
-            continue
-
-        remaining[chosen] = max(0, remaining[chosen] - 1)
-        seen += 1
-
-        # Reservoir sampling (Vitter Algorithm R).
-        if seen <= n_val:
-            val_reservoir.append(line)
-            val_source_reservoir.append(chosen)
-        else:
-            j = rng.randint(1, seen)
-            if j <= n_val:
-                displaced_line = val_reservoir[j - 1]
-                val_reservoir[j - 1] = line
-                val_source_reservoir[j - 1] = chosen
-                train_buf.append(displaced_line)
-            else:
-                train_buf.append(line)
-
-        if len(train_buf) >= chunk_lines:
-            _flush_chunk()
 
     _flush_chunk()
 
     if seen != total_lines:
-        log.warning(
-            f"Reservoir saw {seen:,} lines but expected {total_lines:,} — "
-            f"val sampling fraction will drift slightly from {val_fraction:.4f}"
+        raise RuntimeError(
+            f"Blend staging line-count mismatch: read {seen:,}, expected "
+            f"{total_lines:,}. Refusing to emit a biased validation split."
         )
 
     val_source_counts: dict[str, int] = {}
@@ -1212,18 +1466,12 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
     """
     log.info(f"=== Stage 4: Blend (target={target}) ===")
     cfg = TARGET_CONFIGS[target]
-    total_tokens = cfg["total_tokens"]
+    total_tokens = cfg["corpus_tokens"]
     val_fraction = cfg.get("val_fraction", PRETRAIN_VAL_FRACTION)
 
     CURATED_DIR.mkdir(parents=True, exist_ok=True)
     train_path = CURATED_DIR / "train.jsonl"
     val_path = CURATED_DIR / "val.jsonl"
-
-    if train_path.exists() and val_path.exists():
-        log.info("train.jsonl and val.jsonl already exist — delete to re-blend")
-        return
-
-    rng = random.Random(seed)
 
     source_dirs = {
         source: FILTERED_DIR / f"{source}_deduped"
@@ -1232,6 +1480,55 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
 
     # Initial character targets from the locked mix.
     target_chars = compute_source_char_targets(target)
+    missing_sources = [
+        source
+        for source, source_dir in source_dirs.items()
+        if not list(source_dir.glob("*.jsonl"))
+        or not manifest_outputs_match(source_dir)
+    ]
+    if missing_sources:
+        raise RuntimeError(
+            "Cannot blend without complete deduplicated outputs for every "
+            f"configured source: {', '.join(missing_sources)}"
+        )
+
+    input_signature = stable_digest(
+        {
+            source: tree_signature(source_dir)
+            for source, source_dir in sorted(source_dirs.items())
+        }
+    )
+    blend_contract = {
+        "target": target,
+        "implementation_sha256": code_fingerprint(stage_blend),
+        "target_tokens": total_tokens,
+        "seed": seed,
+        "val_fraction": val_fraction,
+        "chars_per_token_estimate": CHARS_PER_TOKEN,
+        "source_targets_chars": target_chars,
+        "data_mix": DATA_MIX,
+        "code_submix": CODE_SUBMIX,
+        "overflow_sink": OVERFLOW_SINK,
+    }
+    if manifest_matches(
+        CURATED_DIR,
+        stage="blend",
+        contract=blend_contract,
+        input_signature=input_signature,
+        output_pattern="*.json*",
+    ):
+        log.info("Verified blend manifest matches inputs/configuration — reusing")
+        return
+
+    for stale in (
+        train_path,
+        val_path,
+        CURATED_DIR / "blend_stats.json",
+        CURATED_DIR / MANIFEST_NAME,
+    ):
+        stale.unlink(missing_ok=True)
+
+    rng = random.Random(seed)
 
     # Remove any stale staging files from prior runs (always re-stage).
     for source in ALL_SOURCES:
@@ -1251,14 +1548,12 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
         src_dir = source_dirs[source]
         shards = sorted(src_dir.glob("*.jsonl"))
         if not shards:
-            log.warning(f"  {source}: no deduped shards — skipping")
-            continue
+            raise RuntimeError(f"  {source}: no deduped shards")
         staging = CURATED_DIR / f"blend_{source}.jsonl"
         work.append((source, str(src_dir), str(staging), target_chars[source]))
 
     if not work:
-        log.error("No deduped shards found for any source — nothing to blend")
-        return
+        raise RuntimeError("No deduped shards found for any source")
 
     log.info(
         f"Pass 1/3: staging {len(work)} sources ({n_blend_workers} workers)..."
@@ -1272,6 +1567,7 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
                 "docs": docs,
                 "chars": chars,
                 "target_chars": target_chars[source],
+                "initial_deficit": max(0, target_chars[source] - chars),
                 "deficit": max(0, target_chars[source] - chars),
             }
             deficit_frac = source_stats[source]["deficit"] / max(
@@ -1283,6 +1579,16 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
                 f"{chars / 1e9:.3f}B chars "
                 f"(target {target_chars[source] / 1e9:.3f}B){flag}"
             )
+
+    # Futures complete nondeterministically. Normalize mapping order before
+    # overflow and seeded shuffling so identical inputs produce identical
+    # outputs.
+    staging_paths = {
+        source: staging_paths[source] for source in ALL_SOURCES
+    }
+    source_stats = {
+        source: source_stats[source] for source in ALL_SOURCES
+    }
 
     # ── Pass 2: source-aware overflow ─────────────────────────────────────────
     overflow_chains = {
@@ -1298,7 +1604,8 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
             f"{total_deficit / 1e9:.3f}B character deficit..."
         )
 
-    for source, stats in list(source_stats.items()):
+    for source in ALL_SOURCES:
+        stats = source_stats[source]
         remaining_deficit = stats.get("deficit", 0)
         if remaining_deficit <= 0:
             continue
@@ -1323,10 +1630,20 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
             remaining_deficit = max(0, remaining_deficit - chars)
 
         if remaining_deficit > 0:
-            log.warning(
+            log.error(
                 f"  {source}: unresolved deficit after overflow: "
                 f"{remaining_deficit / 1e9:.3f}B chars"
             )
+        stats["deficit"] = remaining_deficit
+
+    unresolved_deficit = sum(
+        stats.get("deficit", 0) for stats in source_stats.values()
+    )
+    if unresolved_deficit:
+        raise RuntimeError(
+            f"Blend cannot satisfy the configured corpus target; "
+            f"{unresolved_deficit:,} characters remain unresolved"
+        )
 
     # ── Pass 3: shuffle + split ────────────────────────────────────────────────
     total_staging_bytes = sum(p.stat().st_size for p in staging_paths.values())
@@ -1340,25 +1657,34 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
         f"budget {SHUFFLE_RAM_BUDGET_GB:.1f} GB"
     )
 
-    if effective_ram_gb < SHUFFLE_RAM_BUDGET_GB:
-        n_train, n_val, val_source_counts = _shuffle_in_memory(
-            staging_paths, train_path, val_path, val_fraction, rng,
-        )
-    else:
-        log.info("  Effective RAM exceeds budget — using chunked disk shuffle")
-        # Weighted-interleave needs total_lines + per-source counts up
-        # front. Both come from source_stats, finalized after pass 2.
-        source_doc_counts = {
-            s: source_stats[s]["docs"]
-            for s in staging_paths.keys()
-            if s in source_stats
-        }
-        total_lines_calc = sum(source_doc_counts.values())
-        n_train, n_val, val_source_counts = _shuffle_chunked_from_sources(
-            staging_paths, train_path, val_path, val_fraction, rng,
-            total_lines=total_lines_calc,
-            source_doc_counts=source_doc_counts,
-        )
+    train_tmp = train_path.with_name(f".{train_path.name}.{os.getpid()}.tmp")
+    val_tmp = val_path.with_name(f".{val_path.name}.{os.getpid()}.tmp")
+    try:
+        if effective_ram_gb < SHUFFLE_RAM_BUDGET_GB:
+            n_train, n_val, val_source_counts = _shuffle_in_memory(
+                staging_paths, train_tmp, val_tmp, val_fraction, rng,
+            )
+        else:
+            log.info("  Effective RAM exceeds budget — using chunked disk shuffle")
+            # Weighted-interleave needs total_lines + per-source counts up
+            # front. Both come from source_stats, finalized after pass 2.
+            source_doc_counts = {
+                s: source_stats[s]["docs"]
+                for s in staging_paths.keys()
+                if s in source_stats
+            }
+            total_lines_calc = sum(source_doc_counts.values())
+            n_train, n_val, val_source_counts = _shuffle_chunked_from_sources(
+                staging_paths, train_tmp, val_tmp, val_fraction, rng,
+                total_lines=total_lines_calc,
+                source_doc_counts=source_doc_counts,
+            )
+        train_tmp.replace(train_path)
+        val_tmp.replace(val_path)
+    except Exception:
+        train_tmp.unlink(missing_ok=True)
+        val_tmp.unlink(missing_ok=True)
+        raise
 
     total_lines = n_train + n_val
     total_chars = sum(s["chars"] for s in source_stats.values())
@@ -1371,8 +1697,9 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
 
     # ── Write blend stats ──────────────────────────────────────────────────────
     stats_path = CURATED_DIR / "blend_stats.json"
-    with open(stats_path, "w") as f:
-        json.dump({
+    atomic_write_json(
+        stats_path,
+        {
             "target": target,
             "target_tokens": total_tokens,
             "chars_per_token": CHARS_PER_TOKEN,
@@ -1380,13 +1707,18 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
             "train_documents": n_train,
             "val_documents": n_val,
             "val_fraction": val_fraction,
-            "estimated_tokens": total_chars // CHARS_PER_TOKEN,
+            "estimated_tokens_from_chars": total_chars // CHARS_PER_TOKEN,
+            "token_count_status": (
+                "estimate_only; authoritative realized token counts are "
+                "written by pretrain/data/tokenize_data.py"
+            ),
             "source_mix": {
                 s: {
                     "docs": v["docs"],
                     "chars": v["chars"],
                     "target_chars": v["target_chars"],
-                    "deficit": v["deficit"],
+                    "initial_deficit": v["initial_deficit"],
+                    "unresolved_deficit": v["deficit"],
                     "val_docs": val_source_counts.get(s, 0),
                     **(
                         {
@@ -1399,34 +1731,21 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
                 }
                 for s, v in source_stats.items()
             },
-        }, f, indent=2)
-    log.info(f"Blend stats → {stats_path}")
-
-
-# ── Stage 5: Upload ────────────────────────────────────────────────────────────
-
-def stage_upload(target: str) -> None:
-    log.info("=== Stage 5: Upload to S3 ===")
-    bucket, prefix = get_bucket_and_prefix()
-
-    date = datetime.now().strftime("%Y-%m-%d")
-    dst_prefix = f"{target}/{date}/curated"
-    s3_path = f"s3://{bucket}/{prefix}/{dst_prefix}/"
-
-    log.info(f"Uploading to {s3_path}")
-    upload_directory(
-        src=CURATED_DIR,
-        dst_prefix=dst_prefix,
-        bucket=bucket,
-        prefix=prefix,
-        overwrite=True,
+        },
     )
-    log.info(f"Upload complete → {s3_path}")
+    write_manifest(
+        CURATED_DIR,
+        stage="blend",
+        contract=blend_contract,
+        input_signature=input_signature,
+        output_pattern="*.json*",
+    )
+    log.info(f"Blend stats → {stats_path}")
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
-STAGES = ["download", "filter", "dedup", "blend", "upload", "stats", "all"]
+STAGES = ["download", "filter", "dedup", "blend", "stats", "all"]
 
 
 def main():
@@ -1448,7 +1767,7 @@ def main():
             "Comma-separated concrete source names for source-scoped capacity "
             "runs. Example: --sources nemotron_cc_math,nemotron_specialized. "
             "When used with --stage all, only download/filter/dedup/stats run; "
-            "blend/upload are intentionally skipped."
+            "blend is intentionally skipped."
         ),
     )
     parser.add_argument(
@@ -1456,6 +1775,15 @@ def main():
         help="Parallel workers for filter/dedup/blend. Default: cpu_count - 2.",
     )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Allow download stage to replace raw source directories whose "
+            "completion manifest is missing or stale. Replacement occurs "
+            "only after a new staged download completes."
+        ),
+    )
     args = parser.parse_args()
 
     if args.mini and args.target != "mini":
@@ -1473,8 +1801,8 @@ def main():
 
     source_scoped = args.sources is not None
 
-    if source_scoped and args.stage in ("blend", "upload"):
-        parser.error("--sources is for source capacity runs; do not use it with blend/upload")
+    if source_scoped and args.stage == "blend":
+        parser.error("--sources is for source capacity runs; do not use it with blend")
 
     n_workers = args.workers or default_workers()
     log.info(
@@ -1486,7 +1814,13 @@ def main():
     )
 
     if args.stage in ("download", "all"):
-        stage_download(args.target, mini=args.mini, workers=n_workers, sources=selected_sources)
+        stage_download(
+            args.target,
+            mini=args.mini,
+            workers=n_workers,
+            sources=selected_sources,
+            force=args.force,
+        )
     if args.stage in ("filter", "all"):
         stage_filter(workers=n_workers, sources=selected_sources)
     if args.stage in ("dedup", "all"):
@@ -1498,13 +1832,11 @@ def main():
         if args.stage == "all":
             log.info(
                 "Source-scoped --stage all complete after download/filter/dedup/stats; "
-                "blend/upload intentionally skipped."
+                "blend intentionally skipped."
             )
     else:
         if args.stage in ("blend", "all"):
             stage_blend(args.target, seed=args.seed, workers=n_workers)
-        if args.stage in ("upload", "all"):
-            stage_upload(args.target)
 
     log.info("Pipeline complete.")
 

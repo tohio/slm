@@ -20,10 +20,10 @@ import logging
 from pathlib import Path
 
 import orjson
-from datasets import load_dataset
+from curator.sources.hf import load_dataset
 from tqdm import tqdm
 
-from curator.constants import CHARS_PER_TOKEN
+from config import CHARS_PER_TOKEN
 
 log = logging.getLogger(__name__)
 
@@ -75,7 +75,6 @@ class WikipediaSource:
             self.DATASET_NAME,
             self.DATASET_CONFIG,
             split="train",
-            trust_remote_code=True,
         )
         log.info(f"Wikipedia: {len(dataset):,} articles loaded")
 

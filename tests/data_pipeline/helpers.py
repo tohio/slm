@@ -33,17 +33,13 @@ def pipeline_path(*parts: str) -> Path:
     Most pipeline artifacts are size-scoped under:
         data/runs/<size>/<stage>/...
 
-    The tokenizer remains shared at:
-        data/tokenizer/...
+    The tokenizer is size-scoped with every other reusable artifact:
+        data/runs/<size>/tokenizer/...
     """
     if not parts:
         return data_dir()
 
     stage, *rest = parts
-
-    # Shared tokenizer path used by training/inference setup.
-    if stage == "tokenizer":
-        return data_dir().joinpath(stage, *rest)
 
     # Backward-compatible aliases used by older tests.
     if stage == "sft" and rest:

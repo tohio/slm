@@ -53,7 +53,10 @@ data/runs/<size>/tokenized/train.json
 data/runs/<size>/tokenized/val.json
 ```
 
-`train.json` and `val.json` store tokenization metadata, including tokenizer fingerprint checks used to prevent stale tokenized artifacts.
+`train.json` and `val.json` store input SHA-256, tokenizer fingerprint, binary
+format version, and realized per-source document/token counts. Tokenization is
+ordered and reproducible; stale derived binaries are rebuilt automatically.
+The dataset reader requires these sidecars.
 
 ---
 

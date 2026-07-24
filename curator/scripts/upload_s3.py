@@ -42,6 +42,9 @@ from tqdm import tqdm
 
 load_dotenv()
 
+from config.data_mix import ALL_SOURCES
+from curator.state import file_snapshot, manifest_outputs_match
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -235,6 +238,36 @@ def _prepare_metadata(size: str, run_id: str) -> None:
     if blend_stats.exists():
         (metadata_dir / "blend_stats.json").write_text(blend_stats.read_text())
 
+    run_dir = DATA_DIR / "runs" / size
+    tracked = [
+        run_dir / "curated" / "_SUCCESS.json",
+        run_dir / "curated" / "blend_stats.json",
+        run_dir / "validated" / "_SUCCESS.json",
+        run_dir / "validated" / "validation_stats.json",
+        run_dir / "tokenized" / "train.json",
+        run_dir / "tokenized" / "val.json",
+        run_dir / "tokenizer" / "slm_tokenizer.json",
+    ]
+    pipeline_manifest = {
+        "run_id": run_id,
+        "size": size,
+        "artifacts": {
+            item["path"]: {
+                key: value
+                for key, value in item.items()
+                if key != "path"
+            }
+            for item in file_snapshot(
+                [path for path in tracked if path.exists()],
+                root=run_dir,
+                exclude_manifest=False,
+            )
+        },
+    }
+    (metadata_dir / "pipeline_manifest.json").write_text(
+        json.dumps(pipeline_manifest, indent=2, sort_keys=True) + "\n"
+    )
+
 
 def _list_existing_keys(
     client, bucket: str, full_prefix: str,
@@ -310,6 +343,7 @@ def upload_directory(
     overwrite: bool = False,
     glob: str = "**/*",
     large_file_bytes: int = 100 * 1024 * 1024,
+    mirror: bool = False,
 ) -> dict[str, int]:
     """
     Upload a local directory to S3 recursively.
@@ -326,6 +360,9 @@ def upload_directory(
         overwrite: If False, skip files that already exist in S3.
         glob: File pattern. Default: all files.
         large_file_bytes: Threshold above which we show per-file progress.
+        mirror: After a successful upload, delete remote keys under this exact
+            prefix that are not present locally. Intended for immutable
+            RUN_ID/stage prefixes, not generic partial uploads.
     """
     client = get_s3_client(workers)
     transfer_config = _transfer_config(workers)
@@ -339,10 +376,19 @@ def upload_directory(
 
     # Build existing-keys set once rather than HEAD-ing every file.
     existing: set[str] = set()
-    if not overwrite:
-        log.info("  Listing existing objects to skip already-uploaded files...")
+    if not overwrite or mirror:
+        purpose = "mirror validation" if overwrite else "resume/skip"
+        log.info(f"  Listing existing objects for {purpose}...")
         existing = _list_existing_keys(client, bucket, full_prefix)
         log.info(f"  {len(existing)} objects already present")
+
+    local_keys = {
+        build_key(
+            f"{prefix}/{dst_prefix}",
+            str(path.relative_to(src)),
+        )
+        for path in files
+    }
 
     counts = {"uploaded": 0, "skipped": 0, "failed": 0}
 
@@ -377,6 +423,28 @@ def upload_directory(
         f"skipped: {counts['skipped']}, "
         f"failed: {counts['failed']}"
     )
+    if mirror and not counts["failed"]:
+        stale_keys = sorted(existing - local_keys)
+        for start in range(0, len(stale_keys), 1_000):
+            batch = stale_keys[start:start + 1_000]
+            response = client.delete_objects(
+                Bucket=bucket,
+                Delete={
+                    "Objects": [{"Key": key} for key in batch],
+                    "Quiet": True,
+                },
+            )
+            errors = response.get("Errors", [])
+            if errors:
+                raise RuntimeError(
+                    f"Failed to remove {len(errors)} stale S3 object(s) "
+                    f"under s3://{bucket}/{full_prefix}"
+                )
+        if stale_keys:
+            log.info(
+                f"Removed {len(stale_keys)} stale object(s) so the remote "
+                "artifact exactly mirrors the completed local stage"
+            )
     return counts
 
 
@@ -402,8 +470,10 @@ def download_prefix(
         objects.extend(page.get("Contents", []))
 
     if not objects:
-        log.warning(f"No objects found at s3://{bucket}/{full_prefix}")
-        return {"downloaded": 0, "skipped": 0, "failed": 0}
+        raise FileNotFoundError(
+            f"No objects found at requested artifact prefix "
+            f"s3://{bucket}/{full_prefix}"
+        )
 
     log.info(f"Downloading {len(objects)} objects → {dst}")
     dst.mkdir(parents=True, exist_ok=True)
@@ -418,7 +488,12 @@ def download_prefix(
         local_path.parent.mkdir(parents=True, exist_ok=True)
 
         if not overwrite and local_path.exists():
-            return "skipped"
+            if local_path.stat().st_size == size:
+                return "skipped"
+            log.warning(
+                f"Replacing size-mismatched local artifact {local_path}: "
+                f"local={local_path.stat().st_size:,}, remote={size:,} bytes"
+            )
         try:
             if size >= large_file_bytes:
                 cb = _ProgressCallback(size, desc=local_path.name)
@@ -500,6 +575,57 @@ def _artifact_upload_paths(size: str, run_id: str, stage: str) -> tuple[Path, st
     return src, dst_prefix, "**/*"
 
 
+def _assert_artifact_stage_complete(
+    size: str,
+    run_id: str,
+    stage: str,
+    path: Path,
+) -> None:
+    """Reject incomplete, stale, or locally mixed artifact stages."""
+    if stage == "metadata":
+        required = path / "pipeline_manifest.json"
+        if not required.exists():
+            raise RuntimeError(f"Metadata is incomplete: missing {required}")
+        try:
+            payload = json.loads(required.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Metadata manifest is invalid: {required}") from exc
+        if payload.get("size") != size or payload.get("run_id") != run_id:
+            raise RuntimeError(
+                f"Metadata manifest does not identify size={size}, "
+                f"run_id={run_id}: {required}"
+            )
+        return
+
+    if stage == "raw":
+        invalid = [
+            source
+            for source in ALL_SOURCES
+            if not manifest_outputs_match(path / source)
+        ]
+        if invalid:
+            raise RuntimeError(
+                "Raw artifact is not manifest-complete for: "
+                + ", ".join(invalid)
+            )
+        return
+
+    patterns = {
+        "curated": "*.json*",
+        "validated": "*.json*",
+        "tokenized": "[tv]*",
+        "tokenizer": "*",
+    }
+    pattern = patterns.get(stage)
+    if pattern is None or not manifest_outputs_match(
+        path,
+        output_pattern=pattern,
+    ):
+        raise RuntimeError(
+            f"Artifact stage '{stage}' is not manifest-complete: {path}"
+        )
+
+
 def _normalize_stages(stages: str | None) -> list[str]:
     if not stages:
         return list(ARTIFACT_STAGES)
@@ -535,8 +661,10 @@ def upload_artifacts(
     for stage in _normalize_stages(stages):
         src, dst_prefix, stage_glob = _artifact_upload_paths(size, run_id, stage)
         if not src.exists():
-            log.warning(f"Skipping missing artifact stage '{stage}': {src}")
-            continue
+            raise FileNotFoundError(
+                f"Requested artifact stage '{stage}' is missing: {src}"
+            )
+        _assert_artifact_stage_complete(size, run_id, stage, src)
 
         effective_glob = stage_glob if stage == "metadata" else glob
         log.info(f"Uploading artifact stage '{stage}': {src} → {dst_prefix}")
@@ -546,8 +674,13 @@ def upload_artifacts(
             bucket=bucket,
             prefix=prefix,
             workers=workers,
-            overwrite=overwrite,
+            # Metadata is the mutable index for a RUN_ID: later stage uploads
+            # must refresh it (for example, validated artifacts are added
+            # after curated artifacts). Corpus/model stages remain immutable
+            # unless the caller explicitly passes --overwrite.
+            overwrite=(overwrite or stage == "metadata"),
             glob=effective_glob,
+            mirror=(overwrite or stage == "metadata"),
         )
         for key in totals:
             totals[key] += counts.get(key, 0)
@@ -558,6 +691,10 @@ def upload_artifacts(
         f"skipped: {totals['skipped']}, "
         f"failed: {totals['failed']}"
     )
+    if totals["failed"]:
+        raise RuntimeError(
+            f"Artifact upload failed for {totals['failed']} file(s)"
+        )
     return totals
 
 
@@ -588,6 +725,7 @@ def download_artifacts(
         )
         for key in totals:
             totals[key] += counts.get(key, 0)
+        _assert_artifact_stage_complete(size, run_id, stage, dst)
 
     log.info(
         f"Artifact download complete — "
@@ -595,6 +733,10 @@ def download_artifacts(
         f"skipped: {totals['skipped']}, "
         f"failed: {totals['failed']}"
     )
+    if totals["failed"]:
+        raise RuntimeError(
+            f"Artifact download failed for {totals['failed']} file(s)"
+        )
     return totals
 
 
@@ -649,7 +791,7 @@ def main():
     bucket, prefix = get_bucket_and_prefix()
 
     if args.command == "upload":
-        upload_directory(
+        counts = upload_directory(
             src=args.src,
             dst_prefix=args.dst,
             bucket=bucket,
@@ -658,8 +800,10 @@ def main():
             overwrite=args.overwrite,
             glob=args.glob,
         )
+        if counts["failed"]:
+            raise SystemExit(1)
     elif args.command == "download":
-        download_prefix(
+        counts = download_prefix(
             src_prefix=args.src,
             dst=args.dst,
             bucket=bucket,
@@ -667,6 +811,8 @@ def main():
             workers=args.workers,
             overwrite=args.overwrite,
         )
+        if counts["failed"]:
+            raise SystemExit(1)
     elif args.command == "list":
         objects = list_prefix(args.prefix, bucket, prefix)
         total_size = sum(o["Size"] for o in objects)

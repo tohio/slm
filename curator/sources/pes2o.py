@@ -3,31 +3,28 @@ curator/sources/pes2o.py
 -------------------------
 peS2o academic papers data source.
 
-Streams the `allenai/peS2o` dataset — a cleaned, filtered, and deduplicated
-subset of Semantic Scholar's open research corpus (S2ORC). Covers ~42B
-tokens across scientific papers from many fields: CS, biology, physics,
-medicine, social sciences, and more.
+Streams `common-pile/peS2o_filtered`, the Common Pile release of peS2o
+restricted to openly licensed full-text papers and distributed as ordinary
+data files. Unlike the legacy `allenai/peS2o` loader, it does not require a
+dataset script or `trust_remote_code`.
 
 Provides academic prose and technical writing that's underrepresented in
 FineWeb/Wikipedia. Helpful for reasoning, formal writing style, and
 vocabulary in technical domains.
 
-Streams in full rather than loading all at once — at 42B tokens the corpus
-is too large to materialize. Resume works at shard granularity: existing
-shards on disk mean that many records of the stream are skipped before
-writing resumes.
+The source is streamed rather than materialized. Stage-level completion and
+restart safety are owned by `curator/scripts/curate.py`; a source invocation
+always starts from an empty staging directory.
 
-Schema note: peS2o v2 tags each record's subset in the `source` field as
-"s2orc/train" or "s2ag/train" (i.e., `<subset>/<split>`). We strip the
-split suffix before matching against the whitelist. s2orc is full-text
-papers, s2ag is abstracts + titles — we consume both.
+Schema note: Common Pile tags records as `pes2o/s2orc`. The release contains
+full-text S2ORC documents; the old abstract-only `s2ag` subset is not assumed.
 
 Output: JSONL with one document per line:
     {
         "text": "...",
         "source": "pes2o",
         "paper_id": "...",
-        "subset": "s2orc | s2ag"
+        "subset": "s2orc"
     }
 
 Usage:
@@ -40,10 +37,10 @@ import logging
 from pathlib import Path
 
 import orjson
-from datasets import load_dataset
+from curator.sources.hf import load_dataset
 from tqdm import tqdm
 
-from curator.constants import CHARS_PER_TOKEN
+from config import CHARS_PER_TOKEN
 
 log = logging.getLogger(__name__)
 
@@ -54,33 +51,27 @@ class PeS2oSource:
 
     Args:
         output_dir: Directory to write output JSONL files.
-        config: HF dataset config. Default `v2` — the latest published
-            version at time of writing. Specific versions (`v1`) are
-            also available.
-        subsets: Which peS2o subsets to include. Default both s2orc
-            (full-text papers) and s2ag (abstracts + titles).
+        subsets: Which peS2o subsets to include. The Common Pile release uses
+            the `s2orc` full-text subset.
         min_length: Minimum document character length. Below this, skipped.
         shard_size: Documents per output JSONL shard.
         max_docs: Maximum documents to write. None = no limit. Used for
             mini runs to validate the pipeline.
     """
 
-    DATASET_NAME = "allenai/peS2o"
-    DATASET_CONFIG = "v2"
+    DATASET_NAME = "common-pile/peS2o_filtered"
     SOURCE_TAG = "pes2o"
-    DEFAULT_SUBSETS = ("s2orc", "s2ag")
+    DEFAULT_SUBSETS = ("s2orc",)
 
     def __init__(
         self,
         output_dir: Path,
-        config: str | None = None,
         subsets: tuple[str, ...] | list[str] = DEFAULT_SUBSETS,
         min_length: int = 500,
         shard_size: int = 50_000,
         max_docs: int | None = None,
     ):
         self.output_dir = Path(output_dir)
-        self.config = config or self.DATASET_CONFIG
         self.subsets = list(subsets)
         self.min_length = min_length
         self.shard_size = shard_size
@@ -90,24 +81,19 @@ class PeS2oSource:
     def download(self) -> list[Path]:
         """Stream peS2o and write to sharded JSONL files."""
         existing_shards = sorted(self.output_dir.glob("pes2o_*.jsonl"))
-        shard_idx = len(existing_shards)
-        skip_records = shard_idx * self.shard_size
-
-        if skip_records > 0:
-            log.info(
-                f"peS2o: found {shard_idx} existing shard(s) — "
-                f"skipping first {skip_records:,} streamed records"
+        if existing_shards:
+            raise RuntimeError(
+                "peS2o output directory is not empty. The canonical curator "
+                "owns restart/replacement semantics; shard count alone is not "
+                "a safe streaming checkpoint."
             )
+        shard_idx = 0
 
-        log.info(
-            f"Streaming {self.DATASET_NAME}/{self.config} from HuggingFace..."
-        )
+        log.info(f"Streaming {self.DATASET_NAME} from HuggingFace...")
         stream = load_dataset(
             self.DATASET_NAME,
-            self.config,
             split="train",
             streaming=True,
-            trust_remote_code=True,
         )
 
         if self.max_docs:
@@ -118,25 +104,15 @@ class PeS2oSource:
         total_written = 0
         total_skipped_short = 0
         total_skipped_subset = 0
-        total_stream_skipped = 0
         stop = False
 
         pbar = tqdm(desc="Streaming peS2o", unit="doc")
 
-        for idx, sample in enumerate(stream):
-            # Resume: skip records belonging to already-written shards
-            if idx < skip_records:
-                total_stream_skipped += 1
-                if total_stream_skipped % 100_000 == 0:
-                    pbar.set_postfix_str(
-                        f"skipping {total_stream_skipped:,}/{skip_records:,}"
-                    )
-                continue
-
-            # peS2o v2 tags the source as "s2orc/train" or "s2ag/train" —
-            # strip the split suffix before matching against our whitelist.
+        for sample in stream:
+            # Common Pile tags the source as "pes2o/s2orc".
             raw_subset = sample.get("source", "")
-            subset = raw_subset.split("/", 1)[0]
+            parts = raw_subset.split("/", 1)
+            subset = parts[1] if len(parts) == 2 and parts[0] == "pes2o" else parts[0]
             if subset not in self.subsets:
                 total_skipped_subset += 1
                 continue
@@ -146,12 +122,16 @@ class PeS2oSource:
                 total_skipped_short += 1
                 continue
 
-            buffer.append({
+            metadata = sample.get("metadata")
+            record = {
                 "text": text,
                 "source": self.SOURCE_TAG,
                 "paper_id": str(sample.get("id", "")),
                 "subset": subset,
-            })
+            }
+            if isinstance(metadata, dict):
+                record["metadata"] = metadata
+            buffer.append(record)
 
             if len(buffer) >= self.shard_size:
                 path = self._write_shard(buffer, shard_idx)
@@ -180,7 +160,6 @@ class PeS2oSource:
             f"written: {total_written:,}, "
             f"skipped short: {total_skipped_short:,} (< {self.min_length} chars), "
             f"skipped subset: {total_skipped_subset:,} (not in {self.subsets}), "
-            f"stream-skipped (resume): {total_stream_skipped:,}, "
             f"new shards: {len(output_files)}"
             f"{' (stopped at max_docs cap)' if stop else ''}"
         )

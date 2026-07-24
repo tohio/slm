@@ -5,9 +5,9 @@ import json
 import logging
 from pathlib import Path
 
-from datasets import load_dataset
+from curator.sources.hf import load_dataset
 
-from curator.constants import CHARS_PER_TOKEN
+from config import CHARS_PER_TOKEN
 
 log = logging.getLogger(__name__)
 
@@ -89,13 +89,10 @@ class NemotronSpecializedSource:
     def download(self) -> list[Path]:
         existing = sorted(self.output_dir.glob(f"{self.SHARD_PREFIX}_*.jsonl"))
         if existing:
-            log.info(
-                "%s: found %d existing shard(s); skipping generation",
-                self.SOURCE_TAG,
-                len(existing),
+            raise RuntimeError(
+                f"{self.SOURCE_TAG} output directory is not empty. Use the "
+                "canonical curator's manifest-aware restart/replacement flow."
             )
-            self._load_existing_stats(existing)
-            return existing
 
         output_files: list[Path] = []
         records: list[dict] = []

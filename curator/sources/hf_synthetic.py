@@ -7,9 +7,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 import orjson
-from datasets import load_dataset
+from curator.sources.hf import load_dataset
 
-from curator.constants import CHARS_PER_TOKEN
+from config import CHARS_PER_TOKEN
 
 log = logging.getLogger(__name__)
 
@@ -46,13 +46,10 @@ class HFSyntheticSource:
     def download(self) -> list[Path]:
         existing = sorted(self.output_dir.glob(f"{self.SHARD_PREFIX}_*.jsonl"))
         if existing:
-            log.info(
-                "%s: found %d existing shard(s) in %s; skipping HF download",
-                self.SOURCE_TAG,
-                len(existing),
-                self.output_dir,
+            raise RuntimeError(
+                f"{self.SOURCE_TAG} output directory is not empty. Use the "
+                "canonical curator's manifest-aware restart/replacement flow."
             )
-            return existing
 
         if not self.HF_REPO:
             raise RuntimeError(f"{self.__class__.__name__} is missing HF_REPO")

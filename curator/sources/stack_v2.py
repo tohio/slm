@@ -19,8 +19,9 @@ To revive:
     2. Re-add _build_source branch for "stack_v2"
     3. Re-add "stack_v2" entry to CODE_SUBMIX and MINI_OVERRIDES in
        config/data_mix.py
-    4. Re-add "stack_v2" to CODE_SOURCES in curator/filters/quality.py
-       and validation/scripts/validate.py
+    4. Add "stack_v2" to the centralized source-routing sets in
+       config/data_mix.py as appropriate; filters and validation consume
+       those sets rather than maintaining local copies
     5. Ensure SWH_AUTH_TOKEN is set and has adequate quota
     6. Consider lowering fetch_workers and adding longer inter-batch
        sleeps to stay under the hourly limit
@@ -51,10 +52,10 @@ from pathlib import Path
 
 import orjson
 import requests
-from datasets import load_dataset
+from curator.sources.hf import load_dataset
 from tqdm import tqdm
 
-from curator.constants import CHARS_PER_TOKEN
+from config import CHARS_PER_TOKEN
 
 log = logging.getLogger(__name__)
 
@@ -169,7 +170,12 @@ class StackV2Source:
     def download(self) -> list[Path]:
         """Iterate per-language shards of the-stack-v2-dedup and write JSONL."""
         existing_shards = sorted(self.output_dir.glob("stack_v2_*.jsonl"))
-        shard_idx = len(existing_shards)
+        if existing_shards:
+            raise RuntimeError(
+                "the-stack-v2 output directory is not empty. Use the "
+                "canonical curator's manifest-aware restart/replacement flow."
+            )
+        shard_idx = 0
 
         log.info(f"Loading {self.DATASET_NAME} per-language...")
         log.info(f"  Languages: {self.languages}")
@@ -212,11 +218,11 @@ class StackV2Source:
                     data_files=f"data/{lang}/*.parquet",
                     split="train",
                     streaming=True,
-                    trust_remote_code=True,
                 )
-            except Exception:
-                log.exception(f"  Failed to load {lang} — skipping")
-                continue
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Failed to load required the-stack-v2 language: {lang}"
+                ) from exc
 
             batch: list[dict] = []
             # Debug instrumentation: track iterator progress per language so
@@ -296,12 +302,11 @@ class StackV2Source:
                                 trim_to = max(0, self.max_docs - total_written)
                                 buffer = buffer[:trim_to]
                                 stop = True
-            except Exception:
-                log.exception(
-                    f"    {lang}: iteration crashed at "
+            except Exception as exc:
+                raise RuntimeError(
+                    f"{lang}: the-stack-v2 iteration crashed at "
                     f"records_seen={records_seen}"
-                )
-                # Don't re-raise — try to drain and move to next language.
+                ) from exc
 
             elapsed = time.time() - lang_start_time
             log.info(

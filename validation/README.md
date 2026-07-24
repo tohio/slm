@@ -7,10 +7,10 @@ Post-curation quality validation for train/val JSONL splits.
 ## Owns
 
 - validation filtering after curation
-- optional Datatrove validation path
+- one canonical source-aware validation path
 - KenLM perplexity filtering
 - validated train/val outputs
-- validation upload helper
+- RUN_ID artifact integration
 
 The curator does heuristic filtering first. This stage catches lower-quality prose that still passes curation.
 
@@ -21,8 +21,7 @@ The curator does heuristic filtering first. This stage catches lower-quality pro
 ```text
 validation/
 └── scripts/
-    ├── validate.py
-    └── upload_validated.py
+    └── validate.py
 ```
 
 ---
@@ -71,7 +70,6 @@ Run validation:
 
 ```bash
 make validate SIZE=125m
-make validate-datatrove SIZE=125m
 ```
 
 Upload through the RUN_ID artifact flow:
@@ -80,7 +78,7 @@ Upload through the RUN_ID artifact flow:
 make artifacts-upload SIZE=125m ARTIFACT_STAGES="validated,metadata"
 ```
 
-Legacy direct upload:
+Convenience alias for the same RUN_ID artifact flow:
 
 ```bash
 make validate-upload SIZE=125m
@@ -90,7 +88,6 @@ Direct calls:
 
 ```bash
 python validation/scripts/validate.py --size 125m
-python validation/scripts/validate.py --size 125m --use-datatrove
 python validation/scripts/validate.py --size 125m --perplexity-threshold 800
 python validation/scripts/validate.py --size 125m --no-perplexity
 ```
@@ -105,13 +102,14 @@ python validation/scripts/validate.py   --train data/runs/125m/curated/train.jso
 
 ## Filters
 
-Validation applies prose quality checks, language filtering, repetition checks, and optional KenLM perplexity filtering.
+Validation applies source-aware prose structure and repetition checks, plus
+KenLM perplexity filtering. Language identification is enforced earlier by the
+curator's quality stage.
 
 | Filter | Purpose |
 |---|---|
 | terminal punctuation / prose structure | catches truncated or malformed prose |
-| repeated n-grams | catches boilerplate and repeated text |
-| language detection | keeps English-dominant records |
+| repeated lines | catches boilerplate and repeated text |
 | KenLM perplexity | removes gibberish, spam, and unnatural text |
 
 Code, synthetic/template-like, math, and specialized sources bypass prose-only heuristics where those heuristics would incorrectly reject useful non-prose records.
@@ -122,7 +120,9 @@ Code, synthetic/template-like, math, and specialized sources bypass prose-only h
 
 If `--perplexity-threshold` is not provided, validation samples train records and computes an automatic threshold. The same threshold is reused for val so train and val remain comparable.
 
-Use `--no-perplexity` only when the KenLM model is unavailable or when debugging other validation filters.
+KenLM is required by default. `--no-perplexity` is an explicit alternate
+contract for debugging and is recorded in the completion manifest; missing
+KenLM dependencies never silently disable filtering.
 
 ---
 

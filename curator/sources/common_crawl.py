@@ -72,7 +72,7 @@ import requests
 from tqdm import tqdm
 from warcio.archiveiterator import ArchiveIterator
 
-from curator.constants import CHARS_PER_TOKEN
+from config import CHARS_PER_TOKEN
 
 log = logging.getLogger(__name__)
 
@@ -452,6 +452,15 @@ class CommonCrawlSource:
             if ctx_tmp is not None:
                 ctx_tmp.cleanup()
 
+        if total_segments_done != len(pending):
+            failed = len(pending) - total_segments_done
+            raise RuntimeError(
+                f"Common Crawl completed only {total_segments_done:,} of "
+                f"{len(pending):,} required segments ({failed:,} failed or "
+                "produced no usable documents). Partial shards remain "
+                "uncommitted for inspection."
+            )
+
         log.info(
             f"Common Crawl download complete — "
             f"written: {total_written:,}, "
@@ -576,6 +585,17 @@ class CommonCrawlSource:
                         total_written += len(chunk)
 
                     if records:
+                        # A segment is resumable only after every record it
+                        # produced is durable.  Keeping a cross-segment
+                        # remainder in memory and marking the segment complete
+                        # first can permanently lose that remainder on crash.
+                        # Flush the per-segment remainder before progress.
+                        if buffer:
+                            path = self._write_shard(buffer, shard_idx)
+                            output_files.append(path)
+                            shard_idx += 1
+                            total_written += len(buffer)
+                            buffer.clear()
                         completed_segments.add(warc_path)
                         self._save_progress(completed_segments)
                         segments_done += 1

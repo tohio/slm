@@ -53,10 +53,10 @@ import re
 from pathlib import Path
 
 import orjson
-from datasets import load_dataset
+from curator.sources.hf import load_dataset
 from tqdm import tqdm
 
-from curator.constants import CHARS_PER_TOKEN
+from config import CHARS_PER_TOKEN
 
 log = logging.getLogger(__name__)
 
@@ -150,21 +150,18 @@ class StackExchangeSource:
     def download(self) -> list[Path]:
         """Stream StackExchange and write to sharded JSONL files."""
         existing_shards = sorted(self.output_dir.glob("stackexchange_*.jsonl"))
-        shard_idx = len(existing_shards)
-        skip_records = shard_idx * self.shard_size
-
-        if skip_records > 0:
-            log.info(
-                f"StackExchange: found {shard_idx} existing shard(s) — "
-                f"skipping first {skip_records:,} streamed records"
+        if existing_shards:
+            raise RuntimeError(
+                "StackExchange output directory is not empty. Use the "
+                "canonical curator's manifest-aware restart/replacement flow."
             )
+        shard_idx = 0
 
         log.info(f"Streaming {self.DATASET_NAME} from HuggingFace...")
         stream = load_dataset(
             self.DATASET_NAME,
             split="train",
             streaming=True,
-            trust_remote_code=True,
         )
 
         if self.max_docs:
@@ -177,21 +174,11 @@ class StackExchangeSource:
         total_written = 0
         total_skipped_short = 0
         total_skipped_no_answer = 0
-        total_stream_skipped = 0
         stop = False
 
         pbar = tqdm(desc="Streaming StackExchange", unit="doc")
 
-        for idx, sample in enumerate(stream):
-            # Resume: skip records belonging to already-written shards
-            if idx < skip_records:
-                total_stream_skipped += 1
-                if total_stream_skipped % 100_000 == 0:
-                    pbar.set_postfix_str(
-                        f"skipping {total_stream_skipped:,}/{skip_records:,}"
-                    )
-                continue
-
+        for sample in stream:
             formatted = self._format(sample)
             if formatted is None:
                 total_skipped_no_answer += 1
@@ -230,7 +217,6 @@ class StackExchangeSource:
             f"written: {total_written:,}, "
             f"skipped short: {total_skipped_short:,} (< {self.min_length} chars), "
             f"skipped no answer: {total_skipped_no_answer:,}, "
-            f"stream-skipped (resume): {total_stream_skipped:,}, "
             f"new shards: {len(output_files)}"
             f"{' (stopped at max_docs cap)' if stop else ''}"
         )

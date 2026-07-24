@@ -53,6 +53,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from curator.state import manifest_outputs_match
+
 log = logging.getLogger(__name__)
 
 # uint16 supports token IDs up to 65535. The metadata check catches drift
@@ -116,20 +118,17 @@ class PretrainingDataset(Dataset):
             )
 
         # ── Metadata ──────────────────────────────────────────────────────────
-        # .json sidecar is expected but not strictly required — if missing we
-        # log a warning and skip the consistency checks. If present we verify
-        # dtype and token count match what's actually on disk.
+        # The sidecar is part of the binary format contract. Loading an
+        # unversioned binary as uint16 can silently reinterpret corrupt or
+        # stale data, so metadata is mandatory.
         meta_path = self.bin_path.with_suffix(".json")
-        if meta_path.exists():
-            with open(meta_path) as f:
-                self.meta = json.load(f)
-        else:
-            log.warning(
-                f"No metadata file at {meta_path} — skipping dtype / count "
-                f"consistency checks. Regenerate with tokenize_data.py to "
-                f"get these safety checks."
+        if not meta_path.exists():
+            raise FileNotFoundError(
+                f"Required tokenized metadata not found: {meta_path}. "
+                f"Regenerate the split with pretrain/data/tokenize_data.py."
             )
-            self.meta = {}
+        with open(meta_path) as f:
+            self.meta = json.load(f)
 
         # Memory-map the token array — zero copy, no RAM usage
         self.data = np.memmap(str(self.bin_path), dtype=np.uint16, mode="r")
@@ -140,21 +139,22 @@ class PretrainingDataset(Dataset):
         # different dtype (e.g. accidentally int32) — memmap would read half
         # the bytes as uint16 and return garbage token IDs. The error is
         # silent without this check.
-        if self.meta:
-            meta_dtype = self.meta.get("dtype")
-            if meta_dtype and meta_dtype != _EXPECTED_DTYPE:
-                raise ValueError(
-                    f"{self.bin_path}: metadata says dtype={meta_dtype!r}, "
-                    f"but PretrainingDataset reads as {_EXPECTED_DTYPE}. "
-                    f"Regenerate the binary or update the dataset reader."
-                )
-            meta_n_tokens = self.meta.get("n_tokens")
-            if meta_n_tokens is not None and meta_n_tokens != self.n_tokens:
-                raise ValueError(
-                    f"{self.bin_path}: metadata says n_tokens={meta_n_tokens:,} "
-                    f"but memmap sees {self.n_tokens:,}. Binary was truncated "
-                    f"or replaced without updating metadata."
-                )
+        meta_dtype = self.meta.get("dtype")
+        if meta_dtype != _EXPECTED_DTYPE:
+            raise ValueError(
+                f"{self.bin_path}: metadata says dtype={meta_dtype!r}, "
+                f"but PretrainingDataset reads as {_EXPECTED_DTYPE}. "
+                f"Regenerate the binary or update the dataset reader."
+            )
+        meta_n_tokens = self.meta.get("n_tokens")
+        if not isinstance(meta_n_tokens, int):
+            raise ValueError(f"{meta_path}: missing integer n_tokens")
+        if meta_n_tokens != self.n_tokens:
+            raise ValueError(
+                f"{self.bin_path}: metadata says n_tokens={meta_n_tokens:,} "
+                f"but memmap sees {self.n_tokens:,}. Binary was truncated "
+                f"or replaced without updating metadata."
+            )
 
         # ── Example count ─────────────────────────────────────────────────────
         # Need seq_len tokens per example. Labels equal input_ids; the model
@@ -248,6 +248,11 @@ def load_train_val(
         FileNotFoundError: if either train.bin or val.bin is missing.
     """
     tokenized_dir = Path(tokenized_dir)
+    if not manifest_outputs_match(tokenized_dir, output_pattern="[tv]*"):
+        raise RuntimeError(
+            f"Tokenized dataset is not manifest-complete: {tokenized_dir}"
+        )
+
     train_bin = tokenized_dir / "train.bin"
     val_bin = tokenized_dir / "val.bin"
 

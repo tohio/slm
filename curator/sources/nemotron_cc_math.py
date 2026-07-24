@@ -6,9 +6,9 @@ import json
 import logging
 from pathlib import Path
 
-from datasets import load_dataset
+from curator.sources.hf import load_dataset
 
-from curator.constants import CHARS_PER_TOKEN
+from config import CHARS_PER_TOKEN
 
 log = logging.getLogger(__name__)
 
@@ -35,15 +35,7 @@ def _text_from_record(record: dict, fields: tuple[str, ...]) -> str:
 
 def _load_streaming_dataset(dataset_name: str, split: str, config: str | None = None):
     if config:
-        try:
-            return load_dataset(dataset_name, config, split=split, streaming=True)
-        except Exception as exc:
-            log.warning(
-                "%s/%s: configured streaming load failed (%s); trying default config",
-                dataset_name,
-                config,
-                exc,
-            )
+        return load_dataset(dataset_name, config, split=split, streaming=True)
 
     return load_dataset(dataset_name, split=split, streaming=True)
 
@@ -94,13 +86,10 @@ class _StreamingHFJsonlSource:
     def download(self) -> list[Path]:
         existing = sorted(self.output_dir.glob(f"{self.SHARD_PREFIX}_*.jsonl"))
         if existing:
-            log.info(
-                "%s: found %d existing shard(s); skipping generation",
-                self.SOURCE_TAG,
-                len(existing),
+            raise RuntimeError(
+                f"{self.SOURCE_TAG} output directory is not empty. Use the "
+                "canonical curator's manifest-aware restart/replacement flow."
             )
-            self._load_existing_stats(existing)
-            return existing
 
         ds = _load_streaming_dataset(
             self.DATASET_NAME,

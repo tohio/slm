@@ -32,10 +32,10 @@ import logging
 from pathlib import Path
 
 import orjson
-from datasets import load_dataset
+from curator.sources.hf import load_dataset
 from tqdm import tqdm
 
-from curator.constants import CHARS_PER_TOKEN
+from config import CHARS_PER_TOKEN
 
 log = logging.getLogger(__name__)
 
@@ -127,7 +127,7 @@ class CodeSearchNetSource:
         languages: list[str] = LANGUAGES,
         min_code_length: int = 100,
         min_docstring_length: int = 20,
-        splits: list[str] = ("train", "validation", "test"),
+        splits: list[str] = ("train",),
         shard_size: int = 100_000,
         max_docs: int | None = None,
     ):
@@ -165,13 +165,12 @@ class CodeSearchNetSource:
                         self.DATASET_NAME,
                         language,
                         split=split,
-                        trust_remote_code=True,
                     )
                 except Exception as e:
-                    log.warning(
-                        f"  Failed to load {language}/{split}: {e} — skipping"
-                    )
-                    continue
+                    raise RuntimeError(
+                        f"Failed to load required CodeSearchNet partition "
+                        f"{language}/{split}"
+                    ) from e
 
                 log.info(f"  {language}/{split}: {len(ds):,} samples")
 

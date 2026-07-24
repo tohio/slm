@@ -236,7 +236,7 @@ def _format_data_mix_table(size: str) -> str:
 
     # Footer line summarising the realized totals so readers don't have
     # to add the column themselves.
-    estimated_tokens = stats.get("estimated_tokens", 0)
+    estimated_tokens = stats.get("estimated_tokens_from_chars", 0)
     train_docs = stats.get("train_documents", 0)
     val_docs = stats.get("val_documents", 0)
     lines.append("")

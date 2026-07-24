@@ -21,22 +21,23 @@ training:
   # Global batch = micro_batch_size × gradient_accumulation_steps × num_gpus
   # These values assume 1 GPU. Adjust before running multi-GPU training:
   #   divide gradient_accumulation_steps by num_gpus to hold global batch constant
-  #   divide max_steps by num_gpus to hold token budget constant
+  #   keep max_steps unchanged when global batch is held constant
   #
-  # Dataset: 50B curation target
+  # Dataset: 75B curation target × 1 epoch = 75B consumed tokens
   # Tokens/step (1 GPU): 2 × 64 × 1 × 4096 = ~524k tokens/step
-  # 1 epoch  → ~57,000 steps  ← recommended
+  # 1 epoch  → ~143,051 steps
   #
-  # At 50B curation target / 1 epoch, the run prioritizes fresh-token exposure and avoids an immediate second pass over finite sources.
+  # At 75B curation target / 1 epoch, the run prioritizes fresh-token exposure
+  # and avoids an immediate second pass over finite sources.
   # no repetition is needed. Modern small-model training (Llama, Phi, Qwen)
   # follows the single-epoch pattern at this scale — fresh tokens outperform
   # repeated ones.
   #
-  # 1 GPU:  grad_accum=64, max_steps=57000
-  # 4 GPU:  grad_accum=16, max_steps=14250
-  # 8 GPU:  grad_accum=8,  max_steps=7125
-  max_steps: 57000
-  warmup_steps: 2000
+  # 1 GPU:  grad_accum=64, max_steps=143051
+  # 4 GPU:  grad_accum=16, max_steps=143051
+  # 8 GPU:  grad_accum=8,  max_steps=143051
+  max_steps: 143051
+  warmup_steps: 5006
   micro_batch_size: 2
   gradient_accumulation_steps: 64  # 1 GPU default — see scaling note above
   precision: bf16

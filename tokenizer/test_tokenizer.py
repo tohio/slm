@@ -6,7 +6,7 @@ roundtrip, fertility (tokens per word), and chat template formatting.
 
 Usage:
     python tokenizer/test_tokenizer.py
-    python tokenizer/test_tokenizer.py --tokenizer data/tokenizer
+    python tokenizer/test_tokenizer.py --size 125m
 """
 
 import argparse
@@ -29,9 +29,7 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-from config.paths import tokenizer_dir, BASE_DATA_DIR
-
-DATA_DIR = BASE_DATA_DIR
+from config.paths import tokenizer_dir, validated_dir
 
 from tokenizer.train_tokenizer import SPECIAL_TOKENS, BOS_ID, EOS_ID, PAD_ID, UNK_ID
 from config import CODE_SOURCES
@@ -318,11 +316,12 @@ def main():
     parser.add_argument(
         "--sample-data",
         type=Path,
-        default=DATA_DIR / "validated" / "train.jsonl",
+        default=None,
         help="Sample data for fertility test",
     )
     args = parser.parse_args()
-    args.tokenizer = args.tokenizer or tokenizer_dir(getattr(args, "size", os.environ.get("SIZE", "125m")))
+    args.tokenizer = args.tokenizer or tokenizer_dir(args.size)
+    args.sample_data = args.sample_data or (validated_dir(args.size) / "train.jsonl")
 
     # Load both tokenizer forms
     tokenizer = load_tokenizer(args.tokenizer)
@@ -335,8 +334,8 @@ def main():
     no_auto_bos_eos_ok = test_no_auto_bos_eos(tokenizer)
 
     # Load sample texts for fertility — natural language only. Validated
-    # records are tagged with their source (one of the 12 sources defined
-    # in config/data_mix.py); filter out code sources so fertility reflects
+    # records are tagged with a configured source; filter out code sources so
+    # fertility reflects
     # English rather than Python/notebooks.
     sample_texts = []
     if args.sample_data.exists():

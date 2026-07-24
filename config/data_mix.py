@@ -6,7 +6,6 @@ and the locked curator-side constants.
 
 Referenced by:
     - curator/scripts/curate.py   (data preparation)
-    - curator/constants.py        (re-exports CHARS_PER_TOKEN etc.)
     - pretrain/train.py           (indirectly via configs and dataset.py)
     - export/export.py            (model card generation)
     - tests/conftest.py           (source list if a test asserts it)
@@ -29,9 +28,8 @@ Token vocabulary:
                       that the final retained/tokenized corpus will contain
                       exactly this many usable tokens.
 
-                      Example from the completed 125M run:
-                          5.5B curation target
-                          -> ~5.12B retained/tokenized tokens
+                      Example: a curation target can produce fewer retained
+                      tokens after validation and exact tokenizer measurement.
 
                       Future targets include a retention buffer so final
                       retained/tokenized artifacts land closer to the intended
@@ -51,31 +49,25 @@ Token vocabulary:
                       consumed_tokens() helper below; not a stored field.
                       Do not confuse this with retained_tokens.
 
-    total_tokens      DEPRECATED. Used to be the field name and helper for
-                      the corpus figure, but read ambiguously between
-                      "unique tokens" and "tokens the model is trained on".
-                      Replaced by corpus_tokens. Back-compat shims (the
-                      `total_tokens` key in each TARGET_CONFIGS entry, and
-                      the total_tokens() helper) are preserved so older
-                      consumers don't break, and emit DeprecationWarning.
-
 Section layout:
     1. DATA_MIX                 top-level source percentages + metadata
     2. CODE_SUBMIX              sub-mix of the 15% code share
-    3. OVERFLOW_SINK            which source absorbs supply deficits
-    4. Source name lists        NON_CODE_SOURCES, CODE_SOURCES, ALL_SOURCES
-    5. TARGET_CONFIGS           per-size corpus + epochs + CC crawls
-    6. Curator constants        CHARS_PER_TOKEN, CC_CHARS_PER_SEGMENT,
+    3. Supplemental caps        fixed/supply-limited source controls
+    4. OVERFLOW_SINK            which source absorbs supply deficits
+    5. Source names + routing   NON_CODE_SOURCES, CODE_SOURCES, ALL_SOURCES,
+                                SYNTHETIC_SOURCES,
+                                PROSE_HEURISTIC_SKIP_SOURCES, DEDUP_PRIORITY
+    6. TARGET_CONFIGS           per-size corpus + epochs + CC crawls
+    7. Curator constants        CHARS_PER_TOKEN, CC_CHARS_PER_SEGMENT,
                                 SHUFFLE_RAM_BUDGET_GB, PRETRAIN_VAL_FRACTION,
                                 MINI_OVERRIDES
-    7. Helpers                  dataset_link, corpus_tokens, consumed_tokens,
-                                epochs, validate, plus deprecated total_tokens
+    8. Helpers                  dataset_link, corpus_tokens, consumed_tokens,
+                                epochs, validate
 """
 
 from __future__ import annotations
 
 import os
-import warnings
 
 
 # ── 1. Top-level data mix ──────────────────────────────────────────────────────
@@ -117,8 +109,8 @@ DATA_MIX: dict[str, dict] = {
     },
     "pes2o": {
         "pct":     5.0,
-        "display": "peS2o (academic papers)",
-        "hub":     "allenai/peS2o",
+        "display": "Common Pile peS2o (filtered academic papers)",
+        "hub":     "common-pile/peS2o_filtered",
     },
     "nemotron_cc_math": {
         "pct":     7.0,
@@ -173,9 +165,9 @@ DATA_MIX: dict[str, dict] = {
 
 # ── 2. Code sub-mix ────────────────────────────────────────────────────────────
 #
-# Percentages of the 15% code share (not of total tokens). Nemotron Code v2
-# becomes the primary scalable code source while stack_v1 remains a reduced
-# raw-code diversity source.
+# Percentages of the 15% code share (not of total tokens). The Stack v1 is the
+# primary scalable code source; the smaller sources add language, notebook,
+# and natural-language-to-code diversity.
 
 CODE_SUBMIX: dict[str, dict] = {
     "stack_v1": {
@@ -287,6 +279,43 @@ OVERFLOW_SINK: str = "fineweb"
 NON_CODE_SOURCES: list[str] = [name for name in DATA_MIX if name != "code"]
 CODE_SOURCES: list[str] = list(CODE_SUBMIX.keys())
 ALL_SOURCES: list[str] = NON_CODE_SOURCES + CODE_SOURCES
+SYNTHETIC_SOURCES: frozenset[str] = frozenset({
+    "synthetic_arithmetic",
+    "synthetic_task_code",
+    "educational_qa_mcq_math",
+    "educational_qa_mcq_general",
+    "factual_restraint",
+})
+PROSE_HEURISTIC_SKIP_SOURCES: frozenset[str] = frozenset(
+    set(CODE_SOURCES)
+    | set(SYNTHETIC_SOURCES)
+    | {"nemotron_cc_math", "nemotron_specialized"}
+)
+
+# Exact cross-source duplicates are retained from the first source processed.
+# Keep curated/reference/specialized corpora ahead of broad web crawls so the
+# preferred copy wins deterministically.
+DEDUP_PRIORITY: list[str] = [
+    "wikipedia",
+    "pg19",
+    "pes2o",
+    "stackexchange",
+    "codesearchnet",
+    "stack_smol",
+    "jupyter",
+    "conala",
+    "synthetic_arithmetic",
+    "synthetic_task_code",
+    "educational_qa_mcq_math",
+    "educational_qa_mcq_general",
+    "factual_restraint",
+    "nemotron_cc_math",
+    "nemotron_specialized",
+    "stack_v1",
+    "fineweb_edu",
+    "fineweb",
+    "common_crawl",
+]
 
 
 # ── 6. Target configurations ───────────────────────────────────────────────────
@@ -308,12 +337,6 @@ ALL_SOURCES: list[str] = NON_CODE_SOURCES + CODE_SOURCES
 #   display_corpus   — human-readable shorthand of corpus_tokens. Used by
 #                      export.py when rendering model cards.
 #
-#   total_tokens     — DEPRECATED back-compat alias for corpus_tokens. Kept
-#                      so older consumers don't break; new code should read
-#                      corpus_tokens. The validate() function will fail if
-#                      the two ever drift apart.
-#   display_tokens   — DEPRECATED back-compat alias for display_corpus.
-#
 # cc_segments is computed at runtime from corpus_tokens × cc_share ×
 # CHARS_PER_TOKEN ÷ CC_CHARS_PER_SEGMENT — see curator/scripts/curate.py.
 #
@@ -329,33 +352,24 @@ TARGET_CONFIGS: dict[str, dict] = {
         "epochs":         1,
         "cc_crawls":      ["CC-MAIN-2024-10"],
         "display_corpus": "1M",
-        # Deprecated aliases (kept for back-compat — see header).
-        "total_tokens":   1_000_000,
-        "display_tokens": "1M",
     },
     "125m": {
         "corpus_tokens":  10_000_000_000,
         "epochs":         2,
         "cc_crawls":      ["CC-MAIN-2024-10"],
         "display_corpus": "10B",
-        "total_tokens":   10_000_000_000,
-        "display_tokens": "10B",
     },
     "350m": {
         "corpus_tokens":  25_000_000_000,
         "epochs":         2,
         "cc_crawls":      ["CC-MAIN-2024-10", "CC-MAIN-2023-50"],
         "display_corpus": "25B",
-        "total_tokens":   25_000_000_000,
-        "display_tokens": "25B",
     },
     "1b": {
         "corpus_tokens":  75_000_000_000,
         "epochs":         1,
         "cc_crawls":      ["CC-MAIN-2024-10", "CC-MAIN-2023-50", "CC-MAIN-2023-40"],
         "display_corpus": "75B",
-        "total_tokens":   75_000_000_000,
-        "display_tokens": "75B",
     },
 }
 
@@ -477,56 +491,13 @@ def consumed_tokens(size: str) -> int:
 
 
 def corpus_tokens_display(size: str) -> str:
-    """Return the human-readable corpus size (e.g. "6.5B") for a given size."""
+    """Return the human-readable corpus size (e.g. "10B") for a given size."""
     return TARGET_CONFIGS[size]["display_corpus"]
 
 
 def epochs(size: str) -> int:
     """Return the training epoch count for a given model size."""
     return TARGET_CONFIGS[size]["epochs"]
-
-
-# ── Deprecated helpers (kept for back-compat) ─────────────────────────────────
-
-def total_tokens(size: str) -> int:
-    """
-    DEPRECATED. Use corpus_tokens(size) instead.
-
-    Previously meant the corpus figure but read ambiguously as "tokens the
-    model is trained on" (which would be corpus_tokens × epochs, a different
-    number). The new helper names corpus_tokens() and consumed_tokens()
-    keep the two quantities visibly distinct.
-
-    This shim returns corpus_tokens(size) for back-compat with older
-    callers (curator scripts, notebooks). Will be removed in a future
-    cleanup; please migrate.
-    """
-    warnings.warn(
-        "config.data_mix.total_tokens() is deprecated and ambiguous. "
-        "Use corpus_tokens(size) for the public-facing unique-data figure, "
-        "or consumed_tokens(size) for the corpus × epochs scheduling "
-        "quantity used to compute max_steps.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return corpus_tokens(size)
-
-
-def token_target_display(size: str) -> str:
-    """
-    DEPRECATED. Use corpus_tokens_display(size) instead.
-
-    Renamed for the same reason as total_tokens — the word "token target"
-    didn't disambiguate corpus from consumed.
-    """
-    warnings.warn(
-        "config.data_mix.token_target_display() is deprecated. "
-        "Use corpus_tokens_display(size) instead — it makes clear that "
-        "the figure refers to the curated corpus, not consumed tokens.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return corpus_tokens_display(size)
 
 
 # ── Validation ────────────────────────────────────────────────────────────────
@@ -542,9 +513,8 @@ def validate() -> None:
       - All CODE_SUBMIX source names are distinct from DATA_MIX source names
       - Curator constants are positive numbers
       - Every TARGET_CONFIGS entry has the required keys
-      - corpus_tokens and the deprecated total_tokens alias agree (drift check)
-      - display_corpus and the deprecated display_tokens alias agree
       - Every MINI_OVERRIDES key is a real source in ALL_SOURCES
+      - DEDUP_PRIORITY contains every concrete source exactly once
     """
     top_total = sum(entry["pct"] for entry in DATA_MIX.values())
     assert abs(top_total - 100.0) < 1e-6, (
@@ -593,27 +563,21 @@ def validate() -> None:
         assert cfg["epochs"] >= 1
         assert len(cfg["cc_crawls"]) >= 1
 
-        # Drift check: deprecated aliases must match canonical fields. If
-        # someone edits one and forgets the other, fail at import time.
-        if "total_tokens" in cfg:
-            assert cfg["total_tokens"] == cfg["corpus_tokens"], (
-                f"TARGET_CONFIGS[{size!r}]: deprecated total_tokens "
-                f"({cfg['total_tokens']}) does not match corpus_tokens "
-                f"({cfg['corpus_tokens']}). Update both, or drop the "
-                f"deprecated key."
-            )
-        if "display_tokens" in cfg:
-            assert cfg["display_tokens"] == cfg["display_corpus"], (
-                f"TARGET_CONFIGS[{size!r}]: deprecated display_tokens "
-                f"({cfg['display_tokens']!r}) does not match display_corpus "
-                f"({cfg['display_corpus']!r}). Update both, or drop the "
-                f"deprecated key."
-            )
-
     unknown_mini = set(MINI_OVERRIDES) - set(ALL_SOURCES)
     assert not unknown_mini, (
         f"MINI_OVERRIDES references sources not in ALL_SOURCES: {unknown_mini}"
     )
+
+    assert len(DEDUP_PRIORITY) == len(set(DEDUP_PRIORITY)), (
+        "DEDUP_PRIORITY contains duplicate source names"
+    )
+    assert set(DEDUP_PRIORITY) == set(ALL_SOURCES), (
+        "DEDUP_PRIORITY must contain every ALL_SOURCES entry exactly once; "
+        f"missing={sorted(set(ALL_SOURCES) - set(DEDUP_PRIORITY))}, "
+        f"unknown={sorted(set(DEDUP_PRIORITY) - set(ALL_SOURCES))}"
+    )
+    assert SYNTHETIC_SOURCES <= set(ALL_SOURCES)
+    assert PROSE_HEURISTIC_SKIP_SOURCES <= set(ALL_SOURCES)
 
 
 # Run the sanity check at import time — cheap, and catches typos the moment

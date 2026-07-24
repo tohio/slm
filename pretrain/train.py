@@ -114,8 +114,9 @@ def validate_tokenizer(tokenizer_dir: Path) -> None:
     if not tokenizer_dir.exists() or not any(tokenizer_dir.iterdir()):
         raise RuntimeError(
             f"Tokenizer directory missing or empty: {tokenizer_dir}\n"
-            f"Run: make tokenizer-download\n"
-            f"Or retrain: make tokenizer && make tokenizer-upload"
+            f"Retrain with: make tokenizer SIZE=<size>\n"
+            f"Or restore with: make artifacts-download SIZE=<size> "
+            f"RUN_ID=<run-id> ARTIFACT_STAGES=tokenizer"
         )
 
     required_files = {

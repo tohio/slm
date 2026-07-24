@@ -50,12 +50,12 @@ Chat template:
     for answer-only loss masking in SFTTrainer.
 
 Output:
-    data/tokenizer/slm_tokenizer.json   — full tokenizer (HF format)
-    data/tokenizer/vocab.json           — vocabulary
-    data/tokenizer/merges.txt           — BPE merge rules
-    data/tokenizer/special_tokens.json  — special token definitions
-    data/tokenizer/tokenizer.json       — HuggingFace PreTrainedTokenizerFast
-    data/tokenizer/tokenizer_config.json — includes chat_template
+    data/runs/<size>/tokenizer/slm_tokenizer.json
+    data/runs/<size>/tokenizer/vocab.json
+    data/runs/<size>/tokenizer/merges.txt
+    data/runs/<size>/tokenizer/special_tokens.json
+    data/runs/<size>/tokenizer/tokenizer.json
+    data/runs/<size>/tokenizer/tokenizer_config.json
 
 Usage:
     python tokenizer/train_tokenizer.py
@@ -67,6 +67,7 @@ import argparse
 import json
 import logging
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -77,6 +78,14 @@ load_dotenv()
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config.paths import validated_dir, tokenizer_dir, BASE_DATA_DIR
+from curator.state import (
+    code_fingerprint,
+    file_snapshot,
+    manifest_matches,
+    manifest_outputs_match,
+    stable_digest,
+    write_manifest,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -401,13 +410,70 @@ def main():
         log.error(f"Input file not found: {args.input}")
         log.error("Run: python validation/scripts/validate.py --size <size>")
         sys.exit(1)
+    default_validated = validated_dir(args.size)
+    if (
+        args.input.parent == default_validated
+        and not manifest_outputs_match(
+            default_validated,
+            output_pattern="*.json*",
+        )
+    ):
+        raise RuntimeError(
+            f"Validated tokenizer input is not manifest-complete: "
+            f"{default_validated}"
+        )
 
+    input_signature = stable_digest(
+        file_snapshot([args.input], root=args.input.parent)
+    )
+    contract = {
+        "implementation_sha256": code_fingerprint(train_tokenizer),
+        "vocab_size": args.vocab_size,
+        "min_frequency": args.min_frequency,
+        "special_tokens": SPECIAL_TOKENS,
+        "normalizer": "NFC",
+        "pre_tokenizer": "ByteLevel(add_prefix_space=False)",
+        "chat_template": CHAT_TEMPLATE,
+    }
+    if manifest_matches(
+        args.output,
+        stage="tokenizer",
+        contract=contract,
+        input_signature=input_signature,
+        output_pattern="*",
+    ):
+        log.info("Verified tokenizer manifest matches input/configuration — reusing")
+        return
+
+    partial_output = args.output.with_name(f".{args.output.name}.partial")
+    backup_output = args.output.with_name(f".{args.output.name}.previous")
+    if partial_output.exists():
+        shutil.rmtree(partial_output)
     train_tokenizer(
         input_path=args.input,
-        output_dir=args.output,
+        output_dir=partial_output,
         vocab_size=args.vocab_size,
         min_frequency=args.min_frequency,
     )
+    write_manifest(
+        partial_output,
+        stage="tokenizer",
+        contract=contract,
+        input_signature=input_signature,
+        output_pattern="*",
+    )
+    if backup_output.exists():
+        shutil.rmtree(backup_output)
+    if args.output.exists():
+        args.output.replace(backup_output)
+    try:
+        partial_output.replace(args.output)
+    except Exception:
+        if backup_output.exists() and not args.output.exists():
+            backup_output.replace(args.output)
+        raise
+    if backup_output.exists():
+        shutil.rmtree(backup_output)
 
     log.info("Tokenizer training complete.")
     log.info(f"Next step: python tokenizer/test_tokenizer.py")

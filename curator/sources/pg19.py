@@ -38,10 +38,10 @@ import logging
 from pathlib import Path
 
 import orjson
-from datasets import load_dataset
+from curator.sources.hf import load_dataset
 from tqdm import tqdm
 
-from curator.constants import CHARS_PER_TOKEN
+from config import CHARS_PER_TOKEN
 
 log = logging.getLogger(__name__)
 
@@ -92,18 +92,16 @@ class PG19Source:
         """Stream pg19 and write to sharded JSONL files."""
         existing = sorted(self.output_dir.glob("pg19_*.jsonl"))
         if existing:
-            log.info(
-                "pg19: found %d existing shard(s); skipping download",
-                len(existing),
+            raise RuntimeError(
+                "pg19 output directory is not empty. Use the canonical "
+                "curator's manifest-aware restart/replacement flow."
             )
-            return existing
 
         log.info(f"Streaming {self.DATASET_NAME} from HuggingFace...")
         dataset = load_dataset(
             self.DATASET_NAME,
             split="train",
             streaming=True,
-            trust_remote_code=True,
         )
 
         if self.max_docs:

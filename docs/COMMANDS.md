@@ -69,13 +69,18 @@ make curate-dedup SIZE=125m WORKERS=62
 make curate-blend SIZE=125m
 ```
 
-Legacy direct upload:
+To replace a legacy or stale raw source only after a clean staged download
+succeeds:
+
+```bash
+make curate-download SIZE=125m FORCE=1
+```
+
+Upload only curated artifacts through the RUN_ID flow:
 
 ```bash
 make curate-upload SIZE=125m
 ```
-
-Prefer `artifacts-upload` for reusable run artifacts.
 
 ---
 
@@ -83,16 +88,13 @@ Prefer `artifacts-upload` for reusable run artifacts.
 
 ```bash
 make validate SIZE=125m
-make validate-datatrove SIZE=125m
 ```
 
-Legacy direct upload:
+Upload only validated artifacts through the RUN_ID flow:
 
 ```bash
 make validate-upload SIZE=125m
 ```
-
-Prefer `artifacts-upload` for reusable run artifacts.
 
 ---
 
@@ -129,14 +131,6 @@ Valid stages:
 
 ```text
 raw, curated, validated, tokenized, tokenizer, metadata
-```
-
-Legacy S3 helpers:
-
-```bash
-make s3-upload SIZE=125m
-make s3-download SIZE=125m
-make s3-list SIZE=125m
 ```
 
 ---

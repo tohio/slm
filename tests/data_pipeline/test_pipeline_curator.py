@@ -25,32 +25,22 @@ import json
 import pytest
 
 from tests.data_pipeline.helpers import requires_stage, read_jsonl, pipeline_path
-from curator.filters.quality import QualityFilter, CODE_SOURCES as QUALITY_CODE_SOURCES
+from curator.filters.quality import QualityFilter
 from curator.filters.dedup import exact_hash
 
 # Import source lists from config — the single source of truth.
-from config import ALL_SOURCES, CODE_SOURCES, NON_CODE_SOURCES
-
-
-SYNTHETIC_SOURCES = {
-    "synthetic_arithmetic",
-    "synthetic_task_code",
-    "educational_qa_mcq",
-    "factual_restraint",
-}
-
-# Sources that bypass prose-only quality filters. This must match
-# curator.filters.quality.CODE_SOURCES, which is broader than config.CODE_SOURCES.
-QUALITY_PROSE_SKIP_SOURCES = set(CODE_SOURCES) | SYNTHETIC_SOURCES | {
-    "nemotron_cc_math",
-    "nemotron_specialized",
-}
+from config import (
+    ALL_SOURCES,
+    NON_CODE_SOURCES,
+    PROSE_HEURISTIC_SKIP_SOURCES,
+    SYNTHETIC_SOURCES,
+)
 
 # Generated/template-like sources should bypass fuzzy MinHash only. Nemotron
 # sources bypass prose filters, but they should not bypass fuzzy dedup.
 FUZZY_DEDUP_SKIP_SOURCES = set(SYNTHETIC_SOURCES)
 
-QUALITY_SKIP_SOURCES = QUALITY_PROSE_SKIP_SOURCES
+QUALITY_SKIP_SOURCES = PROSE_HEURISTIC_SKIP_SOURCES
 
 
 pytestmark = requires_stage("curate-mini")
@@ -70,17 +60,14 @@ class TestConfigurationDrift:
 
     def test_quality_filter_skip_sources_match_expected_sources(self):
         """
-        config.CODE_SOURCES means the code sub-sources in the data mix.
-        quality.CODE_SOURCES is broader: sources that bypass prose filters.
+        Curation and validation share one source-routing contract.
         """
-        assert set(QUALITY_CODE_SOURCES) == QUALITY_PROSE_SKIP_SOURCES, (
-            f"CODE_SOURCES in quality.py ({set(QUALITY_CODE_SOURCES)}) drifted "
-            f"from expected prose-filter skip sources ({QUALITY_PROSE_SKIP_SOURCES}). "
-            f"Update quality.py or this test if a new symbol-heavy source is added."
+        assert set(QualityFilter().config.skip_language_sources) == set(
+            PROSE_HEURISTIC_SKIP_SOURCES
         )
 
     def test_prose_skip_sources_are_real_sources(self):
-        missing = QUALITY_PROSE_SKIP_SOURCES - set(ALL_SOURCES)
+        missing = set(PROSE_HEURISTIC_SKIP_SOURCES) - set(ALL_SOURCES)
         assert not missing, (
             f"Quality prose-skip sources are not in ALL_SOURCES: {missing}"
         )
@@ -99,6 +86,10 @@ class TestConfigurationDrift:
 # ── Raw data ───────────────────────────────────────────────────────────────────
 
 class TestRawData:
+    @pytest.mark.parametrize("source", ALL_SOURCES)
+    def test_raw_completion_manifest_exists(self, source):
+        assert pipeline_path("raw", source, "_SUCCESS.json").exists()
+
     @pytest.mark.parametrize("source", ALL_SOURCES)
     def test_raw_shards_exist(self, source):
         shards = list(pipeline_path("raw", source).glob("*.jsonl"))
@@ -140,6 +131,10 @@ class TestRawData:
 # ── Filtered data ──────────────────────────────────────────────────────────────
 
 class TestFilteredData:
+    @pytest.mark.parametrize("source", ALL_SOURCES)
+    def test_filtered_completion_manifest_exists(self, source):
+        assert pipeline_path("filtered", source, "_SUCCESS.json").exists()
+
     @pytest.mark.parametrize("source", ALL_SOURCES)
     def test_filtered_shards_exist(self, source):
         shards = list(pipeline_path("filtered", source).glob("*.jsonl"))
@@ -192,6 +187,12 @@ class TestFilteredData:
 # ── Deduped data ───────────────────────────────────────────────────────────────
 
 class TestDedupedData:
+    @pytest.mark.parametrize("source", ALL_SOURCES)
+    def test_dedup_completion_manifest_exists(self, source):
+        assert pipeline_path(
+            "filtered", f"{source}_deduped", "_SUCCESS.json"
+        ).exists()
+
     @pytest.mark.parametrize("source", ALL_SOURCES)
     def test_deduped_shards_exist(self, source):
         shards = list(pipeline_path("filtered", f"{source}_deduped").glob("*.jsonl"))
@@ -365,7 +366,8 @@ class TestBlendStats:
         assert "train_documents" in stats
         assert "val_documents" in stats
         assert "val_fraction" in stats
-        assert "estimated_tokens" in stats
+        assert "estimated_tokens_from_chars" in stats
+        assert stats["token_count_status"].startswith("estimate_only")
         assert "chars_per_token" in stats
         assert "source_mix" in stats
 
@@ -376,15 +378,10 @@ class TestBlendStats:
         assert stats["val_documents"] >= 0
 
     def test_blend_stats_sources_recorded(self):
-        """
-        All sources that produced output should appear in blend_stats.
-        We allow up to one source to be absent because tiny submix shares can
-        round to zero at mini scale.
-        """
+        """Every configured source must appear in fail-closed blend stats."""
         stats = self._load_stats()
         mix = stats["source_mix"]
-        present_required = set(mix.keys()) & set(REQUIRED_IN_TRAIN)
-        assert len(present_required) >= len(REQUIRED_IN_TRAIN) - 1, (
+        assert set(mix) == set(REQUIRED_IN_TRAIN), (
             f"blend_stats.json source_mix missing sources. "
             f"Got: {sorted(mix.keys())}"
         )
@@ -401,10 +398,12 @@ class TestBlendStats:
             row = mix[source]
             assert row["docs"] > 0, f"{source} has no blended docs: {row}"
             assert row["chars"] > 0, f"{source} has no blended chars: {row}"
-            assert row["deficit"] == 0, f"{source} has non-zero deficit: {row}"
+            assert row["unresolved_deficit"] == 0, (
+                f"{source} has non-zero unresolved deficit: {row}"
+            )
 
     def test_blend_stats_per_source_schema(self):
-        """Each source entry must have docs, chars, target_chars, deficit."""
+        """Each source entry must expose intended and unresolved capacity."""
         stats = self._load_stats()
         mix = stats["source_mix"]
 
@@ -412,7 +411,10 @@ class TestBlendStats:
             assert "docs" in row, f"{source} missing docs"
             assert "chars" in row, f"{source} missing chars"
             assert "target_chars" in row, f"{source} missing target_chars"
-            assert "deficit" in row, f"{source} missing deficit"
+            assert "initial_deficit" in row, f"{source} missing initial_deficit"
+            assert "unresolved_deficit" in row, (
+                f"{source} missing unresolved_deficit"
+            )
             assert "val_docs" in row, f"{source} missing val_docs"
 
             assert isinstance(row["docs"], int), f"{source} docs is not int"
@@ -420,13 +422,15 @@ class TestBlendStats:
             assert isinstance(row["target_chars"], int), (
                 f"{source} target_chars is not int"
             )
-            assert isinstance(row["deficit"], int), f"{source} deficit is not int"
+            assert isinstance(row["initial_deficit"], int)
+            assert isinstance(row["unresolved_deficit"], int)
             assert isinstance(row["val_docs"], int), f"{source} val_docs is not int"
 
             assert row["docs"] >= 0, f"{source} docs is negative"
             assert row["chars"] >= 0, f"{source} chars is negative"
             assert row["target_chars"] >= 0, f"{source} target_chars is negative"
-            assert row["deficit"] >= 0, f"{source} deficit is negative"
+            assert row["initial_deficit"] >= 0
+            assert row["unresolved_deficit"] >= 0
             assert row["val_docs"] >= 0, f"{source} val_docs is negative"
 
     def test_blend_stats_document_counts_match_curated_files(self):
@@ -449,7 +453,7 @@ class TestBlendStats:
         deficits = {
             source: row
             for source, row in stats["source_mix"].items()
-            if row.get("deficit", 0) != 0
+            if row.get("unresolved_deficit", 0) != 0
         }
 
         assert not deficits, f"Unresolved source deficits in blend_stats: {deficits}"

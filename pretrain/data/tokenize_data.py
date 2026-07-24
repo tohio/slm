@@ -41,8 +41,8 @@ Tokenizer:
 Performance notes:
     - Tokenizer is loaded once per worker process (not per document)
     - Documents are batched into chunks before dispatch to amortise IPC overhead
-    - Tokens are streamed directly to disk as chunks complete via
-      pool.imap_unordered — peak RAM per split is O(chunk_size × avg_tokens),
+    - Tokens are streamed directly to disk in deterministic input order via
+      pool.imap — peak RAM per split is O(chunk_size × avg_tokens),
       not O(shard_size) or O(corpus_size).
     - One persistent mp.Pool for both splits — no pool startup cost per split
 
@@ -71,6 +71,13 @@ load_dotenv()
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from config.paths import validated_dir, tokenizer_dir, tokenized_dir, BASE_DATA_DIR
+from curator.state import (
+    atomic_write_json,
+    code_fingerprint,
+    manifest_outputs_match,
+    stable_digest,
+    write_manifest,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -89,7 +96,7 @@ UINT16_MAX_VOCAB = 65_536
 
 # Bump this whenever the binary token stream format changes.
 # Used to prevent silently reusing stale tokenized files.
-TOKENIZED_FORMAT_VERSION = "bos_doc_eos_v1"
+TOKENIZED_FORMAT_VERSION = "bos_doc_eos_ordered_v2"
 
 # Global tokenizer instance — loaded once per worker process via initializer,
 # not once per document. Avoids one tokenizer load per document in the
@@ -169,12 +176,14 @@ def _worker_init(tokenizer_path: str, bos_id: int, eos_id: int) -> None:
     _worker_eos_id    = eos_id
 
 
-def _tokenize_chunk(texts: list[str]) -> tuple[list[int], int]:
+def _tokenize_chunk(
+    documents: list[tuple[str, str]],
+) -> tuple[list[int], int, dict[str, dict[str, int]]]:
     """
     Tokenize a chunk of documents.
 
     Returns:
-        (tokens, n_docs)
+        (tokens, n_docs, per-source document/token counts)
 
     n_docs is counted from the input chunk length, not by scanning for EOS,
     because document text may itself contain strings that tokenize to EOS.
@@ -182,26 +191,47 @@ def _tokenize_chunk(texts: list[str]) -> tuple[list[int], int]:
     global _worker_tokenizer, _worker_bos_id, _worker_eos_id
 
     tokens: list[int] = []
+    texts = [text for text, _ in documents]
     encodings = _worker_tokenizer.encode_batch(texts, add_special_tokens=False)
+    source_counts: dict[str, dict[str, int]] = {}
 
-    for enc in encodings:
+    for enc, (_, source) in zip(encodings, documents):
         tokens.append(_worker_bos_id)
         tokens.extend(enc.ids)
         tokens.append(_worker_eos_id)
+        counts = source_counts.setdefault(
+            source or "unknown",
+            {"documents": 0, "tokens": 0},
+        )
+        counts["documents"] += 1
+        counts["tokens"] += len(enc.ids) + 2
 
-    return tokens, len(texts)
+    return tokens, len(texts), source_counts
 
 
-def _count_docs(path: Path) -> int:
+def _input_fingerprint(path: Path) -> tuple[int, str]:
     """
-    Count documents (non-empty lines) in a JSONL file.
+    Count documents and SHA-256 the exact validated input bytes in one pass.
 
     This is a separate pass over the input so tqdm can show an ETA during
     the main tokenization loop. For a multi-hour run at 1b scale the extra
     ~30 seconds of counting is a good trade for actionable progress
     reporting. For small runs the overhead is negligible.
     """
-    return sum(1 for line in open(path) if line.strip())
+    digest = hashlib.sha256()
+    docs = 0
+    with open(path, "rb", buffering=8 * 1024 * 1024) as handle:
+        for line in handle:
+            digest.update(line)
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"Invalid JSONL input: {path}") from exc
+            if str(record.get("text", "")).strip():
+                docs += 1
+    return docs, digest.hexdigest()
 
 
 def _chunked(iterable, size: int):
@@ -230,10 +260,8 @@ def _tokenize_split(
     Tokenize one JSONL file to {output_dir}/{split}.bin + .json.
 
     Streams through the input file, batching documents into chunks and
-    dispatching via pool.imap_unordered. Results arrive in whatever order
-    workers finish — the order of documents in the output binary differs
-    from the input, but since documents are separated by EOS and position
-    within the binary carries no meaning, this has no effect on training.
+    dispatching via ordered pool.imap. This makes identical inputs,
+    configuration, and tokenizer produce byte-identical binaries.
 
     Returns the metadata dict written to disk.
     """
@@ -242,64 +270,135 @@ def _tokenize_split(
     meta_path = output_dir / f"{split}.json"
 
     current_tokenizer_sha256 = tokenizer_fingerprint(tokenizer_path)
+    current_implementation_sha256 = code_fingerprint(_tokenize_split)
+    log.info(f"[{split}] Fingerprinting/counting {input_path}...")
+    n_docs_total, input_sha256 = _input_fingerprint(input_path)
+    log.info(f"[{split}] Total documents: {n_docs_total:,}")
 
     if bin_path.exists() and meta_path.exists():
         with open(meta_path) as f:
             meta = json.load(f)
 
+        saved_n_tokens = meta.get("n_tokens")
+        saved_n_docs = meta.get("n_docs")
+        expected_bytes = (
+            saved_n_tokens * np.dtype(np.uint16).itemsize
+            if isinstance(saved_n_tokens, int)
+            else None
+        )
+        if (
+            meta.get("dtype") != "uint16"
+            or saved_n_docs != n_docs_total
+            or expected_bytes is None
+            or bin_path.stat().st_size != expected_bytes
+        ):
+            log.warning(
+                f"[{split}] Existing binary/metadata are incomplete or "
+                "inconsistent; rebuilding this derived split"
+            )
+            bin_path.unlink()
+            meta_path.unlink()
+            return _tokenize_split(
+                input_path, output_dir, split, pool, bos_id, eos_id,
+                tokenizer_path, chunk_size,
+            )
+
         saved_tokenizer_sha256 = meta.get("tokenizer_sha256")
         saved_format_version = meta.get("format_version")
+        saved_input_sha256 = meta.get("input_sha256")
+        saved_implementation_sha256 = meta.get("implementation_sha256")
 
         if saved_tokenizer_sha256 != current_tokenizer_sha256:
-            raise RuntimeError(
+            log.warning(
                 f"[{split}] Existing tokenized data was created with a different "
-                f"or unknown tokenizer.\n"
-                f"Existing tokenizer_sha256: {saved_tokenizer_sha256}\n"
-                f"Current tokenizer_sha256:  {current_tokenizer_sha256}\n"
-                f"Delete {bin_path} and {meta_path}, or run a clean tokenize target."
+                f"or unknown tokenizer; rebuilding this derived split"
+            )
+            bin_path.unlink()
+            meta_path.unlink()
+            return _tokenize_split(
+                input_path, output_dir, split, pool, bos_id, eos_id,
+                tokenizer_path, chunk_size,
             )
 
         if saved_format_version != TOKENIZED_FORMAT_VERSION:
-            raise RuntimeError(
+            log.warning(
                 f"[{split}] Existing tokenized data uses an old or unknown format.\n"
                 f"Existing format_version: {saved_format_version}\n"
-                f"Current format_version:  {TOKENIZED_FORMAT_VERSION}\n"
-                f"Delete {bin_path} and {meta_path}, or run a clean tokenize target."
+                f"Current format_version:  {TOKENIZED_FORMAT_VERSION}; rebuilding"
+            )
+            bin_path.unlink()
+            meta_path.unlink()
+            return _tokenize_split(
+                input_path, output_dir, split, pool, bos_id, eos_id,
+                tokenizer_path, chunk_size,
+            )
+
+        if saved_input_sha256 != input_sha256:
+            log.warning(
+                f"[{split}] Existing tokenized data was created from a "
+                f"different or unknown validated input; rebuilding"
+            )
+            bin_path.unlink()
+            meta_path.unlink()
+            return _tokenize_split(
+                input_path, output_dir, split, pool, bos_id, eos_id,
+                tokenizer_path, chunk_size,
+            )
+
+        if saved_implementation_sha256 != current_implementation_sha256:
+            log.warning(
+                f"[{split}] Tokenization implementation changed; rebuilding"
+            )
+            bin_path.unlink()
+            meta_path.unlink()
+            return _tokenize_split(
+                input_path, output_dir, split, pool, bos_id, eos_id,
+                tokenizer_path, chunk_size,
             )
 
         log.info(
-            f"[{split}] Already tokenized and tokenizer/format match: {bin_path}"
+            f"[{split}] Already tokenized and input/tokenizer/format match: {bin_path}"
         )
         return meta
 
-    log.info(f"[{split}] Counting documents in {input_path}...")
-    n_docs_total = _count_docs(input_path)
-    log.info(f"[{split}] Total documents: {n_docs_total:,}")
-
     n_tokens    = 0
     n_processed = 0
+    source_counts: dict[str, dict[str, int]] = {}
+    tmp_bin_path = bin_path.with_name(f".{bin_path.name}.{os.getpid()}.tmp")
 
-    with open(bin_path, "wb") as bin_file, open(input_path) as f:
+    with open(tmp_bin_path, "wb") as bin_file, open(input_path) as f:
         # Read and chunk documents lazily — no full-corpus list in RAM.
         def _doc_iter():
             for line in f:
                 record = json.loads(line)
                 text = record.get("text", "").strip()
                 if text:
-                    yield text
+                    yield text, str(record.get("source", "unknown"))
 
         chunks = _chunked(_doc_iter(), chunk_size)
 
-        # imap_unordered streams results back as each worker finishes a
-        # chunk. The token list for each chunk is written immediately and
-        # discarded, so peak RAM is bounded by (pool size × chunk size).
+        # Ordered imap preserves input order while still tokenizing chunks in
+        # parallel. The bounded prefetch queue keeps memory bounded.
         pbar = tqdm(total=n_docs_total, desc=f"Tokenizing {split}", unit="doc")
-        for tokens, docs_in_chunk in pool.imap_unordered(_tokenize_chunk, chunks):
+        for tokens, docs_in_chunk, chunk_counts in pool.imap(
+            _tokenize_chunk,
+            chunks,
+        ):
             _write_tokens(tokens, bin_file)
             n_tokens += len(tokens)
             n_processed += docs_in_chunk
+            for source, counts in chunk_counts.items():
+                aggregate = source_counts.setdefault(
+                    source,
+                    {"documents": 0, "tokens": 0},
+                )
+                aggregate["documents"] += counts["documents"]
+                aggregate["tokens"] += counts["tokens"]
             pbar.update(docs_in_chunk)
         pbar.close()
+        bin_file.flush()
+        os.fsync(bin_file.fileno())
+    tmp_bin_path.replace(bin_path)
 
     log.info(f"[{split}] Total tokens:     {n_tokens:,} ({n_tokens / 1e9:.2f}B)")
     log.info(f"[{split}] Total documents:  {n_processed:,}")
@@ -314,13 +413,15 @@ def _tokenize_split(
         "dtype":     "uint16",
         "split":     split,
         "input":     str(input_path),
+        "input_sha256": input_sha256,
         "tokenizer": str(tokenizer_path),
         "tokenizer_sha256": current_tokenizer_sha256,
         "format_version": TOKENIZED_FORMAT_VERSION,
+        "implementation_sha256": current_implementation_sha256,
+        "source_counts": source_counts,
     }
 
-    with open(meta_path, "w") as f:
-        json.dump(meta, f, indent=2)
+    atomic_write_json(meta_path, meta)
     log.info(f"[{split}] Metadata saved:   {meta_path}")
 
     return meta
@@ -439,11 +540,26 @@ def main():
         log.error(f"Train input not found: {args.train}")
         log.error("Run: make validate SIZE=<size>")
         sys.exit(1)
+    if (
+        args.train.parent == run_validated_dir
+        and args.val.parent == run_validated_dir
+        and not manifest_outputs_match(
+            run_validated_dir,
+            output_pattern="*.json*",
+        )
+    ):
+        raise RuntimeError(
+            f"Validated tokenization inputs are not manifest-complete: "
+            f"{run_validated_dir}"
+        )
 
     if not args.tokenizer.exists():
         log.error(f"Tokenizer not found: {args.tokenizer}")
-        log.error("Run: make tokenizer SIZE=<size> && make tokenizer-upload SIZE=<size>")
-        log.error("Or:  make tokenizer-download SIZE=<size>")
+        log.error("Run: make tokenizer SIZE=<size>")
+        log.error(
+            "Or restore it with: make artifacts-download SIZE=<size> "
+            "RUN_ID=<run-id> ARTIFACT_STAGES=tokenizer"
+        )
         sys.exit(1)
 
     # Single-pass tokenizer validation: vocab size + special token IDs.
@@ -451,13 +567,12 @@ def main():
     _, bos_id, eos_id = _validate_tokenizer(args.tokenizer)
     log.info(f"Special token IDs: BOS={bos_id}, EOS={eos_id}")
 
-    val_available = args.val.exists()
-    if not val_available:
-        log.warning(
-            f"Val input not found: {args.val}\n"
-            f"Only train will be tokenized. The curator's blend stage produces "
-            f"both train.jsonl and val.jsonl — re-run 'make curate' to get val."
+    if not args.val.exists():
+        raise FileNotFoundError(
+            f"Val input not found: {args.val}. Tokenization requires both "
+            f"validated splits."
         )
+    val_available = True
 
     log.info(f"Train:      {args.train}")
     log.info(f"Val:        {args.val if val_available else '(not found, skipping)'}")
@@ -474,7 +589,7 @@ def main():
         initializer=_worker_init,
         initargs=(tokenizer_path_str, bos_id, eos_id),
     ) as pool:
-        _tokenize_split(
+        train_meta = _tokenize_split(
             input_path=args.train,
             output_dir=args.output,
             split="train",
@@ -486,7 +601,7 @@ def main():
         )
 
         if val_available:
-            _tokenize_split(
+            val_meta = _tokenize_split(
                 input_path=args.val,
                 output_dir=args.output,
                 split="val",
@@ -496,6 +611,24 @@ def main():
                 tokenizer_path=args.tokenizer,
                 chunk_size=args.chunk_size,
             )
+
+    tokenization_contract = {
+        "implementation_sha256": code_fingerprint(_tokenize_split),
+        "format_version": TOKENIZED_FORMAT_VERSION,
+        "dtype": "uint16",
+        "tokenizer_sha256": train_meta["tokenizer_sha256"],
+        "inputs": {
+            "train": train_meta["input_sha256"],
+            "val": val_meta["input_sha256"],
+        },
+    }
+    write_manifest(
+        args.output,
+        stage="tokenize",
+        contract=tokenization_contract,
+        input_signature=stable_digest(tokenization_contract["inputs"]),
+        output_pattern="[tv]*",
+    )
 
     if args.verify:
         verify_dataset(

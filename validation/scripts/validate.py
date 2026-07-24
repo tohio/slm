@@ -1,7 +1,7 @@
 """
 validation/scripts/validate.py
 --------------------------------
-Data validation pipeline using datatrove.
+Canonical source-aware data validation pipeline.
 
 Applies additional quality filters on top of the curator's heuristic
 filters. The primary addition is perplexity-based filtering using a
@@ -10,7 +10,7 @@ web text that passes heuristic checks.
 
 Pipeline (run independently for each split):
     1. Load curated JSONL from data/runs/<size>/curated/{train,val}.jsonl
-    2. Apply datatrove quality filters (C4, Gopher repetition)
+    2. Apply source-aware C4/Gopher-style checks
     3. Apply perplexity filter (KenLM 5-gram model)
     4. Write validated JSONL to data/runs/<size>/validated/{train,val}.jsonl
     5. Write per-split rejection stats
@@ -45,7 +45,7 @@ KenLM model:
 Usage:
     python validation/scripts/validate.py
     python validation/scripts/validate.py --size 125m
-python validation/scripts/validate.py --train data/runs/125m/curated/train.jsonl \\
+    python validation/scripts/validate.py --train data/runs/125m/curated/train.jsonl \\
     python validation/scripts/validate.py --perplexity-threshold 500
     python validation/scripts/validate.py --no-perplexity   # skip perplexity filter
 """
@@ -64,7 +64,17 @@ load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from config import PROSE_HEURISTIC_SKIP_SOURCES
 from config.paths import curated_dir, validated_dir, BASE_DATA_DIR
+from curator.state import (
+    atomic_write_json,
+    code_fingerprint,
+    file_snapshot,
+    manifest_matches,
+    manifest_outputs_match,
+    stable_digest,
+    write_manifest,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -75,136 +85,12 @@ log = logging.getLogger(__name__)
 
 DATA_DIR = BASE_DATA_DIR
 
-# Source tags whose records are primarily code-like, synthetic/template-like,
-# or symbol-heavy. These bypass prose-only validation heuristics that are
-# intended for normal English web/document text.
-#
-# Keep this aligned with curator.filters.quality.CODE_SOURCES and the
-# synthetic/generated source routing used by curator/scripts/curate.py.
-PROSE_HEURISTIC_SKIP_SOURCES: frozenset[str] = frozenset({
-    # Code sub-sources.
-    "codesearchnet",
-    "stack_smol",
-    "stack_v1",
-    "jupyter",
-    "conala",
-
-    # Generated/template-like sources.
-    "synthetic_arithmetic",
-    "synthetic_task_code",
-    "educational_qa_mcq",
-    "factual_restraint",
-
-    # Symbol-heavy / specialized sources that do not behave like prose.
-    "nemotron_cc_math",
-    "nemotron_specialized",
-})
-
-# Backward-compatible alias: older comments/tests refer to CODE_SOURCES.
-CODE_SOURCES: frozenset[str] = PROSE_HEURISTIC_SKIP_SOURCES
-
-
 def _skip_prose_heuristics(record: dict) -> bool:
     """Return True when prose-only validation checks should be bypassed."""
     return record.get("source") in PROSE_HEURISTIC_SKIP_SOURCES
 
 
-# ── Datatrove filters ──────────────────────────────────────────────────────────
-
-def build_datatrove_pipeline(
-    input_path: Path,
-    output_path: Path,
-    kenlm_model_path: Path | None = None,
-    perplexity_threshold: float | None = None,
-) -> None:
-    """
-    Build and run a datatrove filtering pipeline for one split.
-
-    Uses datatrove's built-in filters:
-        - C4QualityFilter: Google C4 heuristics (terminal punctuation,
-          line length, curly brace ratio, etc.)
-        - GopherRepetitionFilter: Repeated n-gram detection from Gopher
-        - LanguageFilter: fastText-based language detection
-        - PerplexityFilter: KenLM-based perplexity scoring (optional)
-
-    Args:
-        input_path: Input JSONL file.
-        output_path: Output JSONL file.
-        kenlm_model_path: Path to KenLM binary model. If None, skips perplexity filter.
-        perplexity_threshold: Max allowed perplexity. If None, uses 90th percentile.
-    """
-    try:
-        from datatrove.pipeline.filters import (
-            C4QualityFilter,
-            GopherRepetitionFilter,
-            LanguageFilter,
-        )
-        from datatrove.pipeline.readers import JsonlReader
-        from datatrove.pipeline.writers import JsonlWriter
-        from datatrove.executor import LocalPipelineExecutor
-    except ImportError:
-        raise ImportError(
-            "datatrove not installed. Install with: pip install datatrove"
-        )
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    pipeline = [
-        JsonlReader(
-            data_folder=str(input_path.parent),
-            glob_pattern=input_path.name,
-            text_key="text",
-            id_key=None,
-        ),
-        C4QualityFilter(
-            filter_no_terminal_punct=True,
-            min_num_sentences=3,
-            min_words_per_line=None,
-        ),
-        GopherRepetitionFilter(
-            top_n_grams=((2, 0.2), (3, 0.18), (4, 0.16)),
-            dup_line_frac=0.3,
-            dup_para_frac=0.3,
-            dup_line_char_frac=0.2,
-            dup_para_char_frac=0.2,
-        ),
-        LanguageFilter(
-            language_threshold=0.65,
-            languages=["en"],
-        ),
-    ]
-
-    # Add perplexity filter if KenLM model is available
-    if kenlm_model_path and kenlm_model_path.exists():
-        try:
-            from datatrove.pipeline.filters import PerplexityFilter
-            pipeline.append(
-                PerplexityFilter(
-                    model_dataset="en",
-                    model_base_path=str(kenlm_model_path.parent),
-                    max_perplexity=perplexity_threshold or 1500,
-                )
-            )
-            log.info(f"Perplexity filter enabled (threshold={perplexity_threshold or 1500})")
-        except (ImportError, Exception) as e:
-            log.warning(f"Could not load perplexity filter: {e}")
-    else:
-        log.warning("KenLM model not found — skipping perplexity filter")
-        log.warning("Download: wget https://dl.fbaipublicfiles.com/cc_net/lm/en.arpa.bin")
-
-    pipeline.append(
-        JsonlWriter(
-            output_folder=str(output_path.parent),
-            output_filename=output_path.name,
-            text_key="text",
-        )
-    )
-
-    executor = LocalPipelineExecutor(pipeline=pipeline, logging_dir=str(DATA_DIR / "logs"))
-    executor.run()
-
-
-# ── Fallback: manual validation without datatrove ─────────────────────────────
+# ── Canonical validation ───────────────────────────────────────────────────────
 
 def _compute_perplexity_threshold(
     kenlm_model,
@@ -265,14 +151,13 @@ def validate_manual_split(
     Applies:
         - Terminal punctuation check (C4-style) — prose sources only
         - Repeated line ratio (Gopher-style) — prose sources only
-        - Perplexity filter (KenLM, if model available) — all sources
+        - Perplexity filter (KenLM, when enabled) — prose sources only
 
     Code sources (codesearchnet, stack_smol, stack_v1, jupyter, conala)
     bypass the structural prose checks because code does not always end
     in terminal punctuation and may have legitimate repeated lines
-    (boilerplate imports, standard patterns). They still go through the
-    perplexity filter — low-perplexity-on-English means garbage for any
-    source.
+    (boilerplate imports, standard patterns). They also bypass prose KenLM,
+    which is not meaningful for code, math templates, or symbol-heavy data.
 
     Args:
         input_path: Input JSONL file.
@@ -295,76 +180,90 @@ def validate_manual_split(
         "skipped_prose_heuristics": 0,
     }
 
-    with open(input_path) as fin, open(output_path, "w") as fout:
-        for line in tqdm(fin, desc=f"Validating {split}", unit="doc"):
-            record = json.loads(line)
-            text = record.get("text", "")
-            stats["total"] += 1
+    tmp_path = output_path.with_name(f".{output_path.name}.{os.getpid()}.tmp")
+    try:
+        with open(input_path) as fin, open(tmp_path, "w") as fout:
+            for line in tqdm(fin, desc=f"Validating {split}", unit="doc"):
+                record = json.loads(line)
+                text = record.get("text", "")
+                stats["total"] += 1
 
-            skip_prose = _skip_prose_heuristics(record)
-            if skip_prose:
-                stats["skipped_prose_heuristics"] += 1
+                skip_prose = _skip_prose_heuristics(record)
+                if skip_prose:
+                    stats["skipped_prose_heuristics"] += 1
 
-            lines = [l.strip() for l in text.split("\n") if l.strip()]
+                lines = [l.strip() for l in text.split("\n") if l.strip()]
 
-            # C4-style terminal punctuation is a prose-only heuristic.
-            if not skip_prose:
-                has_terminal = any(
-                    l.endswith((".", "!", "?", '"', "'")) for l in lines
-                )
-                if not has_terminal:
-                    stats["rejected_terminal_punct"] += 1
-                    continue
-
-            # Gopher-style repeated line check can catch broken output for any
-            # source, including code/template-like records.
-            if len(lines) >= 4:
-                seen = set()
-                dups = 0
-                for l in lines:
-                    if l in seen:
-                        dups += 1
-                    else:
-                        seen.add(l)
-                if dups / len(lines) > 0.3:
-                    stats["rejected_repeated_lines"] += 1
-                    continue
-
-            # KenLM perplexity is an English prose heuristic. It is not
-            # meaningful for code, arithmetic templates, symbol-heavy math, or
-            # specialized/generated task records.
-            if (
-                not skip_prose
-                and kenlm_model is not None
-                and perplexity_threshold is not None
-            ):
-                try:
-                    ppl = kenlm_model.perplexity(text[:2000])
-                    if ppl > perplexity_threshold:
-                        stats["rejected_perplexity"] += 1
+                # C4-style terminal punctuation is a prose-only heuristic.
+                if not skip_prose:
+                    has_terminal = any(
+                        l.endswith((".", "!", "?", '"', "'")) for l in lines
+                    )
+                    if not has_terminal:
+                        stats["rejected_terminal_punct"] += 1
                         continue
-                except Exception:
-                    pass
 
-            fout.write(json.dumps(record, ensure_ascii=False) + "\n")
-            stats["kept"] += 1
+                # Gopher-style repeated line check can catch broken output for
+                # any source, including code/template-like records.
+                if len(lines) >= 4:
+                    seen = set()
+                    dups = 0
+                    for text_line in lines:
+                        if text_line in seen:
+                            dups += 1
+                        else:
+                            seen.add(text_line)
+                    if dups / len(lines) > 0.3:
+                        stats["rejected_repeated_lines"] += 1
+                        continue
+
+                # KenLM perplexity is an English prose heuristic. It is not
+                # meaningful for code/templates/symbol-heavy math.
+                if (
+                    not skip_prose
+                    and kenlm_model is not None
+                    and perplexity_threshold is not None
+                ):
+                    try:
+                        ppl = kenlm_model.perplexity(text[:2000])
+                        if ppl > perplexity_threshold:
+                            stats["rejected_perplexity"] += 1
+                            continue
+                    except Exception as exc:
+                        raise RuntimeError(
+                            f"KenLM failed while scoring a {split} document"
+                        ) from exc
+
+                fout.write(json.dumps(record, ensure_ascii=False) + "\n")
+                stats["kept"] += 1
+            fout.flush()
+            os.fsync(fout.fileno())
+        tmp_path.replace(output_path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
     return stats
 
 
 def _load_kenlm(kenlm_model_path: Path | None):
-    """Load KenLM model from path, or return None if unavailable."""
-    if kenlm_model_path is None or not kenlm_model_path.exists():
+    """Load the required KenLM model, or return None when explicitly disabled."""
+    if kenlm_model_path is None:
         return None
+    if not kenlm_model_path.exists():
+        raise FileNotFoundError(
+            f"KenLM model not found: {kenlm_model_path}. Download/configure it, "
+            f"or pass --no-perplexity to explicitly record a no-KenLM run."
+        )
     try:
         import kenlm
         model = kenlm.Model(str(kenlm_model_path))
         log.info(f"Loaded KenLM model from {kenlm_model_path}")
         return model
-    except ImportError:
-        log.warning("kenlm not installed — skipping perplexity filter")
-        log.warning("Install: pip install https://github.com/kpu/kenlm/archive/master.zip")
-        return None
+    except ImportError as exc:
+        raise RuntimeError(
+            "kenlm is required when perplexity filtering is enabled"
+        ) from exc
 
 
 def _log_split_report(split: str, stats: dict) -> None:
@@ -431,11 +330,6 @@ def main():
         action="store_true",
         help="Skip perplexity filter",
     )
-    parser.add_argument(
-        "--use-datatrove",
-        action="store_true",
-        help="Use datatrove pipeline (requires datatrove installed)",
-    )
     args = parser.parse_args()
 
     run_curated_dir = curated_dir(args.size)
@@ -454,35 +348,28 @@ def main():
     log.info(f"Val output:   {args.val_output}")
     log.info(f"KenLM:        {kenlm_path or 'disabled'}")
 
-    val_available = args.val.exists()
-    if not val_available:
-        log.warning(
-            f"Val input not found: {args.val}\n"
-            f"Only train will be validated. The curator's blend stage produces "
-            f"both train.jsonl and val.jsonl — re-run 'make curate' to get val."
+    if not args.train.exists():
+        raise FileNotFoundError(f"Train input not found: {args.train}")
+    if not args.val.exists():
+        raise FileNotFoundError(
+            f"Val input not found: {args.val}. Validation requires both splits "
+            f"so train and val retain the same filtering contract."
         )
-
-    # ── datatrove path ────────────────────────────────────────────────────────
-    if args.use_datatrove:
-        log.info("Using datatrove pipeline...")
-        build_datatrove_pipeline(
-            input_path=args.train,
-            output_path=args.train_output,
-            kenlm_model_path=kenlm_path,
-            perplexity_threshold=args.perplexity_threshold,
+    val_available = True
+    if (
+        args.train.parent == run_curated_dir
+        and args.val.parent == run_curated_dir
+        and not manifest_outputs_match(
+            run_curated_dir,
+            output_pattern="*.json*",
         )
-        if val_available:
-            build_datatrove_pipeline(
-                input_path=args.val,
-                output_path=args.val_output,
-                kenlm_model_path=kenlm_path,
-                perplexity_threshold=args.perplexity_threshold,
-            )
-        log.info("Validation complete.")
-        return
+    ):
+        raise RuntimeError(
+            f"Curated inputs are not manifest-complete: {run_curated_dir}"
+        )
 
     # ── Manual path ───────────────────────────────────────────────────────────
-    log.info("Using manual validation pipeline...")
+    log.info("Using canonical source-aware validation pipeline...")
 
     kenlm_model = _load_kenlm(kenlm_path)
 
@@ -495,6 +382,39 @@ def main():
         perplexity_threshold = _compute_perplexity_threshold(
             kenlm_model, args.train, args.perplexity_sample_size,
         )
+
+    input_signature = stable_digest(
+        {
+            "train": file_snapshot([args.train], root=args.train.parent),
+            "val": file_snapshot([args.val], root=args.val.parent),
+        }
+    )
+    validation_contract = {
+        "implementation_sha256": code_fingerprint(validate_manual_split),
+        "prose_heuristic_skip_sources": PROSE_HEURISTIC_SKIP_SOURCES,
+        "perplexity_enabled": kenlm_model is not None,
+        "perplexity_threshold": perplexity_threshold,
+        "perplexity_sample_size": args.perplexity_sample_size,
+        "kenlm_model": (
+            file_snapshot([kenlm_path], root=kenlm_path.parent)[0]
+            if kenlm_path is not None
+            else None
+        ),
+    }
+    common_output_dir = (
+        args.train_output.parent
+        if args.train_output.parent == args.val_output.parent
+        else None
+    )
+    if common_output_dir is not None and manifest_matches(
+        common_output_dir,
+        stage="validate",
+        contract=validation_contract,
+        input_signature=input_signature,
+        output_pattern="*.json*",
+    ):
+        log.info("Verified validation manifest matches inputs/configuration — reusing")
+        return
 
     # Train split
     train_stats = validate_manual_split(
@@ -547,10 +467,18 @@ def main():
         },
     }
 
-    stats_path = run_validated_dir / "validation_stats.json"
-    run_validated_dir.mkdir(parents=True, exist_ok=True)
-    with open(stats_path, "w") as f:
-        json.dump(combined, f, indent=2)
+    stats_dir = common_output_dir or args.train_output.parent
+    stats_path = stats_dir / "validation_stats.json"
+    stats_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(stats_path, combined)
+    if common_output_dir is not None:
+        write_manifest(
+            common_output_dir,
+            stage="validate",
+            contract=validation_contract,
+            input_signature=input_signature,
+            output_pattern="*.json*",
+        )
     log.info(f"Stats written to {stats_path}")
 
     log.info("Validation complete.")

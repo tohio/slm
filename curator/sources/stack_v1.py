@@ -45,10 +45,10 @@ import logging
 from pathlib import Path
 
 import orjson
-from datasets import load_dataset
+from curator.sources.hf import load_dataset
 from tqdm import tqdm
 
-from curator.constants import CHARS_PER_TOKEN
+from config import CHARS_PER_TOKEN
 
 log = logging.getLogger(__name__)
 
@@ -94,7 +94,12 @@ class StackV1Source:
     def download(self) -> list[Path]:
         """Iterate per-language shards of the-stack-dedup and write JSONL."""
         existing_shards = sorted(self.output_dir.glob("stack_v1_*.jsonl"))
-        shard_idx = len(existing_shards)
+        if existing_shards:
+            raise RuntimeError(
+                "the-stack-v1 output directory is not empty. Use the "
+                "canonical curator's manifest-aware restart/replacement flow."
+            )
+        shard_idx = 0
 
         log.info(f"Loading {self.DATASET_NAME} per-language...")
         log.info(f"  Languages: {self.languages}")
@@ -122,11 +127,11 @@ class StackV1Source:
                     data_dir=f"data/{lang}",
                     split="train",
                     streaming=True,
-                    trust_remote_code=True,
                 )
-            except Exception:
-                log.exception(f"  Failed to load {lang} — skipping")
-                continue
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Failed to load required the-stack-v1 language: {lang}"
+                ) from exc
 
             for sample in ds:
                 if stop:

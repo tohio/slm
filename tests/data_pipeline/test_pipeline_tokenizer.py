@@ -37,7 +37,8 @@ from config import CODE_SOURCES
 NON_PROSE_FERTILITY_SOURCES = set(CODE_SOURCES) | {
     "synthetic_arithmetic",
     "synthetic_task_code",
-    "educational_qa_mcq",
+    "educational_qa_mcq_math",
+    "educational_qa_mcq_general",
     "factual_restraint",
 }
 
@@ -57,6 +58,9 @@ def load_hf_tokenizer():
 
 
 class TestTokenizerFiles:
+    def test_tokenizer_completion_manifest_exists(self):
+        assert pipeline_path("tokenizer", "_SUCCESS.json").exists()
+
     def test_tokenizer_dir_exists(self):
         assert pipeline_path("tokenizer").exists()
 
@@ -278,6 +282,25 @@ class TestTokenizedBinIntegrity:
     tokenizer is fine but the tokenization pipeline (batching, special
     token insertion, EOS separators) is broken.
     """
+    def test_tokenization_completion_manifest_exists(self):
+        assert pipeline_path("tokenized", "_SUCCESS.json").exists()
+
+    @pytest.mark.parametrize("split", ["train", "val"])
+    def test_tokenized_metadata_has_reproducibility_fields(self, split):
+        path = pipeline_path("tokenized", f"{split}.json")
+        with open(path) as handle:
+            metadata = json.load(handle)
+        assert len(metadata["input_sha256"]) == 64
+        assert len(metadata["tokenizer_sha256"]) == 64
+        assert metadata["format_version"] == "bos_doc_eos_ordered_v2"
+        assert metadata["source_counts"]
+        assert sum(
+            row["documents"] for row in metadata["source_counts"].values()
+        ) == metadata["n_docs"]
+        assert sum(
+            row["tokens"] for row in metadata["source_counts"].values()
+        ) == metadata["n_tokens"]
+
     def test_tokenized_bin_ids_in_vocab_range(self):
         tokenized_dir = pipeline_path("tokenized")
         assert (tokenized_dir / "train.bin").exists(), (

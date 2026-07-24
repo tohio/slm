@@ -21,18 +21,18 @@ training:
   # Global batch = micro_batch_size × gradient_accumulation_steps × num_gpus
   # These values assume 1 GPU. Adjust before running multi-GPU training:
   #   divide gradient_accumulation_steps by num_gpus to hold global batch constant
-  #   divide max_steps by num_gpus to hold token budget constant
+  #   keep max_steps unchanged when global batch is held constant
   #
-  # Dataset: 6.5B curation target
+  # Dataset: 10B curation target × 2 epochs = 20B consumed tokens
   # Tokens/step (1 GPU): 4 × 8 × 1 × 2048 = ~65k tokens/step
-  # 1 epoch  → ~76,000 steps
-  # 2 epochs → ~152,000 steps  ← recommended
+  # 1 epoch  → ~152,587 steps
+  # 2 epochs → ~305,175 steps
   #
-  # 1 GPU:  grad_accum=8,  max_steps=152000
-  # 4 GPU:  grad_accum=2,  max_steps=38000
-  # 8 GPU:  grad_accum=1,  max_steps=19000
-  max_steps: 152000
-  warmup_steps: 1000
+  # 1 GPU:  grad_accum=8, max_steps=305175
+  # 4 GPU:  grad_accum=2, max_steps=305175
+  # 8 GPU:  grad_accum=1, max_steps=305175
+  max_steps: 305175
+  warmup_steps: 3051
   micro_batch_size: 4
   gradient_accumulation_steps: 8   # 1 GPU default — see scaling note above
   precision: bf16

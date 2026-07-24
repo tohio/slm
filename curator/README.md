@@ -21,7 +21,7 @@ Validation, tokenizer training, tokenization, and model training live in other f
 
 ```text
 curator/
-├── constants.py
+├── state.py
 ├── filters/
 │   ├── quality.py
 │   └── dedup.py
@@ -30,6 +30,7 @@ curator/
 │   ├── sample_source.py
 │   └── upload_s3.py
 └── sources/
+    └── hf.py
 ```
 
 Shared curation settings live in `config/data_mix.py`. Do not duplicate source percentages, token targets, `CHARS_PER_TOKEN`, or Common Crawl crawl settings in curator code.
@@ -49,10 +50,14 @@ blend + train/val split
   ↓
 data/runs/<size>/curated/train.jsonl
 data/runs/<size>/curated/val.jsonl
-data/runs/<size>/metadata/blend_stats.json
+data/runs/<size>/curated/blend_stats.json
 ```
 
 The blend stage samples validation data from the same shuffled distribution as train.
+Every reusable stage directory contains `_SUCCESS.json`. A stage is reused only
+when this manifest matches its inputs, configuration, and output snapshot.
+RUN_ID uploads verify these manifests first and mirror each selected stage, so
+obsolete remote shards cannot survive a replacement upload.
 
 ---
 
@@ -69,7 +74,7 @@ Top-level mix:
 | FineWeb-Edu | 31.5% |
 | Wikipedia | 10.0% |
 | PG-19 | 2.5% |
-| peS2o | 5.0% |
+| Common Pile peS2o filtered | 5.0% |
 | Nemotron CC Math | 7.0% |
 | StackExchange | 1.0% |
 | Synthetic arithmetic | 0.1475% |
@@ -135,6 +140,16 @@ python curator/scripts/curate.py --target 125m
 python curator/scripts/curate.py --target mini --mini
 python curator/scripts/curate.py --target 125m --stage download
 python curator/scripts/curate.py --target 125m --sources wikipedia,fineweb_edu
+```
+
+Hugging Face sources are resolved to immutable dataset commit SHAs before
+loading. `--force` is required to replace legacy or stale raw directories;
+replacement happens only after a new isolated download completes.
+
+```bash
+make curate-download SIZE=125m FORCE=1
+# equivalent direct call:
+python curator/scripts/curate.py --target 125m --stage download --force
 ```
 
 ---
@@ -205,10 +220,13 @@ data/runs/<size>/filtered/
 data/runs/<size>/dedup_scratch/
 data/runs/<size>/curated/train.jsonl
 data/runs/<size>/curated/val.jsonl
-data/runs/<size>/metadata/blend_stats.json
+data/runs/<size>/curated/blend_stats.json
 ```
 
-`blend_stats.json` records the realized mix and is used by export for model-card data-mix reporting.
+`blend_stats.json` records intended character budgets, initial source
+shortfalls, and unresolved shortfalls. Character-derived token totals are
+explicitly estimates. Authoritative realized token and source counts are in
+`tokenized/train.json` and `tokenized/val.json`.
 
 ---
 
@@ -218,4 +236,7 @@ data/runs/<size>/metadata/blend_stats.json
 - Use persistent storage for `DATA_DIR`.
 - Use `WORKERS` to control parallel curation stages.
 - Generated/template-like sources bypass fuzzy MinHash dedup but still run exact dedup.
+- Exact cross-source dedup retains cleaner/reference sources before broad web
+  sources. Fuzzy MinHash runs within each source and is an LSH probability
+  contract, not a strict Jaccard threshold.
 - Restore artifacts by `RUN_ID`, not date.

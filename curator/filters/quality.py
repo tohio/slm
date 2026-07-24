@@ -15,10 +15,8 @@ Source-conditional filter skips:
     These filters are designed for natural language and incorrectly reject
     valid code.
 
-    The set of code-adjacent sources is defined at module level as
-    CODE_SOURCES. Any source tag in this set inherits the default code
-    skip behavior. Adding a new code-adjacent source is a single-line
-    change to that constant.
+    The shared PROSE_HEURISTIC_SKIP_SOURCES contract in config.data_mix
+    controls this routing for curation and validation.
 
     Length filters (min_chars / max_chars) have separate per-source skip
     lists because a source may legitimately fail one bound without the
@@ -29,8 +27,10 @@ FastText language detection:
     Requires the fasttext lid.176.ftz model — download once via:
         make download-fasttext-model
     Model path defaults to DATA_DIR/models/lid.176.ftz.
-    If the model is not found, language detection is skipped with a warning
-    and the stop word fallback is used instead.
+    The canonical curation stage fails before prose filtering if the model or
+    Python package is unavailable, so environment drift cannot silently change
+    which documents pass. The stop-word path remains available for direct
+    QualityFilter use and tests.
 
 Reference:
     FineWeb: https://huggingface.co/spaces/HuggingFaceFW/blogpost-fineweb-v1
@@ -44,35 +44,9 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from config import PROSE_HEURISTIC_SKIP_SOURCES
+
 log = logging.getLogger(__name__)
-
-# Source tags that represent code or code-adjacent content. These sources
-# bypass English-prose-oriented quality filters (symbol ratio, alpha ratio,
-# stop words, etc.) which incorrectly reject valid code.
-#
-# Mixed-content sources (jupyter, conala) are included here because their
-# prose components would pass these filters but their code components
-# would fail them, and per-chunk filtering isn't feasible at the source
-# level. Accepting the trade-off: some non-English content in these
-# sources won't be language-filtered.
-CODE_SOURCES: frozenset[str] = frozenset({
-    # Generated/template-like sources. These can be short, symbol-heavy,
-    # repetitive by design, or formatted unlike normal prose.
-    "synthetic_arithmetic",
-    "synthetic_task_code",
-    "educational_qa_mcq_math",
-    "educational_qa_mcq_general",
-    "factual_restraint",
-    "nemotron_specialized",
-    "nemotron_cc_math",
-
-    # Code and code-adjacent sources.
-    "codesearchnet",
-    "stack_smol",
-    "stack_v1",
-    "jupyter",
-    "conala",
-})
 
 # English stop words — fallback when fasttext is unavailable.
 EN_STOP_WORDS = {
@@ -138,6 +112,17 @@ def _get_fasttext_model():
     return _fasttext_model
 
 
+def require_fasttext_model():
+    """Return the language model or fail instead of changing filter behavior."""
+    model = _get_fasttext_model()
+    if model is None:
+        raise RuntimeError(
+            "FastText language detection is required for prose filtering. "
+            "Install fasttext-wheel and run 'make download-fasttext-model'."
+        )
+    return model
+
+
 @dataclass
 class QualityConfig:
     """Configuration for quality filter thresholds."""
@@ -173,27 +158,27 @@ class QualityConfig:
     # Language detection threshold
     min_language_score: float = 0.65
 
-    # Per-filter skip lists. Default to CODE_SOURCES for filters that reject
-    # code. Kept as per-filter fields (rather than one shared set) so future
+    # Per-filter skip lists default to the shared non-prose routing contract.
+    # Kept as per-filter fields (rather than one shared set) so future
     # tuning can customize which filters skip which sources without schema
     # changes — e.g. to still run boilerplate on jupyter but skip language.
     skip_symbol_ratio_sources: frozenset[str] = field(
-        default_factory=lambda: CODE_SOURCES
+        default_factory=lambda: PROSE_HEURISTIC_SKIP_SOURCES
     )
     skip_mean_word_length_sources: frozenset[str] = field(
-        default_factory=lambda: CODE_SOURCES
+        default_factory=lambda: PROSE_HEURISTIC_SKIP_SOURCES
     )
     skip_alpha_ratio_sources: frozenset[str] = field(
-        default_factory=lambda: CODE_SOURCES
+        default_factory=lambda: PROSE_HEURISTIC_SKIP_SOURCES
     )
     skip_stop_word_sources: frozenset[str] = field(
-        default_factory=lambda: CODE_SOURCES
+        default_factory=lambda: PROSE_HEURISTIC_SKIP_SOURCES
     )
     skip_boilerplate_sources: frozenset[str] = field(
-        default_factory=lambda: CODE_SOURCES
+        default_factory=lambda: PROSE_HEURISTIC_SKIP_SOURCES
     )
     skip_language_sources: frozenset[str] = field(
-        default_factory=lambda: CODE_SOURCES
+        default_factory=lambda: PROSE_HEURISTIC_SKIP_SOURCES
     )
 
     # Length filter skip lists. Separate min/max so sources can opt out

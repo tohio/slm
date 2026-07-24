@@ -21,27 +21,13 @@ import json
 
 import pytest
 
+from config import PROSE_HEURISTIC_SKIP_SOURCES
 from tests.data_pipeline.helpers import requires_stage, pipeline_path
 from curator.filters.quality import QualityFilter
 from curator.filters.dedup import exact_hash
 
 
 pytestmark = requires_stage("validate")
-
-
-PROSE_HEURISTIC_SKIP_SOURCES = {
-    "codesearchnet",
-    "stack_smol",
-    "stack_v1",
-    "jupyter",
-    "conala",
-    "synthetic_arithmetic",
-    "synthetic_task_code",
-    "educational_qa_mcq",
-    "factual_restraint",
-    "nemotron_cc_math",
-    "nemotron_specialized",
-}
 
 VALIDATE_SAMPLE_DOCS = 500
 
@@ -52,6 +38,9 @@ def _count_jsonl(path) -> int:
 
 
 class TestValidatedOutput:
+    def test_validation_completion_manifest_exists(self):
+        assert pipeline_path("validated", "_SUCCESS.json").exists()
+
     def test_validated_train_jsonl_exists(self):
         assert pipeline_path("validated", "train.jsonl").exists()
 

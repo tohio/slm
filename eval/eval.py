@@ -177,7 +177,8 @@ def resolve_tokenizer_path(model_path: Path) -> Path:
 
     raise FileNotFoundError(
         f"tokenizer_config.json not found in {model_path} or {model_path / 'tokenizer'}.\n"
-        f"Ensure the tokenizer was copied during training: make tokenizer-download"
+        f"Ensure the tokenizer was restored with the same RUN_ID artifacts "
+        f"used for training."
     )
 
 

@@ -45,11 +45,11 @@ import logging
 from pathlib import Path
 
 import orjson
-from datasets import load_dataset
+from curator.sources.hf import load_dataset
 from huggingface_hub import HfApi
 from tqdm import tqdm
 
-from curator.constants import CHARS_PER_TOKEN
+from config import CHARS_PER_TOKEN
 
 log = logging.getLogger(__name__)
 
@@ -136,11 +136,11 @@ class StackSmolSource:
                     self.DATASET_NAME,
                     data_files=f"data/{lang}/data.json",
                     split="train",
-                    trust_remote_code=True,
                 )
             except Exception as e:
-                log.warning(f"  Failed to load {lang}: {e} — skipping")
-                continue
+                raise RuntimeError(
+                    f"Failed to load required the-stack-smol language: {lang}"
+                ) from e
 
             for sample in tqdm(ds, desc=f"stack-smol {lang}", unit="file", leave=False):
                 record = self._format(sample, lang)

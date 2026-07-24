@@ -17,6 +17,7 @@
 SIZE    ?= 125m
 GPUS    ?= 1
 WORKERS ?=
+FORCE   ?=
 RUN_ID  ?=
 ARTIFACT_STAGES ?= raw,curated,validated,tokenized,tokenizer,metadata
 
@@ -40,6 +41,8 @@ ifdef WORKERS
 else
   WORKERS_FLAG =
 endif
+
+FORCE_FLAG = $(if $(filter 1 true yes,$(FORCE)),--force,)
 
 SANITY_SIZE ?= 125m
 
@@ -74,7 +77,7 @@ else
 endif
 
 .PHONY: all curate curate-mini curate-download curate-filter curate-dedup \
-        curate-blend curate-upload validate validate-upload validate-datatrove \
+        curate-blend curate-upload validate validate-upload \
         tokenizer tokenizer-test tokenize artifacts-upload artifacts-download \
         config-gen config-gen-pretrain config-gen-sft config-gen-dpo \
         accel-gen-ddp accel-gen-fsdp \
@@ -83,9 +86,8 @@ endif
         export export-base export-instruct export-chat export-code \
         setup setup-data-dir setup-gpu install install-gpu test-upgrade-gpu install-uv install-conda install-kenlm install-orjson \
         download-kenlm-model download-fasttext-model accelerate-config accelerate-config-single accelerate-config-multi \
-        s3-upload s3-download s3-list \
         test-curator test-validate test-tokenizer test-data-pipeline \
-        test-training test-sft-instruct test-sft-chat test-sft-code test-dpo-chat test-dpo test-gpu-pipeline test-model test-training-args test-config-gen test-accel-gen test-unit \
+        test-training test-sft-instruct test-sft-chat test-sft-code test-dpo-chat test-dpo test-gpu-pipeline test-model test-data-unit test-training-args test-config-gen test-accel-gen test-unit \
         sanity-train sanity-train-small sanity-train-tiny sanity-train-save \
         clean clean-data clean-results clean-logs help
 
@@ -100,14 +102,14 @@ all: curate validate tokenizer tokenize pretrain prepare-sft sft-instruct prepar
 
 curate:
 	@echo "==> Stage 1: Curation (target=$(SIZE))"
-	ulimit -n 65536 && $(PYTHON) curator/scripts/curate.py --target $(SIZE) $(WORKERS_FLAG)
+	ulimit -n 65536 && $(PYTHON) curator/scripts/curate.py --target $(SIZE) $(WORKERS_FLAG) $(FORCE_FLAG)
 
 curate-mini:
 	@echo "==> Stage 1: Mini curation run (pipeline validation)"
-	ulimit -n 65536 && $(PYTHON) curator/scripts/curate.py --target mini --mini $(WORKERS_FLAG)
+	ulimit -n 65536 && $(PYTHON) curator/scripts/curate.py --target mini --mini $(WORKERS_FLAG) $(FORCE_FLAG)
 
 curate-download:
-	$(PYTHON) curator/scripts/curate.py --target $(SIZE) --stage download
+	$(PYTHON) curator/scripts/curate.py --target $(SIZE) --stage download $(FORCE_FLAG)
 
 curate-filter:
 	$(PYTHON) curator/scripts/curate.py --target $(SIZE) --stage filter $(WORKERS_FLAG)
@@ -119,36 +121,33 @@ curate-blend:
 	$(PYTHON) curator/scripts/curate.py --target $(SIZE) --stage blend $(WORKERS_FLAG)
 
 curate-upload:
-	@echo "==> Stage 1: Upload curated data to S3 (target=$(SIZE))"
-	$(PYTHON) curator/scripts/curate.py --target $(SIZE) --stage upload
+	@echo "==> Uploading curated artifacts by RUN_ID (target=$(SIZE))"
+	$(PYTHON) curator/scripts/upload_s3.py artifacts-upload --size $(SIZE) $(if $(RUN_ID),--run-id $(RUN_ID),) --stages curated,metadata
 
 # ── Stage 2: Validation ───────────────────────────────────────────────────────
 
 validate:
 	@echo "==> Stage 2: Validation (train + val splits)"
-	$(PYTHON) validation/scripts/validate.py
+	$(PYTHON) validation/scripts/validate.py --size $(SIZE)
 
 validate-upload:
-	@echo "==> Stage 2: Upload validated data to S3 (target=$(SIZE))"
-	$(PYTHON) validation/scripts/upload_validated.py --target $(SIZE)
-
-validate-datatrove:
-	$(PYTHON) validation/scripts/validate.py --use-datatrove
+	@echo "==> Uploading validated artifacts by RUN_ID (target=$(SIZE))"
+	$(PYTHON) curator/scripts/upload_s3.py artifacts-upload --size $(SIZE) $(if $(RUN_ID),--run-id $(RUN_ID),) --stages validated,metadata
 
 # ── Stage 3: Tokenizer ────────────────────────────────────────────────────────
 
 tokenizer:
 	@echo "==> Stage 3: Tokenizer training"
-	$(PYTHON) tokenizer/train_tokenizer.py
+	$(PYTHON) tokenizer/train_tokenizer.py --size $(SIZE)
 
 tokenizer-test:
-	$(PYTHON) tokenizer/test_tokenizer.py
+	$(PYTHON) tokenizer/test_tokenizer.py --size $(SIZE)
 
 # ── Stage 4: Pretrain ─────────────────────────────────────────────────────────
 
 tokenize:
 	@echo "==> Stage 4a: Tokenize dataset (train + val splits)"
-	$(PYTHON) pretrain/data/tokenize_data.py --chunk-size 256 --verify
+	$(PYTHON) pretrain/data/tokenize_data.py --size $(SIZE) --chunk-size 256 --verify
 
 artifacts-upload:
 	@echo "==> Uploading artifacts to S3 (target=$(SIZE), run_id=$(if $(RUN_ID),$(RUN_ID),auto), stages=$(ARTIFACT_STAGES))"
@@ -451,17 +450,6 @@ serve-local:
 	MODEL=results/runs/$(SIZE)/dpo_chat/final ./serve/serve.sh
 
 
-# ── S3 utilities ──────────────────────────────────────────────────────────────
-
-s3-upload:
-	$(PYTHON) curator/scripts/upload_s3.py upload --src "$(DATA_DIR)/runs/$(SIZE)/curated" --dst "runs/$(SIZE)/curated"
-
-s3-download:
-	$(PYTHON) curator/scripts/upload_s3.py download --src "runs/$(SIZE)/curated" --dst "$(DATA_DIR)/runs/$(SIZE)/curated"
-
-s3-list:
-	$(PYTHON) curator/scripts/upload_s3.py list
-
 # ── Setup ─────────────────────────────────────────────────────────────────────
 
 setup:
@@ -599,6 +587,10 @@ test-model:
 	@echo "==> Running model unit tests..."
 	.venv/bin/pytest tests/model/ -v --tb=short
 
+test-data-unit:
+	@echo "==> Running data contract/state unit tests..."
+	.venv/bin/pytest tests/test_data_config.py tests/test_curator_state.py -v --tb=short
+
 test-training-args:
 	@echo "==> Running Transformers/TRL compatibility tests..."
 	.venv/bin/pytest tests/test_training_args.py tests/test_trl_smoke.py -v --tb=short
@@ -611,7 +603,7 @@ test-accel-gen:
 	@echo "==> Running accel_gen unit tests..."
 	.venv/bin/pytest tests/test_accel_gen.py -v --tb=short
 
-test-unit: test-model test-training-args test-config-gen test-accel-gen
+test-unit: test-model test-data-unit test-training-args test-config-gen test-accel-gen
 	@echo "==> Unit tests complete"
 
 # ── Sanity check ──────────────────────────────────────────────────────────────
@@ -703,6 +695,7 @@ help:
 	@echo ""
 	@echo "Tests (unit — no pipeline outputs needed):"
 	@echo "  test-model               Model architecture unit tests"
+	@echo "  test-data-unit           Data config and manifest-state unit tests"
 	@echo "  test-training-args       Transformers/TRL argument compatibility tests"
 	@echo "  test-config-gen          Config generator unit tests"
 	@echo "  test-accel-gen           Accelerate config generator unit tests"
@@ -715,10 +708,10 @@ help:
 	@echo "  sanity-train-save        same as sanity-train but saves the model"
 	@echo ""
 	@echo "Pipeline:"
-	@echo "  curate             Stage 1  — download, curate, blend, upload"
+	@echo "  curate             Stage 1  — download, filter, deduplicate, and blend"
 	@echo "  curate-mini        Stage 1  — mini run for pipeline validation"
 	@echo "  validate           Stage 2  — perplexity filter on train + val splits"
-	@echo "  validate-upload    Stage 2  — upload validated data to S3"
+	@echo "  validate-upload    Upload validated artifacts through RUN_ID storage"
 	@echo "  tokenizer          Stage 3  — train BPE tokenizer"
 	@echo "  tokenize           Stage 4a — tokenize train + val to binaries"
 	@echo "  artifacts-upload   Upload artifacts to S3 using a RUN_ID"
