@@ -99,7 +99,6 @@ Common options:
 --batch-size
 --chat
 --no-bos
---trust-remote-code
 --device
 ```
 

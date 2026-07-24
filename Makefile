@@ -24,6 +24,7 @@ ARTIFACT_STAGES ?= raw,curated,validated,tokenized,tokenizer,metadata
 # DATA_DIR — read from .env if not set in environment.
 DATA_DIR := $(or $(shell grep -v '^\#' .env 2>/dev/null | grep '^DATA_DIR=' | head -1 | cut -d= -f2 | tr -d ' '),data)
 RESULTS_DIR := $(or $(shell grep -v '^\#' .env 2>/dev/null | grep '^RESULTS_DIR=' | head -1 | cut -d= -f2 | tr -d ' '),results)
+EXPORTS_DIR := $(or $(shell grep -v '^\#' .env 2>/dev/null | grep '^EXPORTS_DIR=' | head -1 | cut -d= -f2 | tr -d ' '),$(RESULTS_DIR)/exports)
 PYTHON     ?= .venv/bin/python
 _ACCELERATE = .venv/bin/accelerate
 
@@ -84,10 +85,11 @@ endif
         pretrain pretrain-mini pretrain-smoke pretrain-resume reinit-embeds smoke-gen prepare-sft sft sft-instruct sft-mini sft-instruct-mini sft-resume sft-instruct-resume sft-code sft-code-mini sft-code-resume \
         prepare-dpo dpo-chat dpo-chat-resume dpo-chat-mini dpo dpo-mini dpo-resume eval eval-base eval-instruct eval-chat eval-code eval-sanity eval-sanity-base eval-sanity-instruct eval-sanity-chat eval-sanity-code eval-mini serve serve-local \
         export export-base export-instruct export-chat export-code \
+        export-local export-base-local export-instruct-local export-chat-local export-code-local \
         setup setup-data-dir setup-gpu install install-gpu test-upgrade-gpu install-uv install-conda install-kenlm install-orjson \
         download-kenlm-model download-fasttext-model accelerate-config accelerate-config-single accelerate-config-multi \
         test-curator test-validate test-tokenizer test-data-pipeline \
-        test-training test-sft-instruct test-sft-chat test-sft-code test-dpo-chat test-dpo test-gpu-pipeline test-model test-data-unit test-training-args test-config-gen test-accel-gen test-unit \
+        test-training test-sft-instruct test-sft-chat test-sft-code test-dpo-chat test-dpo test-gpu-pipeline test-model test-export test-data-unit test-training-args test-config-gen test-accel-gen test-unit \
         sanity-train sanity-train-small sanity-train-tiny sanity-train-save \
         clean clean-data clean-results clean-logs help
 
@@ -424,19 +426,38 @@ export: export-base export-instruct export-chat export-code
 
 export-base:
 	@echo "==> Stage 8: Export base model ($(SIZE))"
-	$(PYTHON) export/export.py --size $(SIZE) --variant base
+	EXPORTS_DIR=$(EXPORTS_DIR) $(PYTHON) export/export.py --size $(SIZE) --variant base
 
 export-instruct:
 	@echo "==> Stage 8: Export instruct model ($(SIZE))"
-	$(PYTHON) export/export.py --size $(SIZE) --variant instruct
+	EXPORTS_DIR=$(EXPORTS_DIR) $(PYTHON) export/export.py --size $(SIZE) --variant instruct
 
 export-chat:
 	@echo "==> Stage 8: Export chat model ($(SIZE))"
-	$(PYTHON) export/export.py --size $(SIZE) --variant chat
+	EXPORTS_DIR=$(EXPORTS_DIR) $(PYTHON) export/export.py --size $(SIZE) --variant chat
 
 export-code:
 	@echo "==> Stage 8: Export code model ($(SIZE))"
-	$(PYTHON) export/export.py --size $(SIZE) --variant code
+	EXPORTS_DIR=$(EXPORTS_DIR) $(PYTHON) export/export.py --size $(SIZE) --variant code
+
+export-local: export-base-local export-instruct-local export-chat-local export-code-local
+	@echo "All native local variants exported for slm-$(SIZE)"
+
+export-base-local:
+	@echo "==> Stage 8: Build native local base model ($(SIZE))"
+	EXPORTS_DIR=$(EXPORTS_DIR) $(PYTHON) export/export.py --size $(SIZE) --variant base --dry-run
+
+export-instruct-local:
+	@echo "==> Stage 8: Build native local instruct model ($(SIZE))"
+	EXPORTS_DIR=$(EXPORTS_DIR) $(PYTHON) export/export.py --size $(SIZE) --variant instruct --dry-run
+
+export-chat-local:
+	@echo "==> Stage 8: Build native local chat model ($(SIZE))"
+	EXPORTS_DIR=$(EXPORTS_DIR) $(PYTHON) export/export.py --size $(SIZE) --variant chat --dry-run
+
+export-code-local:
+	@echo "==> Stage 8: Build native local code model ($(SIZE))"
+	EXPORTS_DIR=$(EXPORTS_DIR) $(PYTHON) export/export.py --size $(SIZE) --variant code --dry-run
 
 # ── Stage 10: Serve ───────────────────────────────────────────────────────────
 
@@ -446,8 +467,8 @@ serve:
 
 
 serve-local:
-	@echo "==> Stage 10: Serve local chat checkpoint ($(SIZE))"
-	MODEL=results/runs/$(SIZE)/dpo_chat/final ./serve/serve.sh
+	@echo "==> Stage 10: Serve native local chat export ($(SIZE))"
+	MODEL=$(EXPORTS_DIR)/$(SIZE)/chat ./serve/serve.sh
 
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
@@ -587,6 +608,10 @@ test-model:
 	@echo "==> Running model unit tests..."
 	.venv/bin/pytest tests/model/ -v --tb=short
 
+test-export:
+	@echo "==> Running native export unit tests..."
+	.venv/bin/pytest tests/test_export.py -v --tb=short
+
 test-data-unit:
 	@echo "==> Running data contract/state unit tests..."
 	.venv/bin/pytest tests/test_data_config.py tests/test_curator_state.py -v --tb=short
@@ -603,7 +628,7 @@ test-accel-gen:
 	@echo "==> Running accel_gen unit tests..."
 	.venv/bin/pytest tests/test_accel_gen.py -v --tb=short
 
-test-unit: test-model test-data-unit test-training-args test-config-gen test-accel-gen
+test-unit: test-model test-export test-data-unit test-training-args test-config-gen test-accel-gen
 	@echo "==> Unit tests complete"
 
 # ── Sanity check ──────────────────────────────────────────────────────────────
@@ -695,6 +720,7 @@ help:
 	@echo ""
 	@echo "Tests (unit — no pipeline outputs needed):"
 	@echo "  test-model               Model architecture unit tests"
+	@echo "  test-export              Native Transformers export contract tests"
 	@echo "  test-data-unit           Data config and manifest-state unit tests"
 	@echo "  test-training-args       Transformers/TRL argument compatibility tests"
 	@echo "  test-config-gen          Config generator unit tests"
@@ -740,7 +766,8 @@ help:
 	@echo "  eval-sanity-chat       Stage 7  — behavior sanity eval for chat variant"
 	@echo "  eval-sanity            Stage 7  — alias for eval-sanity-chat"
 	@echo "  eval-mini              Stage 7  — mini eval (pipeline validation)"
-	@echo "  export             Stage 8  — push all variants to HuggingFace Hub"
+	@echo "  export             Stage 8  — build, validate, and push all native Hub variants"
+	@echo "  export-local       Stage 8  — build and validate all native variants without pushing"
 	@echo "  serve              Stage 10 — launch vLLM server"
 	@echo ""
 

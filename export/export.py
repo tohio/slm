@@ -1,15 +1,15 @@
 """
 export/export.py
 -----------------
-Export a trained SLM checkpoint to the HuggingFace Hub.
+Export a trained SLM checkpoint to a native Hugging Face package.
 
-Registers the custom SLMConfig and SLMForCausalLM with AutoConfig and
-AutoModelForCausalLM so the model can be loaded anywhere with:
+Training checkpoints use the in-repository SLM implementation. Its module
+layout and state-dict keys intentionally match Transformers' Llama decoder
+contract, so export converts the configuration and saves the weights as a
+native LlamaForCausalLM package. The published model loads anywhere with:
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
-    model = AutoModelForCausalLM.from_pretrained(
-        "<username>/slm-125m", trust_remote_code=True,
-    )
+    model = AutoModelForCausalLM.from_pretrained("<username>/slm-125m")
 
 Four variants are exported per model size:
 
@@ -28,14 +28,10 @@ so the published card reflects what actually shipped — not just what
 was planned. Falls back to design-only with a caveat note if blend_stats
 is missing or scale-mismatched.
 
-Remote-code bundling:
-    Export writes the architecture files directly into the checkpoint root and
-    config.json declares auto_map entries pointing at config.SLMConfig and
-    model.SLMForCausalLM.
-
-    The root layout is required for compatibility with Transformers dynamic
-    remote-code loading in environments that expect auto_map values in the
-    form module.ClassName.
+The source training checkpoint is never mutated. Export writes a separate
+artifact under results/exports/{size}/{variant}, validates source/native
+logit and greedy-generation parity, then performs a clean AutoModel load with
+trust_remote_code disabled before any Hub upload.
 """
 
 import argparse
@@ -66,25 +62,22 @@ HF_USERNAME = os.environ.get("HF_USERNAME")
 HF_TOKEN    = os.environ.get("HF_TOKEN", "")
 RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", "results"))
 DATA_DIR    = Path(os.environ.get("DATA_DIR", "data"))
+EXPORTS_DIR = Path(os.environ.get("EXPORTS_DIR", str(RESULTS_DIR / "exports")))
+
+OBSOLETE_REMOTE_CODE_PATTERNS = [
+    "attention.py",
+    "block.py",
+    "config.py",
+    "mlp.py",
+    "model.py",
+    "norm.py",
+    "slm_remote/",
+]
 
 # blend_stats.json is written by curator/scripts/curate.py at the end of the
 # blend stage. Reading from data/runs/<size>/curated/ matches the curator's output
 # location regardless of how DATA_DIR is set.
 # Blend stats path is target-scoped; see _load_blend_stats(size).
-
-REPO_ROOT   = Path(__file__).resolve().parents[1]
-MODEL_PKG_DIR = REPO_ROOT / "model"
-
-# Architecture source files bundled into the checkpoint root for Hub remote code.
-BUNDLED_SOURCE_FILES = [
-    "config.py",
-    "model.py",
-    "block.py",
-    "attention.py",
-    "mlp.py",
-    "norm.py",
-]
-
 
 VARIANTS: dict[str, dict] = {
     "base": {
@@ -96,7 +89,7 @@ VARIANTS: dict[str, dict] = {
     "instruct": {
         "checkpoint":    lambda size: RESULTS_DIR / "runs" / size / "sft_instruct" / "final",
         "hub_suffix":    "-instruct",
-        "description":   "instruction-tuned via instruct SFT + response-control",
+        "description":   "instruction-tuned via supervised fine-tuning",
         "pipeline_tag":  "text-generation",
     },
     "chat": {
@@ -277,11 +270,96 @@ def _format_data_mix_table_design_only() -> str:
     return "\n".join(lines)
 
 
+def _read_json(path: Path, label: str) -> dict:
+    """Read a required JSON artifact with a useful export error."""
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"{label} not found at {path}. Export will not guess training "
+            "provenance; regenerate the checkpoint with the current trainer."
+        )
+    with path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def _manifest_dataset_row(label: str, manifest: dict) -> str:
+    """Render one model-card row from an SFT/DPO data manifest."""
+    contract = manifest.get("contract", {})
+    source = contract.get("source", {})
+    dataset = source.get("dataset")
+    revision = source.get("revision")
+    if not dataset or not revision:
+        raise ValueError(
+            f"{label} manifest is missing contract.source.dataset/revision"
+        )
+
+    files = manifest.get("files", {})
+    records = sum(
+        int(file_info.get("records", 0))
+        for file_info in files.values()
+        if isinstance(file_info, dict)
+    )
+    dataset_url = f"https://huggingface.co/datasets/{dataset}/tree/{revision}"
+    return (
+        f"| {label} | [{dataset}]({dataset_url}) | "
+        f"`{revision[:12]}` | {records:,} |"
+    )
+
+
+def _parent_checkpoint(checkpoint: Path, audit_name: str) -> Path:
+    """Resolve the exact parent checkpoint recorded by a training audit."""
+    audit = _read_json(checkpoint / audit_name, f"{audit_name} training audit")
+    parent = audit.get("base_model")
+    if not parent:
+        raise ValueError(f"{audit_name} does not record base_model")
+    return Path(os.path.expandvars(parent))
+
+
+def _fine_tuning_table(size: str, variant: str, checkpoint: Path) -> str:
+    """Build model-card training rows from immutable preparation manifests."""
+    if variant == "base":
+        return ""
+
+    rows = [
+        "| Stage | Dataset | Revision | Prepared records |",
+        "|---|---|---:|---:|",
+    ]
+
+    if variant == "instruct":
+        instruct_checkpoint = checkpoint
+    else:
+        audit_name = "dpo_run_audit.json" if variant == "chat" else "sft_run_audit.json"
+        instruct_checkpoint = _parent_checkpoint(checkpoint, audit_name)
+
+    instruct_manifest = _read_json(
+        instruct_checkpoint / "sft_data_manifest.json",
+        "instruct SFT data manifest",
+    )
+    rows.append(_manifest_dataset_row("Instruct SFT", instruct_manifest))
+
+    if variant == "code":
+        code_manifest = _read_json(
+            checkpoint / "sft_data_manifest.json",
+            "code SFT data manifest",
+        )
+        rows.append(_manifest_dataset_row("Code SFT", code_manifest))
+    elif variant == "chat":
+        dpo_manifest = _read_json(
+            checkpoint / "dpo_data_manifest.json",
+            "DPO data manifest",
+        )
+        rows.append(_manifest_dataset_row("DPO alignment", dpo_manifest))
+
+    return "\n".join(rows)
+
+
 def generate_model_card(
     size: str,
     variant: str,
     hub_name: str,
     n_params: int,
+    checkpoint: Path,
+    config,
+    hf_username: str,
 ) -> str:
     size_upper    = size.upper()
     variant_cfg   = VARIANTS[variant]
@@ -293,37 +371,38 @@ def generate_model_card(
     if variant == "base":
         base_model_yaml = ""
     elif variant in {"chat", "code"}:
-        base_model_yaml = f"base_model: {HF_USERNAME}/slm-{size}-instruct"
+        base_model_yaml = f"base_model: {hf_username}/slm-{size}-instruct"
     else:
-        base_model_yaml = f"base_model: {HF_USERNAME}/slm-{size}"
+        base_model_yaml = f"base_model: {hf_username}/slm-{size}"
 
     variant_section = {
         "base": f"""\
 This is the **base** variant — pretrained from a {token_tgt} curation target with no fine-tuning.
 It is suitable for research and as a starting point for further fine-tuning.
-Use [`{HF_USERNAME}/slm-{size}-instruct`](https://huggingface.co/{HF_USERNAME}/slm-{size}-instruct) for instruction following or
-[`{HF_USERNAME}/slm-{size}-chat`](https://huggingface.co/{HF_USERNAME}/slm-{size}-chat) for aligned conversation.
+Use [`{hf_username}/slm-{size}-instruct`](https://huggingface.co/{hf_username}/slm-{size}-instruct) for instruction following or
+[`{hf_username}/slm-{size}-chat`](https://huggingface.co/{hf_username}/slm-{size}-chat) for aligned conversation.
 """,
         "instruct": f"""\
-This is the **instruct** variant — the base model supervised fine-tuned on general chat and response-control instruction datasets.
+This is the **instruct** variant — the base model supervised fine-tuned on general instruction data.
 It is the sibling base for both the general chat-DPO branch and the code-specialized branch.
-Use [`{HF_USERNAME}/slm-{size}-chat`](https://huggingface.co/{HF_USERNAME}/slm-{size}-chat) for the DPO-aligned version preferred for open-ended conversation.
-Use [`{HF_USERNAME}/slm-{size}`](https://huggingface.co/{HF_USERNAME}/slm-{size}) for the raw base model.
+Use [`{hf_username}/slm-{size}-chat`](https://huggingface.co/{hf_username}/slm-{size}-chat) for the DPO-aligned version preferred for open-ended conversation.
+Use [`{hf_username}/slm-{size}`](https://huggingface.co/{hf_username}/slm-{size}) for the raw base model.
 """,
         "chat": f"""\
 This is the **chat** variant — the instruct model further aligned via general Direct Preference Optimization (DPO).
 This is the recommended variant for conversational and assistant use cases.
-Use [`{HF_USERNAME}/slm-{size}-instruct`](https://huggingface.co/{HF_USERNAME}/slm-{size}-instruct) for the SFT-only version.
-Use [`{HF_USERNAME}/slm-{size}`](https://huggingface.co/{HF_USERNAME}/slm-{size}) for the raw base model.
+Use [`{hf_username}/slm-{size}-instruct`](https://huggingface.co/{hf_username}/slm-{size}-instruct) for the SFT-only version.
+Use [`{hf_username}/slm-{size}`](https://huggingface.co/{hf_username}/slm-{size}) for the raw base model.
 """,
         "code": f"""\
 This is the **code** variant — the instruct model further specialized with code SFT.
-Use [`{HF_USERNAME}/slm-{size}-chat`](https://huggingface.co/{HF_USERNAME}/slm-{size}-chat) for general assistant use.
+Use [`{hf_username}/slm-{size}-chat`](https://huggingface.co/{hf_username}/slm-{size}-chat) for general assistant use.
 """,
     }[variant]
 
     pretrain_table = _format_data_mix_table(size)
 
+    fine_tuning_table = _fine_tuning_table(size, variant, checkpoint)
     training_section = {
         "base": f"""\
 **Pretraining corpus** — {token_tgt} curation target blended across the following sources:
@@ -337,10 +416,7 @@ Use [`{HF_USERNAME}/slm-{size}-chat`](https://huggingface.co/{HF_USERNAME}/slm-{
 
 **Fine-tuning**
 
-| Stage | Dataset | Size |
-|---|---|---|
-| Instruct SFT | SmolTalk backbone + local response-control data | prepared by `finetune/data/prepare_sft.py` |
-| Response control | Generated locally by `finetune/data/response_control.py` | local behavior-control examples |
+{fine_tuning_table}
 """,
         "chat": f"""\
 **Pretraining corpus** — {token_tgt} curation target blended across the following sources:
@@ -349,11 +425,7 @@ Use [`{HF_USERNAME}/slm-{size}-chat`](https://huggingface.co/{HF_USERNAME}/slm-{
 
 **Fine-tuning and alignment**
 
-| Stage | Dataset | Size |
-|---|---|---|
-| Instruct SFT | SmolTalk backbone + local response-control data | prepared by `finetune/data/prepare_sft.py` |
-| Response control | Generated locally by `finetune/data/response_control.py` | local behavior-control examples |
-| DPO alignment | [HuggingFaceH4/ultrafeedback_binarized](https://huggingface.co/datasets/HuggingFaceH4/ultrafeedback_binarized) + local general behavior pairs | prepared by `alignment/data/prepare_dpo.py` |
+{fine_tuning_table}
 """,
         "code": f"""\
 **Pretraining corpus** — {token_tgt} curation target blended across the following sources:
@@ -362,12 +434,60 @@ Use [`{HF_USERNAME}/slm-{size}-chat`](https://huggingface.co/{HF_USERNAME}/slm-{
 
 **Fine-tuning**
 
-| Stage | Dataset | Size |
-|---|---|---|
-| Instruct SFT | SmolTalk backbone + response-control | parent checkpoint: instruct |
-| Code SFT | Magicoder-OSS-Instruct-75K + handcrafted body-only completions | code-specialized branch |
+{fine_tuning_table}
 """,
     }[variant]
+
+    if variant == "base":
+        usage_section = f"""\
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+model_id = "{hf_username}/{hub_name}"
+tokenizer = AutoTokenizer.from_pretrained(model_id)
+model = AutoModelForCausalLM.from_pretrained(model_id)
+
+prompt = "The capital of France is"
+inputs = tokenizer(prompt, return_tensors="pt")
+output = model.generate(
+    **inputs,
+    max_new_tokens=40,
+    do_sample=False,
+    pad_token_id=tokenizer.pad_token_id,
+)
+print(tokenizer.decode(output[0], skip_special_tokens=True))
+```
+"""
+    else:
+        usage_section = f"""\
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+model_id = "{hf_username}/{hub_name}"
+model = AutoModelForCausalLM.from_pretrained(model_id)
+tokenizer = AutoTokenizer.from_pretrained(model_id)
+
+messages = [
+    {{"role": "system", "content": "Answer clearly and concisely."}},
+    {{"role": "user", "content": "Explain what a transformer is."}},
+]
+inputs = tokenizer.apply_chat_template(
+    messages,
+    return_tensors="pt",
+    add_generation_prompt=True,
+    return_dict=True,
+)
+output = model.generate(
+    **inputs,
+    max_new_tokens=120,
+    do_sample=False,
+    repetition_penalty=1.1,
+    pad_token_id=tokenizer.pad_token_id,
+)
+input_len = inputs["input_ids"].shape[1]
+print(tokenizer.decode(output[0][input_len:], skip_special_tokens=True))
+```
+"""
 
     return f"""---
 license: mit
@@ -377,7 +497,7 @@ pipeline_tag: {pipeline_tag}
 tags:
   - causal-lm
   - decoder-only
-  - custom-architecture
+  - llama-compatible
   - rope
   - gqa
   - swiglu
@@ -396,9 +516,10 @@ built entirely from scratch, from raw web data through to a production-ready ali
 
 | Variant | Hub | Description |
 |---|---|---|
-| Base | [{HF_USERNAME}/slm-{size}](https://huggingface.co/{HF_USERNAME}/slm-{size}) | Pretrained only |
-| Instruct | [{HF_USERNAME}/slm-{size}-instruct](https://huggingface.co/{HF_USERNAME}/slm-{size}-instruct) | Instruct SFT + response-control |
-| Chat | [{HF_USERNAME}/slm-{size}-chat](https://huggingface.co/{HF_USERNAME}/slm-{size}-chat) | Instruct + general DPO |
+| Base | [{hf_username}/slm-{size}](https://huggingface.co/{hf_username}/slm-{size}) | Pretrained only |
+| Instruct | [{hf_username}/slm-{size}-instruct](https://huggingface.co/{hf_username}/slm-{size}-instruct) | Instruct SFT |
+| Chat | [{hf_username}/slm-{size}-chat](https://huggingface.co/{hf_username}/slm-{size}-chat) | Instruct + general DPO |
+| Code | [{hf_username}/slm-{size}-code](https://huggingface.co/{hf_username}/slm-{size}-code) | Instruct + code SFT |
 
 ## Architecture
 
@@ -410,56 +531,26 @@ built entirely from scratch, from raw web data through to a production-ready ali
 | Attention | GQA | Reduces KV cache memory at inference |
 | Bias | None | Simpler, modern standard |
 | Embeddings | Tied | Reduces parameters, effective at small scale |
-| Vocab size | 32,000 | Custom BPE tokenizer trained on the pretraining corpus |
+| Layers | {config.num_hidden_layers} | Decoder blocks |
+| Hidden size | {config.hidden_size} | Model width |
+| Attention heads | {config.num_attention_heads} query / {config.num_key_value_heads} KV | Grouped-query layout |
+| Context | {config.max_position_embeddings:,} tokens | Native trained context |
+| RoPE theta | {config.rope_theta:g} | Rotary frequency base |
+| Vocab size | {config.vocab_size:,} | Custom BPE tokenizer trained on the pretraining corpus |
 | Parameters | {param_str} | |
+
+The model was trained with the repository's SLM implementation and exported
+to the equivalent native Transformers `LlamaForCausalLM` format. The Hub
+package contains no executable model code and does not require
+`trust_remote_code`.
 
 ## Training
 
 {training_section}
 
-**Hardware:** NVIDIA H200 (pretraining on 1× H200, fine-tuning on 1× H200)
 ## Usage
 
-```python
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-model = AutoModelForCausalLM.from_pretrained(
-    "{HF_USERNAME}/{hub_name}",
-    trust_remote_code=True,
-)
-tokenizer = AutoTokenizer.from_pretrained(
-    "{HF_USERNAME}/{hub_name}",
-    trust_remote_code=True,
-)
-
-messages = [
-    {{"role": "system", "content": "Answer clearly and concisely."}},
-    {{"role": "user", "content": "Explain what a transformer is."}},
-]
-
-inputs = tokenizer.apply_chat_template(
-    messages,
-    return_tensors="pt",
-    add_generation_prompt=True,
-    return_dict=True,
-)
-
-endofturn_id = tokenizer.convert_tokens_to_ids("<|endofturn|>")
-
-output = model.generate(
-    **inputs,
-    max_new_tokens=120,
-    do_sample=False,
-    repetition_penalty=1.1,
-    pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
-    eos_token_id=[tokenizer.eos_token_id, endofturn_id],
-)
-
-input_len = inputs["input_ids"].shape[1]
-print(tokenizer.decode(output[0][input_len:], skip_special_tokens=True))
-```
-
-`trust_remote_code=True` loads the custom SLM architecture bundled alongside the model weights — no local install of the `tohio/slm` codebase required.
+{usage_section}
 
 ## Limitations
 
@@ -502,7 +593,7 @@ def _export_tokenizer_to_checkpoint_root(tokenizer, tokenizer_path: Path, checkp
     """
     Save/copy tokenizer artifacts to the checkpoint root so standard Hub loading works:
 
-        AutoTokenizer.from_pretrained(repo_id, trust_remote_code=True)
+        AutoTokenizer.from_pretrained(repo_id)
 
     The tokenizer may also exist under checkpoint/tokenizer/, but the Hub root
     must contain tokenizer.json/tokenizer_config.json/etc. for normal use.
@@ -553,104 +644,325 @@ def _export_tokenizer_to_checkpoint_root(tokenizer, tokenizer_path: Path, checkp
 
     log.info("Tokenizer artifacts exported to checkpoint root")
 
-def _bundle_remote_code_package(checkpoint: Path) -> Path:
-    """
-    Copy live architecture source files into the checkpoint root.
+def _checkpoint_dtype(checkpoint: Path):
+    """Read the stored tensor dtype without materializing the checkpoint."""
+    import safetensors
+    import torch
 
-    Transformers remote-code auto_map should use entries like:
-        config.SLMConfig
-        model.SLMForCausalLM
-
-    This root layout avoids nested auto_map values such as
-    slm_remote.model.SLMForCausalLM, which are not accepted by some
-    Transformers dynamic remote-code loaders.
-    """
-    import shutil
-
-    for filename in BUNDLED_SOURCE_FILES:
-        live_file = MODEL_PKG_DIR / filename
-        if not live_file.is_file():
-            raise FileNotFoundError(f"Missing live architecture source file: {live_file}")
-        shutil.copy2(live_file, checkpoint / filename)
-
-    log.info(
-        f"Bundled remote-code files into checkpoint root "
-        f"({len(BUNDLED_SOURCE_FILES)} files)"
-    )
-    return checkpoint
-
-def _validate_bundled_files(checkpoint: Path) -> None:
-    """
-    Confirm bundled remote-code files at checkpoint root match live source.
-
-    Existence alone is not enough — a stale bundled copy from an earlier
-    export can ship buggy code to the Hub silently. Compare bytes against
-    the live source to catch drift.
-    """
-    import hashlib
-
-    missing, mismatched = [], []
-
-    for filename in BUNDLED_SOURCE_FILES:
-        ckpt_file = checkpoint / filename
-        live_file = MODEL_PKG_DIR / filename
-
-        if not ckpt_file.is_file():
-            missing.append(filename)
-            continue
-
-        if hashlib.sha256(ckpt_file.read_bytes()).digest() != \
-           hashlib.sha256(live_file.read_bytes()).digest():
-            mismatched.append(filename)
-
-    if missing:
+    weights_path = checkpoint / "model.safetensors"
+    if not weights_path.is_file():
         raise FileNotFoundError(
-            f"Architecture files missing from checkpoint root: {missing}."
+            f"Native export requires an unsharded safetensors checkpoint at "
+            f"{weights_path}"
         )
 
-    if mismatched:
-        raise RuntimeError(
-            f"Bundled architecture files differ from live source: {mismatched}. "
-            f"Re-run export so checkpoint root files are refreshed."
+    with safetensors.safe_open(str(weights_path), framework="pt", device="cpu") as handle:
+        keys = list(handle.keys())
+        if not keys:
+            raise RuntimeError(f"Checkpoint contains no tensors: {weights_path}")
+        dtype = handle.get_tensor(keys[0]).dtype
+
+    supported = {torch.float32, torch.float16, torch.bfloat16}
+    if dtype not in supported:
+        raise ValueError(f"Unsupported checkpoint dtype for export: {dtype}")
+    return dtype
+
+
+def _native_llama_config(source_config, tokenizer, source_dtype):
+    """Translate SLMConfig fields to the equivalent native LlamaConfig."""
+    from transformers import LlamaConfig
+
+    if len(tokenizer) != source_config.vocab_size:
+        raise ValueError(
+            f"Tokenizer/model vocabulary mismatch: tokenizer={len(tokenizer):,}, "
+            f"model={source_config.vocab_size:,}"
         )
 
-    log.info(
-        f"Bundled remote code validated: "
-        f"{len(BUNDLED_SOURCE_FILES)} root files match live source"
+    return LlamaConfig(
+        vocab_size=source_config.vocab_size,
+        hidden_size=source_config.hidden_size,
+        intermediate_size=source_config.intermediate_size,
+        num_hidden_layers=source_config.num_hidden_layers,
+        num_attention_heads=source_config.num_attention_heads,
+        num_key_value_heads=source_config.num_key_value_heads,
+        hidden_act="silu",
+        max_position_embeddings=source_config.max_position_embeddings,
+        initializer_range=source_config.initializer_range,
+        rms_norm_eps=source_config.rms_norm_eps,
+        use_cache=source_config.use_cache,
+        pad_token_id=tokenizer.pad_token_id,
+        bos_token_id=tokenizer.bos_token_id,
+        eos_token_id=tokenizer.eos_token_id,
+        tie_word_embeddings=source_config.tie_word_embeddings,
+        rope_theta=source_config.rope_theta,
+        rope_scaling=None,
+        attention_bias=False,
+        attention_dropout=source_config.attention_dropout,
+        mlp_bias=False,
+        dtype=str(source_dtype).removeprefix("torch."),
     )
 
-def _ensure_remote_code_auto_map(checkpoint: Path) -> None:
-    """
-    Ensure config.json advertises the bundled custom architecture to
-    Transformers AutoConfig / AutoModelForCausalLM.
 
-    auto_map values use module.ClassName form for compatibility with
-    Transformers dynamic remote-code loading.
-    """
-    config_path = checkpoint / "config.json"
-    if not config_path.is_file():
-        raise FileNotFoundError(f"Missing config.json at {config_path}")
+def _convert_to_native_llama(source_model, tokenizer, source_dtype):
+    """Create a native LlamaForCausalLM and load the SLM state dict strictly."""
+    from transformers import LlamaForCausalLM
 
-    with open(config_path, "r", encoding="utf-8") as f:
-        cfg = json.load(f)
+    native_config = _native_llama_config(
+        source_model.config,
+        tokenizer,
+        source_dtype,
+    )
+    native_model = LlamaForCausalLM(native_config).to(dtype=source_dtype)
+    load_result = native_model.load_state_dict(source_model.state_dict(), strict=True)
+    if load_result.missing_keys or load_result.unexpected_keys:
+        raise RuntimeError(
+            "SLM-to-Llama state-dict conversion was not exact: "
+            f"missing={load_result.missing_keys}, "
+            f"unexpected={load_result.unexpected_keys}"
+        )
+    native_model.tie_weights()
+    native_model.eval()
+    return native_model
 
-    expected_auto_map = {
-        "AutoConfig": "config.SLMConfig",
-        "AutoModelForCausalLM": "model.SLMForCausalLM",
+
+def _parity_batch(tokenizer):
+    """Build one deterministic chat-formatted batch for round-trip checks."""
+    import torch
+
+    messages = [
+        {"role": "system", "content": "Answer clearly and concisely."},
+        {"role": "user", "content": "What is the capital of France?"},
+    ]
+    encoded = tokenizer.apply_chat_template(
+        messages,
+        return_tensors="pt",
+        add_generation_prompt=True,
+        return_dict=True,
+    )
+    if hasattr(encoded, "input_ids"):
+        input_ids = encoded["input_ids"]
+        attention_mask = encoded.get("attention_mask")
+    else:
+        input_ids = encoded
+        attention_mask = None
+    if attention_mask is None:
+        attention_mask = torch.ones_like(input_ids)
+    return input_ids, attention_mask
+
+
+def _capture_parity_reference(model, tokenizer) -> dict:
+    """Capture source logits and greedy tokens before native conversion."""
+    import torch
+    from inference.utils import resolve_special_token_ids
+
+    model.eval()
+    input_ids, attention_mask = _parity_batch(tokenizer)
+    special_ids = resolve_special_token_ids(tokenizer)
+    generation_kwargs = {
+        "max_new_tokens": 16,
+        "do_sample": False,
+        "use_cache": False,
+        "pad_token_id": special_ids.pad,
+        "eos_token_id": special_ids.eos_list,
+    }
+    with torch.no_grad():
+        logits = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            use_cache=False,
+        ).logits.detach().float().cpu()
+        generated = model.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            **generation_kwargs,
+        ).detach().cpu()
+
+    return {
+        "input_ids": input_ids.cpu(),
+        "attention_mask": attention_mask.cpu(),
+        "logits": logits,
+        "generated": generated,
+        "generation_kwargs": generation_kwargs,
     }
 
-    current = cfg.get("auto_map")
-    if current == expected_auto_map:
-        log.info("Remote-code auto_map already present in config.json")
-        return
 
-    cfg["auto_map"] = expected_auto_map
+def _validate_round_trip_parity(model, reference: dict, source_dtype) -> None:
+    """Reject an exported package whose logits or greedy output changed."""
+    import torch
 
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2)
-        f.write("\n")
+    model.eval()
+    with torch.no_grad():
+        logits = model(
+            input_ids=reference["input_ids"],
+            attention_mask=reference["attention_mask"],
+            use_cache=False,
+        ).logits.detach().float().cpu()
+        generated = model.generate(
+            input_ids=reference["input_ids"],
+            attention_mask=reference["attention_mask"],
+            **reference["generation_kwargs"],
+        ).detach().cpu()
 
-    log.info("Injected root remote-code auto_map into config.json")
+    if source_dtype == torch.float32:
+        rtol, atol = 1e-5, 1e-5
+    elif source_dtype == torch.float16:
+        rtol, atol = 5e-3, 5e-3
+    else:
+        rtol, atol = 2e-2, 2e-2
+
+    try:
+        torch.testing.assert_close(
+            logits,
+            reference["logits"],
+            rtol=rtol,
+            atol=atol,
+        )
+    except AssertionError as exc:
+        max_abs = (logits - reference["logits"]).abs().max().item()
+        raise RuntimeError(
+            "Native export changed model logits "
+            f"(max_abs_diff={max_abs:.6g}, rtol={rtol}, atol={atol})"
+        ) from exc
+
+    if not torch.equal(generated, reference["generated"]):
+        raise RuntimeError(
+            "Native export changed deterministic greedy generation. "
+            "Refusing to publish a behaviorally different checkpoint."
+        )
+    log.info("Native round-trip parity passed (logits and greedy tokens)")
+
+
+def _write_generation_config(export_dir: Path, tokenizer) -> None:
+    """Write explicit generation stop-token metadata."""
+    from transformers import GenerationConfig
+    from inference.utils import resolve_special_token_ids
+
+    special_ids = resolve_special_token_ids(tokenizer)
+    generation_config = GenerationConfig(
+        bos_token_id=special_ids.bos,
+        eos_token_id=special_ids.eos_list,
+        pad_token_id=special_ids.pad,
+        do_sample=False,
+        use_cache=True,
+    )
+    generation_config.save_pretrained(str(export_dir))
+
+
+def _validate_native_package(
+    export_dir: Path,
+    source_config,
+    tokenizer,
+    source_dtype,
+):
+    """Load the staged package through Auto* with remote code disabled."""
+    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+
+    config_path = export_dir / "config.json"
+    config_json = _read_json(config_path, "native export config")
+    if config_json.get("model_type") != "llama":
+        raise RuntimeError("Export config model_type must be 'llama'")
+    if config_json.get("architectures") != ["LlamaForCausalLM"]:
+        raise RuntimeError(
+            "Export config architectures must be ['LlamaForCausalLM']"
+        )
+    if "auto_map" in config_json:
+        raise RuntimeError("Native export must not contain auto_map")
+
+    python_files = sorted(path.name for path in export_dir.glob("*.py"))
+    if python_files:
+        raise RuntimeError(
+            f"Native export must not bundle executable model code: {python_files}"
+        )
+
+    loaded_config = AutoConfig.from_pretrained(
+        str(export_dir),
+        trust_remote_code=False,
+        local_files_only=True,
+    )
+    expected_fields = {
+        "vocab_size": source_config.vocab_size,
+        "hidden_size": source_config.hidden_size,
+        "intermediate_size": source_config.intermediate_size,
+        "num_hidden_layers": source_config.num_hidden_layers,
+        "num_attention_heads": source_config.num_attention_heads,
+        "num_key_value_heads": source_config.num_key_value_heads,
+        "max_position_embeddings": source_config.max_position_embeddings,
+    }
+    for field, expected in expected_fields.items():
+        actual = getattr(loaded_config, field)
+        if actual != expected:
+            raise RuntimeError(
+                f"Native config mismatch for {field}: "
+                f"expected {expected}, got {actual}"
+            )
+
+    loaded_tokenizer = AutoTokenizer.from_pretrained(
+        str(export_dir),
+        trust_remote_code=False,
+        local_files_only=True,
+    )
+    if len(loaded_tokenizer) != len(tokenizer):
+        raise RuntimeError(
+            "Tokenizer vocabulary changed during export: "
+            f"{len(tokenizer)} -> {len(loaded_tokenizer)}"
+        )
+
+    loaded_model = AutoModelForCausalLM.from_pretrained(
+        str(export_dir),
+        trust_remote_code=False,
+        local_files_only=True,
+    )
+    if loaded_model.config.model_type != "llama":
+        raise RuntimeError("Clean AutoModel load did not resolve native Llama")
+    loaded_dtype = next(loaded_model.parameters()).dtype
+    if loaded_dtype != source_dtype:
+        raise RuntimeError(
+            f"Native load changed checkpoint dtype: "
+            f"expected {source_dtype}, got {loaded_dtype}"
+        )
+    log.info("Clean AutoConfig/AutoTokenizer/AutoModel load passed")
+    return loaded_model
+
+
+def _write_export_manifest(
+    export_dir: Path,
+    source_checkpoint: Path,
+    size: str,
+    variant: str,
+    source_config,
+    n_params: int,
+    source_dtype,
+) -> None:
+    """Record the conversion contract without hashing multi-GB weights."""
+    manifest = {
+        "schema_version": 1,
+        "format": "transformers_native_llama",
+        "source": {
+            "size": size,
+            "variant": variant,
+            "stage": source_checkpoint.parent.name,
+            "checkpoint": source_checkpoint.name,
+        },
+        "source_model_type": source_config.model_type,
+        "export_model_type": "llama",
+        "source_dtype": str(source_dtype).removeprefix("torch."),
+        "parameters": n_params,
+        "architecture": {
+            "vocab_size": source_config.vocab_size,
+            "hidden_size": source_config.hidden_size,
+            "intermediate_size": source_config.intermediate_size,
+            "num_hidden_layers": source_config.num_hidden_layers,
+            "num_attention_heads": source_config.num_attention_heads,
+            "num_key_value_heads": source_config.num_key_value_heads,
+            "max_position_embeddings": source_config.max_position_embeddings,
+            "rope_theta": source_config.rope_theta,
+            "tie_word_embeddings": source_config.tie_word_embeddings,
+        },
+    }
+    (export_dir / "export_manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 def export(
     size: str,
@@ -659,27 +971,33 @@ def export(
     dry_run: bool = False,
     private: bool = False,
 ) -> None:
-    from transformers import AutoConfig, AutoModelForCausalLM
-    from huggingface_hub import login
+    import gc
+    import shutil
+
     from model import SLMConfig, SLMForCausalLM
 
-    if not HF_USERNAME:
+    if not dry_run and not HF_USERNAME:
         log.error(
             "HF_USERNAME not set in the environment. "
             "Add HF_USERNAME=<your-hub-username> to .env before running export."
         )
         sys.exit(1)
 
+    hf_username = HF_USERNAME or "local"
     variant_cfg = VARIANTS[variant]
     checkpoint  = model_path or variant_cfg["checkpoint"](size)
     hub_suffix  = variant_cfg["hub_suffix"]
     hub_name    = f"slm-{size}{hub_suffix}"
-    repo_id     = f"{HF_USERNAME}/{hub_name}"
+    repo_id     = f"{hf_username}/{hub_name}"
+    export_parent = EXPORTS_DIR / size
+    export_dir = export_parent / variant
+    staging_dir = export_parent / f".{variant}.staging"
 
     log.info(f"=== SLM Export ===")
     log.info(f"Size:       {size}")
     log.info(f"Variant:    {variant}")
     log.info(f"Checkpoint: {checkpoint}")
+    log.info(f"Artifact:   {export_dir}")
     log.info(f"Hub:        {repo_id}")
     log.info(f"Dry run:    {dry_run}")
 
@@ -691,12 +1009,14 @@ def export(
         )
         sys.exit(1)
 
-    AutoConfig.register("slm", SLMConfig)
-    AutoModelForCausalLM.register(SLMConfig, SLMForCausalLM)
-
-    log.info("Loading model...")
-    config   = SLMConfig.from_pretrained(str(checkpoint))
-    model    = SLMForCausalLM.from_pretrained(str(checkpoint))
+    source_dtype = _checkpoint_dtype(checkpoint)
+    log.info(f"Checkpoint dtype: {source_dtype}")
+    log.info("Loading source SLM checkpoint...")
+    config = SLMConfig.from_pretrained(str(checkpoint))
+    model = SLMForCausalLM.from_pretrained(
+        str(checkpoint),
+        dtype=source_dtype,
+    )
     n_params = sum(p.numel() for p in model.parameters())
     log.info(f"Parameters: {n_params:,} ({n_params / 1e6:.1f}M)")
 
@@ -706,64 +1026,89 @@ def export(
     tokenizer = load_tokenizer(tokenizer_path)
     log.info(f"Tokenizer loaded from {tokenizer_path}")
 
-    _export_tokenizer_to_checkpoint_root(tokenizer, tokenizer_path, checkpoint)
+    _validate_model(model, tokenizer, config)
+    parity_reference = _capture_parity_reference(model, tokenizer)
 
+    export_parent.mkdir(parents=True, exist_ok=True)
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir)
+    staging_dir.mkdir(parents=True)
+
+    log.info("Converting SLM checkpoint to native LlamaForCausalLM...")
+    native_model = _convert_to_native_llama(model, tokenizer, source_dtype)
+    native_model.save_pretrained(
+        str(staging_dir),
+        safe_serialization=True,
+    )
+    _export_tokenizer_to_checkpoint_root(tokenizer, tokenizer_path, staging_dir)
+    _write_generation_config(staging_dir, tokenizer)
+    _write_export_manifest(
+        staging_dir,
+        checkpoint,
+        size,
+        variant,
+        config,
+        n_params,
+        source_dtype,
+    )
+
+    model_card = generate_model_card(
+        size=size,
+        variant=variant,
+        hub_name=hub_name,
+        n_params=n_params,
+        checkpoint=checkpoint,
+        config=config,
+        hf_username=hf_username,
+    )
+    card_path = staging_dir / "README.md"
+    card_path.write_text(model_card, encoding="utf-8")
+    log.info(f"Model card written to {card_path} ({len(model_card):,} chars)")
+
+    # Release both in-memory conversion models before the required clean load.
+    del native_model
+    del model
+    gc.collect()
+
+    clean_model = _validate_native_package(
+        staging_dir,
+        config,
+        tokenizer,
+        source_dtype,
+    )
+    _validate_round_trip_parity(clean_model, parity_reference, source_dtype)
+    _validate_model(clean_model, tokenizer, clean_model.config)
+    del clean_model
+    gc.collect()
+
+    if export_dir.exists():
+        shutil.rmtree(export_dir)
+    staging_dir.replace(export_dir)
+    log.info(f"Native export artifact ready: {export_dir}")
 
     if dry_run:
-        log.info("Dry run — skipping Hub push")
+        log.info("Dry run — native artifact validated; skipping Hub push")
         log.info(f"Would push to: https://huggingface.co/{repo_id}")
-        _validate_model(model, tokenizer, config)
-        # Bundle and validate remote-code package before preview.
-        _bundle_remote_code_package(checkpoint)
-        _validate_bundled_files(checkpoint)
-        _ensure_remote_code_auto_map(checkpoint)
-        card = generate_model_card(size, variant, hub_name, n_params)
-        log.info(f"Model card preview ({len(card):,} chars, first 400):")
-        log.info(card[:400].replace("\n", "\n  "))
         return
 
     if not HF_TOKEN:
         log.error("HF_TOKEN not set in .env")
         sys.exit(1)
+    from huggingface_hub import HfApi, login
     login(token=HF_TOKEN)
-
-    _validate_model(model, tokenizer, config)
-
-    # Bundle and validate remote-code package before Hub upload.
-    _bundle_remote_code_package(checkpoint)
-    _validate_bundled_files(checkpoint)
-    _ensure_remote_code_auto_map(checkpoint)
-
-    model_card = generate_model_card(size, variant, hub_name, n_params)
-    card_path  = checkpoint / "README.md"
-    with open(card_path, "w") as f:
-        f.write(model_card)
-    log.info(f"Model card written to {card_path} ({len(model_card):,} chars)")
-
-    # Single-commit push of the entire checkpoint dir — weights, config
-    # (with auto_map), tokenizer, README.md, and the bundled remote-code package.
-    # Using push_to_hub on the model would omit the README and any other
-    # files at the checkpoint root, so we upload the folder directly.
-    from huggingface_hub import HfApi
 
     api = HfApi(token=HF_TOKEN)
     api.create_repo(repo_id=repo_id, private=private, exist_ok=True)
 
-    log.info(f"Pushing {checkpoint} to {repo_id} (single commit)...")
+    log.info(f"Pushing {export_dir} to {repo_id} (single commit)...")
     api.upload_folder(
         repo_id=repo_id,
-        folder_path=str(checkpoint),
+        folder_path=str(export_dir),
         commit_message=f"Export {hub_name} ({n_params / 1e6:.1f}M params)",
-        # Don't upload training-only artefacts even if they happen to be
-        # in the checkpoint dir.
+        # Remove files left by the previous auto_map/remote-code packaging
+        # contract in the same commit that uploads the native package.
+        delete_patterns=OBSOLETE_REMOTE_CODE_PATTERNS,
         ignore_patterns=[
-            "optimizer.pt",
-            "scheduler.pt",
-            "trainer_state.json",
-            "training_args.bin",
-            "rng_state*.pth",
-            "global_step*",
-            "*.log",
             "__pycache__",
             "*.pyc",
         ],

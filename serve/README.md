@@ -34,9 +34,10 @@ Serve exported Hub chat model:
 make serve SIZE=125m
 ```
 
-Serve local chat checkpoint:
+Serve a previously built local native chat export:
 
 ```bash
+make export-chat-local SIZE=125m
 make serve-local SIZE=125m
 ```
 
@@ -44,7 +45,7 @@ The Makefile passes:
 
 ```text
 MODEL=tohio/slm-<size>-chat
-MODEL=results/runs/<size>/dpo_chat/final
+MODEL=results/exports/<size>/chat
 ```
 
 ---
@@ -64,10 +65,10 @@ Serve a Hub chat model:
 ./serve/serve.sh --model tohio/slm-350m-chat
 ```
 
-Serve a local checkpoint:
+Serve a local native export:
 
 ```bash
-./serve/serve.sh --model results/runs/125m/dpo_chat/final
+./serve/serve.sh --model results/exports/125m/chat
 ```
 
 Custom port:
@@ -156,7 +157,8 @@ kubectl logs -f deployment/slm-125m -n inference
 
 ## Notes
 
-- `serve.sh` always passes `--trust-remote-code`.
+- Hub and local serving consume native `LlamaForCausalLM` exports and do not
+  enable remote model code.
 - Local model names are derived from the checkpoint directory.
 - Hub model names are stripped to the repo name for the served model ID.
 - Tensor parallelism is a vLLM serving feature and is separate from the training pipeline.

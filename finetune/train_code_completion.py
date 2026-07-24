@@ -160,30 +160,7 @@ def evaluate_loss(model, loader, device: torch.device) -> float:
     return weighted_loss / supervised_tokens
 
 
-def copy_runtime_files(base_model: Path, out_dir: Path) -> None:
-    for name in [
-        "attention.py",
-        "block.py",
-        "config.py",
-        "mlp.py",
-        "model.py",
-        "norm.py",
-        "README.md",
-        "chat_template.jinja",
-    ]:
-        src = base_model / name
-        if src.exists():
-            shutil.copy2(src, out_dir / name)
-
-    src_remote = base_model / "slm_remote"
-    if src_remote.exists():
-        dst_remote = out_dir / "slm_remote"
-        if dst_remote.exists():
-            shutil.rmtree(dst_remote)
-        shutil.copytree(src_remote, dst_remote)
-
-
-def save_checkpoint(model, tokenizer, base_model: Path, out_dir: Path, metadata: dict[str, Any]) -> None:
+def save_checkpoint(model, tokenizer, out_dir: Path, metadata: dict[str, Any]) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     model.save_pretrained(str(out_dir))
@@ -203,8 +180,6 @@ def save_checkpoint(model, tokenizer, base_model: Path, out_dir: Path, metadata:
         + "\n",
         encoding="utf-8",
     )
-
-    copy_runtime_files(base_model, out_dir)
 
     (out_dir / "code_completion_training_metadata.json").write_text(
         json.dumps(metadata, indent=2) + "\n",
@@ -244,7 +219,6 @@ def latest_recovery_checkpoint(output_dir: Path) -> Path | None:
 def save_recovery_state(
     model,
     tokenizer,
-    base_model: Path,
     output_dir: Path,
     optimizer,
     scheduler,
@@ -253,7 +227,7 @@ def save_recovery_state(
     metadata: dict[str, Any],
 ) -> None:
     checkpoint_dir = output_dir / f"checkpoint-{update}"
-    save_checkpoint(model, tokenizer, base_model, checkpoint_dir, metadata)
+    save_checkpoint(model, tokenizer, checkpoint_dir, metadata)
     state = {
         "update": update,
         "best_val": best_val,
@@ -461,7 +435,6 @@ def main() -> None:
                         save_checkpoint(
                             model,
                             tokenizer,
-                            base_model,
                             output_dir / "best",
                             {
                                 "config": str(cfg_path),
@@ -478,7 +451,6 @@ def main() -> None:
                     save_recovery_state(
                         model,
                         tokenizer,
-                        base_model,
                         output_dir,
                         optimizer,
                         scheduler,
@@ -511,7 +483,6 @@ def main() -> None:
             save_checkpoint(
                 model,
                 tokenizer,
-                base_model,
                 output_dir / "best",
                 {"config": str(cfg_path), "update": update, "val_loss": val_loss},
             )
@@ -545,7 +516,7 @@ def main() -> None:
             encoding="utf-8",
         )
     else:
-        save_checkpoint(model, tokenizer, base_model, final_dir, final_metadata)
+        save_checkpoint(model, tokenizer, final_dir, final_metadata)
     print(f"Saved final checkpoint: {final_dir}")
 
 

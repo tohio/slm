@@ -23,10 +23,8 @@ spec:
           # Pin to a specific version — never use :latest in production.
           # Check https://github.com/vllm-project/vllm/releases for latest stable.
           #
-          # v0.19.0 (Apr 2026): first release line with full transformers-5
-          # compatibility, which our SLM codebase depends on (tie_weights
-          # kwargs, dict-form _tied_weights_keys, DynamicCache.layers API,
-          # cache_position in prepare_inputs_for_generation).
+          # v0.19.0 (Apr 2026): Transformers 5-compatible serving line used
+          # for the native LlamaForCausalLM export contract.
           #
           # vLLM runs in its own image and therefore has an independent
           # PyTorch/Transformers dependency stack. Upgrade this image only with
@@ -54,12 +52,9 @@ spec:
             - "0.85"
             - --served-model-name
             - slm-125m
-            # --trust-remote-code is required because SLMConfig and SLMForCausalLM
-            # are custom classes not known to the base transformers library.
-            # The model is loaded from our own Hub repo, which bundles the
-            # architecture files alongside the weights — see
-            # export/export.py and model/config.py::auto_map.
-            - --trust-remote-code
+            # Export publishes a native LlamaForCausalLM package. Do not add
+            # --trust-remote-code; the Hub repository contains no executable
+            # architecture files.
           ports:
             - containerPort: 8000
               name: http

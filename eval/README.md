@@ -54,7 +54,6 @@ Common options:
 --batch-size
 --num-fewshot
 --device
---trust-remote-code
 --limit
 --output
 ```
@@ -84,7 +83,6 @@ Common options:
 ```text
 --model
 --prompts
---trust-remote-code
 --device
 --repetition-penalty
 --json-out

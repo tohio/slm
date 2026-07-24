@@ -131,7 +131,7 @@ def safe_save_model(model: SLMForCausalLM, dst: Path) -> None:
     Note:
         This function intentionally writes only model.safetensors.
         The caller should copy src -> dst first to preserve config.json,
-        tokenizer/, generation_config.json, auto_map, and any repo files.
+        tokenizer/, generation_config.json, and any run metadata.
     """
     dst.mkdir(parents=True, exist_ok=True)
 
@@ -227,7 +227,7 @@ def main():
     #   2. Patch only dst/model.safetensors.
     #
     # This preserves config.json, tokenizer/, generation_config.json,
-    # auto_map, code files, model card files, and anything else in src.
+    # run metadata, and anything else in src.
     if src.resolve() != dst.resolve():
         if dst.exists():
             shutil.rmtree(dst)

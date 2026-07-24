@@ -14,7 +14,12 @@ Register with HuggingFace AutoModel so the model can be loaded with:
     AutoConfig.register("slm", SLMConfig)
     AutoModelForCausalLM.register(SLMConfig, SLMForCausalLM)
 
-    model = AutoModelForCausalLM.from_pretrained("tohio/slm-125m")
+    model = AutoModelForCausalLM.from_pretrained(
+        "results/runs/125m/pretrain/final"
+    )
+
+Published Hub checkpoints use the native LlamaForCausalLM export contract and
+do not require this registration.
 """
 
 from .config import CONFIGS, SLM_125M, SLM_350M, SLM_1B, SLMConfig

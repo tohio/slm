@@ -6,7 +6,7 @@
 # Usage:
 #   ./serve/serve.sh                                    # serve slm-125m on port 8000
 #   ./serve/serve.sh --model tohio/slm-350m             # serve from Hub
-#   ./serve/serve.sh --model results/runs/125m/dpo_chat/final # local checkpoint
+#   ./serve/serve.sh --model results/exports/125m/chat         # local native export
 #   ./serve/serve.sh --port 8080                        # custom port
 #   MODEL=tohio/slm-1b ./serve/serve.sh                 # via env var
 
@@ -108,7 +108,6 @@ VLLM_ARGS=(
   --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION"
   --tensor-parallel-size   "$TENSOR_PARALLEL_SIZE"
   --served-model-name      "$SERVED_MODEL_NAME"
-  --trust-remote-code
 )
 if [[ -n "$MAX_MODEL_LEN" ]]; then
   VLLM_ARGS+=(--max-model-len "$MAX_MODEL_LEN")

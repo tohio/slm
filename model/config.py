@@ -3,9 +3,12 @@ model/config.py
 ---------------
 Configuration for the SLM model family.
 
-Registers with HuggingFace AutoConfig so the model can be loaded with:
+Registers with Hugging Face AutoConfig inside this repository so local
+training checkpoints can be loaded with:
     from transformers import AutoConfig
-    config = AutoConfig.from_pretrained("tohio/slm-125m")
+    from model import SLMConfig
+    AutoConfig.register("slm", SLMConfig)
+    config = AutoConfig.from_pretrained("results/runs/125m/pretrain/final")
 
 Architecture: dense decoder-only transformer
     - RoPE positional embeddings
@@ -15,22 +18,17 @@ Architecture: dense decoder-only transformer
     - No bias
     - Tied input/output embeddings
 
-Remote-code loading:
-    auto_map is set so that Hub-pushed checkpoints can be loaded on any
-    machine without a local install of this package, via:
-        AutoModelForCausalLM.from_pretrained(
-            "tohio/slm-125m", trust_remote_code=True,
-        )
-
-    For this to work, export/export.py bundles the model source files into
-    the Hub repo root. The auto_map targets below point at those root-level
-    modules.
+Hub export:
+    Local checkpoints keep model_type="slm" and use the in-repository model
+    implementation. export/export.py converts their Llama-compatible state
+    dict and configuration to the native Transformers Llama format before
+    publication. Published checkpoints therefore do not use auto_map or
+    remote model code.
 
     Note:
-        This config intentionally exposes AutoConfig and AutoModelForCausalLM,
-        but not AutoModel. SLMModel is an internal nn.Module, not a
-        PreTrainedModel target. Use AutoModelForCausalLM for loading SLM
-        checkpoints.
+        Local registration maps SLMConfig only to AutoModelForCausalLM, not
+        AutoModel. SLMModel is an internal nn.Module rather than a
+        PreTrainedModel target.
 """
 
 import math
@@ -107,20 +105,6 @@ class SLMConfig(PretrainedConfig):
 
     model_type = "slm"
 
-    # auto_map is serialised into the pushed config.json so that
-    # AutoConfig / AutoModelForCausalLM with trust_remote_code=True can
-    # locate our classes inside the Hub repo.
-    #
-    # Targets reference root-level modules because export.py bundles the
-    # architecture files directly into the checkpoint/Hub repo root.
-    #
-    # We intentionally do NOT expose AutoModel here. SLMModel is now an
-    # internal nn.Module, not a PreTrainedModel. Use AutoModelForCausalLM.
-    auto_map = {
-        "AutoConfig": "config.SLMConfig",
-        "AutoModelForCausalLM": "model.SLMForCausalLM",
-    }
-
     def __init__(
         self,
         vocab_size: int = 32000,
@@ -142,6 +126,11 @@ class SLMConfig(PretrainedConfig):
         attention_dropout: float = 0.0,
         **kwargs,
     ):
+        # Older checkpoints advertised bundled remote model code. Local
+        # checkpoints now use in-repository registration and Hub publication
+        # uses the native Llama export, so do not propagate the legacy mapping
+        # when an old config is loaded and saved again.
+        kwargs.pop("auto_map", None)
         _validate_serialized_rope_parameters(
             kwargs.get("rope_parameters"),
             rope_theta=rope_theta,

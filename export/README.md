@@ -1,36 +1,43 @@
-# export
+# Export
 
-Hugging Face export for SLM variants.
+Native Hugging Face export for SLM base, instruct, chat, and code variants.
 
-Export packages checkpoint weights, tokenizer files, custom model source files, config metadata, and a model card. It does not run evaluation and model cards do not include benchmark tables.
-
----
-
-## Owns
-
-- `export/export.py` — export entry point
-- variant-to-checkpoint mapping
-- Hub repo naming
-- tokenizer root packaging
-- remote-code bundling
-- model-card generation
-
----
+Training checkpoints use the repository's `SLMConfig` and
+`SLMForCausalLM`. Export converts the equivalent configuration and state dict
+to Transformers' built-in `LlamaForCausalLM` package. Published models contain
+no executable architecture code and load without `trust_remote_code`.
 
 ## Variants
 
-| Variant | Checkpoint | Hub repo |
+| Variant | Source checkpoint | Hub repository |
 |---|---|---|
-| base | `results/runs/<size>/pretrain/final` | `tohio/slm-<size>` |
-| instruct | `results/runs/<size>/sft_instruct/final` | `tohio/slm-<size>-instruct` |
-| chat | `results/runs/<size>/dpo_chat/final` | `tohio/slm-<size>-chat` |
-| code | `results/runs/<size>/sft_code/final` | `tohio/slm-<size>-code` |
+| Base | `results/runs/<size>/pretrain/final` | `tohio/slm-<size>` |
+| Instruct | `results/runs/<size>/sft_instruct/final` | `tohio/slm-<size>-instruct` |
+| Chat | `results/runs/<size>/dpo_chat/final` | `tohio/slm-<size>-chat` |
+| Code | `results/runs/<size>/sft_code/final` | `tohio/slm-<size>-code` |
 
----
+Native artifacts are written separately from training checkpoints:
+
+```text
+results/exports/<size>/<variant>/
+```
+
+Set `EXPORTS_DIR` to override the export root. Source checkpoints are never
+modified.
 
 ## Commands
 
-Make targets:
+Validate and build a local native artifact without pushing:
+
+```bash
+make export-base-local SIZE=125m
+make export-instruct-local SIZE=125m
+make export-chat-local SIZE=125m
+make export-code-local SIZE=125m
+make export-local SIZE=125m
+```
+
+Build, validate, and push:
 
 ```bash
 make export-base SIZE=125m
@@ -43,76 +50,102 @@ make export SIZE=125m
 Direct calls:
 
 ```bash
-python export/export.py --size 125m --variant base
-python export/export.py --size 125m --variant instruct
-python export/export.py --size 125m --variant chat
-python export/export.py --size 125m --variant code
 python export/export.py --size 125m --variant chat --dry-run
+python export/export.py --size 125m --variant chat
+python export/export.py --size 125m --variant chat --private
 ```
 
----
-
-## Environment
-
-Required for Hub push:
+Hub pushes require:
 
 ```bash
 HF_USERNAME=tohio
 HF_TOKEN=...
 ```
 
-`.env` is loaded by `export/export.py`.
+`.env` is loaded automatically. A local `--dry-run` does not require Hub
+credentials.
 
----
+## Native conversion contract
 
-## What export writes
+The SLM and Llama packages use the same decoder structure and parameter names:
 
-Before pushing, export updates the checkpoint directory with:
+- token embedding and tied LM head
+- pre-norm decoder blocks
+- bias-free grouped-query attention
+- RoPE
+- RMSNorm
+- bias-free SwiGLU MLP
 
-```text
-README.md
-tokenizer.json
-tokenizer_config.json
-special_tokens_map.json
-config.py
-model.py
-block.py
-attention.py
-mlp.py
-norm.py
-```
-
-Tokenizer files are saved/copied to the checkpoint root so standard Hub loading works without `subfolder="tokenizer"`.
-
-Remote-code files are copied to the checkpoint root and `config.json` is updated with:
+Export maps the SLM configuration to `LlamaConfig`, loads every state-dict key
+strictly, and saves with safe serialization. The exported `config.json` must
+contain:
 
 ```json
 {
-  "AutoConfig": "config.SLMConfig",
-  "AutoModelForCausalLM": "model.SLMForCausalLM"
+  "model_type": "llama",
+  "architectures": ["LlamaForCausalLM"],
+  "tie_word_embeddings": true
 }
 ```
 
----
+It must not contain `auto_map`, and the artifact root must not contain model
+architecture Python files.
 
-## Model card policy
+When pushing over an older SLM Hub repository, export deletes the obsolete
+root architecture files and `slm_remote/` directory in the same Hub commit.
+Uploading a clean local folder alone would not remove stale remote files.
 
-Model cards include:
+## Artifact contents
 
-- model family and variant
-- architecture summary
-- pretraining data-mix table
-- fine-tuning/alignment summary
-- usage example
-- limitations
+Each native artifact contains:
 
-Model cards do not include evaluation or benchmark tables.
+```text
+README.md
+config.json
+generation_config.json
+model.safetensors
+tokenizer.json
+tokenizer_config.json
+special_tokens_map.json
+chat_template.jinja
+export_manifest.json
+```
 
----
+Tokenizer files are copied to the artifact root. `generation_config.json`
+records PAD, BOS, EOS, and end-of-turn stop IDs from the tokenizer rather than
+hardcoded numeric values.
 
-## Data-mix metadata
+`export_manifest.json` records the logical source stage/variant, source dtype,
+parameter count, native format, and architecture values. It does not expose
+host filesystem paths and intentionally does not hash multi-gigabyte model
+weights during export.
 
-Export loads realized curation stats from:
+## Validation
+
+Every local or Hub export must pass:
+
+1. Source checkpoint generation hygiene.
+2. Strict SLM-to-Llama state-dict loading.
+3. Configuration and tokenizer contract checks.
+4. Clean `AutoConfig`, `AutoTokenizer`, and `AutoModelForCausalLM` loading with
+   `trust_remote_code=False`.
+5. Source/export logit parity within dtype-specific tolerance.
+6. Exact deterministic greedy-generation parity.
+7. Cached versus uncached generation parity on the exported model.
+8. Rejection of `auto_map` or bundled Python model files.
+
+The existing native artifact is replaced only after the staged artifact passes
+all checks.
+
+## Model-card metadata
+
+Architecture values and parameter counts come from the loaded checkpoint.
+Non-base variants require the SFT/DPO data manifests copied into their final
+checkpoints. Dataset names, immutable revisions, and prepared record counts are
+rendered from those manifests; export fails instead of publishing guessed or
+stale training provenance.
+
+Realized pretraining mix metadata is read from:
 
 ```text
 data/runs/<size>/metadata/blend_stats.json
@@ -124,33 +157,23 @@ Legacy fallback:
 data/runs/<size>/curated/blend_stats.json
 ```
 
-If no blend stats are available, export falls back to the design mix from `config/data_mix.py`.
+If neither exists, the model card labels the pretraining table as the design
+mix rather than realized data.
 
----
-
-## Validation
-
-Export performs a short generation hygiene check before pushing. This is packaging validation, not benchmark evaluation.
-
-The check catches obviously broken checkpoints such as:
-
-- missing tokenizer files
-- missing architecture files
-- missing `auto_map`
-- empty generation
-- highly repetitive generation
-
-Use `--dry-run` to validate packaging without pushing to the Hub.
-
----
-
-## Loading exported models
+## Loading
 
 ```python
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 model_id = "tohio/slm-125m-chat"
+tokenizer = AutoTokenizer.from_pretrained(model_id)
+model = AutoModelForCausalLM.from_pretrained(model_id)
+```
 
-tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
-model = AutoModelForCausalLM.from_pretrained(model_id, trust_remote_code=True)
+The same code loads a local native artifact:
+
+```python
+model_id = "results/exports/125m/chat"
+tokenizer = AutoTokenizer.from_pretrained(model_id, local_files_only=True)
+model = AutoModelForCausalLM.from_pretrained(model_id, local_files_only=True)
 ```

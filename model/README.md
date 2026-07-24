@@ -65,27 +65,33 @@ RoPE caches are rebuilt lazily in float32 and are not persisted in checkpoints. 
 
 ---
 
-## Export and remote code
+## Export
 
-Exported models bundle the live architecture files into the checkpoint root so Hub loading works with:
+Training checkpoints use the in-repository `SLMConfig` and
+`SLMForCausalLM`. The export stage converts them to the equivalent native
+Transformers Llama configuration and state-dict contract. Published models
+therefore load without repository code:
 
 ```python
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 model_id = "tohio/slm-125m-chat"
 
-tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
-model = AutoModelForCausalLM.from_pretrained(model_id, trust_remote_code=True)
+tokenizer = AutoTokenizer.from_pretrained(model_id)
+model = AutoModelForCausalLM.from_pretrained(model_id)
 ```
 
 The exported `config.json` must advertise:
 
 ```json
 {
-  "AutoConfig": "config.SLMConfig",
-  "AutoModelForCausalLM": "model.SLMForCausalLM"
+  "model_type": "llama",
+  "architectures": ["LlamaForCausalLM"]
 }
 ```
+
+It must not contain `auto_map`, and the Hub repository must not contain
+architecture Python files.
 
 ---
 

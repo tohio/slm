@@ -4,7 +4,7 @@ Small behavior sanity eval for SLM checkpoints.
 
 Examples:
   python eval/sanity_eval.py --model results/runs/125m/dpo_chat/final
-  python eval/sanity_eval.py --model tohio/slm-125m-chat --trust-remote-code
+  python eval/sanity_eval.py --model tohio/slm-125m-chat
   python eval/sanity_eval.py --model results/runs/125m/pretrain/final --prompts eval/sanity_prompts.jsonl
 """
 
@@ -98,13 +98,14 @@ def resolve_tokenizer_path(model_id: str) -> str:
     return model_id
 
 
-def load_model_and_tokenizer(model_id: str, trust_remote_code: bool, device: str):
+def load_model_and_tokenizer(model_id: str, device: str):
     dtype = torch.bfloat16 if device == "cuda" else torch.float32
 
-    if Path(model_id).exists() and not trust_remote_code:
+    if Path(model_id).exists():
         # Local checkpoints use the in-repo custom architecture. Register the
         # config/model pair before loading through AutoModel so Transformers
-        # sees model_type="slm" mapped to SLMForCausalLM.
+        # sees model_type="slm" mapped to SLMForCausalLM. Registration is
+        # harmless for a local native export whose model_type is "llama".
         from transformers import AutoConfig
         from model.config import SLMConfig
         from model.model import SLMForCausalLM
@@ -112,16 +113,11 @@ def load_model_and_tokenizer(model_id: str, trust_remote_code: bool, device: str
         AutoConfig.register("slm", SLMConfig)
         AutoModelForCausalLM.register(SLMConfig, SLMForCausalLM)
 
-        model = AutoModelForCausalLM.from_pretrained(
-            model_id,
-            dtype=dtype,
-        )
-    else:
-        model = AutoModelForCausalLM.from_pretrained(
-            model_id,
-            trust_remote_code=trust_remote_code,
-            dtype=dtype,
-        )
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id,
+        trust_remote_code=False,
+        dtype=dtype,
+    )
 
     model = model.to(device)
     model.eval()
@@ -129,7 +125,7 @@ def load_model_and_tokenizer(model_id: str, trust_remote_code: bool, device: str
     tokenizer_path = resolve_tokenizer_path(model_id)
     tokenizer = AutoTokenizer.from_pretrained(
         tokenizer_path,
-        trust_remote_code=trust_remote_code,
+        trust_remote_code=False,
     )
     return model, tokenizer
 
@@ -223,7 +219,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run SLM sanity behavior eval.")
     parser.add_argument("--model", required=True, help="Local checkpoint path or Hub model id")
     parser.add_argument("--prompts", default="eval/sanity_prompts.jsonl", type=Path)
-    parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--repetition-penalty", type=float, default=1.1)
     parser.add_argument("--json-out", type=Path, default=None)
@@ -232,7 +227,6 @@ def main() -> int:
     cases = load_jsonl(args.prompts)
     model, tokenizer = load_model_and_tokenizer(
         args.model,
-        trust_remote_code=args.trust_remote_code,
         device=args.device,
     )
 

@@ -7,6 +7,8 @@ Tests forward pass shapes, causal masking, parameter counts, weight tying,
 RMSNorm, SwiGLU, and GQA. No GPU required — runs on CPU.
 """
 
+import json
+
 import pytest
 import torch
 
@@ -419,6 +421,12 @@ class TestSLMForCausalLM:
             logits_before = model(input_ids).logits
 
         model.save_pretrained(str(tmp_path))
+        saved_config = json.loads(
+            (tmp_path / "config.json").read_text(encoding="utf-8")
+        )
+        assert "auto_map" not in saved_config
+        assert not list(tmp_path.glob("*.py"))
+
         loaded = SLMForCausalLM.from_pretrained(str(tmp_path))
         loaded.eval()
 
@@ -431,6 +439,17 @@ class TestSLMForCausalLM:
 
 
 class TestSLMConfigValidation:
+    def test_legacy_remote_code_mapping_is_not_propagated(self):
+        from model.config import SLMConfig
+
+        config = SLMConfig(
+            auto_map={
+                "AutoConfig": "config.SLMConfig",
+                "AutoModelForCausalLM": "model.SLMForCausalLM",
+            }
+        )
+        assert "auto_map" not in config.to_dict()
+
     @pytest.mark.parametrize(
         "override",
         [

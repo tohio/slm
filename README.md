@@ -43,7 +43,7 @@ sft_instruct/final
 | `finetune/` | external SFT data contract plus instruct and code trainers |
 | `alignment/` | DPO preference alignment for chat model |
 | `eval/` | optional benchmark and sanity evaluation |
-| `export/` | Hugging Face export, tokenizer packaging, remote-code bundling |
+| `export/` | Native Hugging Face Llama-compatible export and tokenizer packaging |
 | `inference/` | local chat and generation utilities |
 | `serve/` | vLLM serving assets |
 | `tests/` | data, GPU, model, and config tests |

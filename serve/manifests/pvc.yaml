@@ -12,7 +12,7 @@ spec:
       #   125m base/instruct/chat:  ~250MB each  -> ~750MB
       #   350m base/instruct/chat:  ~700MB each  -> ~2.1GB
       #   1b base/instruct/chat:    ~2GB each    -> ~6GB
-      # Plus bundled remote code, tokenizer, README per repo —
+      # Plus tokenizer, model card, and export manifest per repo —
       # negligible. HuggingFace also caches intermediate download blobs
       # (refs/, snapshots/, blobs/) which roughly double the on-disk size.
       #
