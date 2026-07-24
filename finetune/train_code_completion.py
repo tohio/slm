@@ -29,6 +29,8 @@ import yaml
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoConfig, AutoTokenizer, get_cosine_schedule_with_warmup
 
+from config.runtime import configure_torch_runtime
+
 from model.config import SLMConfig
 from model.model import SLMForCausalLM
 
@@ -230,6 +232,7 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+    configure_torch_runtime()
 
     print("=== Raw code-completion SFT ===")
     print(f"Config:      {cfg_path}")
@@ -247,7 +250,7 @@ def main() -> None:
 
     model = SLMForCausalLM.from_pretrained(
         str(base_model),
-        torch_dtype=dtype,
+        dtype=dtype,
     ).to(device)
 
     train_records = read_jsonl(train_path)
@@ -274,7 +277,12 @@ def main() -> None:
         collate_fn=Collator(tokenizer.pad_token_id),
     )
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=learning_rate,
+        weight_decay=weight_decay,
+        fused=device.type == "cuda",
+    )
     warmup_steps = max(5, int(max_updates * warmup_ratio))
     scheduler = get_cosine_schedule_with_warmup(
         optimizer,

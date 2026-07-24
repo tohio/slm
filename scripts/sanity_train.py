@@ -56,7 +56,7 @@ MODEL_ARCH_MINI = {
 
 MODEL_ARCH_125M = {
     "hidden_size":             768,
-    "num_hidden_layers":       12,
+    "num_hidden_layers":       16,
     "num_attention_heads":     12,
     "num_key_value_heads":     4,
     "max_position_embeddings": 2048,

@@ -38,24 +38,9 @@ def _is_rank_zero() -> bool:
 
 DATA_DIR    = Path(os.environ.get("DATA_DIR", "data"))
 from config.paths import pretrain_dir, tokenized_dir as run_tokenized_dir, BASE_RESULTS_DIR
+from config.runtime import configure_torch_runtime
 
 RESULTS_DIR = BASE_RESULTS_DIR
-
-
-def _configure_cuda_for_performance() -> None:
-    if not torch.cuda.is_available():
-        return
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
-    if hasattr(torch.backends.cuda, "enable_flash_sdp"):
-        torch.backends.cuda.enable_flash_sdp(True)
-    if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
-        torch.backends.cuda.enable_mem_efficient_sdp(True)
-    if hasattr(torch.backends.cuda, "enable_math_sdp"):
-        torch.backends.cuda.enable_math_sdp(False)
-
-
-_configure_cuda_for_performance()
 
 
 _NUMERIC_CONFIG_KEYS = {
@@ -326,6 +311,7 @@ def build_training_args(cfg: dict, output_dir: Path, resume: bool):
         lr_scheduler_type=train_cfg.get("lr_scheduler", "cosine"),
         bf16=use_bf16,
         fp16=use_fp16,
+        tf32=has_cuda,
 
         torch_compile=torch_compile,
         torch_compile_backend=train_cfg.get("torch_compile_backend", "inductor"),
@@ -380,6 +366,7 @@ def main():
     log.info(f"Model:      {model_name}")
     log.info(f"Output:     {output_dir}")
     log.info(f"Device:     {'cuda' if torch.cuda.is_available() else 'cpu'}")
+    configure_torch_runtime(log)
     if torch.cuda.is_available():
         log.info(f"GPU:        {torch.cuda.get_device_name(0)} "
                  f"({torch.cuda.get_device_properties(0).total_memory / 1e9:.0f} GB)")

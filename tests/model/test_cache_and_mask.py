@@ -24,10 +24,39 @@ from __future__ import annotations
 
 import pytest
 import torch
+import torch.nn.functional as F
 from transformers.cache_utils import DynamicCache
 
 from model.config import CONFIGS, SLMConfig
 from model.model import SLMForCausalLM
+
+
+def test_attention_uses_native_sdpa_gqa(monkeypatch):
+    """GQA should not materialize repeated K/V heads before SDPA."""
+    from model.attention import GroupedQueryAttention
+
+    config = _tiny_config()
+    attention = GroupedQueryAttention(config, layer_idx=0)
+    original = F.scaled_dot_product_attention
+    observed = {}
+
+    def wrapped(query, key, value, **kwargs):
+        observed["q_heads"] = query.shape[1]
+        observed["kv_heads"] = key.shape[1]
+        observed["enable_gqa"] = kwargs.get("enable_gqa")
+        return original(query, key, value, **kwargs)
+
+    monkeypatch.setattr(F, "scaled_dot_product_attention", wrapped)
+    hidden = torch.randn(1, 4, config.hidden_size)
+    output, cache = attention(hidden, use_cache=True)
+
+    assert output.shape == hidden.shape
+    assert observed == {
+        "q_heads": config.num_attention_heads,
+        "kv_heads": config.num_key_value_heads,
+        "enable_gqa": True,
+    }
+    assert cache[0].shape[1] == config.num_key_value_heads
 
 
 # ── Tiny config for multi-forward tests ───────────────────────────────────────

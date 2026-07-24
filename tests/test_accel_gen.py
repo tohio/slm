@@ -49,7 +49,8 @@ class TestFSDP:
         d = yaml.safe_load(render_fsdp(num_gpus=8))
         assert d["fsdp_config"]["fsdp_transformer_layer_cls_to_wrap"] == \
             DEFAULT_FSDP_TRANSFORMER_LAYER
-        assert d["fsdp_config"]["fsdp_transformer_layer_cls_to_wrap"] == "SLMBlock"
+        assert d["fsdp_config"]["fsdp_transformer_layer_cls_to_wrap"] == \
+            "SLMDecoderBlock"
 
     def test_default_sharding_full(self):
         d = yaml.safe_load(render_fsdp(num_gpus=8))

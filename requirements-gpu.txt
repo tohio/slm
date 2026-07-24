@@ -1,0 +1,7 @@
+--extra-index-url https://download.pytorch.org/whl/cu130
+
+-r requirements-training.txt
+
+# CUDA 13.0 wheel. The base requirements pin the same public torch version,
+# so pip treats this local-version build as compatible.
+torch==2.13.0+cu130

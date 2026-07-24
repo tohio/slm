@@ -123,9 +123,8 @@ class SLMModel(nn.Module):
         return_dict: Optional[bool] = None,
     ) -> BaseModelOutputWithPast:
         use_cache = use_cache if use_cache is not None else self.config.use_cache
-        return_dict = return_dict if return_dict is not None else getattr(
-            self.config, "return_dict", getattr(self.config, "use_return_dict", True)
-        )
+        if return_dict is None:
+            return_dict = getattr(self.config, "return_dict", True)
 
         if self.gradient_checkpointing and self.training and use_cache:
             use_cache = False
@@ -432,8 +431,8 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         """
         Tie LM head weights to input embeddings when tie_word_embeddings=True.
 
-        Direct assignment is used because transformers==5.5.4 in this environment
-        does not expose _tie_or_clone_weights on PreTrainedModel.
+        Direct assignment keeps tied embeddings explicit and stable across the
+        pinned Transformers stack.
         """
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight

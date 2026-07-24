@@ -20,7 +20,7 @@ Packing:
     concatenates short examples into max_seq_length sequences, dramatically
     improving throughput on conversational datasets where most examples are
     much shorter than the context window. assistant_only_loss is compatible
-    with packing in trl 0.28+ — the {% generation %} tags survive packing
+    with packing in the pinned TRL stack — the {% generation %} tags survive packing
     boundaries because the chat template is applied per-message.
 
 Eval batching:
@@ -39,8 +39,7 @@ Warmup:
     The YAML stores `warmup_ratio_recipe` (e.g. 0.03 = 3% of total steps).
     We compute the equivalent `warmup_steps` at runtime from the resolved
     total step count and pass that to SFTConfig. We do NOT pass
-    warmup_ratio because TRL deprecated it in v5.2 in favour of
-    warmup_steps. Computing in code preserves the auto-rescaling property
+    warmup_ratio directly. Computing in code preserves the auto-rescaling property
     when GPU count changes — `warmup_steps` baked into YAML would not.
 
 Usage:
@@ -83,6 +82,7 @@ log = logging.getLogger(__name__)
 
 DATA_DIR    = Path(os.environ.get("DATA_DIR", "data"))
 from config.paths import tokenizer_dir, sft_instruct_dir, sft_code_dir, BASE_RESULTS_DIR
+from config.runtime import configure_torch_runtime
 
 RESULTS_DIR = BASE_RESULTS_DIR
 
@@ -195,7 +195,7 @@ def resolve_warmup_steps(train_cfg: dict, num_train_examples: int) -> int:
 
 def build_sft_args(cfg: dict, output_dir: Path, num_train_examples: int):
     """
-    Build SFTConfig for trl 0.17+.
+    Build SFTConfig for the pinned TRL stack.
 
     assistant_only_loss=True computes loss only on assistant response tokens.
     Requires {% generation %} / {% endgeneration %} tags in the chat template.
@@ -250,11 +250,10 @@ def build_sft_args(cfg: dict, output_dir: Path, num_train_examples: int):
     # attention / FA2 varlen support is implemented.
     packing = data_cfg.get("packing", False)
 
-    # Length grouping is safe with normal causal attention. It does not concatenate
-    # samples; it only batches examples of similar tokenized length together to
-    # reduce padding waste.
+    # Length grouping is safe with normal causal attention. Transformers 5.14
+    # exposes it through train_sampling_strategy rather than group_by_length.
     group_by_length = train_cfg.get("group_by_length", True)
-    length_column_name = train_cfg.get("length_column_name")  # None if unset
+    length_column_name = train_cfg.get("length_column_name", "length")
 
     # torch_compile is controlled by YAML. It is disabled by default because it
     # has not been proven faster for SFT in this repo. Enable only after profiling.
@@ -274,8 +273,10 @@ def build_sft_args(cfg: dict, output_dir: Path, num_train_examples: int):
         adam_beta2=beta2,
         max_grad_norm=train_cfg.get("gradient_clip_val", 1.0),
         lr_scheduler_type=train_cfg.get("lr_scheduler", "cosine"),
+        optim="adamw_torch_fused" if has_cuda else "adamw_torch",
         bf16=use_bf16,
         fp16=use_fp16,
+        tf32=has_cuda,
         torch_compile=torch_compile,
         eval_strategy="steps",
         eval_steps=eval_steps,
@@ -290,6 +291,8 @@ def build_sft_args(cfg: dict, output_dir: Path, num_train_examples: int):
         run_name=cfg.get("name", "slm-sft"),
         dataloader_num_workers=train_cfg.get("num_workers", 4),
         dataloader_pin_memory=has_cuda,
+        train_sampling_strategy="group_by_length" if group_by_length else "random",
+        length_column_name=length_column_name,
         remove_unused_columns=False,
         seed=train_cfg.get("seed", 42),
         gradient_checkpointing=train_cfg.get("gradient_checkpointing", False),
@@ -298,11 +301,6 @@ def build_sft_args(cfg: dict, output_dir: Path, num_train_examples: int):
         packing=packing,
         assistant_only_loss=True,
     )
-
-    # SFTConfig in trl==0.28.0 does not accept group_by_length in its constructor,
-    # but HF Trainer reads these attributes from args when building the sampler.
-    setattr(sft_args, "group_by_length", group_by_length)
-    setattr(sft_args, "length_column_name", length_column_name)
 
     return sft_args
 
@@ -337,6 +335,7 @@ def main():
     log.info(f"Base model: {base_model_path}")
     log.info(f"Output:     {output_dir}")
     log.info(f"Device:     {'cuda' if torch.cuda.is_available() else 'cpu'}")
+    configure_torch_runtime(log)
 
     # ── Model ─────────────────────────────────────────────────────────────────
     from transformers import AutoConfig
@@ -403,7 +402,7 @@ def main():
     log.info("Answer-only loss enabled (assistant_only_loss=True)")
     log.info(f"Packing: {sft_args.packing}")
     log.info(f"torch_compile: {sft_args.torch_compile}")
-    log.info(f"group_by_length: {sft_args.group_by_length}")
+    log.info(f"train_sampling_strategy: {sft_args.train_sampling_strategy}")
     log.info(f"length_column_name: {getattr(sft_args, 'length_column_name', None)}")
     log.info(
         f"Batch sizes: train={sft_args.per_device_train_batch_size}, "

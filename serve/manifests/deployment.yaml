@@ -28,8 +28,9 @@ spec:
           # kwargs, dict-form _tied_weights_keys, DynamicCache.layers API,
           # cache_position in prepare_inputs_for_generation).
           #
-          # Preferred over the v0.19.1 patch release for stability — v0.19.1
-          # bundles a transformers 5.5.4 bump that is newer than our pin.
+          # vLLM runs in its own image and therefore has an independent
+          # PyTorch/Transformers dependency stack. Upgrade this image only with
+          # a separate serving smoke test; it does not inherit requirements.txt.
           image: vllm/vllm-openai:v0.19.0
           args:
             - --model

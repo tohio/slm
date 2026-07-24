@@ -152,16 +152,16 @@ class TestSLMModel:
         assert len(model.layers) == config.num_hidden_layers
 
     def test_init_respects_initializer_range(self):
-        """Standalone SLMModel should apply configured initializer_range."""
-        from model.model import SLMModel
+        """The HF wrapper should apply configured initializer_range."""
+        from model.model import SLMForCausalLM
         config = make_mini_config()
-        model = SLMModel(config)
+        model = SLMForCausalLM(config)
 
         # The configured std is 0.02. After init, the embedding weight's
         # standard deviation should be in a plausible range around that.
         # PyTorch's default Embedding init is N(0, 1) — detection threshold
         # is any std > 0.1, which indicates post_init() did not run.
-        embed_std = model.embed_tokens.weight.std().item()
+        embed_std = model.get_input_embeddings().weight.std().item()
         assert embed_std < 0.05, (
             f"Embedding std {embed_std:.4f} suggests post_init() did not run "
             f"(expected ~{config.initializer_range})"
@@ -199,6 +199,33 @@ class TestSLMForCausalLM:
         out = model(input_ids, labels=labels)
         assert torch.isfinite(out.loss), f"Loss is not finite: {out.loss}"
 
+    def test_gradient_checkpointing_backward(self):
+        """The Transformers checkpointing hook must reach the plain SLMModel."""
+        from model.config import SLMConfig
+        from model.model import SLMForCausalLM
+
+        config = SLMConfig(
+            vocab_size=256,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            max_position_embeddings=64,
+        )
+        model = SLMForCausalLM(config)
+        model.gradient_checkpointing_enable()
+        input_ids = torch.randint(0, config.vocab_size, (2, 16))
+
+        loss = model(input_ids, labels=input_ids).loss
+        loss.backward()
+
+        assert model.model.gradient_checkpointing is True
+        assert any(
+            parameter.grad is not None
+            for parameter in model.parameters()
+        )
+
     def test_weight_tying(self):
         from model.model import SLMForCausalLM
         config = make_mini_config()
@@ -207,12 +234,12 @@ class TestSLMForCausalLM:
             "LM head weight is not tied to embedding weight"
         )
 
-    def test_parameter_count_approximately_25m(self):
+    def test_parameter_count_approximately_22m(self):
         """
-        Mini model should be approximately 25M parameters.
+        Mini model should be approximately 22M unique parameters.
 
         The mini config is deterministic (6 layers × 384 hidden × 32k vocab
-        × tied), so parameter count should be tightly predictable. A ±5%
+        × tied), so parameter count should be tightly predictable. A ±2%
         band catches real drift (e.g. a change to _default_intermediate_size,
         an accidental untie, vocab size change).
         """
@@ -220,11 +247,11 @@ class TestSLMForCausalLM:
         config = make_mini_config()
         model = SLMForCausalLM(config)
         n_params = sum(p.numel() for p in model.parameters())
-        expected = 25_000_000
+        expected = 22_000_000
         drift = abs(n_params - expected) / expected
-        assert drift < 0.05, (
+        assert drift < 0.02, (
             f"Parameter count {n_params:,} drifted {drift:.1%} from "
-            f"expected ~{expected:,} (tolerance 5%)"
+            f"expected ~{expected:,} (tolerance 2%)"
         )
 
     def test_causal_mask_lower_triangular(self):

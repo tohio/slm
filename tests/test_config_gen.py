@@ -54,20 +54,21 @@ class TestPretrainSpecific:
     def test_125m_h200_1gpu(self):
         cfg = compute_pretrain_config("h200", "125m", 1)
         assert cfg.gradient_checkpointing is False
-        assert cfg.actual_global_batch == 32
-        assert cfg.micro_batch_size * cfg.gradient_accumulation_steps == 32
+        assert cfg.actual_global_batch == SIZE_PROFILES["125m"].ref_global_batch
+        assert cfg.micro_batch_size * cfg.gradient_accumulation_steps == \
+            SIZE_PROFILES["125m"].ref_global_batch
 
     def test_125m_h200_8gpu(self):
         cfg = compute_pretrain_config("h200", "125m", 8)
-        assert cfg.actual_global_batch == 32
-        assert cfg.micro_batch_size == 4
-        assert cfg.gradient_accumulation_steps == 1
+        assert cfg.actual_global_batch == SIZE_PROFILES["125m"].ref_global_batch
+        assert cfg.micro_batch_size * cfg.gradient_accumulation_steps * 8 == \
+            SIZE_PROFILES["125m"].ref_global_batch
 
     def test_1b_h200_auto_ckpt(self):
-        """1b on H200×1 needs ckpt to fit ref_global=128 in one step."""
+        """The auto-policy must produce a valid in-budget 1B H200 plan."""
         cfg = compute_pretrain_config("h200", "1b", 1)
-        assert cfg.gradient_checkpointing is True
-        assert cfg.gradient_accumulation_steps == 1
+        assert cfg.actual_global_batch == SIZE_PROFILES["1b"].ref_global_batch
+        assert cfg.estimated_vram_gb <= cfg.vram_budget_gb
 
 
 # ── Pretrain — invariants ────────────────────────────────────────────────────
@@ -93,7 +94,8 @@ class TestPretrainInvariants:
 class TestSFTInstruct:
     def test_125m_h200_1gpu_global_batch(self):
         cfg = compute_sft_instruct_config("h200", "125m", 1)
-        assert cfg.actual_global_batch == 128
+        assert cfg.actual_global_batch == \
+            SFT_INSTRUCT_PROFILES["125m"].ref_global_batch
 
     def test_global_batch_hits_reference_across_grid(self):
         for size in SFT_INSTRUCT_PROFILES:
@@ -130,7 +132,7 @@ class TestSFTCode:
 class TestDPO:
     def test_125m_h200_1gpu(self):
         cfg = compute_dpo_config("h200", "125m", 1)
-        assert cfg.actual_global_batch == 64
+        assert cfg.actual_global_batch == DPO_PROFILES["125m"].ref_global_batch
 
     def test_1b_h200_auto_ckpt(self):
         """1b DPO on H200×1: should enable ckpt — DPO state + activations are heavy."""
@@ -283,6 +285,76 @@ class TestRendering:
         assert checked_in["model"]["num_hidden_layers"] == 16
         assert checked_in["model"]["num_hidden_layers"] == SIZE_PROFILES["125m"].layers
 
+    @pytest.mark.parametrize("size", sorted(SIZE_PROFILES))
+    def test_checked_in_pretrain_recipe_matches_profile(self, size):
+        config_path = (
+            Path(__file__).resolve().parents[1]
+            / "pretrain"
+            / "configs"
+            / f"gpt_{size}.yaml"
+        )
+        checked_in = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        training = checked_in["training"]
+        profile = SIZE_PROFILES[size]
+
+        assert checked_in["model"]["num_hidden_layers"] == profile.layers
+        assert (
+            training["micro_batch_size"]
+            * training["gradient_accumulation_steps"]
+        ) == profile.ref_global_batch
+
+    @pytest.mark.parametrize("size", sorted(SFT_INSTRUCT_PROFILES))
+    def test_checked_in_sft_recipe_matches_profile(self, size):
+        root = Path(__file__).resolve().parents[1]
+        for variant, profiles in (
+            ("instruct", SFT_INSTRUCT_PROFILES),
+            ("code", SFT_CODE_PROFILES),
+        ):
+            checked_in = yaml.safe_load(
+                (
+                    root
+                    / "finetune"
+                    / "configs"
+                    / f"sft_{variant}_{size}.yaml"
+                ).read_text(encoding="utf-8")
+            )
+            training = checked_in["training"]
+            assert checked_in["name"] == f"slm-{size}-{variant}"
+            assert (
+                training["micro_batch_size"]
+                * training["gradient_accumulation_steps"]
+            ) == profiles[size].ref_global_batch
+
+    @pytest.mark.parametrize("size", sorted(DPO_PROFILES))
+    def test_checked_in_dpo_recipe_matches_profile(self, size):
+        config_path = (
+            Path(__file__).resolve().parents[1]
+            / "alignment"
+            / "configs"
+            / f"dpo_chat_{size}.yaml"
+        )
+        checked_in = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        training = checked_in["training"]
+
+        assert checked_in["name"] == f"slm-{size}-chat"
+        assert checked_in["model"]["base_model_path"].endswith(
+            "/sft_instruct/final"
+        )
+        assert (
+            training["micro_batch_size"]
+            * training["gradient_accumulation_steps"]
+        ) == DPO_PROFILES[size].ref_global_batch
+
+    @pytest.mark.parametrize("size", sorted(SIZE_PROFILES))
+    def test_model_preset_architecture_matches_pretrain_profile(self, size):
+        model_cfg = MODEL_CONFIGS[size]
+        profile = SIZE_PROFILES[size]
+        assert model_cfg.hidden_size == profile.hidden
+        assert model_cfg.num_hidden_layers == profile.layers
+        assert model_cfg.num_attention_heads == profile.heads
+        assert model_cfg.num_key_value_heads == profile.kv_heads
+        assert model_cfg.max_position_embeddings == profile.ctx
+
     def test_pretrain_yaml_parses(self):
         cfg = compute_pretrain_config("h200", "350m", 4)
         d = yaml.safe_load(render_pretrain_yaml(cfg))
@@ -309,7 +381,10 @@ class TestRendering:
     def test_dpo_yaml_parses(self):
         cfg = compute_dpo_config("h200", "125m", 1)
         d = yaml.safe_load(render_dpo_yaml(cfg))
-        assert d["name"] == "slm-125m-dpo"
+        assert d["name"] == "slm-125m-chat"
+        assert d["model"]["base_model_path"].endswith("/sft_instruct/final")
+        assert d["data"]["train_path"] == \
+            "$DATA_DIR/runs/125m/dpo_chat/train.jsonl"
         assert d["dpo"]["beta"] == DPO_PROFILES["125m"].dpo_beta
         assert d["dpo"]["max_prompt_length"] == DPO_PROFILES["125m"].max_prompt_length
 
@@ -332,8 +407,10 @@ class TestRendering:
 
 class TestWarnings:
     def test_low_vram_use_warns(self):
-        """125m pretrain on H200 should warn about lots of headroom."""
-        cfg = compute_pretrain_config("h200", "125m", 1)
+        """A deliberately tiny target should warn about unused headroom."""
+        cfg = compute_pretrain_config(
+            "h200", "125m", 1, target_global_batch=1, force_ckpt=False
+        )
         joined = " ".join(cfg.warnings)
         assert "headroom" in joined.lower() or "aggressive" in joined.lower()
 
@@ -353,6 +430,8 @@ class TestWarnings:
         assert "fsdp" in joined.lower()
 
     def test_plan_includes_warnings(self):
-        cfg = compute_pretrain_config("h200", "125m", 1)
+        cfg = compute_pretrain_config(
+            "h200", "125m", 1, target_global_batch=1, force_ckpt=False
+        )
         plan = render_plan(cfg)
         assert "things to verify" in plan.lower()

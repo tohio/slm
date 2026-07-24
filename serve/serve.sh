@@ -6,7 +6,7 @@
 # Usage:
 #   ./serve/serve.sh                                    # serve slm-125m on port 8000
 #   ./serve/serve.sh --model tohio/slm-350m             # serve from Hub
-#   ./serve/serve.sh --model results/slm-125m-dpo/final # serve local checkpoint
+#   ./serve/serve.sh --model results/runs/125m/dpo_chat/final # local checkpoint
 #   ./serve/serve.sh --port 8080                        # custom port
 #   MODEL=tohio/slm-1b ./serve/serve.sh                 # via env var
 

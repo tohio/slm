@@ -270,11 +270,6 @@ class GroupedQueryAttention(nn.Module):
             v = torch.cat([past_key_value[1], v], dim=2)
         past_key_value = (k, v) if use_cache else None
 
-        # GQA: expand KV heads
-        if self.num_kv_heads != self.num_heads:
-            k = k.repeat_interleave(self.num_query_groups, dim=1)
-            v = v.repeat_interleave(self.num_query_groups, dim=1)
-
         # Mask handling.
         #
         # We build an explicit mask whenever ANY of the following is true:
@@ -304,6 +299,9 @@ class GroupedQueryAttention(nn.Module):
             attn_mask=attn_mask,
             dropout_p=dropout_p,
             is_causal=is_causal,
+            # Native SDPA GQA avoids materialising repeated K/V heads and lets
+            # CUDA dispatch directly to an eligible fused implementation.
+            enable_gqa=self.num_kv_heads != self.num_heads,
         )
 
         attn_output = attn_output.transpose(1, 2).contiguous()

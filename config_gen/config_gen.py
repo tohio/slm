@@ -223,18 +223,18 @@ class DPOProfile:
 SIZE_PROFILES: dict[str, PretrainProfile] = {
     "125m": PretrainProfile(
         state_gb=2.0, act_per_seq_gb_no_ckpt=1.75, act_per_seq_gb_ckpt=0.60,
-        ctx=2048, ref_global_batch=64, consumed_tokens=data_mix.consumed_tokens("125m"),
+        ctx=2048, ref_global_batch=32, consumed_tokens=data_mix.consumed_tokens("125m"),
         lr=3.0e-4, warmup_frac=0.01, hidden=768, layers=16, heads=12, kv_heads=4,
     ),
     "350m": PretrainProfile(
         state_gb=5.0, act_per_seq_gb_no_ckpt=0.75, act_per_seq_gb_ckpt=0.16,
-        ctx=2048, ref_global_batch=128, consumed_tokens=data_mix.consumed_tokens("350m"),
-        lr=2.0e-4, warmup_frac=0.01, hidden=1024, layers=28, heads=16, kv_heads=8,
+        ctx=2048, ref_global_batch=64, consumed_tokens=data_mix.consumed_tokens("350m"),
+        lr=2.0e-4, warmup_frac=0.01, hidden=1024, layers=27, heads=16, kv_heads=8,
     ),
     "1b": PretrainProfile(
         state_gb=14.5, act_per_seq_gb_no_ckpt=4.0, act_per_seq_gb_ckpt=0.80,
         ctx=4096, ref_global_batch=128, consumed_tokens=data_mix.consumed_tokens("1b"),
-        lr=1.0e-4, warmup_frac=0.035, hidden=2048, layers=38, heads=32, kv_heads=8,
+        lr=1.0e-4, warmup_frac=0.035, hidden=2048, layers=21, heads=32, kv_heads=8,
     ),
 }
 
@@ -287,32 +287,31 @@ SFT_CODE_PROFILES: dict[str, SFTProfile] = {
 
 # DPO profiles — state is policy weights + grads + AdamW + ref weights (no grads).
 # That's roughly pretrain state + ref weights (BF16) ≈ pretrain state * 1.15-1.2x.
-# Activations are roughly 4× SFT: chosen + rejected pairs through both policy and ref.
+# Retained backward activations are roughly 2× SFT: chosen + rejected policy
+# passes. The frozen reference model contributes state and forward workspace,
+# but does not retain a backward graph.
 #
-# FIXME: act_per_seq values below are suspect across all sizes.
-#        SFT 125m measured at 1.9 GB/seq (state 6.0); DPO 125m here lists
-#        0.22 GB/seq (state 2.3) — but DPO does ~4× the activation work
-#        of SFT (chosen+rejected through both policy and reference). Expect
-#        ~7-8 GB/seq for 125m, scaled accordingly for 350m and 1b.
-#        These numbers will likely OOM on the auto-policy's first attempt.
-#        Re-measure peak VRAM on the first real DPO run for each size and
-#        update — same calibration approach used for SFT 125m.
+# The activation estimates are deliberately monotonic and conservative:
+# approximately 2× the corresponding SFT estimate for chosen/rejected policy
+# work. The frozen reference does not retain backward activations. These remain
+# analytical until a real run supplies measured peaks; the checked configs use
+# a conservative global batch of 16 pairs.
 DPO_PROFILES: dict[str, DPOProfile] = {
     "125m": DPOProfile(
         state_gb=2.3, act_per_seq_gb_no_ckpt=7.6, act_per_seq_gb_ckpt=2.6,
-        max_seq_length=2048, ref_global_batch=64,
+        max_seq_length=2048, ref_global_batch=16,
         lr=5.0e-7, epochs=1, warmup_ratio=0.05,
         dpo_beta=0.1, max_prompt_length=1024,
     ),
     "350m": DPOProfile(
-        state_gb=5.8, act_per_seq_gb_no_ckpt=2.8, act_per_seq_gb_ckpt=0.56,
-        max_seq_length=2048, ref_global_batch=64,
+        state_gb=5.8, act_per_seq_gb_no_ckpt=10.0, act_per_seq_gb_ckpt=3.4,
+        max_seq_length=2048, ref_global_batch=16,
         lr=3.0e-7, epochs=1, warmup_ratio=0.05,
         dpo_beta=0.1, max_prompt_length=1024,
     ),
     "1b": DPOProfile(
-        state_gb=16.5, act_per_seq_gb_no_ckpt=15.2, act_per_seq_gb_ckpt=2.8,
-        max_seq_length=4096, ref_global_batch=64,
+        state_gb=16.5, act_per_seq_gb_no_ckpt=28.0, act_per_seq_gb_ckpt=9.0,
+        max_seq_length=4096, ref_global_batch=16,
         lr=2.0e-7, epochs=1, warmup_ratio=0.05,
         dpo_beta=0.1, max_prompt_length=2048,
     ),
@@ -880,8 +879,8 @@ training:
   #
   # Warmup recipe: {profile.warmup_ratio:.3f} of total steps. Computed at
   # runtime by train_sft.py from the resolved total_steps and passed to
-  # TrainingArguments as warmup_steps. We don't set warmup_ratio in this
-  # YAML because TRL deprecated it in v5.2 in favor of warmup_steps.
+  # TrainingArguments as warmup_steps. The separate recipe key prevents the
+  # trainer library from interpreting it directly.
   warmup_ratio_recipe: {profile.warmup_ratio}
   epochs: {profile.epochs}
   micro_batch_size: {cfg.micro_batch_size}
@@ -903,7 +902,7 @@ training:
     - wandb
 
 optimizer:
-  lr: {profile.lr}
+  lr: {profile.lr:.1e}
   weight_decay: {profile.weight_decay}
   beta1: {profile.beta1}
   beta2: {profile.beta2}
@@ -917,7 +916,7 @@ def render_sft_instruct_yaml(cfg: GeneratedConfig) -> str:
         base_model_path=f"$RESULTS_DIR/runs/{cfg.size}/pretrain/final",
         train_path=f"$DATA_DIR/runs/{cfg.size}/sft_instruct/train.jsonl",
         val_path=f"$DATA_DIR/runs/{cfg.size}/sft_instruct/val.jsonl",
-        out_name="chat",
+        out_name="instruct",
     )
 
 
@@ -928,7 +927,7 @@ def render_sft_code_yaml(cfg: GeneratedConfig) -> str:
         base_model_path=f"$RESULTS_DIR/runs/{cfg.size}/sft_instruct/final",
         train_path=f"$DATA_DIR/runs/{cfg.size}/sft_code/train.jsonl",
         val_path=f"$DATA_DIR/runs/{cfg.size}/sft_code/val.jsonl",
-        out_name="chat-code",
+        out_name="code",
     )
 
 
@@ -937,16 +936,16 @@ def render_dpo_yaml(cfg: GeneratedConfig) -> str:
     eval_micro = max(1, cfg.micro_batch_size // 2)
 
     return f"""{_yaml_header(cfg)}
-name: slm-{cfg.size}-dpo
+name: slm-{cfg.size}-chat
 wandb_project: slm
 
 model:
-  base_model_path: $RESULTS_DIR/runs/{cfg.size}/sft_code/final
+  base_model_path: $RESULTS_DIR/runs/{cfg.size}/sft_instruct/final
   max_seq_length: {profile.max_seq_length}
 
 data:
-  train_path: $DATA_DIR/runs/{cfg.size}/dpo/train.jsonl
-  val_path:   $DATA_DIR/runs/{cfg.size}/dpo/val.jsonl
+  train_path: $DATA_DIR/runs/{cfg.size}/dpo_chat/train.jsonl
+  val_path:   $DATA_DIR/runs/{cfg.size}/dpo_chat/val.jsonl
 
 dpo:
   beta: {profile.dpo_beta}

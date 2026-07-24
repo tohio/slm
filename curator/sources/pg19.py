@@ -69,7 +69,7 @@ class PG19Source:
 
     # Canonical namespaced name. The bare "pg19" alias redirects to an
     # old loading-script path that 404s on dataset_infos.json on
-    # datasets>=3.x, causing silent load failures.
+    # newer datasets releases, causing silent load failures.
     DATASET_NAME = "deepmind/pg19"
     SOURCE_TAG = "pg19"
 

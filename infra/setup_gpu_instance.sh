@@ -69,8 +69,14 @@ fi
 # ── GPU check ─────────────────────────────────────────────────────────────────
 log "GPU check:"
 GPU_NAME="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1 | tr -d '\r')"
+DRIVER_VERSION="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1 | tr -d '\r')"
+MIN_DRIVER_VERSION="580.65.06"
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
 log "Detected GPU: $GPU_NAME"
+if [[ "$(printf '%s\n' "$MIN_DRIVER_VERSION" "$DRIVER_VERSION" | sort -V | head -1)" != "$MIN_DRIVER_VERSION" ]]; then
+    log "ERROR: CUDA 13.0 requires NVIDIA driver >= $MIN_DRIVER_VERSION; found $DRIVER_VERSION"
+    exit 1
+fi
 
 # ── Directories ───────────────────────────────────────────────────────────────
 log "Creating directory structure..."
@@ -99,9 +105,14 @@ log "  ✓ Directories created"
 # ── System dependencies ───────────────────────────────────────────────────────
 log "Installing system dependencies..."
 sudo apt-get update -qq
+sudo apt-get install -y -qq software-properties-common
+if ! command -v python3.12 &>/dev/null; then
+    sudo add-apt-repository ppa:deadsnakes/ppa -y
+    sudo apt-get update -qq
+fi
 sudo apt-get install -y -qq \
     git wget curl unzip htop tmux nvtop build-essential \
-    python3.12 python3.12-dev python3.12-venv python3-pip 2>/dev/null || true
+    python3.12 python3.12-dev python3.12-venv python3-pip
 log "  ✓ System dependencies installed"
 
 # ── AWS CLI ───────────────────────────────────────────────────────────────────
@@ -128,39 +139,10 @@ else
 
     .venv/bin/pip install --upgrade pip --quiet
 
-    if [[ "$GPU_NAME" == *"B200"* || "$GPU_NAME" == *"B300"* || "$GPU_NAME" == *"GB300"* || "$GPU_NAME" == *"RTX 50"* ]]; then
-        log "  Installing PyTorch CUDA 12.8 wheel for Blackwell-class GPU..."
-        .venv/bin/pip install --upgrade --force-reinstall --quiet \
-            "torch>=2.7,<2.8" \
-            "torchvision>=0.22,<0.23" \
-            --index-url https://download.pytorch.org/whl/cu128
-    else
-        log "  Installing known-good PyTorch CUDA 12.1 wheel..."
-        .venv/bin/pip install --upgrade --force-reinstall --quiet \
-            "torch==2.5.1+cu121" \
-            "torchvision==0.20.1+cu121" \
-            --index-url https://download.pytorch.org/whl/cu121
-    fi
+    log "  Installing validated PyTorch/Hugging Face stack with CUDA 13.0..."
+    .venv/bin/pip install --upgrade -r requirements-gpu.txt --quiet
 
-    .venv/bin/pip install -r requirements.txt --quiet
-
-    .venv/bin/python - <<'PYTORCH_CHECK'
-import torch
-
-print(f"torch={torch.__version__} cuda={torch.version.cuda}")
-if not torch.cuda.is_available():
-    raise SystemExit("CUDA is not available after PyTorch install")
-
-name = torch.cuda.get_device_name(0)
-cap = torch.cuda.get_device_capability(0)
-arch = torch.cuda.get_arch_list()
-print(f"gpu={name} capability={cap} arch_list={arch}")
-
-if cap >= (10, 0) and "sm_100" not in arch:
-    raise SystemExit(
-        "Detected Blackwell-class GPU, but installed PyTorch lacks sm_100 support"
-    )
-PYTORCH_CHECK
+    .venv/bin/python infra/verify_environment.py --require-cuda
 
     log "  ✓ Python dependencies installed"
 fi

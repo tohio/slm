@@ -81,11 +81,11 @@ endif
         pretrain pretrain-mini pretrain-smoke pretrain-resume reinit-embeds smoke-gen prepare-sft sft sft-instruct sft-mini sft-instruct-mini sft-resume sft-instruct-resume sft-code sft-code-mini sft-code-resume \
         prepare-dpo dpo-chat dpo-chat-resume dpo-chat-mini dpo dpo-mini dpo-resume eval eval-base eval-instruct eval-chat eval-code eval-sanity eval-sanity-base eval-sanity-instruct eval-sanity-chat eval-sanity-code eval-mini serve serve-local \
         export export-base export-instruct export-chat export-code \
-        setup setup-data-dir setup-gpu install install-gpu install-uv install-conda install-kenlm install-orjson \
+        setup setup-data-dir setup-gpu install install-gpu test-upgrade-gpu install-uv install-conda install-kenlm install-orjson \
         download-kenlm-model download-fasttext-model accelerate-config accelerate-config-single accelerate-config-multi \
         s3-upload s3-download s3-list \
         test-curator test-validate test-tokenizer test-data-pipeline \
-        test-training test-sft-instruct test-sft-chat test-sft-code test-dpo-chat test-dpo test-gpu-pipeline test-model test-config-gen test-accel-gen test-unit \
+        test-training test-sft-instruct test-sft-chat test-sft-code test-dpo-chat test-dpo test-gpu-pipeline test-model test-training-args test-config-gen test-accel-gen test-unit \
         sanity-train sanity-train-small sanity-train-tiny sanity-train-save \
         clean clean-data clean-results clean-logs help
 
@@ -481,7 +481,6 @@ install:
 	python3 -m venv .venv
 	.venv/bin/pip install --upgrade pip
 	.venv/bin/pip install -r requirements.txt
-	.venv/bin/pip install orjson fasttext-wheel
 
 install-uv:
 	@if ! command -v uv >/dev/null 2>&1; then \
@@ -491,7 +490,6 @@ install-uv:
 	uv venv --python 3.12
 	uv pip install --upgrade pip
 	uv pip install -r requirements.txt
-	uv pip install orjson fasttext-wheel
 
 
 install-conda:
@@ -502,7 +500,6 @@ install-conda:
 	conda create -n slm python=3.12 -y
 	conda run -n slm python -m pip install --upgrade pip
 	conda run -n slm pip install -r requirements.txt
-	conda run -n slm pip install orjson fasttext-wheel
 
 
 install-kenlm:
@@ -512,11 +509,15 @@ install-orjson:
 	.venv/bin/pip install orjson fasttext-wheel
 
 install-gpu:
-	@echo "==> Installing dependencies for GPU training instance..."
+	@echo "==> Installing validated CUDA 13.0 training stack..."
 	python3 -m venv .venv
 	.venv/bin/pip install --upgrade pip
-	.venv/bin/pip install -r requirements.txt
-	.venv/bin/pip install orjson fasttext-wheel
+	.venv/bin/pip install -r requirements-gpu.txt
+	.venv/bin/python infra/verify_environment.py --require-cuda
+
+test-upgrade-gpu:
+	@echo "==> Running one-shot CUDA 13 / compile / cache acceptance test..."
+	.venv/bin/python infra/gpu_smoke.py
 
 download-kenlm-model:
 	@echo "==> Downloading KenLM English model (~4GB)..."
@@ -598,6 +599,10 @@ test-model:
 	@echo "==> Running model unit tests..."
 	.venv/bin/pytest tests/model/ -v --tb=short
 
+test-training-args:
+	@echo "==> Running Transformers/TRL compatibility tests..."
+	.venv/bin/pytest tests/test_training_args.py tests/test_trl_smoke.py -v --tb=short
+
 test-config-gen:
 	@echo "==> Running config_gen unit tests..."
 	.venv/bin/pytest tests/test_config_gen.py -v --tb=short
@@ -606,7 +611,7 @@ test-accel-gen:
 	@echo "==> Running accel_gen unit tests..."
 	.venv/bin/pytest tests/test_accel_gen.py -v --tb=short
 
-test-unit: test-model test-config-gen test-accel-gen
+test-unit: test-model test-training-args test-config-gen test-accel-gen
 	@echo "==> Unit tests complete"
 
 # ── Sanity check ──────────────────────────────────────────────────────────────
@@ -676,6 +681,8 @@ help:
 	@echo "  download-kenlm-model     Download KenLM English model (~4GB)"
 	@echo "  accelerate-config        Configure accelerate interactively"
 	@echo "  install                  Install dependencies (pip)"
+	@echo "  install-gpu              Install pinned CUDA 13 training dependencies"
+	@echo "  test-upgrade-gpu         One-shot CUDA/compile/cache acceptance test"
 	@echo "  install-uv               Install dependencies (uv)"
 	@echo "  install-conda            Install dependencies (conda)"
 	@echo "  install-kenlm            Install KenLM Python bindings from source"
@@ -696,6 +703,7 @@ help:
 	@echo ""
 	@echo "Tests (unit — no pipeline outputs needed):"
 	@echo "  test-model               Model architecture unit tests"
+	@echo "  test-training-args       Transformers/TRL argument compatibility tests"
 	@echo "  test-config-gen          Config generator unit tests"
 	@echo "  test-accel-gen           Accelerate config generator unit tests"
 	@echo "  test-unit                All unit tests above"

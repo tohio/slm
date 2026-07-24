@@ -1,0 +1,23 @@
+# Validated training stack. requirements-gpu.txt selects the CUDA 13.0 build
+# of the same public torch version.
+torch==2.13.0
+transformers==5.14.1
+accelerate==1.14.0
+trl==1.9.0
+datasets==5.0.0
+tokenizers==0.22.2
+huggingface-hub==1.24.0
+fsspec[http]==2026.4.0
+
+# Artifact restore, experiment tracking, and training utilities.
+boto3>=1.34.0
+botocore>=1.34.0
+wandb>=0.17.0
+numpy>=1.26.0
+tqdm>=4.66.0
+pyyaml>=6.0.1
+python-dotenv>=1.0.0
+requests>=2.31.0
+
+# Used by the post-install CPU/API checks and model smoke tests.
+pytest>=8.4.0,<9.0.0

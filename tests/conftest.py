@@ -18,6 +18,22 @@ from pathlib import Path
 import pytest
 
 
+def make_mini_config():
+    """Return the small deterministic model config used by CPU unit tests."""
+    from model.config import SLMConfig
+
+    return SLMConfig(
+        vocab_size=32_000,
+        hidden_size=384,
+        intermediate_size=1_024,
+        num_hidden_layers=6,
+        num_attention_heads=6,
+        num_key_value_heads=2,
+        max_position_embeddings=1_024,
+        rope_theta=500_000.0,
+    )
+
+
 def pytest_addoption(parser):
     parser.addoption(
         "--size",
@@ -54,4 +70,4 @@ def code_sft_model_dir(results_dir, model_size):
 
 @pytest.fixture(scope="session")
 def dpo_model_dir(results_dir, model_size):
-    return results_dir / "runs" / model_size / "dpo" / "final"
+    return results_dir / "runs" / model_size / "dpo_chat" / "final"

@@ -39,11 +39,10 @@ Warmup:
     The YAML stores `warmup_ratio_recipe` (e.g. 0.05 = 5% of total steps).
     We compute the equivalent `warmup_steps` at runtime from the resolved
     total step count and pass that to DPOConfig. We do NOT pass
-    warmup_ratio because TRL deprecated it in v5.2 in favour of
-    warmup_steps. Computing in code preserves the auto-rescaling property
+    warmup_ratio directly. Computing in code preserves the auto-rescaling property
     when GPU count changes — `warmup_steps` baked into YAML would not.
 
-Target library versions: trl 0.28.x, transformers 5.5.x.
+Target library versions are pinned together in requirements.txt.
 See requirements.txt for the full compatible stack.
 
 Usage:
@@ -82,6 +81,7 @@ log = logging.getLogger(__name__)
 
 DATA_DIR    = Path(os.environ.get("DATA_DIR", "data"))
 from config.paths import tokenizer_dir, dpo_chat_dir, BASE_RESULTS_DIR
+from config.runtime import configure_torch_runtime
 
 RESULTS_DIR = BASE_RESULTS_DIR
 
@@ -184,7 +184,7 @@ def resolve_warmup_steps(train_cfg: dict, num_train_examples: int) -> int:
 
 def build_dpo_args(cfg: dict, output_dir: Path, beta: float, num_train_examples: int):
     """
-    Build DPOConfig for trl 0.29.x.
+    Build DPOConfig for the pinned TRL stack.
 
     DPO-specific fields read from cfg["dpo"]:
         beta                — KL penalty temperature
@@ -255,14 +255,16 @@ def build_dpo_args(cfg: dict, output_dir: Path, beta: float, num_train_examples:
         per_device_train_batch_size=micro_batch,
         per_device_eval_batch_size=eval_micro_batch,
         gradient_accumulation_steps=train_cfg.get("gradient_accumulation_steps", 4),
-        learning_rate=optim_cfg["lr"],
-        weight_decay=optim_cfg.get("weight_decay", 0.01),
-        adam_beta1=optim_cfg.get("beta1", 0.9),
-        adam_beta2=optim_cfg.get("beta2", 0.98),
+        learning_rate=lr,
+        weight_decay=weight_decay,
+        adam_beta1=beta1,
+        adam_beta2=beta2,
         max_grad_norm=train_cfg.get("gradient_clip_val", 1.0),
         lr_scheduler_type=train_cfg.get("lr_scheduler", "cosine"),
+        optim="adamw_torch_fused" if has_cuda else "adamw_torch",
         bf16=use_bf16,
         fp16=use_fp16,
+        tf32=has_cuda,
         torch_compile=torch_compile,
         eval_strategy="steps",
         eval_steps=eval_steps,
@@ -312,6 +314,7 @@ def main():
     log.info(f"Base model: {base_model_path}")
     log.info(f"Beta:       {beta}")
     log.info(f"Device:     {'cuda' if torch.cuda.is_available() else 'cpu'}")
+    configure_torch_runtime(log)
 
     # ── Model ─────────────────────────────────────────────────────────────────
     from transformers import AutoConfig
@@ -319,24 +322,9 @@ def main():
 
     AutoConfig.register("slm", SLMConfig)
     model = SLMForCausalLM.from_pretrained(str(base_model_path))
-    # trl 0.29's DPOTrainer does `model.warnings_issued["estimate_tokens"] = True`
-    # during __init__ to suppress a transformers FLOPs-estimation warning for
-    # DPO batches (which contain prompt_input_ids, not input_ids).
-    # `warnings_issued` used to be set by transformers' PreTrainedModel.__init__,
-    # but transformers 5.x no longer initialises it — the dict doesn't exist
-    # and the assignment raises AttributeError. Pre-seed it here.
-    #
-    # This is NOT related to SLMForCausalLM's __getattr__ (it does not override
-    # one). It's a transformers-5 / trl-0.29 compat gap that would affect any
-    # model loaded under this stack.
-    #
-    # trl removed this access in PR #4960 (post-0.29, pre-1.0). When we upgrade
-    # past 0.29 verify the hack is no longer needed and remove it.
-    model.warnings_issued = {}
     log.info(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     ref_model = SLMForCausalLM.from_pretrained(str(base_model_path))
-    ref_model.warnings_issued = {}
     for p in ref_model.parameters():
         p.requires_grad = False
 

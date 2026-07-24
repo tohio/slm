@@ -57,7 +57,7 @@ class RMSNorm(nn.Module):
         x = x.to(torch.float32)
         variance = x.pow(2).mean(dim=-1, keepdim=True)
         x = x * torch.rsqrt(variance + self.eps)
-        return self.weight * x.to(input_dtype)
+        return (self.weight * x).to(input_dtype)
 
     def extra_repr(self) -> str:
         return f"hidden_size={self.weight.shape[0]}, eps={self.eps}"

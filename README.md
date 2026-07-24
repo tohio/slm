@@ -77,6 +77,28 @@ pip install -r requirements.txt
 cp .env.sample .env
 ```
 
+For an NVIDIA training host, use the validated CUDA 13.0 path instead:
+
+```bash
+make install-gpu
+```
+
+This installs the training-only `requirements-gpu.txt` (without the local
+curation/notebook stack) and verifies the pinned library
+versions, CUDA runtime, NVIDIA driver, GPU compute capability, and BF16
+support before training.
+
+After applying an environment/model upgrade, run the single integrated GPU
+acceptance check:
+
+```bash
+make test-upgrade-gpu
+```
+
+It performs environment/driver/SM validation, eager and compiled BF16 training
+steps with fused AdamW, and cached-versus-uncached generation parity using a
+tiny synthetic model. It downloads no dataset and does not start a real run.
+
 Common environment variables:
 
 ```bash

@@ -33,12 +33,15 @@ Decoder-only Transformer implementation for SLM.
 
 ## Configured sizes
 
-| Size | Layers | Hidden | Q heads | KV heads | Context |
-|---|---:|---:|---:|---:|---:|
-| `mini` | 6 | 384 | 6 | 2 | 1024 |
-| `125m` | 12 | 768 | 12 | 4 | 2048 |
-| `350m` | 24 | 1024 | 16 | 8 | 2048 |
-| `1b` | 32 | 2048 | 32 | 8 | 4096 |
+Counts below are unique trainable parameters; the LM head shares the token
+embedding matrix.
+
+| Size | Parameters | Layers | Hidden | Q heads | KV heads | Context |
+|---|---:|---:|---:|---:|---:|---:|
+| `mini` | 21.7M | 6 | 384 | 6 | 2 | 1024 |
+| `125m` | 125.3M | 16 | 768 | 12 | 4 | 2048 |
+| `350m` | 351.3M | 27 | 1024 | 16 | 8 | 2048 |
+| `1b` | 1.012B | 21 | 2048 | 32 | 8 | 4096 |
 
 Size-specific training configs live in `pretrain/configs/`.
 

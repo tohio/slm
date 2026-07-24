@@ -33,7 +33,7 @@ from typing import Optional
 
 
 # Layer class to wrap with FSDP. The model in model/block.py defines this.
-DEFAULT_FSDP_TRANSFORMER_LAYER = "SLMBlock"
+DEFAULT_FSDP_TRANSFORMER_LAYER = "SLMDecoderBlock"
 
 
 # ── DDP ──────────────────────────────────────────────────────────────────────

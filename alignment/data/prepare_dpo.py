@@ -25,17 +25,13 @@ tokenizes the full conversation consistently — avoiding BPE boundary
 mismatch warnings that occur with plain string prompts.
 
 Length filtering (defense in depth):
-    trl 0.29 supports DPOConfig.max_prompt_length (applied by the data
-    collator at load time). However, trl's truncation may still drop the
-    start of an overlong prompt, and responses exceeding max_length also
-    get truncated. We additionally filter here using the actual SLM
-    tokenizer: drop any pair where
+    Current TRL no longer exposes DPOConfig.max_prompt_length. We filter here
+    using the actual SLM tokenizer: drop any pair where
         len(prompt) + max(len(chosen), len(rejected))
     exceeds MAX_TOTAL_TOKENS (2048 = smallest model size's DPOConfig.max_length).
     This means train-time truncation never fires on the prepared dataset,
-    the filtered dataset serves all three model sizes without re-preparation,
-    and the whole contract survives the eventual trl 1.0 upgrade (where
-    max_prompt_length is removed and the filter becomes load-bearing).
+    and the filtered dataset serves all three model sizes without
+    re-preparation.
 
 Usage:
     python alignment/data/prepare_dpo.py
