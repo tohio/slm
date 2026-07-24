@@ -13,6 +13,20 @@ import torch
 from tests.conftest import make_mini_config
 
 
+def _make_tiny_config():
+    from model.config import SLMConfig
+
+    return SLMConfig(
+        vocab_size=256,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        max_position_embeddings=64,
+    )
+
+
 # ── RMSNorm ────────────────────────────────────────────────────────────────────
 
 class TestRMSNorm:
@@ -77,11 +91,13 @@ class TestSwiGLUMLP:
 
 class TestGroupedQueryAttention:
     def test_output_shape(self):
-        from model.attention import GroupedQueryAttention
+        from model.attention import GroupedQueryAttention, RotaryEmbedding
         config = make_mini_config()
         attn = GroupedQueryAttention(config, layer_idx=0)
         x = torch.randn(2, 16, config.hidden_size)
-        out, _ = attn(x)
+        position_ids = torch.arange(16).unsqueeze(0)
+        position_embeddings = RotaryEmbedding(config)(x, position_ids)
+        out = attn(x, position_embeddings=position_embeddings)
         assert out.shape == x.shape
 
     def test_kv_heads_fewer_than_q_heads(self):
@@ -92,16 +108,27 @@ class TestGroupedQueryAttention:
         assert attn.num_heads % attn.num_kv_heads == 0
 
     def test_kv_cache_shape(self):
-        from model.attention import GroupedQueryAttention
+        from transformers.cache_utils import DynamicCache
+
+        from model.attention import GroupedQueryAttention, RotaryEmbedding
         config = make_mini_config()
         attn = GroupedQueryAttention(config, layer_idx=0)
         x = torch.randn(2, 16, config.hidden_size)
-        _, cache = attn(x, use_cache=True)
-        assert cache is not None
-        k, v = cache
+        position_ids = torch.arange(16).unsqueeze(0)
+        position_embeddings = RotaryEmbedding(config)(x, position_ids)
+        cache = DynamicCache(config=config)
+        attn(
+            x,
+            position_embeddings=position_embeddings,
+            past_key_values=cache,
+            use_cache=True,
+        )
+        k = cache.layers[0].keys
+        v = cache.layers[0].values
         assert k.shape[1] == config.num_key_value_heads
         assert k.shape[2] == 16  # seq_len
         assert k.shape[3] == config.head_dim
+        assert v.shape == k.shape
 
     def test_no_bias(self):
         from model.attention import GroupedQueryAttention
@@ -117,20 +144,26 @@ class TestGroupedQueryAttention:
 
 class TestDecoderBlock:
     def test_output_shape(self):
+        from model.attention import RotaryEmbedding
         from model.block import SLMDecoderBlock
         config = make_mini_config()
         block = SLMDecoderBlock(config, layer_idx=0)
         x = torch.randn(2, 16, config.hidden_size)
-        out, _ = block(x)
+        position_ids = torch.arange(16).unsqueeze(0)
+        position_embeddings = RotaryEmbedding(config)(x, position_ids)
+        out = block(x, position_embeddings=position_embeddings)
         assert out.shape == x.shape
 
     def test_residual_connection(self):
         """Output should differ from input (residual adds attention/MLP)."""
+        from model.attention import RotaryEmbedding
         from model.block import SLMDecoderBlock
         config = make_mini_config()
         block = SLMDecoderBlock(config, layer_idx=0)
         x = torch.randn(2, 16, config.hidden_size)
-        out, _ = block(x)
+        position_ids = torch.arange(16).unsqueeze(0)
+        position_embeddings = RotaryEmbedding(config)(x, position_ids)
+        out = block(x, position_embeddings=position_embeddings)
         assert not torch.allclose(out, x)
 
 
@@ -198,6 +231,83 @@ class TestSLMForCausalLM:
         labels = input_ids.clone()
         out = model(input_ids, labels=labels)
         assert torch.isfinite(out.loss), f"Loss is not finite: {out.loss}"
+
+    def test_labels_disable_cache_by_default(self):
+        from model.model import SLMForCausalLM
+
+        config = _make_tiny_config()
+        model = SLMForCausalLM(config).train()
+        input_ids = torch.randint(0, config.vocab_size, (2, 16))
+
+        out = model(input_ids, labels=input_ids)
+
+        assert out.past_key_values is None
+
+    def test_shared_causal_loss_honors_num_items_in_batch(self):
+        from model.model import SLMForCausalLM
+
+        config = _make_tiny_config()
+        model = SLMForCausalLM(config)
+        input_ids = torch.randint(0, config.vocab_size, (2, 8))
+        labels = input_ids.clone()
+        labels[0, :4] = -100
+        num_items = (labels[..., 1:] != -100).sum()
+
+        out = model(
+            input_ids,
+            labels=labels,
+            num_items_in_batch=num_items,
+        )
+        expected = torch.nn.functional.cross_entropy(
+            out.logits[..., :-1, :].float().reshape(-1, config.vocab_size),
+            labels[..., 1:].reshape(-1),
+            ignore_index=-100,
+            reduction="sum",
+        ) / num_items
+
+        torch.testing.assert_close(out.loss, expected)
+
+    def test_logits_to_keep_limits_generation_projection(self):
+        from model.model import SLMForCausalLM
+
+        config = _make_tiny_config()
+        model = SLMForCausalLM(config).eval()
+        input_ids = torch.randint(0, config.vocab_size, (2, 16))
+
+        out = model(input_ids, logits_to_keep=1)
+
+        assert out.logits.shape == (2, 1, config.vocab_size)
+
+    def test_return_dict_false_returns_tuple(self):
+        from model.model import SLMForCausalLM
+
+        config = _make_tiny_config()
+        model = SLMForCausalLM(config)
+        input_ids = torch.randint(0, config.vocab_size, (2, 8))
+
+        out = model(input_ids, labels=input_ids, return_dict=False)
+
+        assert isinstance(out, tuple)
+        assert out[0].ndim == 0
+        assert out[1].shape == (2, 8, config.vocab_size)
+
+    @pytest.mark.parametrize(
+        "input_ids,inputs_embeds",
+        [
+            (None, None),
+            (
+                torch.ones((1, 4), dtype=torch.long),
+                torch.zeros((1, 4, 64)),
+            ),
+        ],
+    )
+    def test_requires_exactly_one_model_input(self, input_ids, inputs_embeds):
+        from model.model import SLMForCausalLM
+
+        model = SLMForCausalLM(_make_tiny_config())
+
+        with pytest.raises(ValueError, match="exactly one"):
+            model(input_ids=input_ids, inputs_embeds=inputs_embeds)
 
     def test_gradient_checkpointing_backward(self):
         """The Transformers checkpointing hook must reach the plain SLMModel."""
@@ -318,3 +428,78 @@ class TestSLMForCausalLM:
         assert torch.allclose(logits_before, logits_after, atol=1e-5), (
             "Logits differ after save/load — weight tying or serialisation issue"
         )
+
+
+class TestSLMConfigValidation:
+    @pytest.mark.parametrize(
+        "override",
+        [
+            {"vocab_size": 0},
+            {"hidden_size": 0},
+            {"intermediate_size": 0},
+            {"num_hidden_layers": 0},
+            {"num_attention_heads": 0},
+            {"num_key_value_heads": 0},
+            {"max_position_embeddings": 0},
+            {"rope_theta": 0},
+            {"rms_norm_eps": 0},
+            {"initializer_range": 0},
+            {"attention_dropout": -0.1},
+            {"attention_dropout": 1.0},
+        ],
+    )
+    def test_invalid_numeric_config_is_rejected(self, override):
+        from model.config import SLMConfig
+
+        values = {
+            "vocab_size": 256,
+            "hidden_size": 64,
+            "intermediate_size": 128,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "max_position_embeddings": 64,
+        }
+        values.update(override)
+
+        with pytest.raises(ValueError):
+            SLMConfig(**values)
+
+    def test_odd_rope_head_dimension_is_rejected(self):
+        from model.config import SLMConfig
+
+        with pytest.raises(ValueError, match="must be even"):
+            SLMConfig(
+                vocab_size=256,
+                hidden_size=60,
+                intermediate_size=128,
+                num_hidden_layers=2,
+                num_attention_heads=4,
+                num_key_value_heads=2,
+                max_position_embeddings=64,
+            )
+
+    def test_unimplemented_rope_scaling_is_rejected(self):
+        from model.config import SLMConfig
+
+        common = {
+            "vocab_size": 256,
+            "hidden_size": 64,
+            "intermediate_size": 128,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "max_position_embeddings": 64,
+        }
+
+        with pytest.raises(ValueError, match="not implemented"):
+            SLMConfig(
+                **common,
+                rope_scaling={"rope_type": "linear", "factor": 2.0},
+            )
+
+        with pytest.raises(ValueError, match="not implemented"):
+            SLMConfig(
+                **common,
+                rope_parameters={"rope_type": "linear", "factor": 2.0},
+            )

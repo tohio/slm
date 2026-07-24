@@ -30,54 +30,19 @@ from typing import Optional, Union
 
 import torch
 import torch.nn as nn
-from torch.nn import CrossEntropyLoss
 from transformers import PreTrainedModel
-from transformers.cache_utils import Cache
+from transformers.cache_utils import Cache, DynamicCache
 from transformers.generation import GenerationMixin
+from transformers.masking_utils import create_causal_mask
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 
+from .attention import RotaryEmbedding
 from .block import SLMDecoderBlock
 from .config import SLMConfig
 from .norm import RMSNorm
 
 
-def _extract_kv_from_dynamic_cache(
-    cache: Cache,
-    n_layers: int,
-) -> list[Optional[tuple[torch.Tensor, torch.Tensor]]]:
-    """
-    Extract per-layer (k, v) tuples from a DynamicCache object.
-
-    Handles two DynamicCache formats:
-    - transformers v5: cache.layers is a list of DynamicLayer objects
-      with .keys and .values tensor attributes.
-    - older versions: cache.key_cache / cache.value_cache are lists of tensors.
-
-    Returns a list of length n_layers where each entry is either a
-    (k, v) tuple or None if no cached state exists for that layer.
-    """
-    result = []
-
-    cache_layers = getattr(cache, "layers", None)
-    if cache_layers is not None:
-        for i in range(n_layers):
-            if i < len(cache_layers) and cache_layers[i].is_initialized:
-                result.append((cache_layers[i].keys, cache_layers[i].values))
-            else:
-                result.append(None)
-        return result
-
-    key_cache = getattr(cache, "key_cache", None)
-    value_cache = getattr(cache, "value_cache", None)
-    if key_cache is not None:
-        for i in range(n_layers):
-            if i < len(key_cache):
-                result.append((key_cache[i], value_cache[i]))
-            else:
-                result.append(None)
-        return result
-
-    return [None] * n_layers
+LegacyCache = list[tuple[torch.Tensor, torch.Tensor]]
 
 
 class SLMModel(nn.Module):
@@ -94,12 +59,21 @@ class SLMModel(nn.Module):
     def __init__(self, config: SLMConfig):
         super().__init__()
         self.config = config
+        attention_implementation = getattr(config, "_attn_implementation", None)
+        if attention_implementation not in (None, "sdpa"):
+            raise ValueError(
+                "SLM supports attn_implementation='sdpa' only, got "
+                f"{attention_implementation!r}"
+            )
+        if attention_implementation is None:
+            config._attn_implementation_internal = "sdpa"
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         self.layers = nn.ModuleList(
             [SLMDecoderBlock(config, layer_idx=i) for i in range(config.num_hidden_layers)]
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.rotary_emb = RotaryEmbedding(config)
         self.gradient_checkpointing = False
 
     def get_input_embeddings(self) -> nn.Embedding:
@@ -112,19 +86,44 @@ class SLMModel(nn.Module):
         if isinstance(module, SLMModel):
             module.gradient_checkpointing = value
 
+    def _convert_legacy_cache(self, past_key_values: LegacyCache) -> DynamicCache:
+        if len(past_key_values) != len(self.layers):
+            raise ValueError(
+                "Legacy past_key_values must contain exactly one entry per "
+                f"decoder layer: expected {len(self.layers)}, got "
+                f"{len(past_key_values)}"
+            )
+
+        cache = DynamicCache(config=self.config)
+        for layer_idx, layer_cache in enumerate(past_key_values):
+            if not isinstance(layer_cache, (tuple, list)) or len(layer_cache) != 2:
+                raise ValueError(
+                    "Each legacy cache entry must be a (key, value) pair; "
+                    f"invalid entry at layer {layer_idx}"
+                )
+            cache.update(layer_cache[0], layer_cache[1], layer_idx)
+        return cache
+
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[Union[Cache, list[tuple[torch.Tensor, torch.Tensor]]]] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Union[Cache, LegacyCache]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-    ) -> BaseModelOutputWithPast:
-        use_cache = use_cache if use_cache is not None else self.config.use_cache
+    ) -> Union[BaseModelOutputWithPast, tuple]:
+        if (input_ids is None) == (inputs_embeds is None):
+            raise ValueError("Specify exactly one of input_ids or inputs_embeds")
+
+        if use_cache is None:
+            use_cache = self.config.use_cache and not self.training
+        if output_hidden_states is None:
+            output_hidden_states = self.config.output_hidden_states
         if return_dict is None:
-            return_dict = getattr(self.config, "return_dict", True)
+            return_dict = self.config.return_dict
 
         if self.gradient_checkpointing and self.training and use_cache:
             use_cache = False
@@ -132,43 +131,65 @@ class SLMModel(nn.Module):
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
 
-        hidden_states = inputs_embeds
-
-        if past_key_values is None:
-            past_key_values = [None] * len(self.layers)
-        elif isinstance(past_key_values, Cache):
-            past_key_values = _extract_kv_from_dynamic_cache(
-                past_key_values,
-                len(self.layers),
+        if isinstance(past_key_values, list):
+            past_key_values = self._convert_legacy_cache(past_key_values)
+        elif past_key_values is not None and not isinstance(past_key_values, Cache):
+            raise TypeError(
+                "past_key_values must be a Transformers Cache or a legacy "
+                f"list of key/value pairs, got {type(past_key_values).__name__}"
             )
 
-        next_cache: list | None = [] if use_cache else None
+        if use_cache and past_key_values is None:
+            past_key_values = DynamicCache(config=self.config)
+
+        past_seen_tokens = (
+            past_key_values.get_seq_length()
+            if past_key_values is not None
+            else 0
+        )
+        if position_ids is None:
+            position_ids = (
+                torch.arange(
+                    inputs_embeds.shape[1],
+                    device=inputs_embeds.device,
+                    dtype=torch.long,
+                )
+                + past_seen_tokens
+            ).unsqueeze(0)
+
+        causal_mask = create_causal_mask(
+            config=self.config,
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            position_ids=position_ids,
+        )
+        position_embeddings = self.rotary_emb(inputs_embeds, position_ids)
+
+        hidden_states = inputs_embeds
         all_hidden_states: list | None = [] if output_hidden_states else None
 
-        for layer, past_kv in zip(self.layers, past_key_values):
+        for layer in self.layers:
             if output_hidden_states:
                 all_hidden_states.append(hidden_states)
 
             if self.gradient_checkpointing and self.training:
-                layer_out = self._gradient_checkpointing_func(
+                hidden_states = self._gradient_checkpointing_func(
                     layer.__call__,
                     hidden_states,
-                    attention_mask,
+                    causal_mask,
+                    position_embeddings,
                     None,
                     False,
                 )
-                hidden_states = layer_out[0]
-                layer_kv = layer_out[1] if len(layer_out) > 1 else None
             else:
-                hidden_states, layer_kv = layer(
+                hidden_states = layer(
                     hidden_states,
-                    attention_mask=attention_mask,
-                    past_key_value=past_kv,
+                    attention_mask=causal_mask,
+                    position_embeddings=position_embeddings,
+                    past_key_values=past_key_values,
                     use_cache=use_cache,
                 )
-
-            if use_cache:
-                next_cache.append(layer_kv)
 
         hidden_states = self.norm(hidden_states)
 
@@ -177,12 +198,14 @@ class SLMModel(nn.Module):
 
         if not return_dict:
             return tuple(
-                v for v in [hidden_states, next_cache, all_hidden_states] if v is not None
+                value
+                for value in [hidden_states, past_key_values, all_hidden_states]
+                if value is not None
             )
 
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
-            past_key_values=next_cache,
+            past_key_values=past_key_values,
             hidden_states=all_hidden_states,
         )
 
@@ -206,6 +229,9 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
     config_class = SLMConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
+    _supports_sdpa = True
+    _no_split_modules = ["SLMDecoderBlock"]
+    _skip_keys_device_placement = ["past_key_values"]
 
     _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
 
@@ -459,16 +485,25 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         self,
         input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[Union[Cache, list[tuple[torch.Tensor, torch.Tensor]]]] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Union[Cache, LegacyCache]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-    ) -> CausalLMOutputWithPast:
+        logits_to_keep: Union[int, torch.Tensor] = 0,
+        **kwargs,
+    ) -> Union[CausalLMOutputWithPast, tuple]:
+        if labels is not None and use_cache is None:
+            use_cache = False
+        if return_dict is None:
+            return_dict = self.config.return_dict
+
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
+            position_ids=position_ids,
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
@@ -477,17 +512,33 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs.last_hidden_state
-        logits = self.lm_head(hidden_states)
+        slice_indices = (
+            slice(-logits_to_keep, None)
+            if isinstance(logits_to_keep, int)
+            else logits_to_keep
+        )
+        logits = self.lm_head(hidden_states[:, slice_indices, :])
 
         loss = None
         if labels is not None:
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-
-            loss = CrossEntropyLoss()(
-                shift_logits.view(-1, self.config.vocab_size),
-                shift_labels.view(-1),
+            loss = self.loss_function(
+                logits=logits,
+                labels=labels,
+                vocab_size=self.config.vocab_size,
+                **kwargs,
             )
+
+        if not return_dict:
+            output = tuple(
+                value
+                for value in [
+                    logits,
+                    outputs.past_key_values,
+                    outputs.hidden_states,
+                ]
+                if value is not None
+            )
+            return ((loss,) + output) if loss is not None else output
 
         return CausalLMOutputWithPast(
             loss=loss,

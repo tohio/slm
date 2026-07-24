@@ -9,9 +9,10 @@ These tests target behaviours that test_model.py does NOT cover:
       (catches cache/mask offset bugs when q_len < kv_len)
     - Token-by-token generation matching full forward
       (catches q_len==1 cache path bugs)
-    - Batched inference respecting padding masks
+    - Native Transformers cache preservation
+    - Batched inference respecting left-padding masks
       (catches attention_mask being ignored during eval)
-    - Parameter count validation for all three tiers
+    - Exact analytical parameter counts for all three tiers
       (test_model.py only checks the mini config)
 
 Runs on CPU in under 10 seconds. No pipeline outputs required.
@@ -25,7 +26,7 @@ from __future__ import annotations
 import pytest
 import torch
 import torch.nn.functional as F
-from transformers.cache_utils import DynamicCache
+from transformers.cache_utils import DynamicCache, StaticCache
 
 from model.config import CONFIGS, SLMConfig
 from model.model import SLMForCausalLM
@@ -33,7 +34,7 @@ from model.model import SLMForCausalLM
 
 def test_attention_uses_native_sdpa_gqa(monkeypatch):
     """GQA should not materialize repeated K/V heads before SDPA."""
-    from model.attention import GroupedQueryAttention
+    from model.attention import GroupedQueryAttention, RotaryEmbedding
 
     config = _tiny_config()
     attention = GroupedQueryAttention(config, layer_idx=0)
@@ -48,7 +49,15 @@ def test_attention_uses_native_sdpa_gqa(monkeypatch):
 
     monkeypatch.setattr(F, "scaled_dot_product_attention", wrapped)
     hidden = torch.randn(1, 4, config.hidden_size)
-    output, cache = attention(hidden, use_cache=True)
+    position_ids = torch.arange(4).unsqueeze(0)
+    position_embeddings = RotaryEmbedding(config)(hidden, position_ids)
+    cache = DynamicCache(config=config)
+    output = attention(
+        hidden,
+        position_embeddings=position_embeddings,
+        past_key_values=cache,
+        use_cache=True,
+    )
 
     assert output.shape == hidden.shape
     assert observed == {
@@ -56,7 +65,7 @@ def test_attention_uses_native_sdpa_gqa(monkeypatch):
         "kv_heads": config.num_key_value_heads,
         "enable_gqa": True,
     }
-    assert cache[0].shape[1] == config.num_key_value_heads
+    assert cache.layers[0].keys.shape[1] == config.num_key_value_heads
 
 
 # ── Tiny config for multi-forward tests ───────────────────────────────────────
@@ -188,19 +197,82 @@ def test_generate_cached_matches_uncached():
     assert torch.equal(cached, uncached)
 
 
+def test_forward_preserves_native_cache_object():
+    """The model must update and return the supplied Cache without conversion."""
+    config = _tiny_config()
+    model = SLMForCausalLM(config).eval()
+    prompt = torch.randint(0, config.vocab_size, (1, 10))
+    cache = DynamicCache(config=config)
+
+    with torch.no_grad():
+        out = model(prompt, past_key_values=cache, use_cache=True)
+
+    assert out.past_key_values is cache
+    assert cache.get_seq_length() == prompt.shape[1]
+    assert len(cache.layers) == config.num_hidden_layers
+
+
+def test_static_cache_matches_full_forward():
+    """Compileable StaticCache must preserve causal logits across decode steps."""
+    torch.manual_seed(0)
+    config = _tiny_config()
+    model = SLMForCausalLM(config).eval()
+    prompt = torch.randint(0, config.vocab_size, (1, 11))
+    cache = StaticCache(config=config, max_cache_len=16)
+
+    with torch.no_grad():
+        full = model(prompt, use_cache=False).logits
+        model(
+            prompt[:, :10],
+            attention_mask=torch.ones(1, 10, dtype=torch.long),
+            past_key_values=cache,
+            use_cache=True,
+        )
+        continued = model(
+            prompt[:, 10:],
+            attention_mask=torch.ones(1, 11, dtype=torch.long),
+            past_key_values=cache,
+            use_cache=True,
+        ).logits
+
+    torch.testing.assert_close(full[:, 10:], continued, atol=1e-4, rtol=1e-4)
+
+
+def test_short_legacy_cache_is_rejected():
+    """A malformed legacy cache must not silently skip decoder layers."""
+    config = _tiny_config()
+    model = SLMForCausalLM(config).eval()
+    prompt = torch.randint(0, config.vocab_size, (1, 1))
+    head_dim = config.head_dim
+    one_layer_cache = [
+        (
+            torch.zeros(1, config.num_key_value_heads, 2, head_dim),
+            torch.zeros(1, config.num_key_value_heads, 2, head_dim),
+        )
+    ]
+
+    with pytest.raises(ValueError, match="exactly one entry per decoder layer"):
+        model(
+            prompt,
+            past_key_values=one_layer_cache,
+            use_cache=True,
+        )
+
+
 # ── Batched inference with padding (Bug #2 regression) ────────────────────────
 
 def test_batched_forward_respects_padding_mask():
     """
-    When a batch contains sequences of different lengths (right-padded),
+    When a batch contains sequences of different lengths (left-padded),
     the padded positions must not affect the logits of the real tokens.
 
     Run a short prompt alone, then run it batched alongside a longer
     prompt (forcing the short one to be padded). The logits at the
     short prompt's real positions should be identical in both cases.
 
-    If attention_mask is ignored during eval, the batched run attends
-    over pad positions and this test fails.
+    Left padding is intentional: a causal mask already prevents real tokens
+    from attending to right-padding in the future, so a right-padding test
+    cannot detect an ignored padding mask.
     """
     torch.manual_seed(0)
     config = _tiny_config()
@@ -212,42 +284,64 @@ def test_batched_forward_respects_padding_mask():
     pad_id = 0
 
     short_padded = torch.full((1, 12), pad_id, dtype=torch.long)
-    short_padded[:, :5] = short
+    short_padded[:, -5:] = short
     batch = torch.cat([short_padded, long_], dim=0)  # (2, 12)
 
     attn_mask = torch.ones(2, 12, dtype=torch.long)
-    attn_mask[0, 5:] = 0
+    attn_mask[0, :-5] = 0
 
     with torch.no_grad():
         solo = model(short).logits                              # (1, 5, V)
         batched = model(batch, attention_mask=attn_mask).logits  # (2, 12, V)
 
-    torch.testing.assert_close(batched[0:1, :5], solo, atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(batched[0:1, -5:], solo, atol=1e-4, rtol=1e-4)
 
 
 # ── Parameter counts across all tiers ─────────────────────────────────────────
 
+def _analytical_parameter_count(config: SLMConfig) -> int:
+    hidden = config.hidden_size
+    head_dim = config.head_dim
+    kv_width = config.num_key_value_heads * head_dim
+
+    embeddings = config.vocab_size * hidden
+    attention = (
+        hidden * hidden
+        + hidden * kv_width
+        + hidden * kv_width
+        + hidden * hidden
+    )
+    mlp = 3 * hidden * config.intermediate_size
+    block_norms = 2 * hidden
+    final_norm = hidden
+    untied_lm_head = 0 if config.tie_word_embeddings else embeddings
+
+    return (
+        embeddings
+        + config.num_hidden_layers * (attention + mlp + block_norms)
+        + final_norm
+        + untied_lm_head
+    )
+
+
 @pytest.mark.parametrize(
-    "name, target",
+    "name,layers,expected",
     [
-        ("125m", 125_000_000),
-        ("350m", 350_000_000),
-        ("1b",   1_000_000_000),
+        ("125m", 16, 125_264_640),
+        ("350m", 27, 351_329_280),
+        ("1b", 21, 1_012_488_192),
     ],
 )
-def test_parameter_count_within_tolerance(name: str, target: int):
+def test_production_architecture_and_parameter_count(
+    name: str,
+    layers: int,
+    expected: int,
+):
     """
-    Parameter count per tier should match the published target within 10%.
-    A wider miss usually means intermediate_size, num_layers, or vocab_size
-    drifted away from the intended configuration.
-
-    test_model.py only validates the mini config (~25M); this covers the
-    three production tiers.
+    Production depth and unique parameter count are exact architecture
+    contracts. Analytical counting avoids allocating the full 1B model on CPU.
     """
     config = CONFIGS[name]
-    model = SLMForCausalLM(config)
-    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    drift = abs(n_params - target) / target
-    assert drift < 0.10, (
-        f"{name}: {n_params:,} params vs target {target:,} (drift {drift:.1%})"
-    )
+    assert config.num_hidden_layers == layers
+    assert config.tie_word_embeddings is True
+    assert _analytical_parameter_count(config) == expected

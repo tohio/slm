@@ -23,6 +23,7 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+from transformers.cache_utils import Cache
 
 from .attention import GroupedQueryAttention
 from .config import SLMConfig
@@ -51,7 +52,7 @@ class SLMDecoderBlock(nn.Module):
         config = SLMConfig()
         block = SLMDecoderBlock(config, layer_idx=0)
         x = torch.randn(2, 512, 768)
-        out, _ = block(x)  # shape: (2, 512, 768)
+        # The full SLMModel supplies shared RoPE position embeddings.
     """
 
     def __init__(self, config: SLMConfig, layer_idx: int):
@@ -67,27 +68,30 @@ class SLMDecoderBlock(nn.Module):
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        past_key_value: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        past_key_values: Optional[Cache] = None,
         use_cache: bool = False,
-    ) -> tuple[torch.Tensor, Optional[tuple[torch.Tensor, torch.Tensor]]]:
+    ) -> torch.Tensor:
         """
         Args:
             hidden_states: (batch, seq_len, hidden_size)
-            attention_mask: Optional causal mask
-            past_key_value: Optional KV cache from previous steps
-            use_cache: Whether to return updated KV cache
+            attention_mask: Optional 4D causal/padding mask
+            position_embeddings: Shared RoPE cosine and sine tensors
+            past_key_values: Optional Transformers cache object
+            use_cache: Whether the supplied cache is active
 
         Returns:
-            hidden_states: (batch, seq_len, hidden_size)
-            past_key_value: Updated KV cache if use_cache else None
+            hidden_states: (batch, seq_len, hidden_size). The cache, when
+                present, is updated in place.
         """
         # ── Attention sub-layer ────────────────────────────────────────────────
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states, past_key_value = self.self_attn(
+        hidden_states = self.self_attn(
             hidden_states,
             attention_mask=attention_mask,
-            past_key_value=past_key_value,
+            position_embeddings=position_embeddings,
+            past_key_values=past_key_values,
             use_cache=use_cache,
         )
         hidden_states = residual + hidden_states
@@ -98,4 +102,4 @@ class SLMDecoderBlock(nn.Module):
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
-        return hidden_states, past_key_value
+        return hidden_states

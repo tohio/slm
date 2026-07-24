@@ -33,6 +33,9 @@ Remote-code loading:
         checkpoints.
 """
 
+import math
+from numbers import Real
+
 from transformers import PretrainedConfig
 
 
@@ -52,8 +55,8 @@ class SLMConfig(PretrainedConfig):
             Must divide num_attention_heads evenly. Default: 4.
         max_position_embeddings (int): Maximum sequence length. Default: 2048.
         rope_theta (float): Base period for RoPE. Default: 10000.0.
-        rope_scaling (dict | None): Optional RoPE scaling config for context
-            extension (e.g. YaRN, linear). Default: None.
+        rope_scaling (dict | None): Reserved for future RoPE scaling support.
+            Non-None values are rejected rather than silently ignored.
         rms_norm_eps (float): Epsilon for RMSNorm. Default: 1e-5.
         initializer_range (float): Std for weight initialization. Default: 0.02.
         tie_word_embeddings (bool): Tie input/output embeddings. Default: True.
@@ -139,9 +142,17 @@ class SLMConfig(PretrainedConfig):
         attention_dropout: float = 0.0,
         **kwargs,
     ):
+        _validate_serialized_rope_parameters(
+            kwargs.get("rope_parameters"),
+            rope_theta=rope_theta,
+        )
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
-        self.intermediate_size = intermediate_size or _default_intermediate_size(hidden_size)
+        self.intermediate_size = (
+            _default_intermediate_size(hidden_size)
+            if intermediate_size is None
+            else intermediate_size
+        )
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
         self.num_key_value_heads = num_key_value_heads
@@ -164,6 +175,19 @@ class SLMConfig(PretrainedConfig):
         )
 
     def _validate(self) -> None:
+        positive_integer_fields = {
+            "vocab_size": self.vocab_size,
+            "hidden_size": self.hidden_size,
+            "intermediate_size": self.intermediate_size,
+            "num_hidden_layers": self.num_hidden_layers,
+            "num_attention_heads": self.num_attention_heads,
+            "num_key_value_heads": self.num_key_value_heads,
+            "max_position_embeddings": self.max_position_embeddings,
+        }
+        for name, value in positive_integer_fields.items():
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer, got {value!r}")
+
         if self.num_attention_heads % self.num_key_value_heads != 0:
             raise ValueError(
                 f"num_attention_heads ({self.num_attention_heads}) must be divisible by "
@@ -176,14 +200,39 @@ class SLMConfig(PretrainedConfig):
                 f"num_attention_heads ({self.num_attention_heads})"
             )
 
-        if self.max_position_embeddings <= 0:
+        if self.head_dim % 2 != 0:
             raise ValueError(
-                f"max_position_embeddings must be positive, got {self.max_position_embeddings}"
+                f"attention head dimension must be even for RoPE, got {self.head_dim}"
             )
 
-        if self.rope_theta <= 0:
+        positive_real_fields = {
+            "rope_theta": self.rope_theta,
+            "rms_norm_eps": self.rms_norm_eps,
+            "initializer_range": self.initializer_range,
+        }
+        for name, value in positive_real_fields.items():
+            if (
+                not isinstance(value, Real)
+                or isinstance(value, bool)
+                or not math.isfinite(value)
+                or value <= 0
+            ):
+                raise ValueError(f"{name} must be a positive finite number, got {value!r}")
+
+        if self.rope_scaling is not None:
             raise ValueError(
-                f"rope_theta must be positive, got {self.rope_theta}"
+                "rope_scaling is not implemented by SLM; use rope_scaling=None"
+            )
+
+        if (
+            not isinstance(self.attention_dropout, Real)
+            or isinstance(self.attention_dropout, bool)
+            or not math.isfinite(self.attention_dropout)
+            or not 0.0 <= self.attention_dropout < 1.0
+        ):
+            raise ValueError(
+                "attention_dropout must be in [0, 1), "
+                f"got {self.attention_dropout!r}"
             )
 
     @property
@@ -207,6 +256,32 @@ def _default_intermediate_size(hidden_size: int) -> int:
     """
     raw = int(8 / 3 * hidden_size)
     return (raw + 255) // 256 * 256
+
+
+def _validate_serialized_rope_parameters(
+    rope_parameters: dict | None,
+    rope_theta: float,
+) -> None:
+    """Reject non-default RoPE settings loaded through Transformers v5."""
+    if not rope_parameters:
+        return
+
+    rope_type = rope_parameters.get(
+        "rope_type",
+        rope_parameters.get("type", "default"),
+    )
+    allowed_keys = {"rope_type", "type", "rope_theta"}
+    unexpected_keys = set(rope_parameters) - allowed_keys
+    serialized_theta = rope_parameters.get("rope_theta", rope_theta)
+    if (
+        rope_type != "default"
+        or unexpected_keys
+        or serialized_theta != rope_theta
+    ):
+        raise ValueError(
+            "SLM supports default RoPE parameters only; context scaling is "
+            "not implemented"
+        )
 
 
 # ── Predefined configs for the three model tiers ──────────────────────────────
