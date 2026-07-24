@@ -34,6 +34,8 @@ from torch.utils.data import DataLoader, Dataset
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from config.paths import BASE_RESULTS_DIR
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -373,7 +375,7 @@ def main():
 
     # ── Save (optional) ──────────────────────────────────────────────────────
     if args.save:
-        out_dir = Path(f"results/sanity-{args.arch}")
+        out_dir = BASE_RESULTS_DIR / f"sanity-{args.arch}"
         out_dir.mkdir(parents=True, exist_ok=True)
         model.save_pretrained(str(out_dir))
         tokenizer.save_pretrained(str(out_dir / "tokenizer"))

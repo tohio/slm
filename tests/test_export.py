@@ -5,7 +5,7 @@ import json
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from export.export import _convert_to_native_llama
+from export.export import _convert_to_native_llama, _remote_code_artifacts
 from model import SLMConfig, SLMForCausalLM
 
 
@@ -96,3 +96,20 @@ def test_native_package_loads_without_remote_code(tmp_path):
     assert loaded.config.model_type == "llama"
     assert next(loaded.parameters()).dtype == torch.float32
     assert loaded.lm_head.weight is loaded.model.embed_tokens.weight
+
+
+def test_remote_code_artifact_detection_is_recursive():
+    files = [
+        "README.md",
+        "config.json",
+        "model.safetensors",
+        "modeling_slm.py",
+        "slm_remote/configuration_slm.py",
+        "tools/example.py",
+    ]
+
+    assert _remote_code_artifacts(files) == [
+        "modeling_slm.py",
+        "slm_remote/configuration_slm.py",
+        "tools/example.py",
+    ]

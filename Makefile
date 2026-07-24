@@ -27,10 +27,20 @@ COMPARE_TRAIN_EXAMPLES ?= 32
 COMPARE_EVAL_EXAMPLES ?= 32
 COMPARE_MAX_STEPS ?= 60
 
-# DATA_DIR — read from .env if not set in environment.
-DATA_DIR := $(or $(shell grep -v '^\#' .env 2>/dev/null | grep '^DATA_DIR=' | head -1 | cut -d= -f2 | tr -d ' '),data)
-RESULTS_DIR := $(or $(shell grep -v '^\#' .env 2>/dev/null | grep '^RESULTS_DIR=' | head -1 | cut -d= -f2 | tr -d ' '),results)
-EXPORTS_DIR := $(or $(shell grep -v '^\#' .env 2>/dev/null | grep '^EXPORTS_DIR=' | head -1 | cut -d= -f2 | tr -d ' '),$(RESULTS_DIR)/exports)
+# Read path settings from .env when they are not already set in the
+# environment or on the make command line. Preserve spaces in paths and strip
+# optional inline comments.
+_env_value = $(strip $(shell sed -n 's/^[[:space:]]*$(1)[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | sed 's/[[:space:]]*\#.*$$//' | head -1))
+ifeq ($(origin DATA_DIR),undefined)
+  DATA_DIR := $(or $(call _env_value,DATA_DIR),data)
+endif
+ifeq ($(origin RESULTS_DIR),undefined)
+  RESULTS_DIR := $(or $(call _env_value,RESULTS_DIR),results)
+endif
+ifeq ($(origin EXPORTS_DIR),undefined)
+  EXPORTS_DIR := $(or $(call _env_value,EXPORTS_DIR),$(RESULTS_DIR)/exports)
+endif
+export DATA_DIR RESULTS_DIR EXPORTS_DIR
 PYTHON     ?= .venv/bin/python
 _ACCELERATE = .venv/bin/accelerate
 
@@ -95,7 +105,7 @@ endif
         setup setup-data-dir setup-gpu install install-gpu test-upgrade-gpu install-uv install-conda install-kenlm install-orjson \
         download-kenlm-model download-fasttext-model accelerate-config accelerate-config-single accelerate-config-multi \
         test-curator test-validate test-tokenizer test-data-pipeline \
-        test-training test-sft-instruct test-sft-chat test-sft-code test-dpo-chat test-dpo test-gpu-pipeline test-model test-export test-data-unit test-training-args test-config-gen test-accel-gen test-comparison test-unit test-gpu-gate test-artifacts \
+        test-training test-sft-instruct test-sft-chat test-sft-code test-dpo-chat test-dpo test-gpu-pipeline test-model test-export test-data-unit test-training-args test-config-gen test-accel-gen test-comparison test-misc test-unit test-gpu-gate test-artifacts \
         compare-sft-preflight compare-sft \
         sanity-train sanity-train-small sanity-train-tiny sanity-train-save \
         clean clean-data clean-results clean-logs help
@@ -269,7 +279,7 @@ smoke-gen:
 		"The history of artificial intelligence"; do \
 		echo "--- prompt: $$prompt ---"; \
 		echo "$$prompt" | $(PYTHON) inference/generate.py \
-			--model results/runs/$(SIZE)/pretrain/final \
+			--model "$(RESULTS_DIR)/runs/$(SIZE)/pretrain/final" \
 			--max-new-tokens 30 \
 			--greedy; \
 		echo ""; \
@@ -375,20 +385,20 @@ eval: eval-chat
 
 eval-base:
 	@echo "==> Stage 7: Evaluation (base, $(SIZE))"
-	$(PYTHON) eval/eval.py --model results/runs/$(SIZE)/pretrain/final
+	$(PYTHON) eval/eval.py --model "$(RESULTS_DIR)/runs/$(SIZE)/pretrain/final"
 
 eval-instruct:
 	@echo "==> Stage 7: Evaluation (instruct, $(SIZE))"
-	$(PYTHON) eval/eval.py --model results/runs/$(SIZE)/sft_instruct/final
+	$(PYTHON) eval/eval.py --model "$(RESULTS_DIR)/runs/$(SIZE)/sft_instruct/final"
 
 
 eval-chat:
 	@echo "==> Stage 7: Evaluation (chat, $(SIZE))"
-	$(PYTHON) eval/eval.py --model results/runs/$(SIZE)/dpo_chat/final
+	$(PYTHON) eval/eval.py --model "$(RESULTS_DIR)/runs/$(SIZE)/dpo_chat/final"
 
 eval-code:
 	@echo "==> Stage 7: Evaluation (code, $(SIZE))"
-	$(PYTHON) eval/eval.py --model results/runs/$(SIZE)/sft_code/final
+	$(PYTHON) eval/eval.py --model "$(RESULTS_DIR)/runs/$(SIZE)/sft_code/final"
 
 
 # Behavior sanity eval targets.
@@ -400,31 +410,31 @@ eval-sanity: eval-sanity-chat
 eval-sanity-base:
 	@echo "==> Stage 7: Sanity evaluation (base, $(SIZE))"
 	$(PYTHON) eval/sanity_eval.py \
-		--model results/runs/$(SIZE)/pretrain/final \
-		--json-out results/runs/$(SIZE)/eval/sanity/base.json
+		--model "$(RESULTS_DIR)/runs/$(SIZE)/pretrain/final" \
+		--json-out "$(RESULTS_DIR)/runs/$(SIZE)/eval/sanity/base.json"
 
 eval-sanity-instruct:
 	@echo "==> Stage 7: Sanity evaluation (instruct, $(SIZE))"
 	$(PYTHON) eval/sanity_eval.py \
-		--model results/runs/$(SIZE)/sft_instruct/final \
-		--json-out results/runs/$(SIZE)/eval/sanity/instruct.json
+		--model "$(RESULTS_DIR)/runs/$(SIZE)/sft_instruct/final" \
+		--json-out "$(RESULTS_DIR)/runs/$(SIZE)/eval/sanity/instruct.json"
 
 
 eval-sanity-chat:
 	@echo "==> Stage 7: Sanity evaluation (chat, $(SIZE))"
 	$(PYTHON) eval/sanity_eval.py \
-		--model results/runs/$(SIZE)/dpo_chat/final \
-		--json-out results/runs/$(SIZE)/eval/sanity/chat.json
+		--model "$(RESULTS_DIR)/runs/$(SIZE)/dpo_chat/final" \
+		--json-out "$(RESULTS_DIR)/runs/$(SIZE)/eval/sanity/chat.json"
 
 eval-sanity-code:
 	@echo "==> Stage 7: Sanity evaluation (code, $(SIZE))"
 	$(PYTHON) eval/sanity_eval.py \
-		--model results/runs/$(SIZE)/sft_code/final \
-		--json-out results/runs/$(SIZE)/eval/sanity/code.json
+		--model "$(RESULTS_DIR)/runs/$(SIZE)/sft_code/final" \
+		--json-out "$(RESULTS_DIR)/runs/$(SIZE)/eval/sanity/code.json"
 
 eval-mini:
 	@echo "==> Stage 7: Mini evaluation (pipeline validation)"
-	$(PYTHON) eval/eval.py --model results/runs/$(SIZE)/dpo_chat/final --tasks hellaswag --limit 50 --batch-size 4
+	$(PYTHON) eval/eval.py --model "$(RESULTS_DIR)/runs/$(SIZE)/dpo_chat/final" --tasks hellaswag --limit 50 --batch-size 4
 
 # ── Stage 8: Export ───────────────────────────────────────────────────────────
 
@@ -638,7 +648,11 @@ test-comparison:
 	@echo "==> Running controlled-comparison harness unit tests..."
 	.venv/bin/pytest tests/test_sft_comparison.py -v --tb=short
 
-test-unit: test-model test-export test-data-unit test-training-args test-config-gen test-accel-gen test-comparison
+test-misc:
+	@echo "==> Running cross-cutting contract tests..."
+	.venv/bin/pytest tests/test_misc_contract.py -v --tb=short
+
+test-unit: test-model test-export test-data-unit test-training-args test-config-gen test-accel-gen test-comparison test-misc
 	@echo "==> Unit tests complete"
 
 test-gpu-gate:
@@ -697,7 +711,12 @@ clean-data:
 	rm -rf "$(DATA_DIR)/runs/$(SIZE)" "$(DATA_DIR)/dedup_scratch"
 
 clean-results:
-	rm -rf results/
+	@test -n "$(strip $(RESULTS_DIR))" || (echo "RESULTS_DIR must not be empty"; exit 1)
+	@if [ -e "$(RESULTS_DIR)" ]; then \
+		resolved="$$(cd "$(RESULTS_DIR)" && pwd -P)"; \
+		test "$$resolved" != "/" || (echo "Refusing to remove /"; exit 1); \
+	fi
+	rm -rf -- "$(RESULTS_DIR)"
 
 clean-logs:
 	rm -rf logs/
@@ -787,7 +806,7 @@ help:
 	@echo "  artifacts-download Download artifacts from S3 using RUN_ID=<run_id>"
 	@echo "  pretrain           Stage 4b — pretrain from scratch (auto-runs smoke-gen)"
 	@echo "  pretrain-mini      Stage 4b — mini pretrain run (auto-runs smoke-gen)"
-	@echo "  smoke-gen          Stage 4b — generate from results/runs/\$$(SIZE)/pretrain/final to spot-check"
+	@echo "  smoke-gen          Stage 4b — generate from \$$(RESULTS_DIR)/runs/\$$(SIZE)/pretrain/final to spot-check"
 	@echo "  reinit-embeds      Stage 4c — re-init chat special-token embeds before SFT"
 	@echo "  prepare-sft        Stage 5a — download SFT datasets"
 	@echo "  sft-instruct       Stage 5b — instruct supervised fine-tuning"

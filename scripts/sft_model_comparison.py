@@ -41,6 +41,10 @@ from transformers import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", "results"))
+DEFAULT_EXPORTS_DIR = Path(
+    os.environ.get("EXPORTS_DIR", str(DEFAULT_RESULTS_DIR / "exports"))
+)
 SYSTEM_PROMPT = "You are a helpful assistant."
 HARNESS_VERSION = "3.0"
 
@@ -112,7 +116,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--tohio-model",
-        default="results/exports/125m/base",
+        default=str(DEFAULT_EXPORTS_DIR / "125m" / "base"),
         help=(
             "Native Transformers Tohio export or republished Hub ID. Run "
             "'make export-base-local SIZE=125m' to create the default."

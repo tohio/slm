@@ -40,6 +40,39 @@ COMMANDS = {
 }
 
 
+def _prepare_chat_input_ids(model, tokenizer, messages, max_new_tokens: int):
+    """Format chat while reserving context space for the generated response."""
+    max_context = int(
+        getattr(model.config, "max_position_embeddings", 2048)
+    )
+    if max_new_tokens <= 0:
+        raise ValueError("max_new_tokens must be positive")
+    if max_new_tokens >= max_context:
+        raise ValueError(
+            f"max_new_tokens ({max_new_tokens}) must be smaller than the "
+            f"model context window ({max_context})"
+        )
+
+    max_input_tokens = max_context - max_new_tokens
+    original_truncation_side = tokenizer.truncation_side
+    try:
+        # Preserve the latest turns and generation prompt when a conversation
+        # exceeds the available input budget.
+        tokenizer.truncation_side = "left"
+        input_ids = tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_tensors="pt",
+            truncation=True,
+            max_length=max_input_tokens,
+        )
+    finally:
+        tokenizer.truncation_side = original_truncation_side
+
+    return input_ids.to(model.device)
+
+
 def generate_response(
     model,
     tokenizer,
@@ -62,14 +95,12 @@ def generate_response(
     """
     import torch
 
-    input_ids = tokenizer.apply_chat_template(
+    input_ids = _prepare_chat_input_ids(
+        model,
+        tokenizer,
         messages,
-        tokenize=True,
-        add_generation_prompt=True,
-        return_tensors="pt",
-        truncation=True,
-        max_length=2048,
-    ).to(model.device)
+        max_new_tokens,
+    )
 
     attention_mask = torch.ones_like(input_ids)
     in_len = input_ids.shape[1]

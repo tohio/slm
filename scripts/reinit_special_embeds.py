@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import safetensors.torch
 import torch
 from model import SLMConfig, SLMForCausalLM
+from config.paths import pretrain_dir
 from transformers import AutoConfig, PreTrainedTokenizerFast
 
 AutoConfig.register("slm", SLMConfig)
@@ -201,7 +202,7 @@ def log_ignored_additional_specials(tok: PreTrainedTokenizerFast) -> None:
 def main():
     args = parse_args()
 
-    src = args.src or Path(f"results/runs/{args.size}/pretrain/final")
+    src = args.src or pretrain_dir(args.size) / "final"
     dst = args.dst or src
 
     if not src.exists():

@@ -3,8 +3,15 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 BASE_DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
 BASE_RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", "results"))
+BASE_EXPORTS_DIR = Path(
+    os.environ.get("EXPORTS_DIR", str(BASE_RESULTS_DIR / "exports"))
+)
 
 
 def data_run_dir(size: str) -> Path:
@@ -39,6 +46,10 @@ def tokenized_dir(size: str) -> Path:
     return data_run_dir(size) / "tokenized"
 
 
+def metadata_dir(size: str) -> Path:
+    return data_run_dir(size) / "metadata"
+
+
 def sft_instruct_data_dir(size: str) -> Path:
     return data_run_dir(size) / "sft_instruct"
 
@@ -50,6 +61,10 @@ def sft_chat_data_dir(size: str) -> Path:
 
 def sft_code_data_dir(size: str) -> Path:
     return data_run_dir(size) / "sft_code"
+
+
+def code_completion_data_dir(size: str) -> Path:
+    return data_run_dir(size) / "code_completion"
 
 
 def dpo_chat_data_dir(size: str) -> Path:
@@ -104,4 +119,4 @@ def eval_dir(size: str) -> Path:
 
 
 def export_dir(size: str) -> Path:
-    return results_run_dir(size) / "export"
+    return BASE_EXPORTS_DIR / size

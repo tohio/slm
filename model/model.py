@@ -307,7 +307,6 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
                     "tokenizer_config.json",
                     "special_tokens_map.json",
                     "chat_template.jinja",
-                    "*.py",
                 ],
             }
             if revision is not None:

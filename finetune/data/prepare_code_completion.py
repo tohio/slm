@@ -25,9 +25,14 @@ import hashlib
 import json
 import random
 import re
+import sys
 from collections import Counter
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from config.paths import code_completion_data_dir, sft_code_data_dir
 
 
 BAD_COMPLETION_STARTS = (
@@ -381,8 +386,12 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
-    input_dir = Path(args.input_dir or f"data/runs/{args.size}/sft_code")
-    output_dir = Path(args.output_dir or f"data/runs/{args.size}/code_completion")
+    input_dir = Path(args.input_dir) if args.input_dir else sft_code_data_dir(args.size)
+    output_dir = (
+        Path(args.output_dir)
+        if args.output_dir
+        else code_completion_data_dir(args.size)
+    )
 
     train_rows = read_jsonl(input_dir / "train.jsonl")
     val_rows = read_jsonl(input_dir / "val.jsonl")

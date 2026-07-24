@@ -50,6 +50,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config import (                                                # noqa: E402
     DATA_MIX, CODE_SUBMIX, dataset_link, corpus_tokens_display,
 )
+from config.paths import (                                          # noqa: E402
+    curated_dir,
+    dpo_chat_dir,
+    export_dir as export_size_dir,
+    metadata_dir,
+    pretrain_dir,
+    sft_code_dir,
+    sft_instruct_dir,
+    tokenizer_dir,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -60,11 +70,10 @@ log = logging.getLogger(__name__)
 
 HF_USERNAME = os.environ.get("HF_USERNAME")
 HF_TOKEN    = os.environ.get("HF_TOKEN", "")
-RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", "results"))
-DATA_DIR    = Path(os.environ.get("DATA_DIR", "data"))
-EXPORTS_DIR = Path(os.environ.get("EXPORTS_DIR", str(RESULTS_DIR / "exports")))
 
 OBSOLETE_REMOTE_CODE_PATTERNS = [
+    "*.py",
+    "**/*.py",
     "attention.py",
     "block.py",
     "config.py",
@@ -72,6 +81,7 @@ OBSOLETE_REMOTE_CODE_PATTERNS = [
     "model.py",
     "norm.py",
     "slm_remote/",
+    "slm_remote/**",
 ]
 
 # blend_stats.json is written by curator/scripts/curate.py at the end of the
@@ -81,43 +91,30 @@ OBSOLETE_REMOTE_CODE_PATTERNS = [
 
 VARIANTS: dict[str, dict] = {
     "base": {
-        "checkpoint":    lambda size: RESULTS_DIR / "runs" / size / "pretrain" / "final",
+        "checkpoint":    lambda size: pretrain_dir(size) / "final",
         "hub_suffix":    "",
         "description":   "base pretrained model",
         "pipeline_tag":  "text-generation",
     },
     "instruct": {
-        "checkpoint":    lambda size: RESULTS_DIR / "runs" / size / "sft_instruct" / "final",
+        "checkpoint":    lambda size: sft_instruct_dir(size) / "final",
         "hub_suffix":    "-instruct",
         "description":   "instruction-tuned via supervised fine-tuning",
         "pipeline_tag":  "text-generation",
     },
     "chat": {
-        "checkpoint":    lambda size: RESULTS_DIR / "runs" / size / "dpo_chat" / "final",
+        "checkpoint":    lambda size: dpo_chat_dir(size) / "final",
         "hub_suffix":    "-chat",
         "description":   "chat-aligned from instruct via general DPO preference learning",
         "pipeline_tag":  "text-generation",
     },
     "code": {
-        "checkpoint":    lambda size: RESULTS_DIR / "runs" / size / "sft_code" / "final",
+        "checkpoint":    lambda size: sft_code_dir(size) / "final",
         "hub_suffix":    "-code",
         "description":   "code-specialized from instruct via code SFT",
         "pipeline_tag":  "text-generation",
     },
 }
-def metadata_dir(size: str) -> Path:
-    """Return the local metadata artifact directory for a model size."""
-    return Path(os.environ.get("DATA_DIR", "data")) / "runs" / size / "metadata"
-
-
-def curated_dir(size: str) -> Path:
-    """Return the legacy curated artifact directory for a model size."""
-    return Path(os.environ.get("DATA_DIR", "data")) / "runs" / size / "curated"
-
-
-def tokenizer_dir(size: str) -> Path:
-    """Return the tokenizer artifact directory for a model size."""
-    return Path(os.environ.get("DATA_DIR", "data")) / "runs" / size / "tokenizer"
 
 
 def _load_blend_stats(size: str) -> dict:
@@ -924,6 +921,84 @@ def _validate_native_package(
     return loaded_model
 
 
+def _remote_code_artifacts(repo_files: list[str]) -> list[str]:
+    """Return executable Python artifacts that can trigger remote-code loading."""
+    return sorted(
+        path
+        for path in repo_files
+        if path.endswith(".py") or path == "slm_remote" or path.startswith("slm_remote/")
+    )
+
+
+def _validate_published_native_package(
+    api,
+    repo_id: str,
+    revision: str,
+    expected_tokenizer_size: int,
+) -> None:
+    """Verify the exact published commit has a code-free native HF contract."""
+    from huggingface_hub import hf_hub_download
+    from transformers import AutoConfig, AutoTokenizer
+
+    repo_files = api.list_repo_files(
+        repo_id=repo_id,
+        repo_type="model",
+        revision=revision,
+    )
+    remote_code = _remote_code_artifacts(repo_files)
+    if remote_code:
+        raise RuntimeError(
+            "Published repository still contains executable Python model code: "
+            f"{remote_code}"
+        )
+    if not any(path.endswith(".safetensors") for path in repo_files):
+        raise RuntimeError("Published repository contains no safetensors weights")
+
+    config_path = Path(
+        hf_hub_download(
+            repo_id=repo_id,
+            filename="config.json",
+            revision=revision,
+            token=HF_TOKEN,
+        )
+    )
+    config_json = _read_json(config_path, "published config")
+    if "auto_map" in config_json:
+        raise RuntimeError("Published config still contains auto_map")
+    if config_json.get("model_type") != "llama":
+        raise RuntimeError("Published config model_type must be 'llama'")
+    if config_json.get("architectures") != ["LlamaForCausalLM"]:
+        raise RuntimeError(
+            "Published config architectures must be ['LlamaForCausalLM']"
+        )
+
+    published_config = AutoConfig.from_pretrained(
+        repo_id,
+        revision=revision,
+        token=HF_TOKEN,
+        trust_remote_code=False,
+    )
+    if published_config.model_type != "llama":
+        raise RuntimeError("Published AutoConfig did not resolve native Llama")
+
+    published_tokenizer = AutoTokenizer.from_pretrained(
+        repo_id,
+        revision=revision,
+        token=HF_TOKEN,
+        trust_remote_code=False,
+    )
+    if len(published_tokenizer) != expected_tokenizer_size:
+        raise RuntimeError(
+            "Published tokenizer vocabulary differs from the validated export: "
+            f"{expected_tokenizer_size} -> {len(published_tokenizer)}"
+        )
+
+    log.info(
+        "Published commit %s passed the native, no-remote-code contract",
+        revision,
+    )
+
+
 def _write_export_manifest(
     export_dir: Path,
     source_checkpoint: Path,
@@ -989,7 +1064,7 @@ def export(
     hub_suffix  = variant_cfg["hub_suffix"]
     hub_name    = f"slm-{size}{hub_suffix}"
     repo_id     = f"{hf_username}/{hub_name}"
-    export_parent = EXPORTS_DIR / size
+    export_parent = export_size_dir(size)
     export_dir = export_parent / variant
     staging_dir = export_parent / f".{variant}.staging"
 
@@ -1101,7 +1176,7 @@ def export(
     api.create_repo(repo_id=repo_id, private=private, exist_ok=True)
 
     log.info(f"Pushing {export_dir} to {repo_id} (single commit)...")
-    api.upload_folder(
+    commit_info = api.upload_folder(
         repo_id=repo_id,
         folder_path=str(export_dir),
         commit_message=f"Export {hub_name} ({n_params / 1e6:.1f}M params)",
@@ -1112,6 +1187,19 @@ def export(
             "__pycache__",
             "*.pyc",
         ],
+    )
+
+    revision = getattr(commit_info, "oid", None)
+    if not revision:
+        raise RuntimeError(
+            "Hub upload did not return a commit revision; cannot verify the "
+            "published artifact"
+        )
+    _validate_published_native_package(
+        api=api,
+        repo_id=repo_id,
+        revision=revision,
+        expected_tokenizer_size=len(tokenizer),
     )
 
     log.info(f"Export complete: https://huggingface.co/{repo_id}")
