@@ -101,12 +101,16 @@ def test_one_step_sft_and_dpo(tmp_path):
         use_cpu=True,
         disable_tqdm=True,
     )
-    sft_result = SFTTrainer(
+    sft_trainer = SFTTrainer(
         model=_model(),
         args=sft_args,
         train_dataset=Dataset.from_list(sft_rows),
         processing_class=tokenizer,
-    ).train()
+    )
+    labels = sft_trainer.train_dataset[0]["labels"]
+    assert -100 in labels
+    assert any(token != -100 for token in labels)
+    sft_result = sft_trainer.train()
     assert torch.isfinite(torch.tensor(sft_result.training_loss))
 
     policy = _model()

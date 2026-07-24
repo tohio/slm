@@ -58,25 +58,43 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
 class RawCompletionDataset(Dataset):
     def __init__(self, records: list[dict[str, Any]], tokenizer, max_length: int):
         self.rows: list[dict[str, Any]] = []
+        self.stats = {
+            "input_records": len(records),
+            "retained_records": 0,
+            "invalid_records": 0,
+            "truncated_records": 0,
+            "supervised_tokens": 0,
+        }
 
         for rec in records:
             prompt = rec.get("prompt", "")
             completion = rec.get("completion", "")
 
             if not prompt or not completion:
+                self.stats["invalid_records"] += 1
                 continue
 
             prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
             completion_ids = tokenizer(completion, add_special_tokens=False)["input_ids"]
 
+            original_length = len(prompt_ids) + len(completion_ids) + 1
+            if original_length > max_length:
+                self.stats["truncated_records"] += 1
+                # Keep the end of the prompt (normally the function signature
+                # and docstring) and prioritize supervised completion tokens.
+                if len(completion_ids) + 1 < max_length:
+                    prompt_budget = max_length - len(completion_ids) - 1
+                    prompt_ids = prompt_ids[-prompt_budget:] if prompt_budget else []
+                else:
+                    prompt_budget = min(len(prompt_ids), max(1, max_length // 4))
+                    prompt_ids = prompt_ids[-prompt_budget:]
+                    completion_ids = completion_ids[: max_length - prompt_budget - 1]
+
             input_ids = prompt_ids + completion_ids + [tokenizer.eos_token_id]
             labels = [-100] * len(prompt_ids) + completion_ids + [tokenizer.eos_token_id]
 
-            if len(input_ids) > max_length:
-                input_ids = input_ids[:max_length]
-                labels = labels[:max_length]
-
             if all(x == -100 for x in labels):
+                self.stats["invalid_records"] += 1
                 continue
 
             self.rows.append(
@@ -85,6 +103,8 @@ class RawCompletionDataset(Dataset):
                     "labels": labels,
                 }
             )
+            self.stats["retained_records"] += 1
+            self.stats["supervised_tokens"] += sum(x != -100 for x in labels)
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -121,20 +141,23 @@ class Collator:
 
 def evaluate_loss(model, loader, device: torch.device) -> float:
     model.eval()
-    losses: list[float] = []
+    weighted_loss = 0.0
+    supervised_tokens = 0
 
     with torch.no_grad():
         for batch in loader:
             batch = {k: v.to(device) for k, v in batch.items()}
             out = model(**batch)
-            losses.append(float(out.loss.detach().cpu()))
+            token_count = int((batch["labels"][:, 1:] != -100).sum().item())
+            weighted_loss += float(out.loss.detach().cpu()) * token_count
+            supervised_tokens += token_count
 
     model.train()
 
-    if not losses:
+    if not supervised_tokens:
         return float("inf")
 
-    return sum(losses) / len(losses)
+    return weighted_loss / supervised_tokens
 
 
 def copy_runtime_files(base_model: Path, out_dir: Path) -> None:
@@ -189,9 +212,71 @@ def save_checkpoint(model, tokenizer, base_model: Path, out_dir: Path, metadata:
     )
 
 
+def validate_model_tokenizer(model, tokenizer, max_length: int) -> None:
+    embedding_rows = model.get_input_embeddings().num_embeddings
+    if len(tokenizer) != embedding_rows:
+        raise ValueError(
+            f"Tokenizer has {len(tokenizer):,} tokens but model embeddings have "
+            f"{embedding_rows:,} rows"
+        )
+    context = int(getattr(model.config, "max_position_embeddings", max_length))
+    if max_length > context:
+        raise ValueError(f"max_length={max_length} exceeds model context={context}")
+    for name in ("pad_token_id", "bos_token_id", "eos_token_id"):
+        token_id = getattr(tokenizer, name)
+        config_id = getattr(model.config, name, None)
+        if token_id is None:
+            raise ValueError(f"Tokenizer has no {name}")
+        if config_id is not None and token_id != config_id:
+            raise ValueError(f"{name} mismatch: tokenizer={token_id}, model={config_id}")
+
+
+def latest_recovery_checkpoint(output_dir: Path) -> Path | None:
+    checkpoints: list[tuple[int, Path]] = []
+    for path in output_dir.glob("checkpoint-*"):
+        try:
+            checkpoints.append((int(path.name.split("-")[-1]), path))
+        except ValueError:
+            continue
+    return max(checkpoints, default=(0, None))[1]
+
+
+def save_recovery_state(
+    model,
+    tokenizer,
+    base_model: Path,
+    output_dir: Path,
+    optimizer,
+    scheduler,
+    update: int,
+    best_val: float,
+    metadata: dict[str, Any],
+) -> None:
+    checkpoint_dir = output_dir / f"checkpoint-{update}"
+    save_checkpoint(model, tokenizer, base_model, checkpoint_dir, metadata)
+    state = {
+        "update": update,
+        "best_val": best_val,
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict(),
+        "python_random_state": random.getstate(),
+        "torch_random_state": torch.get_rng_state(),
+    }
+    if torch.cuda.is_available():
+        state["cuda_random_state"] = torch.cuda.get_rng_state_all()
+    torch.save(state, checkpoint_dir / "training_state.pt")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train raw code-completion SFT")
     parser.add_argument("--config", required=True)
+    parser.add_argument(
+        "--resume",
+        nargs="?",
+        const="latest",
+        default=None,
+        help="Resume from the latest checkpoint, or from the supplied checkpoint path",
+    )
     args = parser.parse_args()
 
     cfg_path = Path(args.config)
@@ -221,7 +306,15 @@ def main() -> None:
     weight_decay = float(train_cfg.get("weight_decay", 0.01))
     warmup_ratio = float(train_cfg.get("warmup_ratio", 0.05))
     eval_steps = int(train_cfg.get("eval_steps", 100))
+    save_steps = int(train_cfg.get("save_steps", eval_steps))
     save_best = bool(train_cfg.get("save_best", True))
+    if max_updates <= 0 or eval_steps <= 0 or save_steps <= 0:
+        raise SystemExit("max_updates, eval_steps, and save_steps must be positive")
+    if eval_steps > max_updates or save_steps > max_updates:
+        raise SystemExit(
+            "eval_steps/save_steps exceed max_updates; the run would have no "
+            "comparable evaluation or recoverable checkpoint"
+        )
 
     if not base_model.exists():
         raise SystemExit(f"Missing base model: {base_model}")
@@ -248,10 +341,21 @@ def main() -> None:
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    resume_dir: Path | None = None
+    if args.resume:
+        resume_dir = (
+            latest_recovery_checkpoint(output_dir)
+            if args.resume == "latest"
+            else expand_path(args.resume)
+        )
+        if resume_dir is None or not (resume_dir / "training_state.pt").exists():
+            raise SystemExit(f"No recoverable checkpoint found for --resume in {output_dir}")
+
     model = SLMForCausalLM.from_pretrained(
-        str(base_model),
+        str(resume_dir or base_model),
         dtype=dtype,
     ).to(device)
+    validate_model_tokenizer(model, tokenizer, max_length)
 
     train_records = read_jsonl(train_path)
     val_records = read_jsonl(val_path)
@@ -263,6 +367,8 @@ def main() -> None:
         raise SystemExit("No train records after tokenization")
     if len(val_dataset) == 0:
         raise SystemExit("No val records after tokenization")
+    print(f"Train tokenization audit: {json.dumps(train_dataset.stats, sort_keys=True)}")
+    print(f"Val tokenization audit:   {json.dumps(val_dataset.stats, sort_keys=True)}")
 
     train_loader = DataLoader(
         train_dataset,
@@ -283,7 +389,9 @@ def main() -> None:
         weight_decay=weight_decay,
         fused=device.type == "cuda",
     )
-    warmup_steps = max(5, int(max_updates * warmup_ratio))
+    if not 0.0 <= warmup_ratio <= 1.0:
+        raise SystemExit(f"warmup_ratio must be in [0, 1], got {warmup_ratio}")
+    warmup_steps = round(max_updates * warmup_ratio)
     scheduler = get_cosine_schedule_with_warmup(
         optimizer,
         num_warmup_steps=warmup_steps,
@@ -299,6 +407,21 @@ def main() -> None:
     micro = 0
     running_loss = 0.0
     best_val = float("inf")
+    if resume_dir is not None:
+        state = torch.load(
+            resume_dir / "training_state.pt",
+            map_location="cpu",
+            weights_only=False,
+        )
+        optimizer.load_state_dict(state["optimizer"])
+        scheduler.load_state_dict(state["scheduler"])
+        update = int(state["update"])
+        best_val = float(state["best_val"])
+        random.setstate(state["python_random_state"])
+        torch.set_rng_state(state["torch_random_state"])
+        if device.type == "cuda" and "cuda_random_state" in state:
+            torch.cuda.set_rng_state_all(state["cuda_random_state"])
+        print(f"Resumed from {resume_dir} at update {update}")
 
     while update < max_updates:
         for batch in train_loader:
@@ -351,8 +474,47 @@ def main() -> None:
                         )
                         print(f"Saved best checkpoint: {output_dir / 'best'}")
 
+                if update % save_steps == 0:
+                    save_recovery_state(
+                        model,
+                        tokenizer,
+                        base_model,
+                        output_dir,
+                        optimizer,
+                        scheduler,
+                        update,
+                        best_val,
+                        {
+                            "config": str(cfg_path),
+                            "base_model": str(base_model),
+                            "train_path": str(train_path),
+                            "val_path": str(val_path),
+                            "update": update,
+                            "best_val_loss": (
+                                best_val if best_val < float("inf") else None
+                            ),
+                            "train_tokenization": train_dataset.stats,
+                            "val_tokenization": val_dataset.stats,
+                        },
+                    )
+                    print(f"Saved recovery checkpoint: {output_dir / f'checkpoint-{update}'}")
+
                 if update >= max_updates:
                     break
+
+    # Evaluate the actual final update if it did not coincide with eval_steps.
+    if update % eval_steps:
+        val_loss = evaluate_loss(model, val_loader, device)
+        print(f"update={update}/{max_updates} val_loss={val_loss:.4f}")
+        if save_best and val_loss < best_val:
+            best_val = val_loss
+            save_checkpoint(
+                model,
+                tokenizer,
+                base_model,
+                output_dir / "best",
+                {"config": str(cfg_path), "update": update, "val_loss": val_loss},
+            )
 
     final_metadata = {
         "config": str(cfg_path),
@@ -367,9 +529,23 @@ def main() -> None:
         "weight_decay": weight_decay,
         "warmup_ratio": warmup_ratio,
         "best_val_loss": best_val if best_val < float("inf") else None,
+        "train_tokenization": train_dataset.stats,
+        "val_tokenization": val_dataset.stats,
     }
 
-    save_checkpoint(model, tokenizer, base_model, final_dir, final_metadata)
+    if save_best:
+        best_dir = output_dir / "best"
+        if not best_dir.exists():
+            raise RuntimeError("save_best=true but no evaluated best checkpoint exists")
+        if final_dir.exists():
+            shutil.rmtree(final_dir)
+        shutil.copytree(best_dir, final_dir)
+        (final_dir / "code_completion_training_metadata.json").write_text(
+            json.dumps(final_metadata, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    else:
+        save_checkpoint(model, tokenizer, base_model, final_dir, final_metadata)
     print(f"Saved final checkpoint: {final_dir}")
 
 

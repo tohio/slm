@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import json
 import random
 import re
@@ -56,8 +57,8 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
                 continue
             try:
                 rows.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid JSON in {path}: {exc}") from exc
 
     return rows
 
@@ -343,6 +344,33 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def canonical(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip().lower())
+
+
+def overlap_stats(
+    train: list[dict[str, Any]], val: list[dict[str, Any]]
+) -> dict[str, int]:
+    train_prompts = {canonical(row["prompt"]) for row in train}
+    val_prompts = {canonical(row["prompt"]) for row in val}
+    train_pairs = {
+        hashlib.sha256(
+            (canonical(row["prompt"]) + "\n" + canonical(row["completion"])).encode()
+        ).hexdigest()
+        for row in train
+    }
+    val_pairs = {
+        hashlib.sha256(
+            (canonical(row["prompt"]) + "\n" + canonical(row["completion"])).encode()
+        ).hexdigest()
+        for row in val
+    }
+    return {
+        "prompt_overlap": len(train_prompts & val_prompts),
+        "exact_pair_overlap": len(train_pairs & val_pairs),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prepare raw code-completion SFT data")
     parser.add_argument("--size", default="125m")
@@ -370,6 +398,15 @@ def main() -> None:
 
     if len(train_records) < 100:
         raise SystemExit(f"Too few train records extracted: {len(train_records)}")
+    if not val_records:
+        raise SystemExit("No validation records extracted")
+
+    overlap = overlap_stats(train_records, val_records)
+    if overlap["prompt_overlap"] or overlap["exact_pair_overlap"]:
+        raise SystemExit(
+            "Raw code-completion train/validation leakage detected: "
+            f"{overlap}. Regenerate the parent SFT split before training."
+        )
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -382,6 +419,7 @@ def main() -> None:
         "output_dir": str(output_dir),
         "train": summarize(train_records),
         "val": summarize(val_records),
+        "overlap": overlap,
         "format": {
             "prompt": "raw function signature/docstring prefix",
             "completion": "indented function body only",

@@ -1,0 +1,37 @@
+version: 1
+seed: 42
+validation_fraction: 0.01
+
+# These are temporary, public SFT inputs. Replace only this configuration when
+# the separately maintained synthetic datasets are regenerated and validated.
+# Revisions are pinned so a repeated preparation run consumes identical source
+# data instead of silently following a moving Hub branch.
+quality:
+  max_invalid_fraction: 0.05
+  max_duplicate_fraction: 0.05
+  min_unique_prompt_ratio: 0.90
+
+stages:
+  instruct:
+    dataset: HuggingFaceH4/ultrachat_200k
+    split: train_sft
+    revision: 8049631c405ae6576f93f445c6b8166f76f5505a
+    format: conversational
+    source: ultrachat_200k
+    max_records_by_size:
+      mini: 1000
+      125m: 50000
+      350m: 50000
+      1b: 50000
+
+  code:
+    dataset: ise-uiuc/Magicoder-OSS-Instruct-75K
+    split: train
+    revision: 5f839b1f368a76b161028bb9edff055db34022b2
+    format: magicoder
+    source: magicoder_oss_instruct
+    max_records_by_size:
+      mini: 1000
+      125m: 75000
+      350m: 75000
+      1b: 75000

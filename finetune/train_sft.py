@@ -3,7 +3,10 @@ finetune/train_sft.py
 ----------------------
 Supervised Fine-Tuning using HuggingFace trl SFTTrainer.
 
-Runs one SFT stage per invocation. The general instruct checkpoint is produced by instruct SFT + response-control. Code SFT is a sibling specialization branch that starts from instruct; it is not the parent of the general chat/DPO model.
+Runs one SFT stage per invocation. Instruct and code data are prepared from
+the pinned external-source contract in configs/sft_data_sources.yaml. Code SFT
+is a sibling specialization branch that starts from instruct; it is not the
+parent of the general chat/DPO model.
 
 Answer-only loss:
     Uses trl's native assistant_only_loss=True in SFTConfig. This requires
@@ -16,12 +19,9 @@ Answer-only loss:
     role/content message dicts). No formatting_func needed.
 
 Packing:
-    `data.packing` is read from YAML and passed to SFTConfig. Packing
-    concatenates short examples into max_seq_length sequences, dramatically
-    improving throughput on conversational datasets where most examples are
-    much shorter than the context window. assistant_only_loss is compatible
-    with packing in the pinned TRL stack — the {% generation %} tags survive packing
-    boundaries because the chat template is applied per-message.
+    Disabled. The current custom attention implementation does not enforce
+    packed-example boundaries, so enabling packing could leak attention across
+    unrelated conversations.
 
 Eval batching:
     `training.eval_micro_batch_size` controls per-device eval batch size
@@ -95,9 +95,19 @@ def load_config(config_path: Path) -> dict:
 def load_dataset_from_jsonl(path: Path):
     from datasets import Dataset
     records = []
-    with open(path) as f:
-        for line in f:
-            records.append(json.loads(line))
+    if not path.exists():
+        raise FileNotFoundError(f"SFT dataset not found: {path}")
+    with open(path, encoding="utf-8") as f:
+        for line_number, line in enumerate(f, start=1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid JSON at {path}:{line_number}: {exc}") from exc
+            records.append(record)
+    if not records:
+        raise ValueError(f"SFT dataset is empty: {path}")
     return Dataset.from_list(records)
 
 
@@ -172,16 +182,23 @@ def resolve_warmup_steps(train_cfg: dict, num_train_examples: int) -> int:
 
     if ratio <= 0.0:
         return 0
+    if ratio > 1.0:
+        raise ValueError(f"warmup ratio must be <= 1.0, got {ratio}")
 
     # Resolve world size — accelerate/torchrun set this; fallback to 1.
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     micro_batch = int(train_cfg["micro_batch_size"])
     grad_accum  = int(train_cfg.get("gradient_accumulation_steps", 1))
-    epochs      = int(train_cfg.get("epochs", 1))
+    epochs = int(train_cfg.get("epochs", 1))
 
     global_batch = micro_batch * grad_accum * world_size
     steps_per_epoch = math.ceil(num_train_examples / global_batch)
-    total_steps = steps_per_epoch * epochs
+    configured_max_steps = int(train_cfg.get("max_steps", -1))
+    total_steps = (
+        configured_max_steps
+        if configured_max_steps > 0
+        else steps_per_epoch * epochs
+    )
     steps = max(1, round(total_steps * ratio))
 
     log.info(
@@ -191,6 +208,19 @@ def resolve_warmup_steps(train_cfg: dict, num_train_examples: int) -> int:
         f"global_batch={global_batch}, world_size={world_size})"
     )
     return steps
+
+
+def resolve_total_steps(train_cfg: dict, num_train_examples: int) -> int:
+    max_steps = int(train_cfg.get("max_steps", -1))
+    if max_steps > 0:
+        return max_steps
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    global_batch = (
+        int(train_cfg["micro_batch_size"])
+        * int(train_cfg.get("gradient_accumulation_steps", 1))
+        * world_size
+    )
+    return math.ceil(num_train_examples / global_batch) * int(train_cfg.get("epochs", 1))
 
 
 def build_sft_args(cfg: dict, output_dir: Path, num_train_examples: int):
@@ -231,8 +261,17 @@ def build_sft_args(cfg: dict, output_dir: Path, num_train_examples: int):
 
     warmup_steps = resolve_warmup_steps(train_cfg, num_train_examples)
 
-    save_steps = train_cfg.get("save_steps", 200)
-    eval_steps = train_cfg.get("eval_steps", 200)
+    save_steps = int(train_cfg.get("save_steps", 200))
+    eval_steps = int(train_cfg.get("eval_steps", 200))
+    total_steps = resolve_total_steps(train_cfg, num_train_examples)
+    if eval_steps <= 0 or save_steps <= 0:
+        raise ValueError("eval_steps and save_steps must both be positive")
+    if eval_steps > total_steps or save_steps > total_steps:
+        raise ValueError(
+            f"Training resolves to {total_steps} optimizer steps, but "
+            f"eval_steps={eval_steps} and save_steps={save_steps}. This run "
+            "would not produce a comparable evaluation/checkpoint."
+        )
     if save_steps % eval_steps != 0:
         raise ValueError(
             f"save_steps ({save_steps}) must be a multiple of eval_steps "
@@ -300,6 +339,8 @@ def build_sft_args(cfg: dict, output_dir: Path, num_train_examples: int):
         max_length=cfg["model"].get("max_seq_length", 2048),
         packing=packing,
         assistant_only_loss=True,
+        loss_type=data_cfg.get("loss_type", "chunked_nll"),
+        dataset_num_proc=data_cfg.get("dataset_num_proc"),
     )
 
     return sft_args
@@ -315,11 +356,84 @@ def _sft_output_dir(model_name: str) -> Path:
     return sft_code_dir(size) if model_name.endswith(("-code", "-chat-code")) else sft_instruct_dir(size)
 
 
+def validate_model_tokenizer_contract(model, tokenizer, max_length: int) -> None:
+    embedding_rows = model.get_input_embeddings().num_embeddings
+    if len(tokenizer) != embedding_rows:
+        raise ValueError(
+            f"Tokenizer/model vocabulary mismatch: tokenizer has {len(tokenizer):,} "
+            f"tokens but embeddings have {embedding_rows:,} rows"
+        )
+    config_vocab = int(getattr(model.config, "vocab_size", embedding_rows))
+    if config_vocab != embedding_rows:
+        raise ValueError(
+            f"Model config vocab_size={config_vocab:,} but embeddings have "
+            f"{embedding_rows:,} rows"
+        )
+    for name in ("pad_token_id", "bos_token_id", "eos_token_id"):
+        tokenizer_value = getattr(tokenizer, name)
+        config_value = getattr(model.config, name, None)
+        if tokenizer_value is None:
+            raise ValueError(f"Tokenizer has no {name}")
+        if config_value is not None and tokenizer_value != config_value:
+            raise ValueError(
+                f"{name} mismatch: tokenizer={tokenizer_value}, model={config_value}"
+            )
+    context = int(getattr(model.config, "max_position_embeddings", max_length))
+    if max_length > context:
+        raise ValueError(
+            f"Configured max_seq_length={max_length} exceeds model context={context}"
+        )
+
+
+def validate_conversational_dataset(dataset, label: str) -> None:
+    column = "messages" if "messages" in dataset.column_names else "conversations"
+    if column not in dataset.column_names:
+        raise ValueError(f"{label} data has neither messages nor conversations")
+    for index, messages in enumerate(dataset[column]):
+        if not isinstance(messages, list) or len(messages) < 2:
+            raise ValueError(f"{label}[{index}] has an invalid conversation")
+        roles = [message.get("role") for message in messages if isinstance(message, dict)]
+        if len(roles) != len(messages) or "user" not in roles or roles[-1] != "assistant":
+            raise ValueError(
+                f"{label}[{index}] must contain a user turn and end with assistant"
+            )
+
+
+def processed_dataset_audit(dataset, original_count: int, label: str) -> dict:
+    retained = len(dataset)
+    dropped = original_count - retained
+    if retained <= 0:
+        raise RuntimeError(f"{label} has no examples after TRL preprocessing")
+    if "labels" not in dataset.column_names:
+        raise RuntimeError(f"{label} preprocessing did not produce assistant-only labels")
+
+    supervised_counts = [
+        sum(token != -100 for token in labels)
+        for labels in dataset["labels"]
+    ]
+    if not supervised_counts or min(supervised_counts) <= 0:
+        raise RuntimeError(f"{label} contains examples with no supervised assistant tokens")
+    return {
+        "input_examples": original_count,
+        "retained_examples": retained,
+        "dropped_examples": dropped,
+        "retention_ratio": retained / original_count,
+        "supervised_tokens": sum(supervised_counts),
+        "min_supervised_tokens": min(supervised_counts),
+        "max_supervised_tokens": max(supervised_counts),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="SLM Supervised Fine-Tuning")
     parser.add_argument("--config",     type=Path, required=True, help="Path to SFT config YAML")
     parser.add_argument("--base-model", type=Path, default=None,  help="Override base model path")
     parser.add_argument("--resume",     action="store_true",       help="Resume from latest checkpoint")
+    parser.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help="Run model/tokenizer/data preprocessing audits without optimizing",
+    )
     args = parser.parse_args()
 
     cfg             = load_config(args.config)
@@ -336,6 +450,8 @@ def main():
     log.info(f"Output:     {output_dir}")
     log.info(f"Device:     {'cuda' if torch.cuda.is_available() else 'cpu'}")
     configure_torch_runtime(log)
+    if cfg.get("wandb_project"):
+        os.environ.setdefault("WANDB_PROJECT", str(cfg["wandb_project"]))
 
     # ── Model ─────────────────────────────────────────────────────────────────
     from transformers import AutoConfig
@@ -355,11 +471,19 @@ def main():
             f"tokenizer_config.json not found at {tokenizer_path} — "
             f"falling back to target-scoped tokenizer"
         )
-        tokenizer_path = tokenizer_dir(cfg.get("size", "125m"))
+        size = _size_from_model_name(model_name)
+        if size not in {"mini", "125m", "350m", "1b"}:
+            raise ValueError(f"Cannot infer tokenizer size from model name {model_name!r}")
+        tokenizer_path = tokenizer_dir(size)
 
     log.info(f"Loading tokenizer from {tokenizer_path}...")
     tokenizer = load_tokenizer(tokenizer_path)
     log.info(f"Vocab size: {tokenizer.vocab_size:,}")
+    validate_model_tokenizer_contract(
+        model,
+        tokenizer,
+        int(cfg["model"].get("max_seq_length", 2048)),
+    )
 
     # ── Dataset ───────────────────────────────────────────────────────────────
     # Dataset has a "conversations" field with role/content message dicts.
@@ -372,14 +496,11 @@ def main():
     train_path = Path(os.path.expandvars(data_cfg["train_path"]))
     val_path   = Path(os.path.expandvars(data_cfg["val_path"]))
 
-    if not train_path.exists():
-        log.error(f"Training data not found: {train_path}")
-        log.error("Run: python finetune/data/prepare_sft.py")
-        sys.exit(1)
-
     log.info(f"Loading dataset from {train_path}...")
     train_dataset = load_dataset_from_jsonl(train_path)
     val_dataset   = load_dataset_from_jsonl(val_path)
+    validate_conversational_dataset(train_dataset, "train")
+    validate_conversational_dataset(val_dataset, "validation")
 
     if "conversations" in train_dataset.column_names:
         train_dataset = train_dataset.rename_column("conversations", "messages")
@@ -394,6 +515,8 @@ def main():
 
     log.info(f"Train: {len(train_dataset):,} examples")
     log.info(f"Val:   {len(val_dataset):,} examples")
+    raw_train_count = len(train_dataset)
+    raw_val_count = len(val_dataset)
 
     # ── SFT args ──────────────────────────────────────────────────────────────
     # Pass num_train_examples so warmup_steps can be derived from the recipe
@@ -420,6 +543,48 @@ def main():
         eval_dataset=val_dataset,
         processing_class=tokenizer,
     )
+    train_audit = processed_dataset_audit(
+        trainer.train_dataset, raw_train_count, "train"
+    )
+    val_audit = processed_dataset_audit(
+        trainer.eval_dataset, raw_val_count, "validation"
+    )
+    minimum_retention = float(data_cfg.get("min_retention_ratio", 0.90))
+    for label, audit in (("train", train_audit), ("validation", val_audit)):
+        log.info(
+            "%s preprocessing: retained %,d/%,d (%.2f%%), supervised tokens=%,d",
+            label,
+            audit["retained_examples"],
+            audit["input_examples"],
+            100.0 * audit["retention_ratio"],
+            audit["supervised_tokens"],
+        )
+        if audit["retention_ratio"] < minimum_retention:
+            raise RuntimeError(
+                f"{label} retained only {audit['retention_ratio']:.2%} after "
+                f"tokenization/truncation; required >= {minimum_retention:.2%}. "
+                "Revise the source selection or max sequence length before training."
+            )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    data_manifest = train_path.parent / "manifest.json"
+    run_audit = {
+        "config": str(args.config),
+        "base_model": str(base_model_path),
+        "tokenizer": str(tokenizer_path),
+        "loss_type": sft_args.loss_type,
+        "max_length": sft_args.max_length,
+        "train": train_audit,
+        "validation": val_audit,
+        "data_manifest": str(data_manifest) if data_manifest.exists() else None,
+    }
+    (output_dir / "sft_run_audit.json").write_text(
+        json.dumps(run_audit, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    if args.preflight_only:
+        log.info("SFT preflight passed; no optimization was run.")
+        return
     # ── Train ─────────────────────────────────────────────────────────────────
     log.info("Starting SFT...")
     trainer.train(resume_from_checkpoint=args.resume)
@@ -436,6 +601,9 @@ def main():
         log.info("Tokenizer copied alongside model")
     else:
         log.warning(f"Tokenizer empty or missing at {tokenizer_path} — skipping copy")
+    shutil.copy2(output_dir / "sft_run_audit.json", final_dir / "sft_run_audit.json")
+    if data_manifest.exists():
+        shutil.copy2(data_manifest, final_dir / "sft_data_manifest.json")
 
     log.info(f"Model saved to {final_dir}")
     log.info("SFT complete.")

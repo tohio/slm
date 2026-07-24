@@ -198,6 +198,11 @@ Prepare data:
 make prepare-sft SIZE=125m
 ```
 
+Sources and immutable Hub revisions are configured in
+`finetune/configs/sft_data_sources.yaml`. Prepared splits include a provenance
+and integrity manifest; changing the source contract requires an intentional
+rerun with `finetune/data/prepare_sft.py --force`.
+
 Instruct SFT:
 
 ```bash

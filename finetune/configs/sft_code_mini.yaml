@@ -7,6 +7,8 @@ data:
   train_path: $DATA_DIR/runs/mini/sft_code/train.jsonl
   val_path: $DATA_DIR/runs/mini/sft_code/val.jsonl
   packing: false
+  loss_type: chunked_nll
+  min_retention_ratio: 0.90
   max_samples: 500
 training:
   max_steps: 50
@@ -17,7 +19,7 @@ training:
   gradient_clip_val: 1.0
   gradient_checkpointing: false
   eval_steps: 25
-  save_steps: 50
+  save_steps: 25
   save_total_limit: 1
   log_steps: 5
   num_workers: 2

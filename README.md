@@ -40,7 +40,7 @@ sft_instruct/final
 | `tokenizer/` | BPE tokenizer training and tokenizer checks |
 | `pretrain/` | tokenization and base model pretraining |
 | `model/` | custom decoder-only Transformer implementation |
-| `finetune/` | instruct SFT, code SFT, response-control data |
+| `finetune/` | external SFT data contract plus instruct and code trainers |
 | `alignment/` | DPO preference alignment for chat model |
 | `eval/` | optional benchmark and sanity evaluation |
 | `export/` | Hugging Face export, tokenizer packaging, remote-code bundling |

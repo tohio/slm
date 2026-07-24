@@ -369,6 +369,8 @@ class TestRendering:
         assert d["training"]["micro_batch_size"] == cfg.micro_batch_size
         assert d["model"]["max_seq_length"] == SFT_INSTRUCT_PROFILES["125m"].max_seq_length
         assert d["data"]["train_path"] == "$DATA_DIR/runs/125m/sft_instruct/train.jsonl"
+        assert d["data"]["loss_type"] == "chunked_nll"
+        assert d["data"]["min_retention_ratio"] == 0.90
 
     def test_sft_code_yaml_parses(self):
         cfg = compute_sft_code_config("h200", "125m", 1)

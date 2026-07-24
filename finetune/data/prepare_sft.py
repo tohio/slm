@@ -1,59 +1,24 @@
+#!/usr/bin/env python3
+"""Prepare pinned external datasets for instruct and code SFT.
+
+This repository consumes SFT data; it does not generate synthetic SFT data.
+Sources, immutable revisions, formats, and row caps live in
+``finetune/configs/sft_data_sources.yaml`` so a regenerated synthetic dataset
+can later replace UltraChat or Magicoder without changing the trainer.
+
+The output remains conversational JSONL:
+
+    {"conversations": [{"role": "system", ...}, ...], "source": "..."}
+
+An accompanying ``manifest.json`` records provenance and integrity checks.
+Train/validation splitting is grouped by normalized user prompt so duplicate
+prompts can never leak across the evaluation boundary.
 """
-Download and format SFT datasets for instruct and code fine-tuning.
 
-Formats all data into the SLM conversation format:
-    [
-        {"role": "system",    "content": "..."},
-        {"role": "user",      "content": "..."},
-        {"role": "assistant", "content": "..."}
-    ]
-
-Chat template application:
-    No "text" field is produced. train_sft.py renames "conversations" →
-    "messages" at load time; trl's SFTTrainer then auto-detects the
-    conversational format and applies tokenizer.apply_chat_template()
-    internally. Pre-formatting here would bypass the tokenizer's baked-in
-    chat template (including {% generation %} tags) and break
-    assistant_only_loss=True.
-
-Stage 1 — Instruct SFT:
-    Dataset: size-aware SmolTalk policy
-        125m: 50% of HuggingFaceTB/smol-smoltalk
-        350m: full HuggingFaceTB/smol-smoltalk
-        1b:   full HuggingFaceTB/smoltalk
-    Plus:    generated response-control examples from finetune/data/response_control.py
-    Output:  data/runs/<size>/sft_instruct/train.jsonl + val.jsonl
-
-Stage 2 — Code SFT:
-    Dataset: ise-uiuc/Magicoder-OSS-Instruct-75K
-    Size:    ~75k examples before filtering
-    Output:  data/runs/<size>/sft_code/train.jsonl + val.jsonl
-
-    Code SFT keeps examples whose assistant responses contain actual code.
-    Obvious prose-only / explanation-only examples are dropped so this stage
-    teaches the model to emit code when code is requested.
-
-    Custom simple-code examples are appended to reinforce basic Python,
-    write-only-code behavior, and function-completion behavior.
-
-Output format — one conversation per line:
-    {
-        "conversations": [
-            {"role": "system",    "content": "..."},
-            {"role": "user",      "content": "..."},
-            {"role": "assistant", "content": "..."}
-        ],
-        "source": "smol_smoltalk",
-        "sft_type": "general_assistant"
-    }
-
-Usage:
-    python finetune/data/prepare_sft.py --stage both --size 125m
-    python finetune/data/prepare_sft.py --stage instruct --size 350m
-    python finetune/data/prepare_sft.py --stage code
-"""
+from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -62,1336 +27,394 @@ import re
 import sys
 from collections import Counter
 from pathlib import Path
+from typing import Any
 
+import yaml
 from dotenv import load_dotenv
 
 load_dotenv()
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from config.paths import sft_instruct_data_dir, sft_code_data_dir, BASE_DATA_DIR
+from config.paths import sft_code_data_dir, sft_instruct_data_dir
 
-from finetune.data.response_control import build_response_control_records
-
+log = logging.getLogger(__name__)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
 )
-log = logging.getLogger(__name__)
 
-DATA_DIR = BASE_DATA_DIR
-SFT_DIR = None
-
-# Default system prompts
 DEFAULT_SYSTEM = "You are a helpful, harmless, and honest assistant."
 CODE_SYSTEM = (
-    "You are an expert programming assistant. "
-    "When code is requested, write code directly and avoid unnecessary explanation. "
-    "When explanation is requested, explain clearly in prose and do not rewrite the code."
+    "You are an expert programming assistant. When code is requested, write "
+    "code directly and avoid unnecessary explanation. When explanation is "
+    "requested, explain clearly in prose."
 )
-
-# Handcrafted explanation examples are intentionally oversampled because the
-# Magicoder code stage is dominated by code-output tasks. A small repeated
-# prose-only explanation signal helps preserve task-mode distinction:
-#   explain code -> explain in prose
-#   write code   -> write code
-HANDCRAFTED_CODE_EXPLANATION_REPEAT = 20
+VALID_SIZES = ("mini", "125m", "350m", "1b")
+VALID_STAGES = ("instruct", "code")
+SPACE_RE = re.compile(r"\s+")
 
 
-# Generated response-control chat examples are built in finetune/data/response_control.py.
+def canonical_text(value: str) -> str:
+    return SPACE_RE.sub(" ", value.strip().lower())
 
 
-# ── Chat SFT backbone policy ──────────────────────────────────────────────────
-#
-# OpenHermes is intentionally no longer the default chat SFT source.
-# SmolTalk / smol-smoltalk provides the general assistant backbone, while
-# response_control supplies the targeted custom gap-fill examples.
-#
-# Size policy:
-#   mini: tiny smol-smoltalk subset for end-to-end GPU validation
-#   125m: half of smol-smoltalk
-#   350m: full smol-smoltalk
-#   1b: full smoltalk
-CHAT_SFT_BACKBONE = {
-    "mini": {
-        "dataset": "HuggingFaceTB/smol-smoltalk",
-        "split": "train",
-        "source": "smol_smoltalk",
-        "fraction": 0.01,
-        "max_records": 1000,
-    },
-    "125m": {
-        "dataset": "HuggingFaceTB/smol-smoltalk",
-        "split": "train",
-        "source": "smol_smoltalk",
-        "fraction": 0.50,
-    },
-    "350m": {
-        "dataset": "HuggingFaceTB/smol-smoltalk",
-        "split": "train",
-        "source": "smol_smoltalk",
-        "fraction": 1.00,
-    },
-    "1b": {
-        "dataset": "HuggingFaceTB/smoltalk",
-        "split": "train",
-        "source": "smoltalk",
-        "fraction": 1.00,
-    },
-}
-
-VALID_SFT_SIZES = tuple(CHAT_SFT_BACKBONE.keys())
+def canonical_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def build_handcrafted_response_control_records(max_examples: int = 5000) -> list[dict]:
-    """Return generated response-control chat examples.
+def sha256_json(value: Any) -> str:
+    return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
-    Kept under the old function name so prepare_chat() does not need broader
-    wiring changes. The source field is "response_control".
-    """
-    return build_response_control_records(
-        system=DEFAULT_SYSTEM,
-        max_examples=max_examples,
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def first_user_prompt(messages: list[dict[str, str]]) -> str:
+    return next(
+        (canonical_text(message["content"]) for message in messages if message["role"] == "user"),
+        "",
     )
 
 
-
-
-# ── Code SFT filtering helpers ────────────────────────────────────────────────
-
-CODE_KEYWORDS = (
-    "def ",
-    "class ",
-    "return ",
-    "import ",
-    "from ",
-    "for ",
-    "while ",
-    "if ",
-    "elif ",
-    "else:",
-    "try:",
-    "except ",
-    "with ",
-    "lambda ",
-    "async ",
-    "await ",
-)
-
-PROSE_ONLY_STARTS = (
-    "the given code",
-    "the provided code",
-    "this code",
-    "this function",
-    "this program",
-    "to solve this problem",
-    "to implement this",
-    "here is an explanation",
-    "here's an explanation",
-    "in this solution",
-    "we need to",
-    "you can",
-)
-
-CODE_OUTPUT_TYPES = {"code_generation", "function_completion", "code_repair"}
-
-CODE_BLOCK_RE = re.compile(
-    r"```(?:[a-zA-Z0-9_+\-.#]+)?\s*\n(.*?)```",
-    re.DOTALL,
-)
-
-
-def has_code_fence(text: str) -> bool:
-    return "```" in text
-
-
-def count_indented_code_lines(text: str) -> int:
-    count = 0
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if line.startswith(("    ", "\t")) and not stripped.startswith(("-", "*")):
-            count += 1
-    return count
-
-
-def count_code_keyword_lines(text: str) -> int:
-    count = 0
-    for line in text.splitlines():
-        stripped = line.strip()
-        if any(stripped.startswith(keyword) for keyword in CODE_KEYWORDS):
-            count += 1
-    return count
-
-
-def has_programming_syntax(text: str) -> bool:
-    patterns = [
-        r"\w+\s*=\s*[^=]",
-        r"\w+\([^)]*\)",
-        r"[{};]",
-        r"==|!=|<=|>=|->|=>",
-        r"\[[^\]]+\]",
-    ]
-    return any(re.search(pattern, text) for pattern in patterns)
-
-
-def looks_like_code(text: str) -> bool:
-    """Return True when an assistant response contains substantial code."""
-    if not text or len(text.strip()) < 20:
-        return False
-
-    keyword_lines = count_code_keyword_lines(text)
-    indented_lines = count_indented_code_lines(text)
-
-    if has_code_fence(text) and (keyword_lines >= 1 or has_programming_syntax(text)):
-        return True
-
-    if keyword_lines >= 2:
-        return True
-
-    if indented_lines >= 2 and has_programming_syntax(text):
-        return True
-
-    if "def " in text and "return" in text:
-        return True
-
-    if "class " in text and ("def " in text or "return" in text):
-        return True
-
-    return False
-
-
-def is_prose_heavy_without_code(text: str) -> bool:
-    stripped = text.strip().lower()
-    starts_like_explanation = stripped.startswith(PROSE_ONLY_STARTS)
-    return starts_like_explanation and not looks_like_code(text)
-
-
-STRICT_FUNCTION_COMPLETION_PHRASES = (
-    "return only the function body",
-    "return only function body",
-    "return only the method body",
-    "return only method body",
-    "function body only",
-    "method body only",
-    "complete the function body",
-    "complete this function body",
-    "complete the method body",
-    "complete this method body",
-    "implement the function body",
-    "implement this function body",
-    "implement the method body",
-    "implement this method body",
-    "fill in the function body",
-    "fill in this function body",
-    "fill in the method body",
-    "fill in this method body",
-    "replace the pass statement",
-    "replace pass with",
-)
-
-
-def is_strict_function_completion_prompt(prompt: str) -> bool:
-    """Return True only for body/completion-style code prompts."""
-    prompt = prompt.lower()
-
-    if any(phrase in prompt for phrase in STRICT_FUNCTION_COMPLETION_PHRASES):
-        return True
-
-    body_pattern = re.compile(
-        r"\b(complete|implement|fill in|write)\b.{0,120}\b(function|method)\b.{0,120}\bbody\b",
-        re.DOTALL,
-    )
-    if body_pattern.search(prompt):
-        return True
-
-    return_only_body_pattern = re.compile(
-        r"\breturn only\b.{0,80}\b(function|method)\b.{0,40}\bbody\b",
-        re.DOTALL,
-    )
-    if return_only_body_pattern.search(prompt):
-        return True
-
-    missing_code_pattern = re.compile(
-        r"\b(fill in|complete)\b.{0,80}\b(missing code|todo|pass statement)\b",
-        re.DOTALL,
-    )
-    if missing_code_pattern.search(prompt):
-        return True
-
-    return False
-
-
-CODE_CREATION_PROMPT_RE = re.compile(
-    r"\b(implement|write|create|complete|add|build|generate|finish|fill in)\b",
-    re.DOTALL,
-)
-
-EXPLANATION_PROMPT_PATTERNS = (
-    re.compile(r"\bexplain\s+(what|how|why|the|this|that|following)\b", re.DOTALL),
-    re.compile(r"\bwhat\s+does\b", re.DOTALL),
-    re.compile(r"\bwhat\s+will\s+(be\s+)?(printed|output)\b", re.DOTALL),
-    re.compile(r"\bpredict\s+the\s+output\b", re.DOTALL),
-    re.compile(r"\bunderstand\s+the\s+behavior\b", re.DOTALL),
-)
-
-
-def is_explanation_prompt(prompt: str) -> bool:
-    """Return True for prompts that ask to explain/analyze existing code."""
-    prompt = prompt.lower()
-
-    if not any(pattern.search(prompt) for pattern in EXPLANATION_PROMPT_PATTERNS):
-        return False
-
-    if (
-        CODE_CREATION_PROMPT_RE.search(prompt)
-        and "predict the output" not in prompt
-        and "what will be printed" not in prompt
-        and "what is the output" not in prompt
-    ):
-        return False
-
-    return True
-
-
-def looks_like_mostly_code(text: str) -> bool:
-    """Return True when an assistant response is mostly code, not prose."""
-    stripped = text.strip()
-    if not stripped:
-        return False
-
-    if stripped.startswith("```"):
-        return True
-
-    lines = [line for line in stripped.splitlines() if line.strip()]
-    if not lines:
-        return False
-
-    first = lines[0].strip().lower()
-    code_starts = (
-        "def ", "class ", "import ", "from ", "function ", "const ", "let ",
-        "var ", "public ", "private ", "protected ", "#include", "using ",
-        "package ", "func ", "fn ", "struct ", "enum ", "interface ",
-        "#!/", "mv ", "cp ", "kubectl ", "minikube ",
-    )
-    if first.startswith(code_starts):
-        return True
-
-    fenced = extract_fenced_code(stripped)
-    if fenced:
-        fenced_lines = [line for line in fenced.splitlines() if line.strip()]
-        if len(fenced_lines) >= max(3, len(lines) // 2):
-            return True
-
-    code_lines = 0
-    prose_lines = 0
-    for line in lines:
-        s_line = line.strip()
-        lower = s_line.lower()
-        if (
-            any(lower.startswith(prefix) for prefix in code_starts)
-            or any(lower.startswith(keyword) for keyword in CODE_KEYWORDS)
-            or re.search(r"[{};]", s_line)
-            or re.search(r"\w+\s*=\s*[^=]", s_line)
-        ):
-            code_lines += 1
-        else:
-            prose_lines += 1
-
-    return code_lines >= 3 and code_lines >= prose_lines
-
-
-def classify_code_sft_type(instruction: str, solution: str) -> str:
-    prompt = instruction.lower()
-
-    if is_explanation_prompt(prompt):
-        return "code_explanation"
-
-    if "fix" in prompt or "debug" in prompt or "bug" in prompt:
-        return "code_repair"
-
-    if is_strict_function_completion_prompt(prompt):
-        return "function_completion"
-
-    if "```" in solution.lower() or looks_like_code(solution):
-        return "code_generation"
-
-    return "code_other"
-
-
-def extract_fenced_code(text: str) -> str | None:
-    """Return the largest fenced code block from a response, without fences."""
-    blocks = [match.group(1).strip() for match in CODE_BLOCK_RE.finditer(text)]
-    blocks = [block for block in blocks if block]
-    if not blocks:
+def normalize_messages(raw: Any, system_prompt: str) -> list[dict[str, str]] | None:
+    if not isinstance(raw, list):
         return None
-    return max(blocks, key=len).strip()
 
-
-def normalize_code_solution(solution: str, sft_type: str) -> tuple[str, bool]:
-    """Normalize assistant output for code-output SFT examples."""
-    solution = solution.strip()
-
-    if sft_type not in CODE_OUTPUT_TYPES:
-        return solution, False
-
-    fenced = extract_fenced_code(solution)
-    if fenced:
-        return fenced, True
-
-    return solution, False
-
-
-
-# ── Handcrafted simple code-generation examples ───────────────────────────────
-#
-# These examples directly target the observed failure mode:
-#   write code -> the model describes code instead of emitting code.
-#
-# Magicoder remains the backbone. This set is intentionally small, simple, and
-# high-signal so basic Python/code-output behavior is repeatedly reinforced.
-HANDCRAFTED_SIMPLE_CODE_GENERATION = [
-    {
-        "prompt": "Write only Python code: create a function add_numbers(a, b) that returns their sum.",
-        "answer": "def add_numbers(a, b):\n    return a + b",
-    },
-    {
-        "prompt": "Write a Python function that adds two numbers.",
-        "answer": "def add_numbers(a, b):\n    return a + b",
-    },
-    {
-        "prompt": "Create a Python function called is_even that returns True if n is even.",
-        "answer": "def is_even(n):\n    return n % 2 == 0",
-    },
-    {
-        "prompt": "Write only Python code: create a function square(x) that returns x squared.",
-        "answer": "def square(x):\n    return x * x",
-    },
-    {
-        "prompt": "Write a Python function that returns the first item in a list.",
-        "answer": "def first_item(items):\n    return items[0]",
-    },
-    {
-        "prompt": "Write a Python function that returns the last item in a list.",
-        "answer": "def last_item(items):\n    return items[-1]",
-    },
-    {
-        "prompt": "Write a Python function that reverses a string.",
-        "answer": "def reverse_string(text):\n    return text[::-1]",
-    },
-    {
-        "prompt": "Write a Python function that counts the number of words in a string.",
-        "answer": "def count_words(text):\n    return len(text.split())",
-    },
-    {
-        "prompt": "Write a Python function that returns the maximum number in a list.",
-        "answer": "def max_number(numbers):\n    return max(numbers)",
-    },
-    {
-        "prompt": "Write a Python function that filters even numbers from a list.",
-        "answer": "def filter_even(numbers):\n    return [n for n in numbers if n % 2 == 0]",
-    },
-    {
-        "prompt": "Write only Python code: create a function safe_divide(a, b) that returns 0 if b is 0.",
-        "answer": "def safe_divide(a, b):\n    if b == 0:\n        return 0\n    return a / b",
-    },
-    {
-        "prompt": "Write a Python function that removes duplicates from a list while preserving order.",
-        "answer": "def remove_duplicates(items):\n    seen = set()\n    result = []\n    for item in items:\n        if item not in seen:\n            seen.add(item)\n            result.append(item)\n    return result",
-    },
-    {
-        "prompt": "Write a Python function that returns True if a string is a palindrome.",
-        "answer": "def is_palindrome(text):\n    return text == text[::-1]",
-    },
-    {
-        "prompt": "Write a Python function that clamps a value between low and high.",
-        "answer": "def clamp(value, low, high):\n    return max(low, min(value, high))",
-    },
-    {
-        "prompt": "Write only Python code: create a function celsius_to_fahrenheit(c).",
-        "answer": "def celsius_to_fahrenheit(c):\n    return (c * 9 / 5) + 32",
-    },
-]
-
-# Repeat simple code-generation examples so the add-on is loud enough relative
-# to Magicoder's broader instruction distribution.
-HANDCRAFTED_SIMPLE_CODE_GENERATION_REPEAT = 100
-
-# Repeat raw HumanEval-style function-body completions so this signal is not
-# drowned out by the broader Magicoder instruction distribution.
-HANDCRAFTED_RAW_FUNCTION_COMPLETION_REPEAT = 100
-
-# ── Handcrafted function-completion examples ─────────────────────────────────
-
-HANDCRAFTED_FUNCTION_COMPLETIONS = [
-    {
-        "imports": "from typing import List",
-        "signature": "def first_item(items: List[int]) -> int:",
-        "docstring": "Return the first item in the list.",
-        "body": "return items[0]",
-    },
-    {
-        "imports": "from typing import List",
-        "signature": "def last_item(items: List[int]) -> int:",
-        "docstring": "Return the last item in the list.",
-        "body": "return items[-1]",
-    },
-    {
-        "imports": "from typing import List",
-        "signature": "def sum_items(items: List[int]) -> int:",
-        "docstring": "Return the sum of all integers in the list.",
-        "body": "return sum(items)",
-    },
-    {
-        "imports": "from typing import List",
-        "signature": "def max_item(items: List[int]) -> int:",
-        "docstring": "Return the largest integer in the list.",
-        "body": "return max(items)",
-    },
-    {
-        "imports": "from typing import List",
-        "signature": "def min_item(items: List[int]) -> int:",
-        "docstring": "Return the smallest integer in the list.",
-        "body": "return min(items)",
-    },
-    {
-        "imports": "from typing import List",
-        "signature": "def count_positive(numbers: List[int]) -> int:",
-        "docstring": "Return the number of positive integers.",
-        "body": "return sum(1 for n in numbers if n > 0)",
-    },
-    {
-        "imports": "from typing import List",
-        "signature": "def filter_positive(numbers: List[int]) -> List[int]:",
-        "docstring": "Return only the positive integers from the list.",
-        "body": "return [n for n in numbers if n > 0]",
-    },
-    {
-        "imports": "from typing import List",
-        "signature": "def filter_even(numbers: List[int]) -> List[int]:",
-        "docstring": "Return only the even integers from the list.",
-        "body": "return [n for n in numbers if n % 2 == 0]",
-    },
-    {
-        "imports": "from typing import List",
-        "signature": "def has_close_elements(numbers: List[float], threshold: float) -> bool:",
-        "docstring": "Return True if any two numbers are closer than threshold.",
-        "body": "for i in range(len(numbers)):\n    for j in range(i + 1, len(numbers)):\n        if abs(numbers[i] - numbers[j]) < threshold:\n            return True\nreturn False",
-    },
-    {
-        "imports": "",
-        "signature": "def square(x: int) -> int:",
-        "docstring": "Return x squared.",
-        "body": "return x * x",
-    },
-    {
-        "imports": "",
-        "signature": "def add_one(x: int) -> int:",
-        "docstring": "Return x plus one.",
-        "body": "return x + 1",
-    },
-    {
-        "imports": "",
-        "signature": "def is_positive(x: int) -> bool:",
-        "docstring": "Return True if x is greater than zero.",
-        "body": "return x > 0",
-    },
-    {
-        "imports": "",
-        "signature": "def clamp(value: int, low: int, high: int) -> int:",
-        "docstring": "Clamp value to the inclusive range [low, high].",
-        "body": "return max(low, min(value, high))",
-    },
-    {
-        "imports": "",
-        "signature": "def reverse_string(text: str) -> str:",
-        "docstring": "Return text reversed.",
-        "body": "return text[::-1]",
-    },
-    {
-        "imports": "",
-        "signature": "def safe_divide(a: float, b: float) -> float:",
-        "docstring": "Return a divided by b, or 0.0 if b is zero.",
-        "body": "if b == 0:\n    return 0.0\nreturn a / b",
-    },
-]
-
-
-
-def build_handcrafted_simple_code_generation_records() -> list[dict]:
-    records = []
-
-    prompt_variants = [
-        "{prompt}",
-        "{prompt}\nDo not explain.",
-        "{prompt}\nReturn only the code.",
-    ]
-
-    for example in HANDCRAFTED_SIMPLE_CODE_GENERATION:
-        prompt = example["prompt"].strip()
-        answer = example["answer"].strip()
-
-        for variant in prompt_variants:
-            records.append({
-                "conversations": [
-                    {"role": "system", "content": CODE_SYSTEM},
-                    {"role": "user", "content": variant.format(prompt=prompt)},
-                    {"role": "assistant", "content": answer},
-                ],
-                "source": "handcrafted_simple_code",
-                "sft_type": "code_generation",
-                "normalized": False,
-                "simple_code_variant": True,
-            })
-
-    return records
-
-def build_handcrafted_function_completion_records() -> list[dict]:
-    """Return body-only examples for HumanEval-style behavior.
-
-    These examples explicitly teach:
-      - return only the function body
-      - do not repeat imports
-      - do not repeat the function signature
-      - do not add explanations
-    """
-    records = []
-
-    prompt_variants = [
-        "Complete this Python function. Return only the function body.",
-        "Fill in the function body only. Do not include imports, the function signature, or explanation.",
-        "Implement only the body for this function. Do not repeat the function definition.",
-        "Return only the executable body lines that belong inside this function.",
-        "Replace the missing body. Output only the function body, with no surrounding code.",
-    ]
-
-    for example in HANDCRAFTED_FUNCTION_COMPLETIONS:
-        imports = example["imports"].strip()
-        signature = example["signature"].strip()
-        docstring = example["docstring"].strip()
-        body = example["body"].strip()
-
-        snippet_parts = []
-        if imports:
-            snippet_parts.append(imports)
-        snippet_parts.append(f'{signature}\n    """{docstring}"""')
-        snippet = "\n\n".join(snippet_parts)
-
-        for variant in prompt_variants:
-            prompt = f"{variant}\n\n{snippet}"
-
-            records.append({
-                "conversations": [
-                    {"role": "system", "content": CODE_SYSTEM},
-                    {"role": "user", "content": prompt},
-                    {"role": "assistant", "content": body},
-                ],
-                "source": "handcrafted_function_completion",
-                "sft_type": "function_completion",
-                "normalized": False,
-                "body_only_variant": True,
-            })
-
-    return records
-
-
-def build_handcrafted_raw_function_completion_records() -> list[dict]:
-    """Return raw-prefix function-body completion examples.
-
-    Canonical HumanEval prompts are not chat instructions. They provide:
-
-        def foo(...):
-            \"\"\"docstring\"\"\"
-
-    and expect the model to continue with only the indented function body.
-    These examples reinforce that raw completion mode while still using the
-    existing conversational SFT record format.
-    """
-    records = []
-
-    prompt_templates = [
-        "{snippet}",
-        "{snippet}\n",
-        "Complete the function body only.\n\n{snippet}",
-        "Return only the indented function body.\n\n{snippet}",
-    ]
-
-    for example in HANDCRAFTED_FUNCTION_COMPLETIONS:
-        imports = example["imports"].strip()
-        signature = example["signature"].strip()
-        docstring = example["docstring"].strip()
-        body = example["body"].strip()
-
-        snippet_parts = []
-        if imports:
-            snippet_parts.append(imports)
-        snippet_parts.append(f'{signature}\n    """{docstring}"""')
-        snippet = "\n\n".join(snippet_parts)
-
-        indented_body = "\n".join(
-            f"    {line}" if line.strip() else line
-            for line in body.splitlines()
-        )
-
-        for template in prompt_templates:
-            records.append({
-                "conversations": [
-                    {"role": "system", "content": CODE_SYSTEM},
-                    {"role": "user", "content": template.format(snippet=snippet)},
-                    {"role": "assistant", "content": indented_body},
-                ],
-                "source": "handcrafted_raw_function_completion",
-                "sft_type": "function_completion",
-                "normalized": False,
-                "raw_completion_style": True,
-            })
-
-    return records
-
-
-# ── Handcrafted code-explanation examples ─────────────────────────────────────
-
-HANDCRAFTED_CODE_EXPLANATIONS = [
-    {
-        "prompt": "Explain what this Python function does:\n\ndef square(x):\n    return x * x",
-        "answer": "It returns the square of x by multiplying x by itself.",
-    },
-    {
-        "prompt": "Explain what this Python function does:\n\ndef is_even(n):\n    return n % 2 == 0",
-        "answer": "It returns True when n is evenly divisible by 2, otherwise it returns False.",
-    },
-    {
-        "prompt": "Explain what this Python function does:\n\ndef first_item(items):\n    return items[0]",
-        "answer": "It returns the first element from the items list.",
-    },
-    {
-        "prompt": "Explain what this Python function does:\n\ndef count_positive(numbers):\n    return sum(1 for n in numbers if n > 0)",
-        "answer": "It counts how many numbers in the input are greater than zero.",
-    },
-    {
-        "prompt": "Explain what this Python function does:\n\ndef reverse_string(text):\n    return text[::-1]",
-        "answer": "It returns a new string with the characters of text in reverse order.",
-    },
-    {
-        "prompt": "Explain what this Python function does:\n\ndef safe_get(mapping, key, default=None):\n    return mapping.get(key, default)",
-        "answer": "It looks up key in the mapping and returns default if the key is missing.",
-    },
-    {
-        "prompt": "Explain what this Python function does:\n\ndef remove_duplicates(items):\n    return list(dict.fromkeys(items))",
-        "answer": "It removes duplicate values while preserving the original order of the items.",
-    },
-    {
-        "prompt": "Explain what this Python function does:\n\ndef clamp(value, low, high):\n    return max(low, min(value, high))",
-        "answer": "It restricts value to stay between low and high.",
-    },
-    {
-        "prompt": "Explain what this Python function does:\n\ndef has_close_elements(numbers, threshold):\n    for i in range(len(numbers)):\n        for j in range(i + 1, len(numbers)):\n            if abs(numbers[i] - numbers[j]) < threshold:\n                return True\n    return False",
-        "answer": "It checks every pair of numbers and returns True if any pair is closer than the threshold.",
-    },
-    {
-        "prompt": "Explain what this Python function does:\n\ndef trailing_zeroes_in_factorial(num):\n    count = 0\n    while num >= 5:\n        num //= 5\n        count += num\n    return count",
-        "answer": "It counts how many trailing zeroes appear in num factorial by counting factors of 5.",
-    },
-    {
-        "prompt": "Explain this JavaScript function:\n\nfunction add(a, b) {\n  return a + b;\n}",
-        "answer": "It returns the sum of a and b.",
-    },
-    {
-        "prompt": "Explain this JavaScript function:\n\nfunction isEmpty(arr) {\n  return arr.length === 0;\n}",
-        "answer": "It returns true when the array has no elements.",
-    },
-    {
-        "prompt": "Explain this JavaScript function:\n\nfunction getName(user) {\n  return user.name;\n}",
-        "answer": "It returns the name property from the user object.",
-    },
-    {
-        "prompt": "Explain this TypeScript reducer case:\n\ncase 'CUSTOMER_CLEAR_INFO':\n  return { ...state, info: {} };",
-        "answer": "It returns a new state object with the info field reset to an empty object.",
-    },
-    {
-        "prompt": "Explain this Rust function:\n\nfn double(x: i32) -> i32 {\n    x * 2\n}",
-        "answer": "It returns x multiplied by 2.",
-    },
-    {
-        "prompt": "Explain this Rust expression:\n\nnumbers.iter().filter(|n| **n > 0).count()",
-        "answer": "It iterates over numbers, keeps only positive values, and counts how many there are.",
-    },
-    {
-        "prompt": "Explain this SQL query:\n\nSELECT COUNT(*) FROM users WHERE active = true;",
-        "answer": "It counts the number of active users.",
-    },
-    {
-        "prompt": "Explain this Bash command:\n\ncp source.txt backup.txt",
-        "answer": "It copies source.txt to a new file named backup.txt.",
-    },
-    {
-        "prompt": "Explain this Python class method:\n\ndef available_seats(self):\n    return self.capacity - self.reserved",
-        "answer": "It returns the number of seats that are still available by subtracting reserved seats from capacity.",
-    },
-    {
-        "prompt": "Explain what this Python code does:\n\nresult = [x * x for x in numbers]",
-        "answer": "It creates a new list containing the square of each value in numbers.",
-    },
-    {
-        "prompt": "Explain what this Python code does:\n\nwith open(path) as f:\n    lines = f.readlines()",
-        "answer": "It opens the file at path and reads all lines into a list.",
-    },
-    {
-        "prompt": "Explain this Python conditional:\n\nif not items:\n    return []",
-        "answer": "It checks whether items is empty and returns an empty list when it is.",
-    },
-    {
-        "prompt": "Explain this Python loop:\n\nfor item in items:\n    print(item)",
-        "answer": "It iterates through each item in items and prints it.",
-    },
-    {
-        "prompt": "Explain this Python dictionary update:\n\ncounts[word] = counts.get(word, 0) + 1",
-        "answer": "It increments the count for word, starting from 0 if the word is not already present.",
-    },
-    {
-        "prompt": "Explain this Python statement:\n\nreturn sorted(items, key=lambda item: item.name)",
-        "answer": "It returns items sorted by each item's name attribute.",
-    },
-    {
-        "prompt": "Explain this C# property:\n\npublic string Name { get; set; }",
-        "answer": "It declares a public string property named Name with automatic getter and setter methods.",
-    },
-    {
-        "prompt": "Explain this C# condition:\n\nif (items.Count == 0) return false;",
-        "answer": "It returns false when the items collection is empty.",
-    },
-    {
-        "prompt": "Explain this Java method:\n\npublic int size() {\n    return items.size();\n}",
-        "answer": "It returns the number of elements in the items collection.",
-    },
-    {
-        "prompt": "Explain this JavaScript arrow function:\n\nconst double = x => x * 2;",
-        "answer": "It defines a function that returns its input multiplied by 2.",
-    },
-    {
-        "prompt": "Explain this Python exception handler:\n\ntry:\n    value = int(text)\nexcept ValueError:\n    value = 0",
-        "answer": "It tries to convert text to an integer and falls back to 0 if conversion fails.",
-    },
-    {
-        "prompt": "Explain this Python function:\n\ndef merge_dicts(a, b):\n    return {**a, **b}",
-        "answer": "It returns a new dictionary containing keys from a and b, with b overriding duplicate keys.",
-    },
-    {
-        "prompt": "Explain this Python function:\n\ndef get_extension(filename):\n    return filename.rsplit('.', 1)[-1]",
-        "answer": "It returns the part of filename after the final dot.",
-    },
-    {
-        "prompt": "Explain this Python function:\n\ndef fahrenheit_to_celsius(f):\n    return (f - 32) * 5 / 9",
-        "answer": "It converts a Fahrenheit temperature to Celsius.",
-    },
-    {
-        "prompt": "Explain this Python function:\n\ndef non_empty(strings):\n    return [s for s in strings if s]",
-        "answer": "It returns only the strings that are not empty.",
-    },
-    {
-        "prompt": "Explain this Python function:\n\ndef word_count(text):\n    return len(text.split())",
-        "answer": "It returns the number of whitespace-separated words in text.",
-    },
-]
-
-
-def build_handcrafted_code_explanation_records() -> list[dict]:
-    """Return small prose-only examples for code-explanation behavior."""
-    records = []
-
-    for example in HANDCRAFTED_CODE_EXPLANATIONS:
-        records.append({
-            "conversations": [
-                {"role": "system", "content": CODE_SYSTEM},
-                {"role": "user", "content": example["prompt"].strip()},
-                {"role": "assistant", "content": example["answer"].strip()},
-            ],
-            "source": "handcrafted_code_explanation",
-            "sft_type": "code_explanation",
-            "normalized": False,
-        })
-
-    return records
-
-
-def write_jsonl(records: list[dict], path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        for record in records:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    log.info(f"Wrote {len(records):,} records to {path}")
-
-
-# ── Chat SFT — SmolTalk backbone + custom response-control ─────────────────────
-
-def normalize_chat_messages(example: dict) -> list[dict] | None:
-    """
-    Normalize common chat/instruction schemas into SLM's conversation format.
-
-    Supported shapes:
-      - {"messages": [{"role": "...", "content": "..."}]}
-      - {"conversations": [{"from": "...", "value": "..."}]}
-      - {"prompt": "...", "response"/"completion"/"answer": "..."}
-    """
-    raw = example.get("messages") or example.get("conversations")
-
-    messages: list[dict] = []
-
-    if isinstance(raw, list):
-        for turn in raw:
-            if not isinstance(turn, dict):
-                return None
-
-            role = (turn.get("role") or turn.get("from") or "").strip().lower()
-            content = (turn.get("content") or turn.get("value") or "").strip()
-
-            if not content:
-                return None
-
-            if role in ("system",):
-                mapped_role = "system"
-            elif role in ("human", "user"):
-                mapped_role = "user"
-            elif role in ("gpt", "assistant"):
-                mapped_role = "assistant"
-            else:
-                return None
-
-            messages.append({"role": mapped_role, "content": content})
-
-    else:
-        prompt = (example.get("prompt") or example.get("instruction") or "").strip()
-        response = (
-            example.get("response")
-            or example.get("completion")
-            or example.get("answer")
-            or ""
-        ).strip()
-
-        if not prompt or not response:
+    messages: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
             return None
-
-        messages = [
-            {"role": "user", "content": prompt},
-            {"role": "assistant", "content": response},
-        ]
+        role = item.get("role") or item.get("from")
+        content = item.get("content") or item.get("value")
+        role = {"human": "user", "gpt": "assistant"}.get(role, role)
+        if role not in {"system", "user", "assistant"} or not isinstance(content, str):
+            return None
+        content = content.strip()
+        if not content:
+            return None
+        messages.append({"role": role, "content": content})
 
     if not messages:
         return None
-
     if messages[0]["role"] != "system":
-        messages.insert(0, {"role": "system", "content": DEFAULT_SYSTEM})
+        messages.insert(0, {"role": "system", "content": system_prompt})
 
-    if messages[-1]["role"] != "assistant":
+    conversational = [m for m in messages if m["role"] != "system"]
+    if len(conversational) < 2 or conversational[0]["role"] != "user":
         return None
-
-    roles = {m["role"] for m in messages}
-    if "user" not in roles or "assistant" not in roles:
+    if conversational[-1]["role"] != "assistant":
         return None
-
+    if any(
+        left["role"] == right["role"]
+        for left, right in zip(conversational, conversational[1:])
+    ):
+        return None
     return messages
 
 
-def smoltalk_policy(size: str) -> dict:
-    if size not in CHAT_SFT_BACKBONE:
-        raise ValueError(f"Unsupported SFT size {size!r}. Choices: {VALID_SFT_SIZES}")
-    return CHAT_SFT_BACKBONE[size]
-
-
-def select_backbone_records(records: list[dict], fraction: float, seed: int = 42) -> list[dict]:
-    """Deterministically select a fraction of valid backbone records."""
-    if not records:
-        return records
-
-    if fraction >= 1.0:
-        return records
-
-    if fraction <= 0.0:
-        return []
-
-    n_keep = max(1, int(len(records) * fraction))
-    rng = random.Random(seed)
-    rng.shuffle(records)
-    return records[:n_keep]
-
-
-
-# Per-stage defaults for validation fraction. These are the sources of truth;
-# CLI --val-fraction overrides them only when explicitly passed.
-DEFAULT_VAL_FRACTION = {
-    "chat": 0.02,
-    "code": 0.05,
-}
-
-
-def _limit_records(records: list[dict], max_records: int | None, seed: int = 42) -> list[dict]:
-    """Deterministically cap a record list for mini pipeline validation."""
-    if not max_records or len(records) <= max_records:
-        return records
-    rng = random.Random(seed)
-    records = list(records)
-    rng.shuffle(records)
-    return records[:max_records]
-
-
-def _stratified_response_control_records(records: list[dict], max_records: int) -> list[dict]:
-    """
-    Deterministically cap response-control records while preserving every
-    response-control category in mini validation data.
-    """
-    by_type: dict[str, list[dict]] = {}
-    for record in records:
-        by_type.setdefault(record.get("sft_type", "unknown"), []).append(record)
-
-    if not by_type or len(records) <= max_records:
-        return records
-
-    rng = random.Random(42)
-    for bucket in by_type.values():
-        rng.shuffle(bucket)
-
-    selected: list[dict] = []
-
-    # First pass: guarantee at least one example per category.
-    for sft_type in sorted(by_type):
-        if by_type[sft_type]:
-            selected.append(by_type[sft_type].pop())
-
-    # Fill remaining slots round-robin so larger categories still contribute.
-    type_names = sorted(by_type)
-    while len(selected) < max_records:
-        added = False
-        for sft_type in type_names:
-            if len(selected) >= max_records:
-                break
-            if by_type[sft_type]:
-                selected.append(by_type[sft_type].pop())
-                added = True
-        if not added:
-            break
-
-    rng.shuffle(selected)
-    return selected
-
-
-def prepare_chat(size: str, val_fraction: float, force: bool = False) -> None:
-    """
-    Download and format the size-aware SmolTalk chat SFT backbone.
-
-    Policy:
-      - 125m: 50% of HuggingFaceTB/smol-smoltalk
-      - 350m: full HuggingFaceTB/smol-smoltalk
-      - 1b: full HuggingFaceTB/smoltalk
-
-    Generated response-control examples are appended as the current custom
-    targeted gap-fill dataset.
-    """
-    from datasets import load_dataset
-
-    policy = smoltalk_policy(size)
-
-    out_dir    = sft_instruct_data_dir(size)
-    train_path = out_dir / "train.jsonl"
-    val_path   = out_dir / "val.jsonl"
-
-    if train_path.exists() and val_path.exists() and not force:
-        log.info(f"Chat SFT data already exists at {out_dir}. Use --force to regenerate.")
-        return
-
-    dataset_name = policy["dataset"]
-    split = policy["split"]
-    fraction = float(policy["fraction"])
-    source_name = policy["source"]
-
-    log.info(
-        f"Loading chat SFT backbone: dataset={dataset_name}, "
-        f"split={split}, size={size}, fraction={fraction:.2f}"
-    )
-    dataset = load_dataset(dataset_name, split=split)
-    log.info(f"{dataset_name}: {len(dataset):,} raw examples")
-
-    backbone_records = []
-    skipped = 0
-
-    for example in dataset:
-        messages = normalize_chat_messages(example)
-        if messages is None:
-            skipped += 1
-            continue
-
-        record = {
-            "conversations": messages,
-            "source": source_name,
-            "dataset": dataset_name,
-            "sft_type": "general_assistant",
-        }
-
-        for meta_key in ("subset", "task", "category", "source_id"):
-            if meta_key in example and example[meta_key] is not None:
-                record[meta_key] = example[meta_key]
-
-        backbone_records.append(record)
-
-    selected_backbone = select_backbone_records(backbone_records, fraction=fraction, seed=42)
-    selected_backbone = _limit_records(
-        selected_backbone,
-        policy.get("max_records"),
-        seed=42,
-    )
-
-    log.info(
-        f"Chat backbone: {len(backbone_records):,} valid, "
-        f"{len(selected_backbone):,} selected, {skipped:,} skipped"
-    )
-
-    handcrafted_max = 500 if size == "mini" else 5000
-    handcrafted_records = build_handcrafted_response_control_records(
-        max_examples=5000,
-    )
-    if size == "mini":
-        handcrafted_records = _stratified_response_control_records(
-            handcrafted_records,
-            max_records=handcrafted_max,
+def normalize_record(row: dict[str, Any], source: dict[str, Any]) -> dict[str, Any] | None:
+    source_format = source["format"]
+    if source_format == "conversational":
+        raw_messages = row.get("messages") or row.get("conversations")
+        messages = normalize_messages(raw_messages, DEFAULT_SYSTEM)
+        sft_type = "general_assistant"
+    elif source_format == "magicoder":
+        prompt = row.get("problem") or row.get("instruction")
+        response = row.get("solution") or row.get("response") or row.get("output")
+        if not isinstance(prompt, str) or not isinstance(response, str):
+            return None
+        prompt, response = prompt.strip(), response.strip()
+        if not prompt or not response:
+            return None
+        messages = normalize_messages(
+            [
+                {"role": "system", "content": CODE_SYSTEM},
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": response},
+            ],
+            CODE_SYSTEM,
         )
-    records = selected_backbone + handcrafted_records
+        sft_type = "code_generation"
+    else:
+        raise ValueError(f"Unsupported SFT source format: {source_format!r}")
 
-    log.info(f"Added generated response-control chat examples: {len(handcrafted_records):,}")
-    log.info(f"Processed: {len(records):,} total chat SFT records")
-
-    n_val = max(1000, int(len(records) * val_fraction))
-    n_val = min(n_val, max(1, len(records) - 1))
-    random.seed(42)
-    random.shuffle(records)
-    val_records   = records[:n_val]
-    train_records = records[n_val:]
-
-    write_jsonl(train_records, train_path)
-    write_jsonl(val_records, val_path)
-
-    log.info(f"Chat SFT: {len(train_records):,} train, {len(val_records):,} val")
+    if messages is None:
+        return None
+    return {
+        "conversations": messages,
+        "source": source["source"],
+        "sft_type": sft_type,
+    }
 
 
-# ── Code SFT — Magicoder-OSS-Instruct ─────────────────────────────────────────
-
-def prepare_code(size: str, val_fraction: float, force: bool = False) -> None:
-    """
-    Download and format Magicoder-OSS-Instruct-75K for code SFT.
-
-    Magicoder generates coding problems inspired by real open-source code,
-    then generates solutions. Each example is a single-turn instruction/response
-    pair.
-
-    This stage keeps only examples whose assistant response contains real code.
-    Obvious prose-only / explanation-only examples are dropped. For code-output
-    task types, fenced code is normalized to code-only targets so code SFT
-    teaches the model to produce code directly when code is requested.
-    """
+def load_source(source: dict[str, Any]):
     from datasets import load_dataset
 
-    out_dir    = sft_code_data_dir(size)
-    train_path = out_dir / "train.jsonl"
-    val_path   = out_dir / "val.jsonl"
+    kwargs: dict[str, Any] = {
+        "split": source["split"],
+        "revision": source["revision"],
+    }
+    if source.get("config"):
+        kwargs["name"] = source["config"]
+    token = os.environ.get("HF_TOKEN")
+    if token:
+        kwargs["token"] = token
+    return load_dataset(source["dataset"], **kwargs)
 
-    if train_path.exists() and val_path.exists() and not force:
-        log.info(f"Code SFT data already exists at {out_dir}. Use --force to regenerate.")
-        return
 
-    log.info("Loading Magicoder-OSS-Instruct-75K...")
-    dataset = load_dataset("ise-uiuc/Magicoder-OSS-Instruct-75K", split="train")
-    log.info(f"Magicoder: {len(dataset):,} examples")
+def select_source_rows(dataset, cap: int, seed: int):
+    if cap <= 0:
+        raise ValueError(f"max_records must be positive, got {cap}")
+    if len(dataset) <= cap:
+        return dataset
+    return dataset.shuffle(seed=seed).select(range(cap))
 
-    records = []
-    skipped_reasons = Counter()
-    type_counts = Counter()
-    normalized_count = 0
 
-    for example in dataset:
-        # Use `or ""` to handle None values
-        instruction = (example.get("problem") or "").strip()
-        solution    = (example.get("solution") or "").strip()
-
-        if not instruction:
-            skipped_reasons["missing_instruction"] += 1
-            continue
-
-        if not solution:
-            skipped_reasons["missing_solution"] += 1
-            continue
-
-        sft_type = classify_code_sft_type(instruction, solution)
-
-        if sft_type == "code_explanation":
-            if looks_like_mostly_code(solution):
-                skipped_reasons["code_explanation_is_code"] += 1
-                continue
+def prepare_records(dataset, source: dict[str, Any], quality: dict[str, float]) -> tuple[list[dict], dict]:
+    valid: list[dict[str, Any]] = []
+    invalid = 0
+    for row in dataset:
+        record = normalize_record(row, source)
+        if record is None:
+            invalid += 1
         else:
-            if is_prose_heavy_without_code(solution):
-                skipped_reasons["prose_only"] += 1
-                continue
+            valid.append(record)
 
-            if not looks_like_code(solution):
-                skipped_reasons["no_code_detected"] += 1
-                continue
-
-        normalized_solution, normalized = normalize_code_solution(solution, sft_type)
-
-        if not normalized_solution:
-            skipped_reasons["empty_after_normalization"] += 1
-            continue
-
-        if normalized:
-            normalized_count += 1
-
-        type_counts[sft_type] += 1
-
-        messages = [
-            {"role": "system",    "content": CODE_SYSTEM},
-            {"role": "user",      "content": instruction},
-            {"role": "assistant", "content": normalized_solution},
-        ]
-
-        records.append({
-            "conversations": messages,
-            "source": "magicoder",
-            "sft_type": sft_type,
-            "normalized": normalized,
-        })
-
-    simple_code_base = build_handcrafted_simple_code_generation_records()
-    simple_code_records = (
-        simple_code_base * HANDCRAFTED_SIMPLE_CODE_GENERATION_REPEAT
-    )
-    records.extend(simple_code_records)
-    type_counts["code_generation"] += len(simple_code_records)
-    log.info(
-        f"Added handcrafted simple-code examples: "
-        f"{len(simple_code_records):,} "
-        f"({len(simple_code_base):,} unique × "
-        f"{HANDCRAFTED_SIMPLE_CODE_GENERATION_REPEAT})"
-    )
-
-    handcrafted_records = build_handcrafted_function_completion_records()
-    records.extend(handcrafted_records)
-    type_counts["function_completion"] += len(handcrafted_records)
-    log.info(
-        f"Added handcrafted function-completion examples: "
-        f"{len(handcrafted_records):,}"
-    )
-
-    raw_completion_base = build_handcrafted_raw_function_completion_records()
-    raw_completion_records = (
-        raw_completion_base * HANDCRAFTED_RAW_FUNCTION_COMPLETION_REPEAT
-    )
-    records.extend(raw_completion_records)
-    type_counts["function_completion"] += len(raw_completion_records)
-    log.info(
-        f"Added handcrafted raw function-completion examples: "
-        f"{len(raw_completion_records):,} "
-        f"({len(raw_completion_base):,} unique × "
-        f"{HANDCRAFTED_RAW_FUNCTION_COMPLETION_REPEAT})"
-    )
-
-    handcrafted_explanation_base = build_handcrafted_code_explanation_records()
-    handcrafted_explanation_records = (
-        handcrafted_explanation_base * HANDCRAFTED_CODE_EXPLANATION_REPEAT
-    )
-    records.extend(handcrafted_explanation_records)
-    type_counts["code_explanation"] += len(handcrafted_explanation_records)
-    log.info(
-        f"Added handcrafted code-explanation examples: "
-        f"{len(handcrafted_explanation_records):,} "
-        f"({len(handcrafted_explanation_base):,} unique × "
-        f"{HANDCRAFTED_CODE_EXPLANATION_REPEAT})"
-    )
-
-    skipped = sum(skipped_reasons.values())
-    log.info(f"Processed: {len(records):,} kept, {skipped:,} skipped")
-    log.info(f"Normalized code-only outputs: {normalized_count:,}")
-    if skipped_reasons:
-        log.info("Skipped by reason:")
-        for reason, count in skipped_reasons.most_common():
-            log.info(f"  {reason}: {count:,}")
-    if type_counts:
-        log.info("Kept by sft_type:")
-        for sft_type, count in type_counts.most_common():
-            log.info(f"  {sft_type}: {count:,}")
-
-    if not records:
+    total = len(dataset)
+    invalid_fraction = invalid / total if total else 1.0
+    if invalid_fraction > float(quality["max_invalid_fraction"]):
         raise RuntimeError(
-            "Code SFT filtering removed all examples. Relax looks_like_code() "
-            "or inspect Magicoder schema changes."
+            f"{source['source']} rejected {invalid}/{total} rows "
+            f"({invalid_fraction:.2%}), above max_invalid_fraction="
+            f"{float(quality['max_invalid_fraction']):.2%}"
         )
 
-    # Keep mini validation small while preserving all code-task categories.
-    records = _limit_records(records, 1000 if size == "mini" else None, seed=42)
+    unique: dict[str, dict[str, Any]] = {}
+    prompt_counts: Counter[str] = Counter()
+    for record in valid:
+        key = sha256_json(record["conversations"])
+        unique.setdefault(key, record)
+        prompt_counts[first_user_prompt(record["conversations"])] += 1
 
-    # Split
-    n_val = max(100 if size == "mini" else 500, int(len(records) * val_fraction))
-    n_val = min(n_val, max(1, len(records) - 1))
-    random.seed(42)
-    random.shuffle(records)
-    val_records   = records[:n_val]
-    train_records = records[n_val:]
+    duplicate_count = len(valid) - len(unique)
+    duplicate_fraction = duplicate_count / len(valid) if valid else 1.0
+    if duplicate_fraction > float(quality["max_duplicate_fraction"]):
+        raise RuntimeError(
+            f"{source['source']} contains {duplicate_count}/{len(valid)} exact "
+            f"duplicates ({duplicate_fraction:.2%}), above max_duplicate_fraction="
+            f"{float(quality['max_duplicate_fraction']):.2%}. Fix the source dataset."
+        )
 
-    write_jsonl(train_records, train_path)
-    write_jsonl(val_records, val_path)
+    records = list(unique.values())
+    unique_prompt_ratio = len(prompt_counts) / len(valid) if valid else 0.0
+    if unique_prompt_ratio < float(quality["min_unique_prompt_ratio"]):
+        raise RuntimeError(
+            f"{source['source']} unique-prompt ratio is {unique_prompt_ratio:.2%}, "
+            f"below min_unique_prompt_ratio="
+            f"{float(quality['min_unique_prompt_ratio']):.2%}. Fix the source dataset."
+        )
 
-    log.info(f"Code SFT: {len(train_records):,} train, {len(val_records):,} val")
+    stats = {
+        "selected_rows": total,
+        "valid_rows": len(valid),
+        "invalid_rows": invalid,
+        "invalid_fraction": invalid_fraction,
+        "exact_duplicates_removed": duplicate_count,
+        "duplicate_fraction": duplicate_fraction,
+        "unique_conversations": len(records),
+        "unique_prompts": len(prompt_counts),
+        "unique_prompt_ratio": unique_prompt_ratio,
+        "maximum_prompt_multiplicity": max(prompt_counts.values(), default=0),
+    }
+    return records, stats
 
-# ── CLI ────────────────────────────────────────────────────────────────────────
 
-def main():
-    parser = argparse.ArgumentParser(description="Prepare SFT datasets")
+def grouped_split(
+    records: list[dict[str, Any]], validation_fraction: float, seed: int
+) -> tuple[list[dict], list[dict]]:
+    if not 0.0 < validation_fraction < 1.0:
+        raise ValueError("validation_fraction must be strictly between 0 and 1")
+    if len(records) < 2:
+        raise RuntimeError("At least two valid, unique SFT records are required")
+
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        prompt = first_user_prompt(record["conversations"])
+        groups.setdefault(prompt, []).append(record)
+    if len(groups) < 2:
+        raise RuntimeError("At least two unique user prompts are required")
+
+    keys = list(groups)
+    random.Random(seed).shuffle(keys)
+    target = max(1, round(len(records) * validation_fraction))
+    val_keys: set[str] = set()
+    val_count = 0
+    for key in keys:
+        if val_count >= target and val_keys:
+            break
+        val_keys.add(key)
+        val_count += len(groups[key])
+
+    train = [record for key in keys if key not in val_keys for record in groups[key]]
+    val = [record for key in keys if key in val_keys for record in groups[key]]
+    random.Random(seed + 1).shuffle(train)
+    random.Random(seed + 2).shuffle(val)
+    return train, val
+
+
+def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def output_dir(stage: str, size: str) -> Path:
+    return sft_instruct_data_dir(size) if stage == "instruct" else sft_code_data_dir(size)
+
+
+def source_contract(config: dict[str, Any], stage: str, size: str) -> dict[str, Any]:
+    source = dict(config["stages"][stage])
+    caps = source.pop("max_records_by_size")
+    if size not in caps:
+        raise KeyError(f"No {stage} row cap configured for size {size!r}")
+    return {
+        "config_version": config["version"],
+        "stage": stage,
+        "size": size,
+        "seed": int(config["seed"]),
+        "validation_fraction": float(config["validation_fraction"]),
+        "quality": config["quality"],
+        "source": source,
+        "max_records": int(caps[size]),
+    }
+
+
+def prepare_stage(config: dict[str, Any], stage: str, size: str, force: bool) -> None:
+    contract = source_contract(config, stage, size)
+    contract_hash = sha256_json(contract)
+    destination = output_dir(stage, size)
+    manifest_path = destination / "manifest.json"
+
+    if manifest_path.exists() and not force:
+        existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if existing.get("contract_sha256") == contract_hash:
+            for filename in ("train.jsonl", "val.jsonl"):
+                path = destination / filename
+                expected_hash = existing.get("files", {}).get(filename, {}).get("sha256")
+                if not path.exists() or not expected_hash or sha256_file(path) != expected_hash:
+                    raise RuntimeError(
+                        f"{path} is missing or differs from its manifest. "
+                        "Restore it or rerun intentionally with --force."
+                    )
+            log.info("%s/%s already matches source contract; reusing it", size, stage)
+            return
+        raise RuntimeError(
+            f"{destination} was prepared from a different source contract. "
+            "Inspect or archive it, then rerun with --force."
+        )
+    if not manifest_path.exists() and destination.exists() and any(destination.iterdir()) and not force:
+        raise RuntimeError(
+            f"{destination} contains unmanifested data. Inspect or archive it, "
+            "then rerun with --force."
+        )
+
+    source = contract["source"]
+    log.info(
+        "Loading %s@%s (%s)",
+        source["dataset"],
+        source["revision"],
+        source["split"],
+    )
+    dataset = select_source_rows(
+        load_source(source),
+        cap=contract["max_records"],
+        seed=contract["seed"],
+    )
+    records, quality_stats = prepare_records(dataset, source, contract["quality"])
+    train, val = grouped_split(
+        records,
+        validation_fraction=contract["validation_fraction"],
+        seed=contract["seed"],
+    )
+
+    train_prompts = {first_user_prompt(row["conversations"]) for row in train}
+    val_prompts = {first_user_prompt(row["conversations"]) for row in val}
+    overlap = train_prompts & val_prompts
+    if overlap:
+        raise AssertionError(f"Internal error: {len(overlap)} prompts cross train/val")
+
+    destination.mkdir(parents=True, exist_ok=True)
+    write_jsonl(destination / "train.jsonl", train)
+    write_jsonl(destination / "val.jsonl", val)
+    files = {
+        filename: {
+            "records": len(rows),
+            "sha256": sha256_file(destination / filename),
+        }
+        for filename, rows in (("train.jsonl", train), ("val.jsonl", val))
+    }
+    manifest = {
+        "schema_version": 1,
+        "contract_sha256": contract_hash,
+        "contract": contract,
+        "quality": quality_stats,
+        "files": files,
+        "split": {
+            "train_records": len(train),
+            "validation_records": len(val),
+            "train_unique_prompts": len(train_prompts),
+            "validation_unique_prompts": len(val_prompts),
+            "prompt_overlap": 0,
+        },
+    }
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    log.info(
+        "Prepared %s/%s: %,d train, %,d validation",
+        size,
+        stage,
+        len(train),
+        len(val),
+    )
+
+
+def load_config(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as handle:
+        config = yaml.safe_load(handle)
+    missing = {"version", "seed", "validation_fraction", "quality", "stages"} - set(config)
+    if missing:
+        raise ValueError(f"SFT source config missing keys: {sorted(missing)}")
+    return config
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--stage", choices=(*VALID_STAGES, "both"), default="both")
+    parser.add_argument("--size", choices=VALID_SIZES, default="125m")
     parser.add_argument(
-        "--stage",
-        choices=["instruct", "chat", "code", "both"],
-        default="both",
-        help="Which SFT stage to prepare",
+        "--source-config",
+        type=Path,
+        default=Path("finetune/configs/sft_data_sources.yaml"),
     )
     parser.add_argument(
-        "--val-fraction",
-        type=float,
-        default=None,
-        help=(
-            "Override validation fraction. If unset, uses stage-specific "
-            f"defaults: {DEFAULT_VAL_FRACTION}"
-        ),
+        "--force",
+        action="store_true",
+        help="Replace existing prepared data after its source contract changes",
     )
-    parser.add_argument(
-        "--size",
-        choices=VALID_SFT_SIZES,
-        default="125m",
-        help=(
-            "Model size used for size-aware chat SFT source policy. "
-            "mini=tiny smol-smoltalk subset, 125m=half smol-smoltalk, "
-            "350m=full smol-smoltalk, 1b=full smoltalk."
-        ),
-    )
-    parser.add_argument("--force", action="store_true", help="Regenerate selected SFT data even if train/val files already exist.")
     args = parser.parse_args()
-    os.environ["SIZE"] = args.size
 
-    global SFT_DIR
-    SFT_DIR = DATA_DIR / "runs" / args.size
-
-    if args.stage in ("instruct", "chat", "both"):
-        policy = smoltalk_policy(args.size)
-        log.info(
-            "=== Preparing Chat SFT data "
-            f"({policy['dataset']}, size={args.size}, fraction={policy['fraction']:.2f}) ==="
-        )
-        frac = args.val_fraction if args.val_fraction is not None else DEFAULT_VAL_FRACTION["chat"]
-        prepare_chat(size=args.size, val_fraction=frac, force=args.force)
-
-    if args.stage in ("code", "both"):
-        log.info("=== Preparing Code SFT data (Magicoder-OSS-Instruct) ===")
-        frac = args.val_fraction if args.val_fraction is not None else DEFAULT_VAL_FRACTION["code"]
-        prepare_code(size=args.size, val_fraction=frac, force=args.force)
-
-    log.info("SFT data preparation complete.")
-    log.info(f"Output: {SFT_DIR}")
+    config = load_config(args.source_config)
+    stages = VALID_STAGES if args.stage == "both" else (args.stage,)
+    for stage in stages:
+        prepare_stage(config, stage, args.size, args.force)
 
 
 if __name__ == "__main__":

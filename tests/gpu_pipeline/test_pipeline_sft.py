@@ -16,6 +16,7 @@ Checks for each SFT stage:
 """
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,26 @@ def load_model_and_tokenizer(model_dir: Path):
     model = SLMForCausalLM.from_pretrained(str(model_dir))
     tokenizer = PreTrainedTokenizerFast.from_pretrained(str(model_dir / "tokenizer"))
     return model, tokenizer
+
+
+def assistant_only_batch(tokenizer, messages):
+    batch = tokenizer.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=False,
+        return_dict=True,
+        return_tensors="pt",
+        return_assistant_tokens_mask=True,
+    )
+    mask = batch.pop("assistant_masks")
+    if not isinstance(mask, torch.Tensor):
+        mask = torch.tensor(mask)
+    labels = batch["input_ids"].clone()
+    labels[mask == 0] = -100
+    assert (labels == -100).any(), "Prompt tokens were not masked"
+    assert (labels != -100).any(), "No assistant tokens were supervised"
+    batch["labels"] = labels
+    return batch
 
 
 # ── SFT data ───────────────────────────────────────────────────────────────────
@@ -80,89 +101,42 @@ class TestSFTData:
         )
 
     @requires_stage("prepare-sft")
-    def test_chat_data_contains_response_control_examples(self):
-        """
-        Chat SFT should include the generated response-control supplement.
-
-        This catches regressions where prepare_sft.py still downloads
-        OpenHermes but silently stops adding local behavior-control records.
-        """
-        path = pipeline_path("sft", "chat", "train.jsonl")
-        found = 0
-        with open(path) as f:
-            for line in f:
-                record = json.loads(line)
-                if record.get("source") == "response_control":
-                    found += 1
-                    if found >= 10:
-                        break
-
-        assert found > 0, (
-            "No response_control examples found in chat SFT train.jsonl. "
-            "Run make prepare-sft after ensuring response_control.py is wired "
-            "into prepare_sft.py."
-        )
+    def test_chat_manifest_has_pinned_external_source(self):
+        path = pipeline_path("sft", "chat", "manifest.json")
+        manifest = json.loads(path.read_text())
+        source = manifest["contract"]["source"]
+        assert source["dataset"]
+        assert source["revision"]
+        assert source["format"] == "conversational"
+        assert manifest["split"]["prompt_overlap"] == 0
+        assert manifest["quality"]["duplicate_fraction"] <= \
+            manifest["contract"]["quality"]["max_duplicate_fraction"]
 
     @requires_stage("prepare-sft")
-    def test_response_control_examples_have_expected_types(self):
-        """
-        Response-control records should cover the behavior categories that
-        sanity_eval.py checks: direct facts, AI concepts, factual restraint,
-        and concise stopping.
-        """
-        path = pipeline_path("sft", "chat", "train.jsonl")
-        expected = {
-            "simple_factual",
-            "ai_concept",
-            "factual_restraint",
-            "concise_answer",
-        }
-        seen = set()
+    def test_chat_train_val_prompt_sets_are_disjoint(self):
+        def prompts(path):
+            values = set()
+            with open(path) as handle:
+                for line in handle:
+                    record = json.loads(line)
+                    user = next(
+                        turn["content"]
+                        for turn in record["conversations"]
+                        if turn["role"] == "user"
+                    )
+                    values.add(re.sub(r"\s+", " ", user.strip().lower()))
+            return values
 
-        with open(path) as f:
-            for line in f:
-                record = json.loads(line)
-                if record.get("source") != "response_control":
-                    continue
-                sft_type = record.get("sft_type")
-                if sft_type:
-                    seen.add(sft_type)
-                if expected <= seen:
-                    break
-
-        missing = expected - seen
-        assert not missing, (
-            f"Missing response-control categories in chat SFT data: {missing}. "
-            f"Seen: {seen}"
-        )
-
-    @requires_stage("prepare-sft")
-    def test_response_control_examples_do_not_include_arithmetic(self):
-        """
-        Arithmetic was moved out of response-control SFT and into the
-        synthetic_arithmetic pretraining source. Response-control should
-        not be the mechanism for teaching base arithmetic.
-        """
-        path = pipeline_path("sft", "chat", "train.jsonl")
-        bad = 0
-
-        with open(path) as f:
-            for line in f:
-                record = json.loads(line)
-                if record.get("source") != "response_control":
-                    continue
-                if record.get("sft_type") == "arithmetic":
-                    bad += 1
-                    break
-
-        assert bad == 0, (
-            "Found arithmetic response-control examples. Arithmetic should "
-            "come from the synthetic_arithmetic pretraining source instead."
-        )
+        train = prompts(pipeline_path("sft", "chat", "train.jsonl"))
+        val = prompts(pipeline_path("sft", "chat", "val.jsonl"))
+        assert train
+        assert val
+        assert train.isdisjoint(val)
 
     @requires_stage("prepare-sft")
     def test_code_data_has_code_system_prompt(self):
         path = pipeline_path("sft", "code", "train.jsonl")
+        found = False
         with open(path) as f:
             for line in f:
                 record = json.loads(line)
@@ -172,7 +146,9 @@ class TestSFTData:
                            "programming" in turns[0]["content"].lower(), (
                         "Code SFT system prompt doesn't mention code/programming"
                     )
+                    found = True
                     break
+        assert found, "No code SFT record with a system prompt was found"
 
 
 # ── Chat SFT model ─────────────────────────────────────────────────────────────
@@ -208,13 +184,10 @@ class TestChatSFTModel:
             {"role": "user", "content": "What is 2 + 2?"},
             {"role": "assistant", "content": "2 + 2 = 4."},
         ]
-        text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
-        encoding = tokenizer(text, return_tensors="pt", truncation=True, max_length=128)
-        input_ids = encoding["input_ids"]
-        labels = input_ids.clone()
+        batch = assistant_only_batch(tokenizer, messages)
 
         with torch.no_grad():
-            out = model(input_ids, labels=labels)
+            out = model(**batch)
         assert torch.isfinite(out.loss), f"Chat SFT loss not finite: {out.loss}"
 
     def test_chat_model_generation_does_not_crash(self, chat_sft_model_dir):
@@ -263,13 +236,10 @@ class TestCodeSFTModel:
             {"role": "user", "content": "Write a Python hello world."},
             {"role": "assistant", "content": "print('Hello, world!')"},
         ]
-        text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
-        encoding = tokenizer(text, return_tensors="pt", truncation=True, max_length=128)
-        input_ids = encoding["input_ids"]
-        labels = input_ids.clone()
+        batch = assistant_only_batch(tokenizer, messages)
 
         with torch.no_grad():
-            out = model(input_ids, labels=labels)
+            out = model(**batch)
         assert torch.isfinite(out.loss), f"Code SFT loss not finite: {out.loss}"
 
     def test_code_special_tokens_in_vocab(self, code_sft_model_dir):

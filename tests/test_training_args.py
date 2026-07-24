@@ -13,6 +13,7 @@ def _training() -> dict:
         "micro_batch_size": 2,
         "eval_micro_batch_size": 1,
         "gradient_accumulation_steps": 1,
+        "warmup_ratio_recipe": 0.5,
         "eval_steps": 1,
         "save_steps": 1,
         "report_to": "none",
@@ -38,6 +39,8 @@ def test_sft_config_uses_current_length_sampler(tmp_path: Path):
     assert args.optim.value == "adamw_torch"
     assert args.learning_rate == 1.0e-5
     assert args.assistant_only_loss is True
+    assert args.loss_type == "chunked_nll"
+    assert args.warmup_steps == 1
 
 
 def test_dpo_config_coerces_yaml_numeric_values(tmp_path: Path):

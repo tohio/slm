@@ -16,5 +16,6 @@ training:
   weight_decay: 0.01
   warmup_ratio: 0.05
   eval_steps: 100
+  save_steps: 100
   save_best: true
   seed: 42

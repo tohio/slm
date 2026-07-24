@@ -7,6 +7,8 @@ data:
   train_path: $DATA_DIR/runs/125m/sft_code/train.jsonl
   val_path: $DATA_DIR/runs/125m/sft_code/val.jsonl
   packing: false
+  loss_type: chunked_nll
+  min_retention_ratio: 0.90
 training:
   warmup_ratio_recipe: 0.03
   epochs: 2
@@ -18,8 +20,8 @@ training:
   gradient_checkpointing: false
   torch_compile: false
   group_by_length: true
-  eval_steps: 2000
-  save_steps: 2000
+  eval_steps: 200
+  save_steps: 200
   save_total_limit: 3
   log_steps: 10
   num_workers: 4

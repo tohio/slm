@@ -178,8 +178,8 @@ class SFTProfile:
     # enforce packed-example boundaries. Enable only after safe packed attention
     # / FA2 varlen support is implemented.
     packing: bool = False
-    eval_steps: int = 2000
-    save_steps: int = 2000
+    eval_steps: int = 200
+    save_steps: int = 200
 
     # Groups similar-length examples into the same batch to reduce padding waste.
     # Safe with normal causal attention because it does not concatenate samples.
@@ -251,17 +251,17 @@ SFT_INSTRUCT_PROFILES: dict[str, SFTProfile] = {
     "125m": SFTProfile(
         state_gb=2.0, act_per_seq_gb_no_ckpt=3.9, act_per_seq_gb_ckpt=1.3,
         max_seq_length=2048, ref_global_batch=64, lr=1.0e-5, epochs=2,
-        warmup_ratio=0.03, eval_steps=2000, save_steps=2000,
+        warmup_ratio=0.03, eval_steps=200, save_steps=200,
     ),
     "350m": SFTProfile(
         state_gb=5.0, act_per_seq_gb_no_ckpt=5.0, act_per_seq_gb_ckpt=1.7,
         max_seq_length=2048, ref_global_batch=128,
-        lr=8.0e-6, epochs=2, warmup_ratio=0.03, eval_steps=2000, save_steps=2000,
+        lr=8.0e-6, epochs=2, warmup_ratio=0.03, eval_steps=200, save_steps=200,
     ),
     "1b": SFTProfile(
         state_gb=14.5, act_per_seq_gb_no_ckpt=14.0, act_per_seq_gb_ckpt=4.5,
         max_seq_length=4096, ref_global_batch=128,
-        lr=5.0e-6, epochs=2, warmup_ratio=0.03, eval_steps=2000, save_steps=2000,
+        lr=5.0e-6, epochs=2, warmup_ratio=0.03, eval_steps=200, save_steps=200,
     ),
 }
 
@@ -271,17 +271,17 @@ SFT_CODE_PROFILES: dict[str, SFTProfile] = {
     "125m": SFTProfile(
         state_gb=2.0, act_per_seq_gb_no_ckpt=3.9, act_per_seq_gb_ckpt=1.3,
         max_seq_length=2048, ref_global_batch=64, lr=5.0e-6,
-        epochs=2, warmup_ratio=0.03, eval_steps=2000, save_steps=2000,
+        epochs=2, warmup_ratio=0.03, eval_steps=200, save_steps=200,
     ),
     "350m": SFTProfile(
         state_gb=5.0, act_per_seq_gb_no_ckpt=5.0, act_per_seq_gb_ckpt=1.7,
         max_seq_length=2048, ref_global_batch=128,
-        lr=4.0e-6, epochs=2, warmup_ratio=0.03, eval_steps=2000, save_steps=2000,
+        lr=4.0e-6, epochs=2, warmup_ratio=0.03, eval_steps=200, save_steps=200,
     ),
     "1b": SFTProfile(
         state_gb=14.5, act_per_seq_gb_no_ckpt=14.0, act_per_seq_gb_ckpt=4.5,
         max_seq_length=4096, ref_global_batch=128,
-        lr=2.5e-6, epochs=2, warmup_ratio=0.03, eval_steps=2000, save_steps=2000,
+        lr=2.5e-6, epochs=2, warmup_ratio=0.03, eval_steps=200, save_steps=200,
     ),
 }
 
@@ -873,6 +873,8 @@ data:
   train_path: {train_path}
   val_path:   {val_path}
   packing: {str(profile.packing).lower()}
+  loss_type: chunked_nll
+  min_retention_ratio: 0.90
 
 training:
   # micro × accum × gpus = {cfg.micro_batch_size} × {cfg.gradient_accumulation_steps} × {cfg.num_gpus} = {cfg.actual_global_batch} sequences/step
