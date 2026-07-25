@@ -58,3 +58,13 @@ def test_make_recipes_do_not_bypass_configured_results_root():
         if line.startswith("\t")
     ]
     assert not any("results/runs/" in line for line in recipe_lines)
+
+
+def test_training_launcher_preserves_requested_multi_gpu_process_count():
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+
+    assert (
+        "ACCELERATE = $(_ACCELERATE) launch --num_processes $(GPUS) "
+        "--num_machines 1 --mixed_precision bf16 --dynamo_backend no"
+        in makefile
+    )

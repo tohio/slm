@@ -29,6 +29,7 @@ COMPARE_OUTPUT_DIR ?= $(RESULTS_DIR)/diagnostics/sft-comparison
 COMPARE_TRAIN_EXAMPLES ?= 32
 COMPARE_EVAL_EXAMPLES ?= 32
 COMPARE_MAX_STEPS ?= 60
+EXPORT_VARIANT ?= base
 
 REQUIRED_ENV_VARS := \
 	S3_BUCKET S3_PREFIX AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY \
@@ -107,14 +108,14 @@ endif
         tokenizer tokenizer-test tokenize artifacts-upload artifacts-download \
         config-gen config-gen-pretrain config-gen-sft config-gen-dpo \
         accel-gen-ddp accel-gen-fsdp \
-        pretrain pretrain-mini pretrain-smoke pretrain-resume reinit-embeds smoke-gen prepare-sft sft sft-instruct sft-mini sft-instruct-mini sft-resume sft-instruct-resume sft-code sft-code-mini sft-code-resume \
+        pretrain pretrain-preflight pretrain-mini pretrain-smoke pretrain-resume pretrain-resume-preflight reinit-embeds smoke-gen prepare-sft sft sft-instruct sft-mini sft-instruct-mini sft-resume sft-instruct-resume sft-code sft-code-mini sft-code-resume \
         prepare-dpo dpo-chat dpo-chat-resume dpo-chat-mini dpo dpo-mini dpo-resume eval eval-base eval-instruct eval-chat eval-code eval-sanity eval-sanity-base eval-sanity-instruct eval-sanity-chat eval-sanity-code eval-mini serve serve-local \
         export export-base export-instruct export-chat export-code \
         export-local export-base-local export-instruct-local export-chat-local export-code-local \
         setup setup-data-dir setup-gpu install install-gpu test-upgrade-gpu install-uv install-conda install-kenlm install-orjson \
         download-kenlm-model download-fasttext-model accelerate-config accelerate-config-single accelerate-config-multi \
         test-curator test-validate test-tokenizer test-data-pipeline \
-        test-training test-sft-instruct test-sft-chat test-sft-code test-dpo-chat test-dpo test-gpu-pipeline test-model test-export test-data-unit test-training-args test-config-gen test-accel-gen test-comparison test-misc test-unit test-gpu-gate test-artifacts \
+        test-training test-sft-instruct test-sft-chat test-sft-code test-dpo-chat test-dpo test-gpu-pipeline test-model test-export test-export-acceptance test-vllm-export test-data-unit test-training-args test-config-gen test-accel-gen test-comparison test-misc test-unit test-gpu-gate test-pretrain-ready test-pretrain-resume-ready test-artifacts \
         compare-sft-preflight compare-sft \
         sanity-train sanity-train-small sanity-train-tiny sanity-train-save \
         clean clean-data clean-results clean-logs help
@@ -183,6 +184,7 @@ train-all: check-env
 		RUN_ID="$(RUN_ID)"
 	$(MAKE) test-gpu-gate
 	$(MAKE) config-gen SIZE="$(SIZE)" GPUS="$(GPUS)"
+	$(MAKE) pretrain-preflight SIZE="$(SIZE)" GPUS="$(GPUS)"
 	$(MAKE) pretrain SIZE="$(SIZE)" GPUS="$(GPUS)"
 	$(MAKE) reinit-embeds SIZE="$(SIZE)"
 	$(MAKE) test-training SIZE="$(SIZE)"
@@ -323,6 +325,21 @@ accel-gen-fsdp:
 	$(PYTHON) -m config_gen.accel_gen --strategy fsdp --gpus $(GPUS)
 
 # Pretrain
+pretrain-preflight:
+	@echo "==> Pretraining preflight ($(SIZE), $(GPUS) GPU(s), config=$(PRETRAIN_CONFIG))"
+	$(PYTHON) pretrain/train.py \
+		--config "$(PRETRAIN_CONFIG)" \
+		--preflight-only \
+		--expected-gpus "$(GPUS)"
+
+pretrain-resume-preflight:
+	@echo "==> Pretraining resume preflight ($(SIZE), $(GPUS) GPU(s), config=$(PRETRAIN_CONFIG))"
+	$(PYTHON) pretrain/train.py \
+		--config "$(PRETRAIN_CONFIG)" \
+		--resume \
+		--preflight-only \
+		--expected-gpus "$(GPUS)"
+
 pretrain:
 	@echo "==> Stage 4b: Pretraining ($(SIZE), $(GPUS) GPU(s), config=$(PRETRAIN_CONFIG))"
 	$(ACCELERATE) pretrain/train.py \
@@ -707,6 +724,20 @@ test-export:
 	@echo "==> Running native export unit tests..."
 	.venv/bin/pytest tests/test_export.py -v --tb=short
 
+test-export-acceptance:
+	@case "$(EXPORT_VARIANT)" in base|instruct|chat|code) ;; \
+		*) echo "EXPORT_VARIANT must be base, instruct, chat, or code"; exit 1;; esac
+	@echo "==> Native export/load acceptance ($(SIZE), $(EXPORT_VARIANT))..."
+	EXPORTS_DIR=$(EXPORTS_DIR) $(PYTHON) export/export.py \
+		--size "$(SIZE)" \
+		--variant "$(EXPORT_VARIANT)" \
+		--dry-run
+
+test-vllm-export: test-export-acceptance
+	@echo "==> vLLM offline generation smoke ($(SIZE), $(EXPORT_VARIANT))..."
+	$(PYTHON) scripts/vllm_smoke.py \
+		--model "$(EXPORTS_DIR)/$(SIZE)/$(EXPORT_VARIANT)"
+
 test-data-unit:
 	@echo "==> Running data contract/state unit tests..."
 	.venv/bin/pytest tests/test_data_config.py tests/test_curator_state.py -v --tb=short
@@ -739,6 +770,26 @@ test-gpu-gate:
 	@echo "==> Validating the installed GPU stack without datasets or checkpoints..."
 	.venv/bin/python infra/verify_environment.py --require-cuda
 	.venv/bin/python infra/gpu_smoke.py
+
+test-pretrain-ready: check-env
+	@echo "==> Bounded readiness gate for a new pretraining run..."
+	$(MAKE) test-model
+	$(MAKE) test-data-unit
+	$(MAKE) test-training-args
+	$(MAKE) test-config-gen
+	$(MAKE) test-accel-gen
+	$(MAKE) test-gpu-gate
+	$(MAKE) pretrain-preflight SIZE="$(SIZE)" GPUS="$(GPUS)"
+
+test-pretrain-resume-ready: check-env
+	@echo "==> Bounded readiness gate for a resumed pretraining run..."
+	$(MAKE) test-model
+	$(MAKE) test-data-unit
+	$(MAKE) test-training-args
+	$(MAKE) test-config-gen
+	$(MAKE) test-accel-gen
+	$(MAKE) test-gpu-gate
+	$(MAKE) pretrain-resume-preflight SIZE="$(SIZE)" GPUS="$(GPUS)"
 
 test-artifacts: test-data-pipeline test-gpu-pipeline
 	@echo "==> Existing pipeline artifact validation complete"
@@ -860,6 +911,8 @@ help:
 	@echo "Tests (unit — no pipeline outputs needed):"
 	@echo "  test-model               Model architecture unit tests"
 	@echo "  test-export              Native Transformers export contract tests"
+	@echo "  test-export-acceptance   Build and clean-load one real native export"
+	@echo "  test-vllm-export         Load that export in vLLM and generate one response"
 	@echo "  test-data-unit           Data config and manifest-state unit tests"
 	@echo "  test-training-args       Transformers/TRL argument compatibility tests"
 	@echo "  test-config-gen          Config generator unit tests"
@@ -867,6 +920,8 @@ help:
 	@echo "  test-comparison          Controlled SFT comparison unit tests"
 	@echo "  test-unit                All unit tests above"
 	@echo "  test-gpu-gate            Bounded CUDA/compile/cache test; no datasets"
+	@echo "  test-pretrain-ready      Bounded new-run contracts, CUDA gate, and preflight"
+	@echo "  test-pretrain-resume-ready Bounded resume contracts and provenance preflight"
 	@echo "  test-artifacts           Strictly validate existing mini/full artifacts"
 	@echo ""
 	@echo "Controlled model comparison:"
@@ -888,7 +943,10 @@ help:
 	@echo "  tokenize           Stage 4a — tokenize train + val to binaries"
 	@echo "  artifacts-upload   Upload artifacts to S3 using a RUN_ID"
 	@echo "  artifacts-download Download artifacts from S3 using RUN_ID=<run_id>"
+	@echo "  pretrain-preflight Validate a new run without allocating model weights"
 	@echo "  pretrain           Stage 4b — pretrain from scratch (auto-runs smoke-gen)"
+	@echo "  pretrain-resume-preflight Validate checkpoint and provenance before resume"
+	@echo "  pretrain-resume    Stage 4b — resume the latest compatible checkpoint"
 	@echo "  pretrain-mini      Stage 4b — mini pretrain run (auto-runs smoke-gen)"
 	@echo "  smoke-gen          Stage 4b — generate from \$$(RESULTS_DIR)/runs/\$$(SIZE)/pretrain/final to spot-check"
 	@echo "  reinit-embeds      Stage 4c — re-init chat special-token embeds before SFT"

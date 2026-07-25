@@ -12,6 +12,7 @@ stages. Production logic owned by one stage belongs in that stage's directory.
 | `run_lm_eval.py` | Register the local architecture and invoke lm-evaluation-harness |
 | `pretrain_hf_125m.py` | Standalone 125M pretraining diagnostic on a Hub dataset |
 | `sft_model_comparison.py` | Controlled SmolLM2/SLM response-to-SFT comparison |
+| `vllm_smoke.py` | Load one native export in vLLM and generate a bounded response |
 
 ## Training diagnostic
 
@@ -142,6 +143,20 @@ The harness performs checkpoint integrity, prompt-sensitivity, and cache-parity
 checks; selects one common set of pinned records; builds labels itself; and
 reports tokenizer-specific exposure and evaluation outputs. Use
 `--preflight-only` to stop before dataset selection and training.
+
+## vLLM export smoke
+
+After a native export passes its conversion and clean-load checks, run one
+offline vLLM generation in the serving environment:
+
+```bash
+make test-vllm-export \
+  SIZE=125m \
+  EXPORT_VARIANT=base
+```
+
+The script requires a local native Llama export, applies the packaged chat
+template, and fails on an empty generation.
 
 ## Conventions
 

@@ -103,17 +103,26 @@ make config-gen \
 Inspect the generated pretraining, SFT, and DPO YAML files before starting a
 paid run.
 
-### Pretrain the base model
-
-Start a new run:
+`GPUS` is passed directly to Accelerate as `--num_processes`. `GPUS=1` uses
+one process; `GPUS>1` keeps the existing one-process-per-GPU DDP launch:
 
 ```bash
+make pretrain SIZE=350m GPUS=4
+```
+
+### Pretrain the base model
+
+Run the bounded readiness gate, then start a new run:
+
+```bash
+make test-pretrain-ready SIZE=125m GPUS=1
 make pretrain SIZE=125m GPUS=1
 ```
 
 Resume an interrupted run:
 
 ```bash
+make test-pretrain-resume-ready SIZE=125m GPUS=1
 make pretrain-resume SIZE=125m GPUS=1
 ```
 
@@ -122,6 +131,10 @@ The promoted checkpoint is:
 ```text
 $RESULTS_DIR/runs/<size>/pretrain/final/
 ```
+
+`pretrain_run_audit.json` records the resolved training configuration,
+tokenizer fingerprint, tokenized-data identity, process count, and distributed
+strategy. Resume requires an exact match and never falls back to a new run.
 
 ### Finalize chat/control-token embeddings
 
@@ -212,6 +225,24 @@ Build and validate native local packages:
 
 ```bash
 make export-local SIZE=125m
+```
+
+Run the clean native load, parity, and generation acceptance gate for one
+variant:
+
+```bash
+make test-export-acceptance \
+  SIZE=125m \
+  EXPORT_VARIANT=base
+```
+
+In an environment with vLLM installed, exercise the produced package through
+offline generation:
+
+```bash
+make test-vllm-export \
+  SIZE=125m \
+  EXPORT_VARIANT=base
 ```
 
 Publish all validated variants using the configured Hugging Face account:

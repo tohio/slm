@@ -20,6 +20,8 @@ data or training stages.
 |---|---|---|
 | CPU contracts | `make test-unit` | Installed CPU environment |
 | GPU acceptance | `make test-gpu-gate` | Supported NVIDIA environment |
+| New pretraining readiness | `make test-pretrain-ready SIZE=<size> GPUS=<n>` | GPU environment and restored tokenized artifacts |
+| Resume readiness | `make test-pretrain-resume-ready SIZE=<size> GPUS=<n>` | Compatible pretraining audit and checkpoint |
 | Curator artifacts | `make test-curator SIZE=<size>` | Completed curated corpus |
 | Validation artifacts | `make test-validate SIZE=<size>` | Completed validated corpus |
 | Tokenizer behavior | `make tokenizer-test SIZE=<size>` | Trained tokenizer |
@@ -29,6 +31,8 @@ data or training stages.
 | Code SFT artifact | `make test-sft-code SIZE=<size>` | Final code checkpoint |
 | DPO artifact | `make test-dpo-chat SIZE=<size>` | Final chat checkpoint |
 | Complete GPU pipeline | `make test-gpu-pipeline SIZE=<size>` | All final training checkpoints |
+| Native export acceptance | `make test-export-acceptance SIZE=<size> EXPORT_VARIANT=<variant>` | Completed source checkpoint |
+| vLLM export smoke | `make test-vllm-export SIZE=<size> EXPORT_VARIANT=<variant>` | Native export, CUDA, and vLLM environment |
 
 ## CPU contracts
 
@@ -72,6 +76,24 @@ retrain the tokenizer, or retokenize the data.
 
 ## Training artifact gates
 
+Before starting a new pretraining run:
+
+```bash
+make test-pretrain-ready SIZE=125m GPUS=1
+```
+
+Before resuming:
+
+```bash
+make test-pretrain-resume-ready SIZE=125m GPUS=1
+```
+
+These bounded gates run the training/configuration contracts, CUDA acceptance,
+and pretraining preflight. They do not allocate model weights or perform an
+optimizer step. With `GPUS>1`, preflight verifies that the requested number of
+devices is visible; the actual training command retains the existing
+Accelerate multi-process launch.
+
 Run the matching gate after each completed training stage:
 
 ```bash
@@ -83,6 +105,23 @@ make test-dpo-chat SIZE=125m
 
 The Make targets require the requested artifacts. A missing final checkpoint
 fails instead of silently skipping.
+
+## Export and serving acceptance
+
+Build one real native package and require source/native logit parity,
+deterministic generation parity, and clean AutoConfig/AutoTokenizer/AutoModel
+loading:
+
+```bash
+make test-export-acceptance SIZE=125m EXPORT_VARIANT=base
+```
+
+The serving environment can then load that artifact with vLLM and generate one
+bounded response:
+
+```bash
+make test-vllm-export SIZE=125m EXPORT_VARIANT=base
+```
 
 ## Bounded pipeline rehearsal
 

@@ -62,6 +62,24 @@ Override the mapped source checkpoint with `--model PATH`. Hub publication
 reads `HF_USERNAME` and `HF_TOKEN` from the environment or `.env`; local
 `--dry-run` export does not require Hub credentials.
 
+Run the complete native conversion and clean-load acceptance contract for one
+real checkpoint:
+
+```bash
+make test-export-acceptance \
+  SIZE=125m \
+  EXPORT_VARIANT=base
+```
+
+In a supported vLLM serving environment, load that package and generate one
+bounded response:
+
+```bash
+make test-vllm-export \
+  SIZE=125m \
+  EXPORT_VARIANT=base
+```
+
 ## Conversion contract
 
 The project model and Transformers Llama model share the same decoder
@@ -105,7 +123,7 @@ parameter count, source dtype, and package format.
 
 ## Validation
 
-Every local and Hub export must pass:
+Every local and Hub export, including `test-export-acceptance`, must pass:
 
 1. source-checkpoint generation hygiene;
 2. strict state-dict conversion;

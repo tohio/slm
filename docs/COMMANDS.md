@@ -195,16 +195,19 @@ make accel-gen-fsdp GPUS=8
 ```
 
 Use the same `GPUS` value for Accelerate setup, config generation, and training.
+Training continues to pass `GPUS` directly to Accelerate as the process count.
 
 ---
 
 ## Pretraining
 
 ```bash
+make pretrain-preflight SIZE=125m GPUS=1
 make pretrain-mini SIZE=mini GPUS=1
 make pretrain SIZE=125m GPUS=1
+make pretrain-resume-preflight SIZE=125m GPUS=1
 make pretrain-resume SIZE=125m GPUS=1
-make pretrain-smoke SIZE=125m
+make pretrain-smoke SIZE=mini
 make smoke-gen SIZE=125m
 ```
 
@@ -218,6 +221,13 @@ Before SFT:
 
 ```bash
 make reinit-embeds SIZE=125m
+```
+
+Bounded readiness gates:
+
+```bash
+make test-pretrain-ready SIZE=125m GPUS=1
+make test-pretrain-resume-ready SIZE=125m GPUS=1
 ```
 
 ---

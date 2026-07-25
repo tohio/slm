@@ -39,8 +39,11 @@ def _is_rank_zero() -> bool:
 DATA_DIR    = Path(os.environ.get("DATA_DIR", "data"))
 from config.paths import pretrain_dir, tokenized_dir as run_tokenized_dir, BASE_RESULTS_DIR
 from config.runtime import configure_torch_runtime
+from curator.state import atomic_write_json, stable_digest
 
 RESULTS_DIR = BASE_RESULTS_DIR
+PRETRAIN_AUDIT_FILENAME = "pretrain_run_audit.json"
+PRETRAIN_AUDIT_VERSION = 1
 
 
 _NUMERIC_CONFIG_KEYS = {
@@ -110,7 +113,7 @@ def validate_active_tokenizer_matches_tokenized_data(tokenized_dir: Path, tokeni
     log.info("Tokenizer fingerprint matches tokenized training metadata: %s", actual)
 
 
-def validate_tokenizer(tokenizer_dir: Path) -> None:
+def validate_tokenizer(tokenizer_dir: Path, tokenized_dir: Path) -> None:
     if not tokenizer_dir.exists() or not any(tokenizer_dir.iterdir()):
         raise RuntimeError(
             f"Tokenizer directory missing or empty: {tokenizer_dir}\n"
@@ -168,6 +171,324 @@ def _find_latest_checkpoint(output_dir: Path) -> Path | None:
         return None
     numbered.sort()
     return numbered[-1][1]
+
+
+def resolve_pretrain_checkpoint(
+    output_dir: Path,
+    *,
+    resume: bool,
+) -> Path | None:
+    """Resolve a safe start state without silently mixing training runs."""
+    latest_checkpoint = _find_latest_checkpoint(output_dir)
+
+    if resume:
+        if latest_checkpoint is None:
+            raise RuntimeError(
+                f"--resume was requested but no checkpoint-* directory exists "
+                f"in {output_dir}. Refusing to start from scratch. Use the "
+                f"normal pretrain target for a new run or restore the expected "
+                f"checkpoint."
+            )
+        return latest_checkpoint
+
+    if output_dir.exists():
+        existing_artifacts = sorted(
+            path
+            for path in output_dir.iterdir()
+            if path.name != PRETRAIN_AUDIT_FILENAME
+        )
+        if existing_artifacts:
+            rendered = "\n  ".join(str(path) for path in existing_artifacts)
+            raise RuntimeError(
+                "A new pretraining run was requested in an output directory "
+                "that already contains training artifacts:\n  "
+                f"{rendered}\n"
+                "Use --resume for the interrupted run or choose a different "
+                "RESULTS_DIR for a new run."
+            )
+
+    return None
+
+
+def validate_model_tokenizer_contract(model_config, tokenizer_dir: Path) -> None:
+    """Validate vocabulary and special-token IDs without allocating a model."""
+    tokenizer_path = tokenizer_dir / "slm_tokenizer.json"
+    tokenizer = Tokenizer.from_file(str(tokenizer_path))
+    tokenizer_vocab_size = tokenizer.get_vocab_size(with_added_tokens=True)
+
+    if tokenizer_vocab_size != model_config.vocab_size:
+        raise RuntimeError(
+            f"Model/tokenizer vocabulary mismatch: model config expects "
+            f"{model_config.vocab_size:,} tokens but {tokenizer_path} contains "
+            f"{tokenizer_vocab_size:,}."
+        )
+
+    required_tokens = {
+        "pad_token_id": "<PAD>",
+        "bos_token_id": "<BOS>",
+        "eos_token_id": "<EOS>",
+    }
+    for name, token in required_tokens.items():
+        token_id = getattr(model_config, name)
+        if token_id is None or not 0 <= token_id < tokenizer_vocab_size:
+            raise RuntimeError(
+                f"Model config {name}={token_id!r} is outside tokenizer "
+                f"vocabulary size {tokenizer_vocab_size:,}."
+            )
+        tokenizer_token_id = tokenizer.token_to_id(token)
+        if tokenizer_token_id != token_id:
+            raise RuntimeError(
+                f"Model/tokenizer special-token mismatch: model config "
+                f"{name}={token_id}, but tokenizer token {token!r} has ID "
+                f"{tokenizer_token_id!r}."
+            )
+
+
+def validate_preflight_gpu(expected_gpus: int, precision: str) -> None:
+    """Fail before optimization when the requested GPU contract is unavailable."""
+    if expected_gpus < 1:
+        raise ValueError(f"expected_gpus must be >= 1, got {expected_gpus}")
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            f"Pretraining preflight requires CUDA for GPUS={expected_gpus}, "
+            "but torch.cuda.is_available() is false."
+        )
+
+    visible_gpus = torch.cuda.device_count()
+    if visible_gpus < expected_gpus:
+        raise RuntimeError(
+            f"Pretraining requested {expected_gpus} GPU(s), but only "
+            f"{visible_gpus} are visible."
+        )
+    if precision == "bf16" and not torch.cuda.is_bf16_supported():
+        raise RuntimeError("The generated pretraining config requires BF16 support.")
+
+    log.info(
+        "GPU preflight passed: requested=%d, visible=%d, precision=%s",
+        expected_gpus,
+        visible_gpus,
+        precision,
+    )
+
+
+def resolve_distributed_strategy(
+    requested: str | None,
+    world_size: int,
+) -> str:
+    """Resolve the topology without changing Accelerate's launch behavior."""
+    if world_size < 1:
+        raise ValueError(f"world_size must be >= 1, got {world_size}")
+
+    strategy = requested or os.environ.get("SLM_DISTRIBUTED_STRATEGY")
+    if not strategy:
+        if world_size == 1:
+            strategy = "single"
+        elif os.environ.get("ACCELERATE_USE_FSDP", "").lower() == "true":
+            strategy = "fsdp"
+        else:
+            strategy = "ddp"
+
+    if strategy not in {"single", "ddp", "fsdp"}:
+        raise ValueError(
+            f"distributed strategy must be single, ddp, or fsdp; got {strategy!r}"
+        )
+    if strategy == "single" and world_size != 1:
+        raise RuntimeError(
+            f"single-process topology cannot use world_size={world_size}"
+        )
+    if strategy in {"ddp", "fsdp"} and world_size < 2:
+        raise RuntimeError(
+            f"{strategy} topology requires at least two processes"
+        )
+    return strategy
+
+
+def _read_required_json(path: Path, label: str) -> dict:
+    if not path.is_file():
+        raise FileNotFoundError(f"Missing {label}: {path}")
+    try:
+        with path.open(encoding="utf-8") as handle:
+            value = json.load(handle)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Invalid JSON in {label}: {path}") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError(f"{label} must contain a JSON object: {path}")
+    return value
+
+
+def tokenized_data_identity(tokenized_dir: Path) -> dict:
+    """Return a portable identity for the manifest-complete tokenized corpus."""
+    completion = _read_required_json(
+        tokenized_dir / "_SUCCESS.json",
+        "tokenized completion manifest",
+    )
+    required_manifest_fields = (
+        "manifest_version",
+        "contract_sha256",
+        "input_signature",
+        "output_signature",
+    )
+    missing = [
+        field for field in required_manifest_fields
+        if completion.get(field) in (None, "")
+    ]
+    if missing:
+        raise RuntimeError(
+            f"{tokenized_dir / '_SUCCESS.json'} is missing required fields: "
+            f"{missing}"
+        )
+
+    splits = {}
+    for split in ("train", "val"):
+        metadata_path = tokenized_dir / f"{split}.json"
+        binary_path = tokenized_dir / f"{split}.bin"
+        metadata = _read_required_json(
+            metadata_path,
+            f"tokenized {split} metadata",
+        )
+        required_metadata_fields = (
+            "n_tokens",
+            "n_docs",
+            "bos_id",
+            "eos_id",
+            "dtype",
+            "format_version",
+            "input_sha256",
+            "tokenizer_sha256",
+            "implementation_sha256",
+        )
+        missing_metadata = [
+            field for field in required_metadata_fields
+            if metadata.get(field) in (None, "")
+        ]
+        if missing_metadata:
+            raise RuntimeError(
+                f"{metadata_path} is missing required fields: "
+                f"{missing_metadata}"
+            )
+        if not binary_path.is_file():
+            raise FileNotFoundError(f"Missing tokenized {split} binary: {binary_path}")
+        splits[split] = {
+            "metadata_sha256": stable_digest(metadata),
+            "binary_bytes": binary_path.stat().st_size,
+            "n_tokens": metadata["n_tokens"],
+            "n_docs": metadata["n_docs"],
+            "bos_id": metadata["bos_id"],
+            "eos_id": metadata["eos_id"],
+            "dtype": metadata["dtype"],
+            "format_version": metadata["format_version"],
+            "input_sha256": metadata["input_sha256"],
+            "tokenizer_sha256": metadata["tokenizer_sha256"],
+            "implementation_sha256": metadata["implementation_sha256"],
+        }
+
+    if (
+        splits["train"]["tokenizer_sha256"]
+        != splits["val"]["tokenizer_sha256"]
+    ):
+        raise RuntimeError(
+            "Train and validation binaries were created with different tokenizers"
+        )
+
+    return {
+        "manifest": {
+            field: completion[field]
+            for field in required_manifest_fields
+        },
+        "splits": splits,
+    }
+
+
+def build_pretrain_run_contract(
+    *,
+    cfg: dict,
+    run_size: str,
+    tokenizer_dir: Path,
+    tokenized_dir: Path,
+    world_size: int,
+    distributed_strategy: str,
+) -> dict:
+    """Build the immutable inputs required to resume a pretraining run."""
+    return {
+        "contract_version": PRETRAIN_AUDIT_VERSION,
+        "run_size": run_size,
+        "resolved_config": cfg,
+        "resolved_config_sha256": stable_digest(cfg),
+        "tokenizer": {
+            "sha256": tokenizer_fingerprint(
+                tokenizer_dir / "slm_tokenizer.json"
+            ),
+        },
+        "tokenized_data": tokenized_data_identity(tokenized_dir),
+        "distributed": {
+            "world_size": world_size,
+            "strategy": distributed_strategy,
+        },
+    }
+
+
+def _contract_differences(expected, actual, prefix: str = "") -> list[str]:
+    """Return concise key paths that differ between two run contracts."""
+    if isinstance(expected, dict) and isinstance(actual, dict):
+        differences = []
+        for key in sorted(set(expected) | set(actual)):
+            path = f"{prefix}.{key}" if prefix else str(key)
+            if key not in expected or key not in actual:
+                differences.append(path)
+            else:
+                differences.extend(
+                    _contract_differences(expected[key], actual[key], path)
+                )
+        return differences
+    return [] if expected == actual else [prefix or "<root>"]
+
+
+def validate_or_write_pretrain_audit(
+    output_dir: Path,
+    contract: dict,
+    *,
+    resume: bool,
+    write: bool,
+) -> Path:
+    """Persist a new-run contract or reject an incompatible resume."""
+    audit_path = output_dir / PRETRAIN_AUDIT_FILENAME
+    current_payload = {
+        "schema_version": PRETRAIN_AUDIT_VERSION,
+        "contract_sha256": stable_digest(contract),
+        "contract": contract,
+    }
+
+    if audit_path.exists():
+        saved_payload = _read_required_json(audit_path, "pretraining run audit")
+        saved_contract = saved_payload.get("contract")
+        if not isinstance(saved_contract, dict):
+            raise RuntimeError(
+                f"{audit_path} does not contain a valid run contract"
+            )
+        if saved_payload.get("contract_sha256") != stable_digest(saved_contract):
+            raise RuntimeError(
+                f"{audit_path} failed its own contract checksum"
+            )
+        if saved_contract != contract:
+            differences = _contract_differences(saved_contract, contract)
+            rendered = "\n  ".join(differences[:20])
+            raise RuntimeError(
+                "Pretraining run contract mismatch. Refusing to "
+                f"{'resume' if resume else 'reuse the output directory'}.\n"
+                f"Changed fields:\n  {rendered}"
+            )
+    elif resume:
+        raise RuntimeError(
+            f"Cannot resume without {audit_path}. The checkpoint predates the "
+            "fail-closed provenance contract or its audit was removed."
+        )
+
+    if write and not audit_path.exists():
+        atomic_write_json(audit_path, current_payload)
+        log.info("Pretraining run audit written to %s", audit_path)
+    elif audit_path.exists():
+        log.info("Pretraining run audit matches: %s", audit_path)
+    return audit_path
 
 
 class VRAMProbe(TrainerCallback):
@@ -349,12 +670,35 @@ def main():
     parser = argparse.ArgumentParser(description="SLM Pretraining")
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help="Validate run inputs, GPU visibility, and resume state without optimization",
+    )
+    parser.add_argument(
+        "--expected-gpus",
+        type=int,
+        default=None,
+        help="Required visible GPU count for --preflight-only",
+    )
+    parser.add_argument(
+        "--distributed-strategy",
+        choices=["single", "ddp", "fsdp"],
+        default=None,
+        help="Optional topology identity; otherwise inferred from the launched world",
+    )
     parser.add_argument("--data-dir", type=Path, default=DATA_DIR)
     parser.add_argument("--results-dir", type=Path, default=RESULTS_DIR)
     args = parser.parse_args()
 
     cfg        = load_config(args.config)
     model_name = cfg["name"]
+    run_size = (
+        cfg.get("size")
+        or cfg.get("data", {}).get("size")
+        or model_name.removeprefix("slm-")
+    )
+    resolved_tokenized_dir = run_tokenized_dir(run_size)
     if cfg.get("output_dir"):
         output_dir = Path(cfg["output_dir"])
         if not output_dir.is_absolute():
@@ -372,19 +716,15 @@ def main():
         log.info(f"GPU:        {torch.cuda.get_device_name(0)} "
                  f"({torch.cuda.get_device_properties(0).total_memory / 1e9:.0f} GB)")
 
-    resume_checkpoint = None
-    if args.resume:
-        resume_checkpoint = _find_latest_checkpoint(output_dir)
-        if resume_checkpoint is None:
-            log.warning(
-                f"--resume passed but no checkpoint found in {output_dir}. "
-                f"Training will start from scratch."
-            )
-        else:
-            log.info(f"Resuming from checkpoint: {resume_checkpoint}")
+    resume_checkpoint = resolve_pretrain_checkpoint(
+        output_dir,
+        resume=args.resume,
+    )
+    if resume_checkpoint is not None:
+        log.info(f"Resuming from checkpoint: {resume_checkpoint}")
 
     tokenizer_dir = args.data_dir / "tokenizer"
-    validate_tokenizer(tokenizer_dir)
+    validate_tokenizer(tokenizer_dir, resolved_tokenized_dir)
 
     from model import SLMConfig, SLMForCausalLM
 
@@ -402,20 +742,10 @@ def main():
         initializer_range=model_cfg_dict.get("initializer_range", 0.02),
         tie_word_embeddings=model_cfg_dict.get("tie_word_embeddings", True),
     )
-
-    log.info(f"Initializing model from scratch...")
-    model    = SLMForCausalLM(model_config)
-    n_params = sum(p.numel() for p in model.parameters())
-    log.info(f"Parameters: {n_params:,} ({n_params / 1e6:.1f}M)")
+    validate_model_tokenizer_contract(model_config, tokenizer_dir)
 
     from pretrain.data.dataset import load_train_val
 
-    run_size = (
-        cfg.get("size")
-        or cfg.get("data", {}).get("size")
-        or model_name.removeprefix("slm-")
-    )
-    resolved_tokenized_dir = run_tokenized_dir(run_size)
     seq_len = model_cfg_dict["max_position_embeddings"]
 
     log.info(f"Loading datasets from {resolved_tokenized_dir}")
@@ -428,6 +758,69 @@ def main():
     log.info(f"Training tokens: {budget['total_training_tokens'] / 1e9:.2f}B")
 
     training_args = build_training_args(cfg, output_dir, resume=args.resume)
+    world_size = (
+        args.expected_gpus
+        if args.preflight_only and args.expected_gpus is not None
+        else int(os.environ.get("WORLD_SIZE", "1"))
+    )
+    distributed_strategy = resolve_distributed_strategy(
+        args.distributed_strategy,
+        world_size,
+    )
+    global_batch = (
+        training_args.per_device_train_batch_size
+        * training_args.gradient_accumulation_steps
+        * world_size
+    )
+    tokens_per_step = global_batch * seq_len
+    scheduled_tokens = tokens_per_step * training_args.max_steps
+
+    log.info(
+        "Training plan: strategy=%s, processes=%d, global_batch=%d sequences, "
+        "tokens_per_step=%,d, max_steps=%,d, scheduled_tokens=%.2fB",
+        distributed_strategy,
+        world_size,
+        global_batch,
+        tokens_per_step,
+        training_args.max_steps,
+        scheduled_tokens / 1e9,
+    )
+
+    run_contract = build_pretrain_run_contract(
+        cfg=cfg,
+        run_size=run_size,
+        tokenizer_dir=tokenizer_dir,
+        tokenized_dir=resolved_tokenized_dir,
+        world_size=world_size,
+        distributed_strategy=distributed_strategy,
+    )
+
+    if args.preflight_only:
+        validate_or_write_pretrain_audit(
+            output_dir,
+            run_contract,
+            resume=args.resume,
+            write=False,
+        )
+        validate_preflight_gpu(
+            world_size,
+            str(cfg["training"].get("precision", "bf16")),
+        )
+        log.info("Pretraining preflight passed; no model weights were allocated.")
+        return
+
+    if _is_rank_zero():
+        validate_or_write_pretrain_audit(
+            output_dir,
+            run_contract,
+            resume=args.resume,
+            write=True,
+        )
+
+    log.info("Initializing model from scratch...")
+    model = SLMForCausalLM(model_config)
+    n_params = sum(p.numel() for p in model.parameters())
+    log.info(f"Parameters: {n_params:,} ({n_params / 1e6:.1f}M)")
 
     log.info(
         f"Throughput knobs: "
@@ -486,6 +879,14 @@ def main():
 
         shutil.copytree(tokenizer_dir, final_dir / "tokenizer", dirs_exist_ok=True)
         log.info(f"Tokenizer copied to {final_dir / 'tokenizer'}")
+        shutil.copy2(
+            output_dir / PRETRAIN_AUDIT_FILENAME,
+            final_dir / PRETRAIN_AUDIT_FILENAME,
+        )
+        log.info(
+            "Pretraining run audit copied to %s",
+            final_dir / PRETRAIN_AUDIT_FILENAME,
+        )
 
         log.info(f"Model saved to {final_dir}")
 

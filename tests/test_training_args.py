@@ -1,9 +1,25 @@
 """Compatibility checks for the pinned Transformers/TRL training stack."""
 
+import hashlib
+import json
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
 
 from alignment.train_dpo import build_dpo_args
 from finetune.train_sft import build_sft_args
+from pretrain.train import (
+    resolve_distributed_strategy,
+    resolve_pretrain_checkpoint,
+    tokenized_data_identity,
+    validate_model_tokenizer_contract,
+    validate_or_write_pretrain_audit,
+    validate_preflight_gpu,
+    validate_tokenizer,
+)
 
 
 def _training() -> dict:
@@ -78,3 +94,213 @@ def test_dpo_config_coerces_yaml_numeric_values(tmp_path: Path):
     assert args.precompute_ref_log_probs is True
     assert args.remove_unused_columns is True
     assert args.warmup_steps == 1
+
+
+def test_pretrain_tokenizer_validation_uses_explicit_tokenized_dir(
+    tmp_path: Path,
+):
+    tokenizer_dir = tmp_path / "active-tokenizer"
+    tokenized_dir = tmp_path / "runs" / "125m" / "tokenized"
+    tokenizer_dir.mkdir()
+    tokenized_dir.mkdir(parents=True)
+
+    tokenizer_path = tokenizer_dir / "slm_tokenizer.json"
+    tokenizer = Tokenizer(
+        WordLevel({"<UNK>": 0, "hello": 1}, unk_token="<UNK>")
+    )
+    tokenizer.save(str(tokenizer_path))
+    (tokenizer_dir / "tokenizer_config.json").write_text(
+        "{}\n",
+        encoding="utf-8",
+    )
+
+    canonical = Tokenizer.from_file(str(tokenizer_path)).to_str()
+    fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    (tokenized_dir / "train.json").write_text(
+        json.dumps({"tokenizer_sha256": fingerprint}) + "\n",
+        encoding="utf-8",
+    )
+
+    validate_tokenizer(tokenizer_dir, tokenized_dir)
+
+
+def test_pretrain_resume_requires_a_checkpoint(tmp_path: Path):
+    with pytest.raises(RuntimeError, match="Refusing to start from scratch"):
+        resolve_pretrain_checkpoint(tmp_path, resume=True)
+
+
+def test_pretrain_resume_selects_latest_checkpoint(tmp_path: Path):
+    (tmp_path / "checkpoint-20").mkdir()
+    expected = tmp_path / "checkpoint-120"
+    expected.mkdir()
+    (tmp_path / "checkpoint-invalid").mkdir()
+
+    assert resolve_pretrain_checkpoint(tmp_path, resume=True) == expected
+
+
+@pytest.mark.parametrize("artifact", ["checkpoint-20", "final", "events.log"])
+def test_new_pretrain_run_rejects_existing_training_artifacts(
+    tmp_path: Path,
+    artifact: str,
+):
+    path = tmp_path / artifact
+    if "." in artifact:
+        path.write_text("partial run\n", encoding="utf-8")
+    else:
+        path.mkdir()
+
+    with pytest.raises(RuntimeError, match="already contains training artifacts"):
+        resolve_pretrain_checkpoint(tmp_path, resume=False)
+
+
+def test_pretrain_model_tokenizer_contract_rejects_special_token_mismatch(
+    tmp_path: Path,
+):
+    tokenizer_dir = tmp_path / "tokenizer"
+    tokenizer_dir.mkdir()
+    tokenizer = Tokenizer(
+        WordLevel(
+            {
+                "<PAD>": 0,
+                "<UNK>": 1,
+                "<EOS>": 2,
+                "<BOS>": 3,
+            },
+            unk_token="<UNK>",
+        )
+    )
+    tokenizer.save(str(tokenizer_dir / "slm_tokenizer.json"))
+    model_config = SimpleNamespace(
+        vocab_size=4,
+        pad_token_id=0,
+        bos_token_id=2,
+        eos_token_id=3,
+    )
+
+    with pytest.raises(RuntimeError, match="special-token mismatch"):
+        validate_model_tokenizer_contract(model_config, tokenizer_dir)
+
+
+def test_tokenized_data_identity_captures_manifest_and_splits(tmp_path: Path):
+    completion = {
+        "manifest_version": 2,
+        "contract_sha256": "contract",
+        "input_signature": "input",
+        "output_signature": "output",
+    }
+    (tmp_path / "_SUCCESS.json").write_text(
+        json.dumps(completion),
+        encoding="utf-8",
+    )
+    for split, tokens in (("train", 4), ("val", 2)):
+        metadata = {
+            "n_tokens": tokens,
+            "n_docs": 1,
+            "bos_id": 2,
+            "eos_id": 3,
+            "dtype": "uint16",
+            "format_version": "test",
+            "input_sha256": f"{split}-input",
+            "tokenizer_sha256": "tokenizer",
+            "implementation_sha256": "implementation",
+        }
+        (tmp_path / f"{split}.json").write_text(
+            json.dumps(metadata),
+            encoding="utf-8",
+        )
+        (tmp_path / f"{split}.bin").write_bytes(b"\0\0" * tokens)
+
+    identity = tokenized_data_identity(tmp_path)
+
+    assert identity["manifest"] == completion
+    assert identity["splits"]["train"]["binary_bytes"] == 8
+    assert identity["splits"]["val"]["n_tokens"] == 2
+
+
+def test_pretrain_audit_rejects_changed_resume_contract(tmp_path: Path):
+    contract = {
+        "contract_version": 1,
+        "resolved_config_sha256": "config-a",
+        "distributed": {"world_size": 1, "strategy": "single"},
+    }
+    validate_or_write_pretrain_audit(
+        tmp_path,
+        contract,
+        resume=False,
+        write=True,
+    )
+    validate_or_write_pretrain_audit(
+        tmp_path,
+        contract,
+        resume=True,
+        write=False,
+    )
+
+    changed = {
+        **contract,
+        "distributed": {"world_size": 2, "strategy": "ddp"},
+    }
+    with pytest.raises(RuntimeError, match="distributed.strategy"):
+        validate_or_write_pretrain_audit(
+            tmp_path,
+            changed,
+            resume=True,
+            write=False,
+        )
+
+
+def test_pretrain_resume_requires_provenance_audit(tmp_path: Path):
+    with pytest.raises(RuntimeError, match="Cannot resume without"):
+        validate_or_write_pretrain_audit(
+            tmp_path,
+            {"contract_version": 1},
+            resume=True,
+            write=False,
+        )
+
+
+@pytest.mark.parametrize(
+    ("requested", "world_size", "expected"),
+    [
+        (None, 1, "single"),
+        (None, 4, "ddp"),
+        ("ddp", 2, "ddp"),
+        ("fsdp", 8, "fsdp"),
+    ],
+)
+def test_distributed_strategy_resolution(
+    monkeypatch,
+    requested: str | None,
+    world_size: int,
+    expected: str,
+):
+    monkeypatch.delenv("SLM_DISTRIBUTED_STRATEGY", raising=False)
+    monkeypatch.delenv("ACCELERATE_USE_FSDP", raising=False)
+    assert resolve_distributed_strategy(requested, world_size) == expected
+
+
+def test_pretrain_gpu_preflight_rejects_missing_cuda(monkeypatch):
+    monkeypatch.setattr(
+        "pretrain.train.torch.cuda.is_available",
+        lambda: False,
+    )
+
+    with pytest.raises(RuntimeError, match="requires CUDA"):
+        validate_preflight_gpu(expected_gpus=1, precision="bf16")
+
+
+def test_pretrain_gpu_preflight_accepts_requested_bf16_devices(monkeypatch):
+    monkeypatch.setattr(
+        "pretrain.train.torch.cuda.is_available",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "pretrain.train.torch.cuda.device_count",
+        lambda: 4,
+    )
+    monkeypatch.setattr(
+        "pretrain.train.torch.cuda.is_bf16_supported",
+        lambda: True,
+    )
+
+    validate_preflight_gpu(expected_gpus=4, precision="bf16")

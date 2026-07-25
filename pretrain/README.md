@@ -97,8 +97,22 @@ make restore-size-tokenizer SIZE=125m
 Start or resume pretraining:
 
 ```bash
+make pretrain-preflight SIZE=125m GPUS=1
 make pretrain SIZE=125m GPUS=1
+
+make pretrain-resume-preflight SIZE=125m GPUS=1
 make pretrain-resume SIZE=125m GPUS=1
+```
+
+The preflight validates CUDA/BF16 availability, visible GPU count, model and
+tokenizer contracts, tokenized manifests/binaries, output-directory state,
+token budget, and resume provenance without allocating model weights.
+
+Multi-GPU behavior is unchanged: the Make target passes `GPUS` to Accelerate
+as `--num_processes`, producing one process per GPU:
+
+```bash
+make pretrain SIZE=350m GPUS=4
 ```
 
 The bounded architecture/data rehearsal uses the mini recipe:
@@ -125,12 +139,17 @@ accelerate launch \
 Checkpoints and the promoted base model are stored at:
 
 ```text
-$RESULTS_DIR/runs/<size>/pretrain/checkpoints/
+$RESULTS_DIR/runs/<size>/pretrain/checkpoint-<step>/
 $RESULTS_DIR/runs/<size>/pretrain/final/
 ```
 
-`--resume` selects the latest compatible checkpoint in the run directory.
-The final checkpoint is the parent of instruct SFT.
+The run root contains `pretrain_run_audit.json`. It binds the resolved
+training configuration, tokenizer fingerprint, tokenized-data identity,
+process count, and distributed strategy. `--resume` requires the audit and
+latest checkpoint and refuses changed inputs instead of starting over.
+
+The audit is copied into `final/`. The final checkpoint is the parent of
+instruct SFT.
 
 Before using chat/control tokens in post-training, reinitialize their embedding
 rows in the final base checkpoint:
@@ -150,8 +169,7 @@ make smoke-gen SIZE=125m
 Run the architecture and training-contract tests before a paid run:
 
 ```bash
-make test-model
-make test-training-args
+make test-pretrain-ready SIZE=125m GPUS=1
 ```
 
 Validate a completed pretraining artifact:
