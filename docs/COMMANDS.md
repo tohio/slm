@@ -25,6 +25,37 @@ make <target> RUN_ID=125m-20260629-a8f3c9
 
 ---
 
+## New-host workflows
+
+Run the complete data workflow on a new curation host:
+
+```bash
+make curate-all \
+  SIZE=125m \
+  WORKERS=62 \
+  DATA_DIR=/data/slm/data
+```
+
+Run the complete model-training workflow on a new GPU host:
+
+```bash
+make train-all \
+  SIZE=125m \
+  GPUS=1 \
+  RUN_ID=125m-20260629-a8f3c9 \
+  DATA_DIR=/data/slm/data
+```
+
+Both commands require every value in `.env`. `curate-all` creates and uploads
+the training-ready artifacts. `train-all` restores that artifact run and
+trains the base, instruct, code, and chat variants. It is restricted to new
+training runs; use the stage-specific resume targets after an interruption.
+
+See [`CURATION.md`](CURATION.md) and [`TRAIN.md`](TRAIN.md) for the complete
+contracts and stage-by-stage commands.
+
+---
+
 ## Setup
 
 ```bash

@@ -6,6 +6,8 @@ Project-level references:
   artifact flow.
 - [System diagram](architecture.svg) — pipeline and model-family overview.
 - [Command Reference](COMMANDS.md) — Make targets, variables, and stage commands.
+- [Curation](CURATION.md) — new-host setup through uploaded training artifacts.
+- [Training](TRAIN.md) — artifact restore, pretraining, SFT, DPO, and export.
 - [Disk Setup](DISK_SETUP.md) — persistent storage layout and instance setup.
 - [Hardware Guide](HARDWARE.md) — GPU sizing and training-time estimates.
 - [Testing](TESTING.md) — test layers, stage gates, and artifact requirements.

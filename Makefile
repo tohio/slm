@@ -9,10 +9,13 @@
 #   make config-gen-* GPU=h200                           # override GPU auto-detection
 #   make config-gen-* MODE=aggressive                    # 90% VRAM budget (or conservative=70%)
 #
-# Full pipeline:
-#   make all SIZE=125m GPUS=4
+# New-host workflows:
+#   make curate-all SIZE=125m WORKERS=62 DATA_DIR=/data/slm/data
+#   make train-all SIZE=125m GPUS=4 RUN_ID=125m-YYYYMMDD-abcdef
 #
 # See docs/COMMANDS.md for full target documentation.
+
+.DEFAULT_GOAL := help
 
 SIZE    ?= 125m
 GPUS    ?= 1
@@ -26,6 +29,12 @@ COMPARE_OUTPUT_DIR ?= $(RESULTS_DIR)/diagnostics/sft-comparison
 COMPARE_TRAIN_EXAMPLES ?= 32
 COMPARE_EVAL_EXAMPLES ?= 32
 COMPARE_MAX_STEPS ?= 60
+
+REQUIRED_ENV_VARS := \
+	S3_BUCKET S3_PREFIX AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY \
+	AWS_DEFAULT_REGION DATA_DIR RESULTS_DIR EXPORTS_DIR HF_HOME \
+	HF_DATASETS_CACHE HF_XET_HIGH_PERFORMANCE WANDB_API_KEY WANDB_PROJECT \
+	HF_TOKEN HF_USERNAME
 
 # Read path settings from .env when they are not already set in the
 # environment or on the make command line. Preserve spaces in paths and strip
@@ -93,7 +102,7 @@ else
   _MODE_FLAG =
 endif
 
-.PHONY: all curate curate-mini curate-download curate-filter curate-dedup \
+.PHONY: all check-env curate-all train-all curate curate-mini curate-download curate-filter curate-dedup \
         curate-blend curate-upload validate validate-upload \
         tokenizer tokenizer-test tokenize artifacts-upload artifacts-download \
         config-gen config-gen-pretrain config-gen-sft config-gen-dpo \
@@ -110,12 +119,83 @@ endif
         sanity-train sanity-train-small sanity-train-tiny sanity-train-save \
         clean clean-data clean-results clean-logs help
 
-# ── Full pipeline ──────────────────────────────────────────────────────────────
-# Note: assumes configs exist at $(PRETRAIN_CONFIG), $(SFT_INSTRUCT_CONFIG), etc.
-# Run `make config-gen` first to auto-generate them tuned for the current GPU.
+# ── New-host workflows ────────────────────────────────────────────────────────
 
-all: curate validate tokenizer tokenize pretrain prepare-sft sft-instruct prepare-dpo dpo-chat sft-code
-	@echo "Canonical pipeline complete for slm-$(SIZE) on $(GPUS) GPU(s)"
+all:
+	@echo "The data and training workflows run on different host types."
+	@echo "Use 'make curate-all ...' on the curation host, then"
+	@echo "'make train-all ...' on the GPU host."
+
+check-env:
+	@test -f .env || (echo "Missing .env. Copy .env.sample to .env and fill every value."; exit 1)
+	@missing=""; \
+	for var in $(REQUIRED_ENV_VARS); do \
+		value=$$(sed -n "s/^$${var}=//p" .env | head -1 | sed 's/[[:space:]]*#.*$$//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$$//'); \
+		if [ -z "$$value" ] || [ "$$value" = "..." ]; then \
+			missing="$$missing $$var"; \
+		fi; \
+	done; \
+	if [ -n "$$missing" ]; then \
+		echo "Fill these required .env values:$$missing"; \
+		exit 1; \
+	fi
+
+curate-all: check-env
+	@case "$(SIZE)" in mini|125m|350m|1b) ;; *) echo "SIZE must be mini, 125m, 350m, or 1b"; exit 1;; esac
+	@test -n "$(strip $(WORKERS))" || (echo "WORKERS is required. Example: WORKERS=62"; exit 1)
+	@case "$(WORKERS)" in *[!0-9]*|'') echo "WORKERS must be a positive integer"; exit 1;; esac
+	@test "$(WORKERS)" -gt 0 || (echo "WORKERS must be greater than zero"; exit 1)
+	@test -n "$(strip $(DATA_DIR))" || (echo "DATA_DIR is required"; exit 1)
+	@echo "==> Complete curation workflow: SIZE=$(SIZE), WORKERS=$(WORKERS), DATA_DIR=$(DATA_DIR)"
+	$(MAKE) setup-data-dir DATA_DIR="$(DATA_DIR)"
+	$(MAKE) download-fasttext-model DATA_DIR="$(DATA_DIR)"
+	$(MAKE) download-kenlm-model DATA_DIR="$(DATA_DIR)"
+	$(PYTHON) infra/verify_environment.py
+	$(MAKE) curate SIZE="$(SIZE)" WORKERS="$(WORKERS)"
+	$(MAKE) test-curator SIZE="$(SIZE)"
+	$(MAKE) validate SIZE="$(SIZE)"
+	$(MAKE) test-validate SIZE="$(SIZE)"
+	$(MAKE) tokenizer SIZE="$(SIZE)"
+	$(MAKE) tokenizer-test SIZE="$(SIZE)"
+	$(MAKE) tokenize SIZE="$(SIZE)"
+	$(MAKE) test-data-pipeline SIZE="$(SIZE)"
+	$(MAKE) artifacts-upload \
+		SIZE="$(SIZE)" \
+		WORKERS="$(WORKERS)" \
+		ARTIFACT_STAGES="tokenized,tokenizer,metadata"
+	@echo "==> Curation workflow complete. Record this RUN_ID:"
+	@cat "$(DATA_DIR)/runs/$(SIZE)/RUN_ID"
+
+train-all: check-env
+	@case "$(SIZE)" in mini|125m|350m|1b) ;; *) echo "SIZE must be mini, 125m, 350m, or 1b"; exit 1;; esac
+	@test -n "$(strip $(RUN_ID))" || (echo "RUN_ID is required. Use the ID produced by curate-all."; exit 1)
+	@case "$(GPUS)" in *[!0-9]*|'') echo "GPUS must be a positive integer"; exit 1;; esac
+	@test "$(GPUS)" -gt 0 || (echo "GPUS must be greater than zero"; exit 1)
+	@test -n "$(strip $(DATA_DIR))" || (echo "DATA_DIR is required"; exit 1)
+	@test -n "$(strip $(RESULTS_DIR))" || (echo "RESULTS_DIR is required"; exit 1)
+	@test ! -e "$(RESULTS_DIR)/runs/$(SIZE)/pretrain" || \
+		(echo "train-all starts new runs only, but pretraining output already exists."; \
+		 echo "Use the stage-specific resume command in docs/TRAIN.md."; exit 1)
+	@echo "==> Complete training workflow: SIZE=$(SIZE), GPUS=$(GPUS), RUN_ID=$(RUN_ID)"
+	$(MAKE) setup-gpu \
+		DATA_DIR="$(DATA_DIR)" \
+		SIZE="$(SIZE)" \
+		RUN_ID="$(RUN_ID)"
+	$(MAKE) test-gpu-gate
+	$(MAKE) config-gen SIZE="$(SIZE)" GPUS="$(GPUS)"
+	$(MAKE) pretrain SIZE="$(SIZE)" GPUS="$(GPUS)"
+	$(MAKE) reinit-embeds SIZE="$(SIZE)"
+	$(MAKE) test-training SIZE="$(SIZE)"
+	$(MAKE) prepare-sft SIZE="$(SIZE)"
+	$(MAKE) sft-instruct SIZE="$(SIZE)" GPUS="$(GPUS)"
+	$(MAKE) test-sft-instruct SIZE="$(SIZE)"
+	$(MAKE) sft-code SIZE="$(SIZE)" GPUS="$(GPUS)"
+	$(MAKE) test-sft-code SIZE="$(SIZE)"
+	$(MAKE) prepare-dpo SIZE="$(SIZE)"
+	$(MAKE) dpo-chat SIZE="$(SIZE)" GPUS="$(GPUS)"
+	$(MAKE) test-dpo-chat SIZE="$(SIZE)"
+	@echo "==> Training workflow complete for slm-$(SIZE)"
+	@echo "Next: evaluate and export the completed variants. See docs/TRAIN.md."
 
 # ── Stage 1: Data curation ────────────────────────────────────────────────────
 
@@ -736,6 +816,10 @@ help:
 	@echo "       make config-gen-* [GPU=h200|b200|...] [MODE=conservative|balanced|aggressive]"
 	@echo ""
 	@echo "For full target documentation see: docs/COMMANDS.md"
+	@echo ""
+	@echo "New-host workflows:"
+	@echo "  curate-all               Setup, curate, validate, tokenize, test, and upload"
+	@echo "  train-all                Setup, restore, train all model branches, and test"
 	@echo ""
 	@echo "Config generation (run before pretrain/sft-instruct/dpo-chat/sft-code):"
 	@echo "  config-gen-pretrain  Auto-generate pretrain/configs/gpt_$(SIZE).yaml"
