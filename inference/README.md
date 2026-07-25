@@ -1,10 +1,8 @@
 # inference
 
+## Purpose
+
 Local inference utilities for SLM checkpoints and exported Hub models.
-
----
-
-## Owns
 
 - `inference/chat.py` — interactive chat CLI
 - `inference/generate.py` — batch/raw prompt generation
@@ -12,7 +10,10 @@ Local inference utilities for SLM checkpoints and exported Hub models.
 
 Serving through vLLM lives in `serve/`.
 
----
+## How It Fits In
+
+Inference loads existing local checkpoints or published native exports and
+does not modify them; see [Architecture](../docs/ARCHITECTURE.md).
 
 ## Model references
 
@@ -34,8 +35,6 @@ tohio/slm-<size>-chat
 tohio/slm-<size>-code
 ```
 
----
-
 ## Interactive chat
 
 Local checkpoint:
@@ -53,7 +52,12 @@ python inference/chat.py --model tohio/slm-125m-chat
 Custom generation settings:
 
 ```bash
-python inference/chat.py   --model tohio/slm-125m-chat   --system "You are a concise assistant."   --max-new-tokens 256   --temperature 0.7   --top-p 0.9
+python inference/chat.py \
+  --model tohio/slm-125m-chat \
+  --system "You are a concise assistant." \
+  --max-new-tokens 256 \
+  --temperature 0.7 \
+  --top-p 0.9
 ```
 
 Interactive commands:
@@ -66,26 +70,34 @@ Interactive commands:
 /quit
 ```
 
----
-
 ## Batch generation
 
 Raw base-model completion:
 
 ```bash
-echo "The capital of France is" | python inference/generate.py   --model results/runs/125m/pretrain/final   --max-new-tokens 30   --greedy
+echo "The capital of France is" | python inference/generate.py \
+  --model results/runs/125m/pretrain/final \
+  --max-new-tokens 30 \
+  --greedy
 ```
 
 Chat-formatted generation:
 
 ```bash
-echo "Explain attention in one sentence." | python inference/generate.py   --model results/runs/125m/dpo_chat/final   --chat   --max-new-tokens 80
+echo "Explain attention in one sentence." | python inference/generate.py \
+  --model results/runs/125m/dpo_chat/final \
+  --chat \
+  --max-new-tokens 80
 ```
 
 File input/output:
 
 ```bash
-python inference/generate.py   --model tohio/slm-125m-chat   --input prompts.txt   --output completions.jsonl   --chat
+python inference/generate.py \
+  --model tohio/slm-125m-chat \
+  --input prompts.txt \
+  --output completions.jsonl \
+  --chat
 ```
 
 Common options:
@@ -102,8 +114,6 @@ Common options:
 --device
 ```
 
----
-
 ## Token behavior
 
 - Runtime code resolves token IDs from the loaded tokenizer.
@@ -111,8 +121,6 @@ Common options:
 - `--no-bos` disables BOS for continuation-style generation.
 - `--chat` wraps prompts as user messages with the tokenizer chat template.
 - Chat, instruct, and code variants should normally use `--chat` or `chat.py`.
-
----
 
 ## Serving
 

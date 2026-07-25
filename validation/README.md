@@ -1,10 +1,8 @@
 # validation
 
+## Purpose
+
 Post-curation quality validation for train/val JSONL splits.
-
----
-
-## Owns
 
 - validation filtering after curation
 - one canonical source-aware validation path
@@ -14,7 +12,11 @@ Post-curation quality validation for train/val JSONL splits.
 
 The curator does heuristic filtering first. This stage catches lower-quality prose that still passes curation.
 
----
+## How It Fits In
+
+Validation consumes curator output and produces the only accepted input for
+tokenizer training and corpus tokenization; see
+[Architecture](../docs/ARCHITECTURE.md).
 
 ## Key files
 
@@ -23,8 +25,6 @@ validation/
 └── scripts/
     └── validate.py
 ```
-
----
 
 ## Inputs
 
@@ -44,8 +44,6 @@ data/models/lid.176.ftz
 
 `en.arpa.bin` is used for KenLM perplexity filtering. `lid.176.ftz` is used for language detection.
 
----
-
 ## Outputs
 
 ```text
@@ -53,8 +51,6 @@ data/runs/<size>/validated/train.jsonl
 data/runs/<size>/validated/val.jsonl
 data/runs/<size>/metadata/
 ```
-
----
 
 ## Commands
 
@@ -95,10 +91,12 @@ python validation/scripts/validate.py --size 125m --no-perplexity
 Override input/output paths:
 
 ```bash
-python validation/scripts/validate.py   --train data/runs/125m/curated/train.jsonl   --val data/runs/125m/curated/val.jsonl   --train-output data/runs/125m/validated/train.jsonl   --val-output data/runs/125m/validated/val.jsonl
+python validation/scripts/validate.py \
+  --train data/runs/125m/curated/train.jsonl \
+  --val data/runs/125m/curated/val.jsonl \
+  --train-output data/runs/125m/validated/train.jsonl \
+  --val-output data/runs/125m/validated/val.jsonl
 ```
-
----
 
 ## Filters
 
@@ -114,8 +112,6 @@ curator's quality stage.
 
 Code, synthetic/template-like, math, and specialized sources bypass prose-only heuristics where those heuristics would incorrectly reject useful non-prose records.
 
----
-
 ## Perplexity threshold
 
 If `--perplexity-threshold` is not provided, validation samples train records and computes an automatic threshold. The same threshold is reused for val so train and val remain comparable.
@@ -123,8 +119,6 @@ If `--perplexity-threshold` is not provided, validation samples train records an
 KenLM is required by default. `--no-perplexity` is an explicit alternate
 contract for debugging and is recorded in the completion manifest; missing
 KenLM dependencies never silently disable filtering.
-
----
 
 ## Tests
 

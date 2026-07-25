@@ -1,8 +1,16 @@
 # Tests
 
+## Purpose
+
 The suite is layered so expensive training is not repeated merely to test it.
 Tests either exercise cheap synthetic inputs or validate artifacts produced by
 the real pipeline run.
+
+## How It Fits In
+
+Unit and GPU gates validate executable contracts; artifact tests validate
+outputs from real pipeline stages without starting duplicate training. See
+[Architecture](../docs/ARCHITECTURE.md).
 
 ## Test policy
 

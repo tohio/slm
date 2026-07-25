@@ -80,3 +80,5 @@ htmlcov/
 
 # Local-only legacy DPO source helpers
 misc/dpo/prepare_dpo_legacy_sources.py
+
+DOCUMENTATION_DIRECTIVE.md

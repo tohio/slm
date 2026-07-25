@@ -1,10 +1,8 @@
 # tokenizer
 
+## Purpose
+
 BPE tokenizer training and tokenizer validation for SLM.
-
----
-
-## Owns
 
 - tokenizer training in `train_tokenizer.py`
 - project special-token definitions
@@ -13,7 +11,11 @@ BPE tokenizer training and tokenizer validation for SLM.
 
 Corpus tokenization for pretraining lives in `pretrain/data/tokenize_data.py`.
 
----
+## How It Fits In
+
+The tokenizer is trained from validated data and reused unchanged by
+pretraining, post-training, evaluation, export, inference, and serving; see
+[Architecture](../docs/ARCHITECTURE.md).
 
 ## Key files
 
@@ -23,8 +25,6 @@ tokenizer/
 ├── test_tokenizer.py
 └── README.md
 ```
-
----
 
 ## Inputs
 
@@ -39,8 +39,6 @@ Optional direct input:
 ```bash
 python tokenizer/train_tokenizer.py --size 125m --input data/runs/125m/validated/train.jsonl
 ```
-
----
 
 ## Outputs
 
@@ -64,8 +62,6 @@ chat_template.jinja
 ```
 
 Export copies the required tokenizer files into the checkpoint root before pushing to Hugging Face.
-
----
 
 ## Special tokens
 
@@ -97,8 +93,6 @@ Additional special tokens:
 
 Training code can assert the special-token layout. Runtime code resolves token IDs from the loaded tokenizer instead of importing hard-coded IDs.
 
----
-
 ## Commands
 
 Train tokenizer:
@@ -129,23 +123,17 @@ python tokenizer/train_tokenizer.py --size 125m --min-frequency 2
 python tokenizer/test_tokenizer.py --size 125m
 ```
 
----
-
 ## Chat template
 
 The tokenizer saves the chat template used by SFT, DPO, inference, and serving.
 
 The template includes assistant-generation markers required by TRL answer-only loss masking. Any chat-template change requires tokenizer, SFT, DPO, inference, export, and serving compatibility review.
 
----
-
 ## BOS/EOS policy
 
 The tokenizer does not automatically inject BOS/EOS through a post-processor. Training and inference code add those tokens explicitly where appropriate.
 
 This avoids corrupting chat-formatted examples with unexpected special tokens.
-
----
 
 ## Pretraining tokenization
 

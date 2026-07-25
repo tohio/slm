@@ -1,10 +1,8 @@
 # pretrain
 
+## Purpose
+
 Base-model pretraining for SLM. This folder owns corpus tokenization, memory-mapped datasets, base training, checkpoint resume, and smoke generation.
-
----
-
-## Owns
 
 - `pretrain/data/tokenize_data.py` — validated JSONL to tokenized `.bin`
 - `pretrain/data/dataset.py` — memory-mapped train/val dataset
@@ -13,7 +11,11 @@ Base-model pretraining for SLM. This folder owns corpus tokenization, memory-map
 
 Post-training is handled by `finetune/` and `alignment/`.
 
----
+## How It Fits In
+
+Pretraining consumes validated, tokenized corpus artifacts and produces the
+base checkpoint used by every post-training branch; see
+[Architecture](../docs/ARCHITECTURE.md).
 
 ## Configs
 
@@ -31,8 +33,6 @@ Generate/update configs for the current hardware:
 make config-gen-pretrain SIZE=125m GPUS=1
 make config-gen SIZE=125m GPUS=1
 ```
-
----
 
 ## Inputs
 
@@ -58,8 +58,6 @@ format version, and realized per-source document/token counts. Tokenization is
 ordered and reproducible; stale derived binaries are rebuilt automatically.
 The dataset reader requires these sidecars.
 
----
-
 ## Outputs
 
 ```text
@@ -68,8 +66,6 @@ data/runs/<size>/tokenized/val.bin
 results/runs/<size>/pretrain/checkpoints/
 results/runs/<size>/pretrain/final
 ```
-
----
 
 ## Commands
 
@@ -108,15 +104,11 @@ accelerate launch pretrain/train.py --config pretrain/configs/gpt_125m.yaml
 python pretrain/train.py --config pretrain/configs/gpt_125m.yaml --resume
 ```
 
----
-
 ## Dataset behavior
 
 `dataset.py` memory maps flat token arrays and slices fixed-length windows for causal LM training.
 
 The train/val split is created before tokenization by the curator blend stage. Pretraining does not create its own runtime split.
-
----
 
 ## Checkpoint contract
 
@@ -127,8 +119,6 @@ results/runs/<size>/pretrain/final
 ```
 
 This checkpoint is the parent for instruct SFT.
-
----
 
 ## Tests
 

@@ -9,6 +9,7 @@ SIZE=125m
 GPUS=1
 DATA_DIR=data
 RESULTS_DIR=results
+EXPORTS_DIR=results/exports
 RUN_ID=
 ARTIFACT_STAGES=raw,curated,validated,tokenized,tokenizer,metadata
 ```
@@ -310,6 +311,18 @@ make eval-sanity SIZE=125m
 
 ## Export
 
+Build and validate local native artifacts without publishing:
+
+```bash
+make export-base-local SIZE=125m
+make export-instruct-local SIZE=125m
+make export-chat-local SIZE=125m
+make export-code-local SIZE=125m
+make export-local SIZE=125m
+```
+
+Build, validate, and publish:
+
 ```bash
 make export-base SIZE=125m
 make export-instruct SIZE=125m
@@ -370,16 +383,33 @@ Unit tests:
 
 ```bash
 make test-model
+make test-export
+make test-data-unit
+make test-training-args
 make test-config-gen
 make test-accel-gen
+make test-comparison
+make test-misc
 make test-unit
 ```
+
+GPU environment gate:
+
+```bash
+make test-gpu-gate
+make test-upgrade-gpu
+```
+
+The two targets are equivalent. Run the gate once per GPU image or dependency
+upgrade; it does not download training data or load a trained checkpoint.
 
 ---
 
 ## Diagnostics
 
 ```bash
+make compare-sft-preflight
+make compare-sft
 make sanity-train
 make sanity-train-small
 make sanity-train-tiny
@@ -389,6 +419,9 @@ make sanity-train-save SANITY_SIZE=tiny
 ---
 
 ## Cleanup
+
+These targets delete local files. Confirm `DATA_DIR`, `RESULTS_DIR`, and
+`SIZE` before running them.
 
 ```bash
 make clean-data SIZE=125m

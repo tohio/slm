@@ -1,4 +1,4 @@
-# Disk Setup
+# Disk setup
 
 This guide covers mounting a secondary disk to `/data` on a fresh Ubuntu 24.04
 instance. Follow this before cloning the repo if you are using a separate disk
@@ -25,7 +25,7 @@ lsblk
 
 You should see two block devices — your boot disk and your data disk. Example:
 
-```
+```text
 NAME   MAJ:MIN RM  SIZE RO TYPE MOUNTPOINT
 vda    252:0    0   50G  0 disk
 └─vda1 252:1    0   50G  0 part /
@@ -85,7 +85,7 @@ sudo blkid /dev/vdc
 
 Output will look like:
 
-```
+```text
 /dev/vdc: UUID="f161f289-ea2c-478d-960a-ead94e9142e5" TYPE="ext4"
 ```
 
@@ -115,10 +115,15 @@ df -h /data
 
 Expected output:
 
-```
+```text
 Filesystem      Size  Used Avail Use% Mounted on
 /dev/vdc        1.3T   28K  1.2T   1% /data
 ```
 
 `/data` is now ready. Return to the [README](../README.md) and proceed with
 the clone step.
+
+## See Also
+
+- [Hardware](HARDWARE.md)
+- [Command reference](COMMANDS.md)

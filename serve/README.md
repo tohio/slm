@@ -1,15 +1,16 @@
 # serve
 
+## Purpose
+
 vLLM serving assets for SLM. The server exposes an OpenAI-compatible API for exported Hub models or local checkpoints.
-
----
-
-## Owns
 
 - `serve/serve.sh` — local vLLM launch wrapper
 - `serve/manifests/` — Kubernetes deployment assets
 
----
+## How It Fits In
+
+Serving is downstream of native export and does not use repository model code;
+see [Architecture](../docs/ARCHITECTURE.md).
 
 ## Files
 
@@ -23,8 +24,6 @@ serve/
 ├── serve.sh
 └── README.md
 ```
-
----
 
 ## Make targets
 
@@ -47,8 +46,6 @@ The Makefile passes:
 MODEL=tohio/slm-<size>-chat
 MODEL=results/exports/<size>/chat
 ```
-
----
 
 ## Direct local serving
 
@@ -92,14 +89,14 @@ MAX_MODEL_LEN=2048 ./serve/serve.sh --model tohio/slm-1b-chat
 
 `MAX_MODEL_LEN` is unset by default so vLLM can read the context length from the model config.
 
----
-
 ## API examples
 
 Chat completion:
 
 ```bash
-curl http://localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
     "model": "slm-125m-chat",
     "messages": [
       {"role": "user", "content": "What is a transformer?"}
@@ -138,24 +135,22 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ```
 
----
-
 ## Kubernetes manifests
 
 Manifests live in `serve/manifests/`.
 
 ```bash
 kubectl create namespace inference
-kubectl create secret generic hf-credentials   --from-literal=token="$HF_TOKEN"   -n inference
+kubectl create secret generic hf-credentials \
+  --from-literal=token="$HF_TOKEN" \
+  -n inference
 
 kubectl apply -f serve/manifests/
 kubectl get pods -n inference
 kubectl logs -f deployment/slm-125m -n inference
 ```
 
----
-
-## Notes
+## Gotchas
 
 - Hub and local serving consume native `LlamaForCausalLM` exports and do not
   enable remote model code.

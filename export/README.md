@@ -1,11 +1,19 @@
 # Export
 
+## Purpose
+
 Native Hugging Face export for SLM base, instruct, chat, and code variants.
 
 Training checkpoints use the repository's `SLMConfig` and
 `SLMForCausalLM`. Export converts the equivalent configuration and state dict
 to Transformers' built-in `LlamaForCausalLM` package. Published models contain
 no executable architecture code and load without `trust_remote_code`.
+
+## How It Fits In
+
+Export is the publication boundary between repository-native training
+checkpoints and portable Transformers packages; see
+[Architecture](../docs/ARCHITECTURE.md).
 
 ## Variants
 
@@ -133,9 +141,12 @@ Every local or Hub export must pass:
 6. Exact deterministic greedy-generation parity.
 7. Cached versus uncached generation parity on the exported model.
 8. Rejection of `auto_map` or bundled Python model files.
+9. Exact-revision Hub checks for native config resolution, tokenizer size,
+   safetensors weights, and absence of executable Python files.
 
 The existing native artifact is replaced only after the staged artifact passes
-all checks.
+all local checks. A Hub upload reports success only after the published commit
+passes the remote contract checks.
 
 ## Model-card metadata
 
@@ -159,6 +170,11 @@ data/runs/<size>/curated/blend_stats.json
 
 If neither exists, the model card labels the pretraining table as the design
 mix rather than realized data.
+
+Generated cards include the model identity, variant lineage, architecture,
+context length, training provenance, intended use, explicit evaluation status,
+limitations, native loading example, and MIT license. Update card content in
+`generate_model_card()`; do not hand-edit an exported `README.md`.
 
 ## Loading
 

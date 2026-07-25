@@ -1,10 +1,15 @@
 # scripts
 
+## Purpose
+
 Stage-neutral utility and diagnostic scripts.
 
 Stage-owned scripts should stay in their stage folder. This folder is for helpers used across stages or diagnostics that intentionally sit outside the main pipeline.
 
----
+## How It Fits In
+
+These utilities diagnose or support multiple stages without owning a pipeline
+artifact; see [Architecture](../docs/ARCHITECTURE.md).
 
 ## Files
 
@@ -71,7 +76,9 @@ Direct use:
 
 ```bash
 python scripts/reinit_special_embeds.py --size 125m
-python scripts/reinit_special_embeds.py   --src results/runs/125m/pretrain/checkpoint-152000   --dst results/runs/125m/pretrain/final
+python scripts/reinit_special_embeds.py \
+  --src results/runs/125m/pretrain/checkpoint-152000 \
+  --dst results/runs/125m/pretrain/final
 ```
 
 Options:
@@ -100,7 +107,16 @@ Wrapper for lm-evaluation-harness with the local SLM architecture pre-registered
 Example:
 
 ```bash
-python scripts/run_lm_eval.py   --model hf   --model_args pretrained=results/runs/125m/sft_code/final,dtype=bfloat16   --tasks humaneval   --num_fewshot 0   --batch_size 1   --apply_chat_template   --output_path results/eval/debug_humaneval   --log_samples   --limit 5
+python scripts/run_lm_eval.py \
+  --model hf \
+  --model_args pretrained=results/runs/125m/sft_code/final,dtype=bfloat16 \
+  --tasks humaneval \
+  --num_fewshot 0 \
+  --batch_size 1 \
+  --apply_chat_template \
+  --output_path results/eval/debug_humaneval \
+  --log_samples \
+  --limit 5
 ```
 
 Prefer the Makefile eval targets for normal use:

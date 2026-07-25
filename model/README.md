@@ -1,10 +1,8 @@
 # model
 
+## Purpose
+
 Decoder-only Transformer implementation for SLM.
-
----
-
-## Owns
 
 - `model/config.py` — `SLMConfig`
 - `model/model.py` — `SLMModel` and `SLMForCausalLM`
@@ -13,7 +11,11 @@ Decoder-only Transformer implementation for SLM.
 - `model/mlp.py` — SwiGLU MLP
 - `model/norm.py` — RMSNorm
 
----
+## How It Fits In
+
+Training stages use this implementation directly. `export/` converts final
+checkpoints to an equivalent native Transformers package for distribution; see
+[Architecture](../docs/ARCHITECTURE.md).
 
 ## Architecture
 
@@ -29,8 +31,6 @@ Decoder-only Transformer implementation for SLM.
 | Embeddings | tied input/output embeddings |
 | Cache | generation KV cache support |
 
----
-
 ## Configured sizes
 
 Counts below are unique trainable parameters; the LM head shares the token
@@ -45,8 +45,6 @@ embedding matrix.
 
 Size-specific training configs live in `pretrain/configs/`.
 
----
-
 ## Key classes
 
 - `SLMConfig` extends `transformers.PretrainedConfig`.
@@ -55,15 +53,11 @@ Size-specific training configs live in `pretrain/configs/`.
 
 Use `AutoModelForCausalLM`, not `AutoModel`, for exported checkpoints.
 
----
-
 ## Attention
 
 `attention.py` implements grouped-query attention with RoPE.
 
 RoPE caches are rebuilt lazily in float32 and are not persisted in checkpoints. This avoids stale or low-precision RoPE buffers when loading or casting models.
-
----
 
 ## Export
 
@@ -92,8 +86,6 @@ The exported `config.json` must advertise:
 
 It must not contain `auto_map`, and the Hub repository must not contain
 architecture Python files.
-
----
 
 ## Tests
 

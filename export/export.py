@@ -490,6 +490,7 @@ print(tokenizer.decode(output[0][input_len:], skip_special_tokens=True))
 license: mit
 language:
   - en
+library_name: transformers
 pipeline_tag: {pipeline_tag}
 tags:
   - causal-lm
@@ -504,8 +505,11 @@ tags:
 
 # {hub_name}
 
-A {size_upper} decoder-only language model ({description}). Part of the SLM model family —
-built entirely from scratch, from raw web data through to a production-ready aligned model.
+A {size_upper} decoder-only language model ({description}) from the SLM model
+family. This release is intended for research, evaluation, and controlled
+experimentation.
+
+## Intended Use
 
 {variant_section}
 
@@ -549,6 +553,17 @@ package contains no executable model code and does not require
 
 {usage_section}
 
+## Evaluation
+
+Benchmark scores are not embedded in this release. The export gate validates
+checkpoint integrity, native Transformers loading, source/export logit and
+greedy-generation parity, cached/uncached generation parity, tokenizer
+compatibility, and the absence of remote model code. These are packaging and
+behavioral-integrity checks, not measures of downstream task quality.
+
+Use the repository's benchmark and sanity evaluation tools before selecting
+the model for an application.
+
 ## Limitations
 
 - **Scale:** At {size_upper} parameters this model is significantly smaller than frontier models. It will underperform on complex reasoning, long-context tasks, and domains not well-represented in the pretraining data.
@@ -556,6 +571,10 @@ package contains no executable model code and does not require
 - **Safety:** DPO alignment provides basic harmlessness training but does not guarantee safe outputs in all contexts. This model has not undergone red-teaming or adversarial safety evaluation.
 - **Languages:** Training data is predominantly English. Performance on other languages will be significantly degraded.
 - **Code:** Code generation is primarily Python-oriented, reflecting the code sub-mix distribution used in pretraining and SFT.
+
+## License
+
+Released under the MIT License.
 
 ## Related
 

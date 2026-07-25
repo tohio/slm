@@ -1,9 +1,16 @@
 # Supervised fine-tuning
 
+## Purpose
+
 This directory consumes external SFT datasets and trains the instruct, code,
 and optional raw code-completion branches. Synthetic data is generated and
 repaired in the separate `slm-synthetic-data` project; no synthetic examples
 are created here.
+
+## How It Fits In
+
+Instruct SFT consumes the base checkpoint. Chat DPO and code SFT then branch
+from the instruct checkpoint; see [Architecture](../docs/ARCHITECTURE.md).
 
 ## Data contract
 

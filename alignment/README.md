@@ -1,8 +1,16 @@
 # DPO alignment
 
+## Purpose
+
 This directory consumes external preference data and trains the chat-aligned
 SLM branch with Direct Preference Optimization. Synthetic preference generation
 and repair belong to the separate `slm-synthetic-data` repository.
+
+## How It Fits In
+
+DPO starts from the instruct checkpoint and produces the chat branch. It does
+not modify the instruct or code branches; see
+[Architecture](../docs/ARCHITECTURE.md).
 
 ## Data contract
 

@@ -1,16 +1,6 @@
-# Hardware Recommendations
+# Hardware recommendations
 
 Practical hardware guidance for running the SLM pipeline. These are operational recommendations, not minimum theoretical requirements.
-
----
-
-## Token targets
-
-| Size | Curation target | Epochs | Consumed target |
-|---|---:|---:|---:|
-| `125m` | 10B | 2 | 20B |
-| `350m` | 25B | 2 | 50B |
-| `1b` | 75B | 1 | 75B |
 
 ---
 
@@ -40,7 +30,7 @@ Recommended starting points:
 | `350m` | 1–2 TB+ |
 | `1b` | 2 TB+ |
 
-See `docs/DISK_SETUP.md` for mounting a secondary disk at `/data`.
+See [Disk setup](DISK_SETUP.md) for mounting a secondary disk at `/data`.
 
 ---
 
@@ -114,4 +104,10 @@ watch -n 2 nvidia-smi
 nvtop
 ```
 
-Detailed command sequences are in `docs/COMMANDS.md`.
+Detailed command sequences are in the [command reference](COMMANDS.md).
+
+## See Also
+
+- [Architecture](ARCHITECTURE.md)
+- [Disk setup](DISK_SETUP.md)
+- [Command reference](COMMANDS.md)
