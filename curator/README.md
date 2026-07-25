@@ -118,9 +118,19 @@ make download-fasttext-model DATA_DIR=/data/slm/data
 ```
 
 `HF_TOKEN` is required for authenticated or gated Hub sources. Accept each
-enabled dataset's terms before starting a full run. Common Crawl access uses
-AWS region `us-east-1`. `SWH_AUTH_TOKEN` improves source-file retrieval for
-Stack v2-compatible loaders but is not required by the active Stack v1 mix.
+enabled dataset's terms before starting a full run:
+
+- [`bigcode/the-stack-dedup`](https://huggingface.co/datasets/bigcode/the-stack-dedup)
+  — primary source in the code sub-mix.
+- [`bigcode/the-stack-smol`](https://huggingface.co/datasets/bigcode/the-stack-smol)
+  — supplemental code source.
+- [`nvidia/Nemotron-CC-Math-v1`](https://huggingface.co/datasets/nvidia/Nemotron-CC-Math-v1)
+  — mathematical pretraining corpus.
+
+Sign in with the Hugging Face account associated with `HF_TOKEN` before
+accepting access. Common Crawl access uses AWS region `us-east-1`.
+`SWH_AUTH_TOKEN` improves source-file retrieval for Stack v2-compatible
+loaders but is not required by the active Stack v1 mix.
 
 ## Usage
 

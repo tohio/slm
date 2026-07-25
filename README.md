@@ -36,10 +36,10 @@ standard inference and vLLM serving.
 
 | Size | Parameters | Layers | Hidden size | Q/KV heads | Context |
 |---|---:|---:|---:|---:|---:|
-| `mini` | 21.7M | 6 | 384 | 6 / 2 | 1,024 |
-| `125m` | 125.3M | 16 | 768 | 12 / 4 | 2,048 |
-| `350m` | 351.3M | 27 | 1,024 | 16 / 8 | 2,048 |
-| `1b` | 1.012B | 21 | 2,048 | 32 / 8 | 4,096 |
+| `mini` | 22M | 6 | 384 | 6 / 2 | 1,024 |
+| `125m` | 125M | 16 | 768 | 12 / 4 | 2,048 |
+| `350m` | 350M | 27 | 1,024 | 16 / 8 | 2,048 |
+| `1b` | 1B | 21 | 2,048 | 32 / 8 | 4,096 |
 
 All profiles use RoPE, RMSNorm, SwiGLU, grouped-query attention, pre-normalized
 residual blocks, tied token embeddings, bias-free projections, and generation
@@ -84,6 +84,22 @@ model lineage, and artifact flow.
   separate hosts.
 - For GPU training: an NVIDIA GPU with BF16 support, CUDA 13.0 wheels, and an
   NVIDIA driver version supported by `infra/verify_environment.py`.
+
+### Dataset access
+
+Before curation, sign in to the Hugging Face account associated with
+`HF_TOKEN`, review the conditions, and request access to each gated source used
+by the active data mix:
+
+- [`bigcode/the-stack-dedup`](https://huggingface.co/datasets/bigcode/the-stack-dedup)
+  — primary source in the code sub-mix.
+- [`bigcode/the-stack-smol`](https://huggingface.co/datasets/bigcode/the-stack-smol)
+  — supplemental code source.
+- [`nvidia/Nemotron-CC-Math-v1`](https://huggingface.co/datasets/nvidia/Nemotron-CC-Math-v1)
+  — mathematical pretraining corpus.
+
+Dataset access is granted to the Hugging Face account, not to an individual
+token. Generate `HF_TOKEN` from the same account after accepting the terms.
 
 ### Installation
 
