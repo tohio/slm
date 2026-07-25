@@ -1,121 +1,188 @@
-# Supervised fine-tuning
+# Supervised Fine-Tuning
 
-## Purpose
+This directory prepares external instruction datasets and trains the instruct,
+code-instruction, and optional raw code-completion branches.
 
-This directory consumes external SFT datasets and trains the instruct, code,
-and optional raw code-completion branches. Synthetic data is generated and
-repaired in the separate `slm-synthetic-data` project; no synthetic examples
-are created here.
+Synthetic example generation is maintained in
+[`tohio/slm-synthetic-data`](https://github.com/tohio/slm-synthetic-data);
+this repository consumes datasets but does not generate them.
 
-## How It Fits In
+## Contents
 
-Instruct SFT consumes the base checkpoint. Chat DPO and code SFT then branch
-from the instruct checkpoint; see [Architecture](../docs/ARCHITECTURE.md).
+| Path | Purpose |
+|---|---|
+| `configs/sft_data_sources.yaml` | Pinned dataset, adapter, limits, and validation policy |
+| `configs/sft_instruct_*.yaml` | Instruct SFT recipes |
+| `configs/sft_code_*.yaml` | Code-instruction SFT recipes |
+| `configs/code_completion_*.yaml` | Optional raw code-completion recipes |
+| `data/prepare_sft.py` | Normalize, validate, deduplicate, split, and manifest SFT data |
+| `data/prepare_code_completion.py` | Derive leakage-checked completion pairs |
+| `train_sft.py` | Assistant-only-loss instruct/code trainer |
+| `train_code_completion.py` | Prompt-masked raw completion trainer |
 
-## Data contract
-
-`configs/sft_data_sources.yaml` is the only source registry. It pins the Hub
-dataset, immutable revision, split, source format, validation thresholds, and
-per-size row cap. The current temporary sources are:
-
-| Stage | Source | Purpose |
-|---|---|---|
-| Instruct | `HuggingFaceH4/ultrachat_200k` | General assistant behavior |
-| Code | `ise-uiuc/Magicoder-OSS-Instruct-75K` | Code instruction following |
-
-The 125M, 350M, and 1B recipes use the same source population and cap so model
-comparisons are not confounded by different SFT data. `mini` has a smaller cap
-for pipeline validation.
-
-To replace a source later, update only `configs/sft_data_sources.yaml`. A
-conversational replacement must expose a `messages` or `conversations` column;
-the `magicoder` adapter accepts problem/solution-style records.
-
-Preparation:
-
-```bash
-make prepare-sft SIZE=125m
-# Replace previously prepared data only after intentionally changing contract:
-python finetune/data/prepare_sft.py --size 125m --stage both --force
-```
-
-Each prepared directory contains `train.jsonl`, `val.jsonl`, and
-`manifest.json`. Preparation fails when invalid or duplicate rates exceed the
-configured thresholds. Exact duplicates are counted and recorded, not silently
-used. Validation is grouped by normalized user prompt, and the manifest must
-report zero train/validation prompt overlap. An existing dataset is reused only
-when its manifest matches the current source contract.
-
-Prepared paths:
-
-```text
-data/runs/<size>/sft_instruct/
-data/runs/<size>/sft_code/
-data/runs/<size>/code_completion/
-```
-
-## Training branches
+## Model branches
 
 ```text
 pretrain/final
-  -> sft_instruct/final
-       -> DPO chat alignment (alignment/)
-       -> sft_code/final
-            -> optional sft_code_completion/final
+  └─ sft_instruct/final
+       ├─ dpo_chat/final
+       └─ sft_code/final
+            └─ sft_code_completion/final  (optional)
 ```
 
-Run instruct and code SFT:
+Instruct SFT starts from the reinitialized base checkpoint. Code SFT starts
+from instruct SFT so it retains the general assistant behavior learned by the
+first stage.
+
+## Dataset contract
+
+`configs/sft_data_sources.yaml` is the source registry used by preparation and
+training:
+
+| Stage | Dataset | Adapter | Full-profile cap |
+|---|---|---|---:|
+| Instruct | `HuggingFaceH4/ultrachat_200k` | conversational messages | 50,000 |
+| Code | `ise-uiuc/Magicoder-OSS-Instruct-75K` | problem/solution instruction | 75,000 |
+
+Each source is pinned to an immutable revision. The 125M, 350M, and 1B
+profiles use the same selected population; `mini` uses 1,000 records per
+stage for pipeline validation.
+
+Preparation writes:
+
+```text
+$DATA_DIR/runs/<size>/sft_instruct/
+  train.jsonl
+  val.jsonl
+  manifest.json
+
+$DATA_DIR/runs/<size>/sft_code/
+  train.jsonl
+  val.jsonl
+  manifest.json
+```
+
+The preparation stage normalizes records to the project's conversation
+schema, validates required roles/content, rejects excessive invalid or
+duplicate rates, and splits by normalized user prompt. The manifest records
+the source revision, selection settings, tokenizer hash, file hashes,
+retention statistics, and zero prompt overlap between train and validation.
+Existing output is reused only when its manifest matches the current contract.
+
+## Prepare data
+
+Prepare both SFT stages:
+
+```bash
+make prepare-sft SIZE=125m
+```
+
+Prepare or replace data explicitly after changing the source contract:
+
+```bash
+python finetune/data/prepare_sft.py \
+  --size 125m \
+  --stage both \
+  --force
+```
+
+The target tokenizer must already be available at
+`$DATA_DIR/runs/<size>/tokenizer/`; preparation uses its exact chat rendering
+and token budgets.
+
+## Train
+
+Generate hardware-specific recipes on the training host:
+
+```bash
+make config-gen-sft SIZE=125m GPUS=1
+```
+
+Train instruct and code branches:
 
 ```bash
 make sft-instruct SIZE=125m GPUS=1
-make sft-instruct-resume SIZE=125m GPUS=1
 make sft-code SIZE=125m GPUS=1
+```
+
+Resume the latest compatible checkpoints:
+
+```bash
+make sft-instruct-resume SIZE=125m GPUS=1
 make sft-code-resume SIZE=125m GPUS=1
 ```
 
-The trainer requires the tokenizer's native chat template with
-`{% generation %}` markers and uses assistant-only loss. Before optimization
-it validates vocabulary/special-token/context compatibility, tokenizes both
-splits, records supervised-token and retention statistics, and aborts below
-`data.min_retention_ratio`. `data.loss_type: chunked_nll` is explicit in every
-recipe. Packing remains disabled because the custom attention implementation
-does not yet enforce packed-example boundaries.
-
-`sft_run_audit.json` is written before training. `final/` contains the
-lowest-validation-loss checkpoint plus the run audit and data manifest.
-Run the exact preprocessing checks without spending a training run:
+Run preprocessing and compatibility checks without optimization:
 
 ```bash
 python finetune/train_sft.py \
-  --config finetune/configs/sft_instruct_125m.yaml --preflight-only
+  --config finetune/configs/sft_instruct_125m.yaml \
+  --preflight-only
 ```
 
-## Raw code completion
+The trainer requires the tokenizer chat template and its generation markers.
+It applies assistant-only loss, reports retained/supervised tokens, enforces
+the configured minimum retention ratio, validates context and vocabulary
+compatibility, and keeps packing disabled so examples cannot attend across
+packed boundaries.
 
-This optional stage derives prompt/body pairs from the already split code SFT
-data and checks for prompt or pair leakage:
+Before training starts, it writes `sft_run_audit.json`. The promoted `final/`
+directory contains the lowest-validation-loss checkpoint, the run audit, and
+the prepared-data manifest:
+
+```text
+$RESULTS_DIR/runs/<size>/sft_instruct/final/
+$RESULTS_DIR/runs/<size>/sft_code/final/
+```
+
+## Optional raw code completion
+
+Derive completion examples from the already split code-instruction dataset:
 
 ```bash
 make prepare-code-completion SIZE=125m
 make sft-code-completion SIZE=125m
-make eval-code-completion SIZE=125m
 ```
 
-The raw trainer masks prompt tokens, reports truncation/supervision statistics,
-uses token-weighted validation loss, writes recoverable `checkpoint-<step>`
-directories, and promotes `best/` to `final/`. Resume directly with:
+The preparation stage checks prompt and pair leakage. Training masks prompt
+tokens, uses token-weighted validation loss, writes resumable checkpoints, and
+promotes the best validation checkpoint to:
+
+```text
+$RESULTS_DIR/runs/<size>/sft_code_completion/final/
+```
+
+Resume directly:
 
 ```bash
 python finetune/train_code_completion.py \
-  --config finetune/configs/code_completion_125m.yaml --resume
+  --config finetune/configs/code_completion_125m.yaml \
+  --resume
 ```
+
+Evaluate the branch with HumanEval:
+
+```bash
+make eval-code-completion SIZE=125m
+```
+
+HumanEval executes generated code; run it only in an isolated environment.
 
 ## Validation
 
-Run cheap checks before a full training job:
+Run contract and one-step integration tests before a full job:
 
 ```bash
-python -m pytest tests/test_training_args.py tests/test_trl_smoke.py -q
-make test-sft-instruct SIZE=mini
-make test-sft-code SIZE=mini
+python -m pytest \
+  tests/test_sft_data_contract.py \
+  tests/test_training_args.py \
+  tests/test_trl_smoke.py \
+  -q
+```
+
+Validate completed stage artifacts:
+
+```bash
+make test-sft-instruct SIZE=125m
+make test-sft-code SIZE=125m
 ```

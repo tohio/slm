@@ -1,23 +1,50 @@
-# pretrain
+# Pretraining
 
-## Purpose
+This directory converts the validated corpus to memory-mapped token arrays and
+trains a base SLM model from scratch.
 
-Base-model pretraining for SLM. This folder owns corpus tokenization, memory-mapped datasets, base training, checkpoint resume, and smoke generation.
+## Contents
 
-- `pretrain/data/tokenize_data.py` — validated JSONL to tokenized `.bin`
-- `pretrain/data/dataset.py` — memory-mapped train/val dataset
-- `pretrain/train.py` — Hugging Face Trainer pretraining entry point
-- `pretrain/configs/` — size-specific base training configs
+| Path | Purpose |
+|---|---|
+| `data/tokenize_data.py` | Encode validated JSONL with the run tokenizer |
+| `data/dataset.py` | Read fixed-length windows from memory-mapped token arrays |
+| `train.py` | Build the model, run causal-language-model training, resume, and save |
+| `configs/gpt_*.yaml` | Size-specific model and optimization recipes |
 
-Post-training is handled by `finetune/` and `alignment/`.
+Post-training branches are owned by `finetune/` and `alignment/`.
 
-## How It Fits In
+## Data contract
 
-Pretraining consumes validated, tokenized corpus artifacts and produces the
-base checkpoint used by every post-training branch; see
-[Architecture](../docs/ARCHITECTURE.md).
+Tokenization reads:
 
-## Configs
+```text
+$DATA_DIR/runs/<size>/validated/train.jsonl
+$DATA_DIR/runs/<size>/validated/val.jsonl
+$DATA_DIR/runs/<size>/tokenizer/slm_tokenizer.json
+```
+
+It writes:
+
+```text
+$DATA_DIR/runs/<size>/tokenized/train.bin
+$DATA_DIR/runs/<size>/tokenized/train.json
+$DATA_DIR/runs/<size>/tokenized/val.bin
+$DATA_DIR/runs/<size>/tokenized/val.json
+```
+
+The JSON sidecars record the input digest, tokenizer fingerprint, binary
+format, and realized source/document/token counts. Training requires those
+sidecars and rejects a tokenizer that does not match the tokenized corpus.
+The train/validation split is created by curation; pretraining does not split
+documents again.
+
+`dataset.py` memory maps the flat token arrays and returns fixed-length causal
+language-model windows without loading the entire corpus into memory.
+
+## Configuration
+
+Available profiles:
 
 ```text
 pretrain/configs/gpt_smoke.yaml
@@ -27,102 +54,111 @@ pretrain/configs/gpt_350m.yaml
 pretrain/configs/gpt_1b.yaml
 ```
 
-Generate/update configs for the current hardware:
+Generate the selected recipe on the target training host:
 
 ```bash
 make config-gen-pretrain SIZE=125m GPUS=1
+```
+
+To generate pretraining, SFT, and DPO recipes together:
+
+```bash
 make config-gen SIZE=125m GPUS=1
 ```
 
-## Inputs
+Configuration generation uses the selected model size, GPU type/count, VRAM
+policy, and effective-batch targets. Inspect the resulting YAML before
+starting an expensive run.
 
-Tokenization reads:
+## Usage
 
-```text
-data/runs/<size>/validated/train.jsonl
-data/runs/<size>/validated/val.jsonl
-data/runs/<size>/tokenizer/
-```
-
-Training reads:
-
-```text
-data/runs/<size>/tokenized/train.bin
-data/runs/<size>/tokenized/val.bin
-data/runs/<size>/tokenized/train.json
-data/runs/<size>/tokenized/val.json
-```
-
-`train.json` and `val.json` store input SHA-256, tokenizer fingerprint, binary
-format version, and realized per-source document/token counts. Tokenization is
-ordered and reproducible; stale derived binaries are rebuilt automatically.
-The dataset reader requires these sidecars.
-
-## Outputs
-
-```text
-data/runs/<size>/tokenized/train.bin
-data/runs/<size>/tokenized/val.bin
-results/runs/<size>/pretrain/checkpoints/
-results/runs/<size>/pretrain/final
-```
-
-## Commands
-
-Tokenize:
+Encode and verify the corpus:
 
 ```bash
 make tokenize SIZE=125m
 ```
 
-Train:
+Equivalent direct command:
 
 ```bash
-make pretrain-mini SIZE=mini GPUS=1
+python pretrain/data/tokenize_data.py \
+  --size 125m \
+  --chunk-size 256 \
+  --verify
+```
+
+Before training, activate the tokenizer associated with this size and data
+run:
+
+```bash
+make restore-size-tokenizer SIZE=125m
+```
+
+Start or resume pretraining:
+
+```bash
 make pretrain SIZE=125m GPUS=1
 make pretrain-resume SIZE=125m GPUS=1
 ```
 
-Smoke generation:
+The bounded architecture/data rehearsal uses the mini recipe:
 
 ```bash
-make pretrain-smoke SIZE=125m
-make smoke-gen SIZE=125m
+make pretrain-mini SIZE=mini GPUS=1
 ```
 
-Before SFT:
+Direct invocation:
+
+```bash
+accelerate launch \
+  pretrain/train.py \
+  --config pretrain/configs/gpt_125m.yaml
+
+accelerate launch \
+  pretrain/train.py \
+  --config pretrain/configs/gpt_125m.yaml \
+  --resume
+```
+
+## Outputs and resume
+
+Checkpoints and the promoted base model are stored at:
+
+```text
+$RESULTS_DIR/runs/<size>/pretrain/checkpoints/
+$RESULTS_DIR/runs/<size>/pretrain/final/
+```
+
+`--resume` selects the latest compatible checkpoint in the run directory.
+The final checkpoint is the parent of instruct SFT.
+
+Before using chat/control tokens in post-training, reinitialize their embedding
+rows in the final base checkpoint:
 
 ```bash
 make reinit-embeds SIZE=125m
 ```
 
-Direct calls:
+Run the base generation smoke check after a completed pretraining run:
 
 ```bash
-python pretrain/data/tokenize_data.py --size 125m --verify
-accelerate launch pretrain/train.py --config pretrain/configs/gpt_125m.yaml
-python pretrain/train.py --config pretrain/configs/gpt_125m.yaml --resume
+make smoke-gen SIZE=125m
 ```
 
-## Dataset behavior
+## Validation
 
-`dataset.py` memory maps flat token arrays and slices fixed-length windows for causal LM training.
-
-The train/val split is created before tokenization by the curator blend stage. Pretraining does not create its own runtime split.
-
-## Checkpoint contract
-
-The final base checkpoint is:
-
-```text
-results/runs/<size>/pretrain/final
-```
-
-This checkpoint is the parent for instruct SFT.
-
-## Tests
+Run the architecture and training-contract tests before a paid run:
 
 ```bash
-make test-training SIZE=mini
+make test-model
+make test-training-args
+```
+
+Validate a completed pretraining artifact:
+
+```bash
 make test-training SIZE=125m
 ```
+
+The artifact test expects an existing checkpoint; it is not a substitute for
+pretraining and does not launch another full run.

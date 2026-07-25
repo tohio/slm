@@ -1,115 +1,87 @@
-# scripts
+# Utility Scripts
 
-## Purpose
+This directory contains diagnostics and recovery helpers that span pipeline
+stages. Production logic owned by one stage belongs in that stage's directory.
 
-Stage-neutral utility and diagnostic scripts.
+## Contents
 
-Stage-owned scripts should stay in their stage folder. This folder is for helpers used across stages or diagnostics that intentionally sit outside the main pipeline.
+| File | Purpose |
+|---|---|
+| `sanity_train.py` | Known-good synthetic/Hugging Face training diagnostic |
+| `reinit_special_embeds.py` | Reinitialize chat/control embedding rows before SFT |
+| `run_lm_eval.py` | Register the local architecture and invoke lm-evaluation-harness |
+| `pretrain_hf_125m.py` | Standalone 125M pretraining diagnostic on a Hub dataset |
+| `sft_model_comparison.py` | Controlled SmolLM2/SLM response-to-SFT comparison |
 
-## How It Fits In
+## Training diagnostic
 
-These utilities diagnose or support multiple stages without owning a pipeline
-artifact; see [Architecture](../docs/ARCHITECTURE.md).
-
-## Files
-
-```text
-scripts/
-├── pretrain_hf_125m.py
-├── reinit_special_embeds.py
-├── run_lm_eval.py
-├── sanity_train.py
-├── sft_model_comparison.py
-└── README.md
-```
-
----
-
-## `sanity_train.py`
-
-Known-good training diagnostic using a simple Hugging Face data path. Use it to separate model/trainer issues from curation-data issues.
-
-Make targets:
+`sanity_train.py` isolates model/trainer behavior from the curated-data path.
+It can create a small synthetic run or save a diagnostic checkpoint.
 
 ```bash
-make sanity-train
-make sanity-train-small
 make sanity-train-tiny
+make sanity-train-small
+make sanity-train
+```
+
+Save the selected diagnostic output:
+
+```bash
 make sanity-train-save SANITY_SIZE=tiny
 ```
 
 Direct examples:
 
 ```bash
-python scripts/sanity_train.py --arch 125m --target-tokens 2500000000
-python scripts/sanity_train.py --arch mini --target-tokens 50000000 --save
+python scripts/sanity_train.py \
+  --arch mini \
+  --target-tokens 50000000
+
+python scripts/sanity_train.py \
+  --arch 125m \
+  --target-tokens 2500000000 \
+  --save
 ```
 
-Useful options:
+The script exposes architecture, target-token, batch, learning-rate, warmup,
+logging/evaluation cadence, scratch-directory, save, and token-reuse controls.
+It is diagnostic evidence only; it does not create a pipeline pretraining
+checkpoint.
 
-```text
---arch
---target-tokens
---batch-size
---lr
---warmup-steps
---log-every
---eval-every
---scratch-dir
---save
---reuse-tokens
-```
+## Special-token embedding initialization
 
----
-
-## `reinit_special_embeds.py`
-
-Reinitializes chat-template special-token embeddings before SFT.
-
-Normal use:
+Run after base pretraining and before instruct SFT:
 
 ```bash
 make reinit-embeds SIZE=125m
 ```
 
-Direct use:
+The default source and destination are the same final base checkpoint:
+
+```text
+$RESULTS_DIR/runs/<size>/pretrain/final/
+```
+
+Use explicit paths for recovery:
 
 ```bash
-python scripts/reinit_special_embeds.py --size 125m
 python scripts/reinit_special_embeds.py \
   --src results/runs/125m/pretrain/checkpoint-152000 \
   --dst results/runs/125m/pretrain/final
 ```
 
-Options:
+The script edits only the configured chat/control embedding rows and validates
+the result. It uses direct safetensors I/O to preserve the checkpoint layout.
 
-```text
---size
---src
---dst
---no-backup
-```
+## Evaluation wrapper
 
-Default input/output:
-
-```text
-input/output  results/runs/<size>/pretrain/final
-```
-
-The script uses direct safetensors I/O and avoids `SLMForCausalLM.from_pretrained()` / `save_pretrained()` for checkpoint safety.
-
----
-
-## `run_lm_eval.py`
-
-Wrapper for lm-evaluation-harness with the local SLM architecture pre-registered.
-
-Example:
+Normal evaluation should use the Make targets or `eval/eval.py`. The lower
+level wrapper is useful when invoking harness-specific options directly:
 
 ```bash
 python scripts/run_lm_eval.py \
   --model hf \
-  --model_args pretrained=results/runs/125m/sft_code/final,dtype=bfloat16 \
+  --model_args "pretrained=results/runs/125m/sft_code/final,dtype=bfloat16" \
   --tasks humaneval \
   --num_fewshot 0 \
   --batch_size 1 \
@@ -119,47 +91,63 @@ python scripts/run_lm_eval.py \
   --limit 5
 ```
 
-Prefer the Makefile eval targets for normal use:
+HumanEval executes generated code; run it only in an isolated environment.
+
+## Standalone 125M pretraining path
+
+`pretrain_hf_125m.py` downloads a selected text dataset, creates an isolated
+125M run, and invokes tokenizer/tokenization/pretraining commands. Use it to
+distinguish trainer/model failures from curator or validation failures.
+
+Inspect its required safeguards and defaults before running:
 
 ```bash
-make eval-base SIZE=125m
-make eval-instruct SIZE=125m
-make eval-chat SIZE=125m
-make eval-code SIZE=125m
+python scripts/pretrain_hf_125m.py --help
 ```
 
----
+This path is not part of the normal stage graph and must not overwrite an
+existing run unless the explicit replacement/backup options are supplied.
 
-## `pretrain_hf_125m.py`
+## Controlled SFT comparison
 
-Diagnostic pretraining path that uses a Hugging Face dataset with the 125m architecture. It is useful for validating trainer behavior independently from the full curation pipeline.
+The comparison harness evaluates whether the local 125M base model is a valid
+candidate and how it responds to the same bounded SFT experiment as
+SmolLM2-135M.
 
----
-
-## `sft_model_comparison.py`
-
-Fail-fast comparison of SmolLM2-135M and a native SLM-125M export. It checks
-checkpoint integrity, prompt sensitivity, and cached/uncached parity before an
-optional controlled completion-only SFT run.
+First create the native base artifact and run preflight:
 
 ```bash
 make export-base-local SIZE=125m
 make compare-sft-preflight
+```
+
+Then run the bounded comparison:
+
+```bash
 make compare-sft
 ```
 
-The harness uses `trust_remote_code=False` for both models. It owns tokenization
-and labels so both trainers receive the same selected record identities without
-silent preprocessing drops. Tokenizer-specific token totals are reported.
+Direct invocation:
 
----
+```bash
+python scripts/sft_model_comparison.py \
+  --tohio-model results/exports/125m/base \
+  --train-examples 32 \
+  --eval-examples 32 \
+  --max-steps 60 \
+  --output-dir results/diagnostics/sft-comparison
+```
 
-## Adding scripts
+The harness performs checkpoint integrity, prompt-sensitivity, and cache-parity
+checks; selects one common set of pinned records; builds labels itself; and
+reports tokenizer-specific exposure and evaluation outputs. Use
+`--preflight-only` to stop before dataset selection and training.
 
-Scripts in this folder should be:
+## Conventions
 
-- stage-neutral diagnostics
-- helpers used across multiple stages
-- one-off recovery utilities with clear comments
-
-Stage-specific production scripts belong in the owning stage folder.
+- Keep stage production commands with their owning stage.
+- Make diagnostics fail loudly instead of repairing inputs silently.
+- Require explicit paths or opt-in flags for operations that replace
+  checkpoints or prepared data.
+- Write reusable results under `$RESULTS_DIR`; use scratch storage only for
+  disposable intermediates.

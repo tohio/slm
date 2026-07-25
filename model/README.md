@@ -1,91 +1,108 @@
-# model
+# Model
 
 ## Purpose
 
-Decoder-only Transformer implementation for SLM.
+`model/` implements the train-time SLM decoder architecture. It owns model
+construction, causal language-model loss, attention masks, RoPE, grouped-query
+attention, KV-cache behavior, and Hugging Face generation integration. Training
+configuration, data loading, and native export live in their respective stages.
 
-- `model/config.py` — `SLMConfig`
-- `model/model.py` — `SLMModel` and `SLMForCausalLM`
-- `model/block.py` — decoder block
-- `model/attention.py` — GQA attention and RoPE
-- `model/mlp.py` — SwiGLU MLP
-- `model/norm.py` — RMSNorm
+## Contents
+
+```text
+model/
+├── attention.py   RoPE and grouped-query self-attention
+├── block.py       pre-normalized decoder block
+├── config.py      SLMConfig and predefined model profiles
+├── mlp.py         SwiGLU feed-forward network
+├── model.py       SLMModel and SLMForCausalLM
+└── norm.py        RMSNorm
+```
 
 ## How It Fits In
 
-Training stages use this implementation directly. `export/` converts final
-checkpoints to an equivalent native Transformers package for distribution; see
-[Architecture](../docs/ARCHITECTURE.md).
+Pretraining constructs `SLMForCausalLM` from the selected YAML profile. SFT and
+DPO reload the resulting checkpoints through the same class. Evaluation and
+local inference register `SLMConfig` with `AutoModelForCausalLM`. The export
+stage maps the compatible weights and configuration into a native
+`LlamaForCausalLM` artifact.
 
 ## Architecture
 
-| Component | Choice |
+| Component | Implementation |
 |---|---|
-| Model type | dense decoder-only causal LM |
-| Position encoding | RoPE |
+| Objective | decoder-only causal language modeling |
+| Decoder | pre-norm attention and MLP residual blocks |
+| Position encoding | RoPE, computed in float32 and shared across layers |
+| Attention | PyTorch SDPA with grouped-query attention |
 | Normalization | RMSNorm |
-| Block style | pre-norm with residual connections |
-| MLP | SwiGLU |
-| Attention | grouped-query attention |
-| Bias | none |
-| Embeddings | tied input/output embeddings |
-| Cache | generation KV cache support |
+| Feed-forward network | bias-free SwiGLU |
+| Embeddings | tied token embedding and LM-head weights |
+| Generation | Transformers `Cache` support and legacy-cache conversion |
+| Dropout | configurable attention dropout; zero in the supplied profiles |
 
-## Configured sizes
+The attention layer accepts only the SDPA implementation. CUDA runtime setup
+leaves Flash, memory-efficient, cuDNN, and math SDPA kernels enabled so PyTorch
+can select the valid implementation for each shape and mask.
 
-Counts below are unique trainable parameters; the LM head shares the token
-embedding matrix.
+## Configured Profiles
 
-| Size | Parameters | Layers | Hidden | Q heads | KV heads | Context |
-|---|---:|---:|---:|---:|---:|---:|
-| `mini` | 21.7M | 6 | 384 | 6 | 2 | 1024 |
-| `125m` | 125.3M | 16 | 768 | 12 | 4 | 2048 |
-| `350m` | 351.3M | 27 | 1024 | 16 | 8 | 2048 |
-| `1b` | 1.012B | 21 | 2048 | 32 | 8 | 4096 |
+Counts are unique trainable parameters; tied embeddings are counted once.
 
-Size-specific training configs live in `pretrain/configs/`.
+| Size | Parameters | Layers | Hidden | Intermediate | Q heads | KV heads | Context |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `mini` | 21.7M | 6 | 384 | 1,024 | 6 | 2 | 1,024 |
+| `125m` | 125.3M | 16 | 768 | 2,048 | 12 | 4 | 2,048 |
+| `350m` | 351.3M | 27 | 1,024 | 2,816 | 16 | 8 | 2,048 |
+| `1b` | 1.012B | 21 | 2,048 | 5,632 | 32 | 8 | 4,096 |
 
-## Key classes
+`pretrain/configs/` is the training source of truth for complete model
+profiles. `SLM_125M`, `SLM_350M`, and `SLM_1B` in `config.py` provide matching
+programmatic defaults.
 
-- `SLMConfig` extends `transformers.PretrainedConfig`.
-- `SLMModel` is the internal decoder stack and is a plain `nn.Module`.
-- `SLMForCausalLM` is the Hugging Face `PreTrainedModel` wrapper used for training, export, inference, and serving.
+## API
 
-Use `AutoModelForCausalLM`, not `AutoModel`, for exported checkpoints.
-
-## Attention
-
-`attention.py` implements grouped-query attention with RoPE.
-
-RoPE caches are rebuilt lazily in float32 and are not persisted in checkpoints. This avoids stale or low-precision RoPE buffers when loading or casting models.
-
-## Export
-
-Training checkpoints use the in-repository `SLMConfig` and
-`SLMForCausalLM`. The export stage converts them to the equivalent native
-Transformers Llama configuration and state-dict contract. Published models
-therefore load without repository code:
+Construct a model directly:
 
 ```python
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from model import SLMConfig, SLMForCausalLM
 
-model_id = "tohio/slm-125m-chat"
-
-tokenizer = AutoTokenizer.from_pretrained(model_id)
-model = AutoModelForCausalLM.from_pretrained(model_id)
+config = SLMConfig(
+    vocab_size=32_000,
+    hidden_size=768,
+    intermediate_size=2_048,
+    num_hidden_layers=16,
+    num_attention_heads=12,
+    num_key_value_heads=4,
+    max_position_embeddings=2_048,
+    rope_theta=500_000.0,
+)
+model = SLMForCausalLM(config)
 ```
 
-The exported `config.json` must advertise:
+Load a local SLM checkpoint:
 
-```json
-{
-  "model_type": "llama",
-  "architectures": ["LlamaForCausalLM"]
-}
+```python
+from transformers import AutoConfig, AutoModelForCausalLM
+from model import SLMConfig, SLMForCausalLM
+
+AutoConfig.register("slm", SLMConfig)
+AutoModelForCausalLM.register(SLMConfig, SLMForCausalLM)
+
+model = AutoModelForCausalLM.from_pretrained(
+    "results/runs/125m/pretrain/final"
+)
 ```
 
-It must not contain `auto_map`, and the Hub repository must not contain
-architecture Python files.
+## Constraints
+
+- `hidden_size` must divide evenly by `num_attention_heads`.
+- `num_attention_heads` must divide evenly by `num_key_value_heads`.
+- Attention head dimensions must be even for RoPE.
+- Context scaling is not implemented; `rope_scaling` must remain `None`.
+- Gradient checkpointing disables the generation cache while training.
+- `SLMModel` is the internal `nn.Module`; use `SLMForCausalLM` for training,
+  saving, loading, and generation.
 
 ## Tests
 
@@ -93,4 +110,6 @@ architecture Python files.
 make test-model
 ```
 
-Model tests cover architecture construction, masks, cache behavior, and parameterization.
+The model suite covers construction, parameter counts, causal and padding
+masks, cached decoding, generation parity, validation errors, and checkpoint
+round trips.

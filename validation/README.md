@@ -1,128 +1,157 @@
-# validation
+# Validation
 
 ## Purpose
 
-Post-curation quality validation for train/val JSONL splits.
+`validation/` applies post-curation document checks to the blended pretraining
+train and validation splits. It removes structurally broken prose, excessive
+line repetition, and high-perplexity prose while preserving code, math, and
+other non-prose sources for which English-prose heuristics are inappropriate.
 
-- validation filtering after curation
-- one canonical source-aware validation path
-- KenLM perplexity filtering
-- validated train/val outputs
-- RUN_ID artifact integration
+It does not load sources, deduplicate documents, train the tokenizer, or
+tokenize the corpus.
 
-The curator does heuristic filtering first. This stage catches lower-quality prose that still passes curation.
-
-## How It Fits In
-
-Validation consumes curator output and produces the only accepted input for
-tokenizer training and corpus tokenization; see
-[Architecture](../docs/ARCHITECTURE.md).
-
-## Key files
+## Contents
 
 ```text
 validation/
 └── scripts/
-    └── validate.py
+    └── validate.py   split validation, reporting, and completion manifest
 ```
 
-## Inputs
+## How It Fits In
 
-Default inputs:
+Input:
 
 ```text
-data/runs/<size>/curated/train.jsonl
-data/runs/<size>/curated/val.jsonl
+$DATA_DIR/runs/<size>/curated/train.jsonl
+$DATA_DIR/runs/<size>/curated/val.jsonl
 ```
 
-Optional model inputs:
+Output:
 
 ```text
-data/models/en.arpa.bin
-data/models/lid.176.ftz
+$DATA_DIR/runs/<size>/validated/train.jsonl
+$DATA_DIR/runs/<size>/validated/val.jsonl
+$DATA_DIR/runs/<size>/validated/validation_stats.json
+$DATA_DIR/runs/<size>/validated/_SUCCESS.json
 ```
 
-`en.arpa.bin` is used for KenLM perplexity filtering. `lid.176.ftz` is used for language detection.
+Tokenizer training consumes the validated training split. Binary tokenization
+consumes both validated splits.
 
-## Outputs
+## Validation Rules
 
-```text
-data/runs/<size>/validated/train.jsonl
-data/runs/<size>/validated/val.jsonl
-data/runs/<size>/metadata/
-```
+| Rule | Applies to | Rejection condition |
+|---|---|---|
+| Terminal punctuation | prose-like sources | no non-empty line ends in `.`, `!`, `?`, `'`, or `"` |
+| Repeated-line ratio | every source | duplicate non-empty lines exceed 30% when the record has at least four lines |
+| KenLM perplexity | prose-like sources | perplexity exceeds the configured or derived threshold |
 
-## Commands
+Code, configured synthetic sources, Nemotron math, and Nemotron specialized
+records bypass terminal-punctuation and KenLM checks. They still receive the
+repeated-line check.
 
-Install validation prerequisites:
+When no explicit perplexity threshold is supplied, the validator:
+
+1. reads up to `--perplexity-sample-size` prose-like training documents;
+2. scores the first 1,000 characters with the configured KenLM model;
+3. selects the 90th-percentile score;
+4. applies that same threshold to train and validation.
+
+`--no-perplexity` records an explicit no-KenLM run. It is not an automatic
+fallback for a missing model.
+
+## Prerequisites
+
+Install the KenLM bindings and download the English model:
 
 ```bash
 make install-kenlm
-make download-fasttext-model DATA_DIR=/data/slm/data
 make download-kenlm-model DATA_DIR=/data/slm/data
 ```
 
-Run validation:
+The default model path is:
+
+```text
+$DATA_DIR/models/en.arpa.bin
+```
+
+## Usage
+
+Validate a size-scoped curated corpus:
 
 ```bash
 make validate SIZE=125m
 ```
 
-Upload through the RUN_ID artifact flow:
+Use a fixed threshold:
 
 ```bash
-make artifacts-upload SIZE=125m ARTIFACT_STAGES="validated,metadata"
+python validation/scripts/validate.py \
+  --size 125m \
+  --perplexity-threshold 800
 ```
 
-Convenience alias for the same RUN_ID artifact flow:
+Disable perplexity filtering explicitly:
+
+```bash
+python validation/scripts/validate.py \
+  --size 125m \
+  --no-perplexity
+```
+
+Override every path:
+
+```bash
+python validation/scripts/validate.py \
+  --size 125m \
+  --train /data/slm/data/runs/125m/curated/train.jsonl \
+  --val /data/slm/data/runs/125m/curated/val.jsonl \
+  --train-output /data/slm/data/runs/125m/validated/train.jsonl \
+  --val-output /data/slm/data/runs/125m/validated/val.jsonl
+```
+
+The validator reuses an existing output only when its completion manifest
+matches the input files, implementation, KenLM selection, threshold policy,
+and current outputs.
+
+## Artifact Transfer
+
+Upload validated data and metadata:
 
 ```bash
 make validate-upload SIZE=125m
 ```
 
-Direct calls:
+Equivalent explicit stage selection:
 
 ```bash
-python validation/scripts/validate.py --size 125m
-python validation/scripts/validate.py --size 125m --perplexity-threshold 800
-python validation/scripts/validate.py --size 125m --no-perplexity
+make artifacts-upload \
+  SIZE=125m \
+  ARTIFACT_STAGES="validated,metadata"
 ```
-
-Override input/output paths:
-
-```bash
-python validation/scripts/validate.py \
-  --train data/runs/125m/curated/train.jsonl \
-  --val data/runs/125m/curated/val.jsonl \
-  --train-output data/runs/125m/validated/train.jsonl \
-  --val-output data/runs/125m/validated/val.jsonl
-```
-
-## Filters
-
-Validation applies source-aware prose structure and repetition checks, plus
-KenLM perplexity filtering. Language identification is enforced earlier by the
-curator's quality stage.
-
-| Filter | Purpose |
-|---|---|
-| terminal punctuation / prose structure | catches truncated or malformed prose |
-| repeated lines | catches boilerplate and repeated text |
-| KenLM perplexity | removes gibberish, spam, and unnatural text |
-
-Code, synthetic/template-like, math, and specialized sources bypass prose-only heuristics where those heuristics would incorrectly reject useful non-prose records.
-
-## Perplexity threshold
-
-If `--perplexity-threshold` is not provided, validation samples train records and computes an automatic threshold. The same threshold is reused for val so train and val remain comparable.
-
-KenLM is required by default. `--no-perplexity` is an explicit alternate
-contract for debugging and is recorded in the completion manifest; missing
-KenLM dependencies never silently disable filtering.
 
 ## Tests
 
+Validate mini artifacts:
+
 ```bash
 make test-validate SIZE=mini
+```
+
+Validate a completed full-size artifact:
+
+```bash
 make test-validate SIZE=125m
 ```
+
+The artifact test requires the expected files and fails rather than skipping
+when they are absent.
+
+## Gotchas
+
+- The automatic threshold is derived from train only and reused for
+  validation; do not calculate independent split thresholds.
+- Changing the KenLM model or threshold changes the stage contract.
+- `validation_stats.json` contains measured rejection counts and the threshold
+  used; inspect it before tokenizer training.

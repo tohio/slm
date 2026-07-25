@@ -1,157 +1,119 @@
-# tokenizer
+# Tokenizer
 
-## Purpose
+This directory trains and validates the size-specific tokenizer used by
+pretraining, SFT, DPO, evaluation, export, and inference.
 
-BPE tokenizer training and tokenizer validation for SLM.
+## Contents
 
-- tokenizer training in `train_tokenizer.py`
-- project special-token definitions
-- Hugging Face tokenizer config output
-- tokenizer validation checks in `test_tokenizer.py`
+| File | Purpose |
+|---|---|
+| `train_tokenizer.py` | Train the byte-level BPE tokenizer and write its manifest |
+| `test_tokenizer.py` | Validate vocabulary, special tokens, round trips, fertility, and chat rendering |
 
-Corpus tokenization for pretraining lives in `pretrain/data/tokenize_data.py`.
+Corpus tokenization is a separate pretraining-data stage implemented by
+`pretrain/data/tokenize_data.py`.
 
-## How It Fits In
+## Input and output
 
-The tokenizer is trained from validated data and reused unchanged by
-pretraining, post-training, evaluation, export, inference, and serving; see
-[Architecture](../docs/ARCHITECTURE.md).
-
-## Key files
+The default input is the validated training split:
 
 ```text
-tokenizer/
-├── train_tokenizer.py
-├── test_tokenizer.py
-└── README.md
+$DATA_DIR/runs/<size>/validated/train.jsonl
 ```
 
-## Inputs
-
-Default training input:
+The tokenizer and its completion manifest are written to:
 
 ```text
-data/runs/<size>/validated/train.jsonl
+$DATA_DIR/runs/<size>/tokenizer/
 ```
 
-Optional direct input:
+The directory contains the raw BPE tokenizer, Hugging Face tokenizer files,
+vocabulary and merge files, the chat template, special-token metadata, and the
+stage manifest. A matching manifest allows an unchanged tokenizer build to be
+reused; changed input or tokenizer settings produce a new build.
 
-```bash
-python tokenizer/train_tokenizer.py --size 125m --input data/runs/125m/validated/train.jsonl
-```
+## Tokenizer contract
 
-## Outputs
+The tokenizer uses:
 
-Default output directory:
+- NFC normalization;
+- byte-level BPE pre-tokenization with `add_prefix_space=False`;
+- a default vocabulary size of 32,000;
+- a default minimum token frequency of 2;
+- no automatic BOS/EOS post-processor.
 
-```text
-data/runs/<size>/tokenizer/
-```
+The first four vocabulary entries are fixed:
 
-Expected files:
+| ID | Token |
+|---:|---|
+| 0 | `<PAD>` |
+| 1 | `<UNK>` |
+| 2 | `<BOS>` |
+| 3 | `<EOS>` |
 
-```text
-slm_tokenizer.json
-tokenizer.json
-tokenizer_config.json
-vocab.json
-merges.txt
-special_tokens.json
-special_tokens_map.json
-chat_template.jinja
-```
+IDs 4–15 are the chat, code, tool, reasoning, and context delimiters defined in
+`train_tokenizer.py`. Runtime code resolves these tokens by string; changing
+their spelling or order is a pipeline-wide compatibility change.
 
-Export copies the required tokenizer files into the checkpoint root before pushing to Hugging Face.
+The saved chat template adds one BOS at the start of a conversation, role and
+end-of-turn delimiters around each message, and EOS on assistant turns.
+Assistant content is wrapped in Jinja generation markers so TRL can construct
+assistant-only loss masks during SFT.
 
-## Special tokens
+## Usage
 
-The four structural tokens are fixed first:
-
-```text
-<PAD>
-<UNK>
-<BOS>
-<EOS>
-```
-
-Additional special tokens:
-
-```text
-<|system|>
-<|user|>
-<|assistant|>
-<|endofturn|>
-<|code|>
-<|endofcode|>
-<|tool|>
-<|endoftool|>
-<|reasoning|>
-<|endofreasoning|>
-<|context|>
-<|endofcontext|>
-```
-
-Training code can assert the special-token layout. Runtime code resolves token IDs from the loaded tokenizer instead of importing hard-coded IDs.
-
-## Commands
-
-Train tokenizer:
+Train and validate a tokenizer:
 
 ```bash
 make tokenizer SIZE=125m
-```
-
-Validate tokenizer:
-
-```bash
 make tokenizer-test SIZE=125m
-make test-tokenizer SIZE=125m
 ```
 
-Upload tokenizer artifacts:
+Equivalent direct commands:
 
 ```bash
-make artifacts-upload SIZE=125m ARTIFACT_STAGES="tokenizer,metadata"
-```
+python tokenizer/train_tokenizer.py \
+  --size 125m \
+  --vocab-size 32000 \
+  --min-frequency 2
 
-Direct calls:
-
-```bash
-python tokenizer/train_tokenizer.py --size 125m
-python tokenizer/train_tokenizer.py --size 125m --vocab-size 32000
-python tokenizer/train_tokenizer.py --size 125m --min-frequency 2
 python tokenizer/test_tokenizer.py --size 125m
 ```
 
-## Chat template
+Use explicit paths when testing a nonstandard corpus or output directory:
 
-The tokenizer saves the chat template used by SFT, DPO, inference, and serving.
+```bash
+python tokenizer/train_tokenizer.py \
+  --size 125m \
+  --input /data/slm/data/runs/125m/validated/train.jsonl \
+  --output /tmp/slm-tokenizer
 
-The template includes assistant-generation markers required by TRL answer-only loss masking. Any chat-template change requires tokenizer, SFT, DPO, inference, export, and serving compatibility review.
+python tokenizer/test_tokenizer.py \
+  --size 125m \
+  --tokenizer /tmp/slm-tokenizer
+```
 
-## BOS/EOS policy
-
-The tokenizer does not automatically inject BOS/EOS through a post-processor. Training and inference code add those tokens explicitly where appropriate.
-
-This avoids corrupting chat-formatted examples with unexpected special tokens.
-
-## Pretraining tokenization
-
-After tokenizer training, pretraining tokenization is run from the pretrain folder:
+After training the tokenizer, encode the validated corpus for pretraining:
 
 ```bash
 make tokenize SIZE=125m
 ```
 
-Direct call:
+When data preparation and training use different hosts, transfer the tokenizer
+together with tokenized data and metadata:
 
 ```bash
-python pretrain/data/tokenize_data.py --size 125m --chunk-size 256 --verify
+make artifacts-upload \
+  SIZE=125m \
+  ARTIFACT_STAGES="tokenized,tokenizer,metadata"
 ```
 
-Tokenization writes:
+## Compatibility rules
 
-```text
-data/runs/<size>/tokenized/train.bin
-data/runs/<size>/tokenized/val.bin
-```
+- Do not substitute a tokenizer from another size or data run.
+- Keep the tokenizer fingerprint recorded by corpus tokenization with the
+  corresponding `.bin` files.
+- Synchronize the selected size's tokenizer into the repository runtime path
+  with `make restore-size-tokenizer SIZE=<size>` before model training.
+- Review SFT, DPO, inference, export, and serving whenever the chat template or
+  special-token set changes.

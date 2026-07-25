@@ -1,203 +1,252 @@
-# curator
+# Curation
 
 ## Purpose
 
-Data curation for SLM pretraining. This folder owns source loading, filtering, deduplication, blending, sampling, and RUN_ID artifact transfer.
+`curator/` builds the pretraining corpus. It loads configured sources, applies
+source-aware quality filters, performs deterministic exact and fuzzy
+deduplication, allocates source budgets, and produces shuffled train and
+validation JSONL files. Post-curation perplexity validation, tokenizer
+training, and binary tokenization are separate stages.
 
-- source loaders in `curator/sources/`
-- heuristic quality filters in `curator/filters/quality.py`
-- exact and fuzzy dedup in `curator/filters/dedup.py`
-- curation orchestration in `curator/scripts/curate.py`
-- source sampling in `curator/scripts/sample_source.py`
-- artifact upload/download in `curator/scripts/upload_s3.py`
-
-Validation, tokenizer training, tokenization, and model training live in other folders.
-
-## How It Fits In
-
-Curator is the first pipeline stage. It produces shuffled train/validation
-JSONL for `validation/`; see [Architecture](../docs/ARCHITECTURE.md).
-
-## Key files
+## Contents
 
 ```text
 curator/
-├── state.py
-├── filters/
-│   ├── quality.py
-│   └── dedup.py
+├── filters/              quality, PII, and deduplication logic
 ├── scripts/
-│   ├── curate.py
-│   ├── sample_source.py
-│   └── upload_s3.py
-└── sources/
-    └── hf.py
+│   ├── curate.py         curation orchestrator
+│   ├── sample_source.py  inspect stage outputs
+│   └── upload_s3.py      run-scoped artifact transfer
+├── sources/              one loader per concrete data source
+└── state.py              completion manifests and artifact fingerprints
 ```
 
-Shared curation settings live in `config/data_mix.py`. Do not duplicate source percentages, token targets, `CHARS_PER_TOKEN`, or Common Crawl crawl settings in curator code.
+## How It Fits In
 
-## Data flow
+The curator reads the data contract in `config/data_mix.py` and writes:
 
 ```text
-source loaders
-  ↓
-quality filters
-  ↓
-dedup
-  ↓
-blend + train/val split
-  ↓
-data/runs/<size>/curated/train.jsonl
-data/runs/<size>/curated/val.jsonl
-data/runs/<size>/curated/blend_stats.json
+$DATA_DIR/runs/<size>/curated/train.jsonl
+$DATA_DIR/runs/<size>/curated/val.jsonl
 ```
 
-The blend stage samples validation data from the same shuffled distribution as train.
-Every reusable stage directory contains `_SUCCESS.json`. A stage is reused only
-when this manifest matches its inputs, configuration, and output snapshot.
-RUN_ID uploads verify these manifests first and mirror each selected stage, so
-obsolete remote shards cannot survive a replacement upload.
+`validation/` consumes those files. `pretrain/data/tokenize_data.py` later
+measures the authoritative retained token counts; character-derived token
+counts in curation reports are planning estimates.
 
-## Source mix
+## Data Contract
 
-`config/data_mix.py` is the source of truth for top-level percentages, the code
-sub-mix, source-specific caps, overflow order, and per-size token targets.
-Curator reads that module directly, and export uses the same values when
-building model cards.
+`config/data_mix.py` is the single source of truth for:
 
-## Token targets
+- top-level source percentages and the code sub-mix;
+- fixed-supply and supplemental caps;
+- deterministic cross-source deduplication priority;
+- the FineWeb overflow sink;
+- `mini`, 125M, 350M, and 1B corpus targets;
+- validation split fraction and curation constants.
 
-Inspect the current contract without copying values into another document:
+Print the active mix and corpus targets directly from the configuration:
 
 ```bash
 python - <<'PY'
-from config import DATA_MIX, CODE_SUBMIX, TARGET_CONFIGS
+from config.data_mix import CODE_SUBMIX, DATA_MIX, TARGET_CONFIGS
 
-print("data_mix:", {name: item["pct"] for name, item in DATA_MIX.items()})
-print("code_submix:", {name: item["pct"] for name, item in CODE_SUBMIX.items()})
-print("targets:", TARGET_CONFIGS)
+for name, item in DATA_MIX.items():
+    print(f"{name:32} {item['pct']:8.4f}%")
+
+print("\nCode sub-mix")
+for name, item in CODE_SUBMIX.items():
+    print(f"{name:32} {item['pct']:8.4f}%")
+
+print("\nCorpus targets")
+for size, item in TARGET_CONFIGS.items():
+    print(size, item["corpus_tokens"], "tokens", item["epochs"], "epoch(s)")
 PY
 ```
 
-## Commands
+The configured source families include broad and educational web text,
+Wikipedia, books, academic papers, math and specialized technical corpora,
+StackExchange, curated synthetic signals, and a five-source code sub-mix.
+Exact dataset IDs and revisions belong in the configuration and source
+loaders, not a duplicated README table.
 
-Mini run:
+## Pipeline Stages
+
+```text
+download
+  source loader → $DATA_DIR/runs/<size>/raw/<source>/
+
+filter
+  raw source → $DATA_DIR/runs/<size>/filtered/<source>/
+
+dedup
+  filtered source → $DATA_DIR/runs/<size>/filtered/<source>_deduped/
+
+blend
+  all complete dedup outputs → curated/{train,val}.jsonl
+```
+
+Every reusable stage directory contains `_SUCCESS.json`. A stage is reused only
+when its manifest version, implementation/configuration fingerprint, input
+signature, and output signature match. File presence alone is not treated as
+completion.
+
+Exact deduplication runs across sources in `DEDUP_PRIORITY` order so the
+preferred copy is retained. Fuzzy MinHash deduplication runs within each
+eligible source. Template-like synthetic sources skip fuzzy matching but still
+participate in exact deduplication.
+
+The blend stage:
+
+- converts target token shares into character budgets;
+- applies fixed-source and supplemental caps;
+- routes source deficits to the configured overflow sink;
+- stages every source to its effective budget;
+- chooses in-memory or disk-backed shuffling from
+  `SHUFFLE_RAM_BUDGET_GB`;
+- creates the train/validation split from one shuffled population.
+
+## Prerequisites
+
+Set `DATA_DIR` to persistent storage and configure the credentials required by
+the selected sources in `.env`.
+
+```bash
+make setup-data-dir DATA_DIR=/data/slm/data
+source .venv/bin/activate
+make download-fasttext-model DATA_DIR=/data/slm/data
+```
+
+`HF_TOKEN` is required for authenticated or gated Hub sources. Accept each
+enabled dataset's terms before starting a full run. Common Crawl access uses
+AWS region `us-east-1`. `SWH_AUTH_TOKEN` improves source-file retrieval for
+Stack v2-compatible loaders but is not required by the active Stack v1 mix.
+
+## Usage
+
+Bounded pipeline validation:
 
 ```bash
 make curate-mini
 ```
 
-Full curation:
+Full target:
 
 ```bash
 make curate SIZE=125m WORKERS=62
 ```
 
-Stage-specific runs:
+Run individual stages:
 
 ```bash
 make curate-download SIZE=125m
 make curate-filter SIZE=125m WORKERS=62
 make curate-dedup SIZE=125m WORKERS=62
-make curate-blend SIZE=125m
+make curate-blend SIZE=125m WORKERS=62
 ```
 
-Direct calls:
+Run selected sources through download, filter, dedup, and statistics:
 
 ```bash
-python curator/scripts/curate.py --target 125m
-python curator/scripts/curate.py --target mini --mini
-python curator/scripts/curate.py --target 125m --stage download
-python curator/scripts/curate.py --target 125m --sources wikipedia,fineweb_edu
+python curator/scripts/curate.py \
+  --target 125m \
+  --stage all \
+  --sources wikipedia,fineweb_edu \
+  --workers 16
 ```
 
-Hugging Face sources are resolved to immutable dataset commit SHAs before
-loading. `--force` is required to replace legacy or stale raw directories;
-replacement happens only after a new isolated download completes.
+Source-scoped `--stage all` intentionally stops before blend because blending
+requires every configured source.
+
+Rebuild a raw source whose completion manifest does not match:
 
 ```bash
-make curate-download SIZE=125m FORCE=1
-# equivalent direct call:
-python curator/scripts/curate.py --target 125m --stage download --force
+python curator/scripts/curate.py \
+  --target 125m \
+  --stage download \
+  --sources wikipedia \
+  --force
 ```
 
-## Sampling
+The new download is written to an isolated staging directory and promoted only
+after completion.
 
-Use `sample_source.py` to inspect actual records written by a source/stage.
+## Inspection
+
+Print readable records from any stage:
 
 ```bash
-python curator/scripts/sample_source.py --size 125m --stage raw --source wikipedia --limit 10
-python curator/scripts/sample_source.py --size 125m --stage filtered --source wikipedia --limit 10
-python curator/scripts/sample_source.py --size 125m --stage deduped --source wikipedia --limit 10
-python curator/scripts/sample_source.py --size 125m --stage curated --source wikipedia --limit 10
-python curator/scripts/sample_source.py --size 125m --stage validated --source wikipedia --limit 10
+python curator/scripts/sample_source.py \
+  --size 125m \
+  --stage raw \
+  --source wikipedia \
+  --limit 10
 ```
 
-Valid sample stages:
-
-```text
-raw, filtered, deduped, curated, validated
-```
-
-## RUN_ID artifacts
-
-Artifacts are stored by `RUN_ID`, not date.
-
-Local layout:
-
-```text
-data/runs/<size>/RUN_ID
-data/runs/<size>/<stage>/
-```
-
-S3 layout:
-
-```text
-<S3_PREFIX>/<size>/<run_id>/<stage>/
-```
-
-Valid artifact stages:
-
-```text
-raw, curated, validated, tokenized, tokenizer, metadata
-```
-
-Upload:
-
-```bash
-make artifacts-upload SIZE=125m
-make artifacts-upload SIZE=125m RUN_ID=125m-20260629-a8f3c9
-```
-
-Download:
-
-```bash
-make artifacts-download SIZE=125m RUN_ID=125m-20260629-a8f3c9
-```
+`--stage` accepts `raw`, `filtered`, `deduped`, `curated`, or `validated`.
+Use `--random` for deterministic random sampling and `--max-chars` to limit
+record display length.
 
 ## Outputs
 
 ```text
-data/runs/<size>/raw/
-data/runs/<size>/filtered/
-data/runs/<size>/dedup_scratch/
-data/runs/<size>/curated/train.jsonl
-data/runs/<size>/curated/val.jsonl
-data/runs/<size>/curated/blend_stats.json
+$DATA_DIR/runs/<size>/
+├── raw/<source>/
+├── filtered/<source>/
+├── filtered/<source>_deduped/
+├── dedup_scratch/
+└── curated/
+    ├── train.jsonl
+    ├── val.jsonl
+    ├── blend_stats.json
+    └── _SUCCESS.json
 ```
 
-`blend_stats.json` records intended character budgets, initial source
-shortfalls, and unresolved shortfalls. Character-derived token totals are
-explicitly estimates. Authoritative realized token and source counts are in
-`tokenized/train.json` and `tokenized/val.json`.
+`blend_stats.json` records document and character counts, target budgets,
+source deficits, overflow contribution, and validation counts by source.
+
+## Run-Scoped Artifact Transfer
+
+The curator creates:
+
+```text
+$DATA_DIR/runs/<size>/RUN_ID
+```
+
+Artifact storage uses:
+
+```text
+s3://$S3_BUCKET/$S3_PREFIX/<size>/<run_id>/<stage>/
+```
+
+Upload curation outputs:
+
+```bash
+make curate-upload SIZE=125m
+```
+
+Upload or restore an explicit stage set:
+
+```bash
+make artifacts-upload \
+  SIZE=125m \
+  RUN_ID=125m-YYYYMMDD-abcdef \
+  ARTIFACT_STAGES="curated,metadata"
+
+make artifacts-download \
+  SIZE=125m \
+  RUN_ID=125m-YYYYMMDD-abcdef \
+  ARTIFACT_STAGES="curated,metadata"
+```
+
+Downloads require an explicit `RUN_ID`. A restored stage is accepted only when
+its artifact metadata matches the requested run and stage.
 
 ## Gotchas
 
-- Run long curation jobs inside `tmux`.
-- Use persistent storage for `DATA_DIR`.
-- Use `WORKERS` to control parallel curation stages.
-- Generated/template-like sources bypass fuzzy MinHash dedup but still run exact dedup.
-- Exact cross-source dedup retains cleaner/reference sources before broad web
-  sources. Fuzzy MinHash runs within each source and is an LSH probability
-  contract, not a strict Jaccard threshold.
-- Restore artifacts by `RUN_ID`, not date.
+- Full curation is storage- and network-intensive; use persistent storage and
+  a session manager such as `tmux`.
+- `WORKERS` controls filter, dedup, blend, and artifact-transfer parallelism.
+- Do not delete `_SUCCESS.json` while expecting a stage to remain reusable.
+- Do not change `config/data_mix.py` under an existing run ID.
+- Run `make test-curator SIZE=<size>` after curation and before validation.

@@ -1,34 +1,30 @@
-# inference
+# Inference
 
-## Purpose
+This directory provides interactive chat and batch text generation for local
+training checkpoints, local exports, and published SLM models.
 
-Local inference utilities for SLM checkpoints and exported Hub models.
+## Contents
 
-- `inference/chat.py` — interactive chat CLI
-- `inference/generate.py` — batch/raw prompt generation
-- `inference/utils.py` — model/tokenizer loading and special-token resolution
+| File | Purpose |
+|---|---|
+| `chat.py` | Stateful terminal chat with reset, system-prompt, and history controls |
+| `generate.py` | Raw or chat-formatted generation from standard input or a text file |
+| `utils.py` | Model/tokenizer loading and runtime special-token resolution |
 
-Serving through vLLM lives in `serve/`.
-
-## How It Fits In
-
-Inference loads existing local checkpoints or published native exports and
-does not modify them; see [Architecture](../docs/ARCHITECTURE.md).
+For a local training checkpoint, the loader prefers its `tokenizer/`
+subdirectory. For a native export or Hub model, tokenizer files are loaded
+from the model root. Models are placed with Transformers `device_map="auto"`.
 
 ## Model references
 
-Local checkpoints:
-
 ```text
-results/runs/<size>/pretrain/final
-results/runs/<size>/sft_instruct/final
-results/runs/<size>/dpo_chat/final
-results/runs/<size>/sft_code/final
-```
+$RESULTS_DIR/runs/<size>/pretrain/final
+$RESULTS_DIR/runs/<size>/sft_instruct/final
+$RESULTS_DIR/runs/<size>/dpo_chat/final
+$RESULTS_DIR/runs/<size>/sft_code/final
 
-Hub models:
+$EXPORTS_DIR/<size>/<variant>
 
-```text
 tohio/slm-<size>
 tohio/slm-<size>-instruct
 tohio/slm-<size>-chat
@@ -37,19 +33,14 @@ tohio/slm-<size>-code
 
 ## Interactive chat
 
-Local checkpoint:
+Start a local chat checkpoint:
 
 ```bash
-python inference/chat.py --model results/runs/125m/dpo_chat/final
+python inference/chat.py \
+  --model results/runs/125m/dpo_chat/final
 ```
 
-Hub model:
-
-```bash
-python inference/chat.py --model tohio/slm-125m-chat
-```
-
-Custom generation settings:
+Start a published model with custom generation settings:
 
 ```bash
 python inference/chat.py \
@@ -57,71 +48,69 @@ python inference/chat.py \
   --system "You are a concise assistant." \
   --max-new-tokens 256 \
   --temperature 0.7 \
-  --top-p 0.9
+  --top-p 0.9 \
+  --dtype bfloat16
 ```
 
 Interactive commands:
 
-```text
-/help
-/reset
-/system <prompt>
-/history
-/quit
-```
+| Command | Effect |
+|---|---|
+| `/help` | Show commands |
+| `/reset` | Clear conversation history |
+| `/system <prompt>` | Replace the system prompt and reset history |
+| `/history` | Print the current conversation |
+| `/quit` | Exit |
 
-## Batch generation
+## Batch and raw generation
 
-Raw base-model completion:
+Greedy base-model continuation from standard input:
 
 ```bash
-echo "The capital of France is" | python inference/generate.py \
-  --model results/runs/125m/pretrain/final \
-  --max-new-tokens 30 \
-  --greedy
+printf '%s\n' "The capital of France is" |
+  python inference/generate.py \
+    --model results/runs/125m/pretrain/final \
+    --max-new-tokens 30 \
+    --greedy
 ```
 
 Chat-formatted generation:
 
 ```bash
-echo "Explain attention in one sentence." | python inference/generate.py \
-  --model results/runs/125m/dpo_chat/final \
-  --chat \
-  --max-new-tokens 80
+printf '%s\n' "Explain attention in one sentence." |
+  python inference/generate.py \
+    --model results/runs/125m/dpo_chat/final \
+    --chat \
+    --max-new-tokens 80
 ```
 
-File input/output:
+Read one prompt per line and write JSONL completions:
 
 ```bash
 python inference/generate.py \
   --model tohio/slm-125m-chat \
   --input prompts.txt \
   --output completions.jsonl \
-  --chat
+  --chat \
+  --batch-size 4
 ```
 
-Common options:
+Generation options include `--max-new-tokens`, `--temperature`, `--top-p`,
+`--top-k`, `--greedy`, `--batch-size`, `--dtype`, and
+`--repetition-penalty`.
 
-```text
---max-new-tokens
---temperature
---top-p
---top-k
---greedy
---batch-size
---chat
---no-bos
---device
-```
+## Token and prompt behavior
 
-## Token behavior
+- Raw mode prepends BOS by default; `--no-bos` disables it for continuation
+  experiments.
+- `--chat` renders each input as a user message with the tokenizer's saved
+  chat template. It ignores `--no-bos` because the template owns special-token
+  placement.
+- `chat.py` and chat-formatted generation require a tokenizer with a chat
+  template.
+- Runtime stop IDs are resolved from the loaded tokenizer and include EOS and
+  end-of-turn.
+- Use raw mode for the base model. Use `--chat` or `chat.py` for instruct,
+  chat, and code-instruction variants.
 
-- Runtime code resolves token IDs from the loaded tokenizer.
-- Raw completion prepends BOS by default.
-- `--no-bos` disables BOS for continuation-style generation.
-- `--chat` wraps prompts as user messages with the tokenizer chat template.
-- Chat, instruct, and code variants should normally use `--chat` or `chat.py`.
-
-## Serving
-
-Use `serve/` for an OpenAI-compatible vLLM server.
+For multi-user HTTP serving, use the vLLM assets in `serve/`.
