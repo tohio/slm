@@ -8,6 +8,9 @@ Project-level references:
 - [Command Reference](COMMANDS.md) — Make targets, variables, and stage commands.
 - [Disk Setup](DISK_SETUP.md) — persistent storage layout and instance setup.
 - [Hardware Guide](HARDWARE.md) — GPU sizing and training-time estimates.
+- [Testing](TESTING.md) — test layers, stage gates, and artifact requirements.
+- [Troubleshooting](TROUBLESHOOTING.md) — setup, data access, resume, storage,
+  and artifact-transfer diagnostics.
 
 Component guides:
 

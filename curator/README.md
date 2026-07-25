@@ -108,8 +108,8 @@ The blend stage:
 
 ## Prerequisites
 
-Set `DATA_DIR` to persistent storage and configure the credentials required by
-the selected sources in `.env`.
+Set `DATA_DIR` to persistent storage and complete every variable in `.env`
+before starting the pipeline.
 
 ```bash
 make setup-data-dir DATA_DIR=/data/slm/data
@@ -128,9 +128,7 @@ enabled dataset's terms before starting a full run:
   — mathematical pretraining corpus.
 
 Sign in with the Hugging Face account associated with `HF_TOKEN` before
-accepting access. Common Crawl access uses AWS region `us-east-1`.
-`SWH_AUTH_TOKEN` improves source-file retrieval for Stack v2-compatible
-loaders but is not required by the active Stack v1 mix.
+accepting access.
 
 ## Usage
 
@@ -217,7 +215,7 @@ source deficits, overflow contribution, and validation counts by source.
 
 ## Run-Scoped Artifact Transfer
 
-The curator creates:
+The first artifact upload creates:
 
 ```text
 $DATA_DIR/runs/<size>/RUN_ID
@@ -260,3 +258,5 @@ its artifact metadata matches the requested run and stage.
 - Do not delete `_SUCCESS.json` while expecting a stage to remain reusable.
 - Do not change `config/data_mix.py` under an existing run ID.
 - Run `make test-curator SIZE=<size>` after curation and before validation.
+- See [`docs/TROUBLESHOOTING.md`](../docs/TROUBLESHOOTING.md) for access,
+  storage, resume, and artifact-transfer diagnostics.

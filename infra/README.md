@@ -22,9 +22,14 @@ On a fresh Ubuntu 22.04 host:
 
 ```bash
 cp .env.sample .env
+vi .env
 make setup-data-dir DATA_DIR=/data/slm/data
+source ~/.bashrc
 source .venv/bin/activate
 ```
+
+Complete every variable in `.env` before running the setup target. Do not leave
+blank values or placeholders.
 
 Download the models used by language identification and perplexity validation:
 
@@ -39,8 +44,7 @@ does not accept dataset terms or supply credentials.
 
 ## GPU training host
 
-Populate `.env` with the artifact-store and Hugging Face credentials, then
-restore one complete curation/tokenizer run:
+Complete every variable in `.env`, then restore one curation/tokenizer run:
 
 ```bash
 make setup-gpu \

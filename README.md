@@ -74,18 +74,11 @@ model lineage, and artifact flow.
 
 ### Prerequisites
 
-- Git and GNU Make.
-- Python 3.12.
-- Linux for the supported instance setup scripts.
-- Persistent storage sized for the selected corpus and checkpoints.
-- A Hugging Face token for authenticated dataset and model access.
-- Accepted terms for any gated datasets enabled by `config/data_mix.py`.
-- AWS credentials and an S3 bucket when data preparation and GPU training use
-  separate hosts.
-- For GPU training: an NVIDIA GPU with BF16 support, CUDA 13.0 wheels, and an
-  NVIDIA driver version supported by `infra/verify_environment.py`.
-
-### Dataset access
+- A fresh Ubuntu instance with `git`, `sudo`, network access, and persistent
+  storage sized for the selected corpus.
+- A Hugging Face account and token.
+- An AWS account, S3 bucket, and credentials.
+- A Weights & Biases account and API key.
 
 Before curation, sign in to the Hugging Face account associated with
 `HF_TOKEN`, review the conditions, and request access to each gated source used
@@ -101,35 +94,106 @@ by the active data mix:
 Dataset access is granted to the Hugging Face account, not to an individual
 token. Generate `HF_TOKEN` from the same account after accepting the terms.
 
-### Installation
+### Curation process
 
-Clone the repository and create the environment file:
+The following sequence covers infrastructure setup through uploaded,
+training-ready artifacts for the 125M profile.
+
+#### 1. Prepare persistent storage
+
+Mount and persist the data volume before installing the repository. Follow
+[`docs/DISK_SETUP.md`](docs/DISK_SETUP.md) when using a secondary volume, then
+verify the selected path:
+
+```bash
+df -h /data
+```
+
+#### 2. Clone and configure the repository
 
 ```bash
 git clone https://github.com/tohio/slm.git
 cd slm
 cp .env.sample .env
+vi .env
 ```
 
-For local development:
+Complete every variable in `.env`. Do not leave blank values, commented
+settings, or `...` placeholders. This check must produce no output:
 
 ```bash
-make install
-source .venv/bin/activate
+grep -nE '=\.\.\.|^[A-Z][A-Z0-9_]*=[[:space:]]*(#.*)?$' .env
 ```
 
-For a fresh Ubuntu data-processing host, the setup target installs system and
-Python dependencies, KenLM bindings, the spaCy model, and the run directories:
+#### 3. Install the data-processing environment
+
+The setup target installs the system and Python dependencies and creates the
+run directories. The two model downloads support language identification and
+perplexity validation.
 
 ```bash
 make setup-data-dir DATA_DIR=/data/slm/data
+source ~/.bashrc
 source .venv/bin/activate
 make download-fasttext-model DATA_DIR=/data/slm/data
 make download-kenlm-model DATA_DIR=/data/slm/data
+.venv/bin/python infra/verify_environment.py
 ```
 
-For a fresh NVIDIA training host, first populate `.env` with S3 and Hugging
-Face credentials, then restore a completed data run:
+#### 4. Start a persistent session
+
+```bash
+tmux new -s slm-curation
+nproc
+```
+
+Set `WORKERS` below the available CPU count so the operating system and
+download processes retain headroom. `WORKERS=62` is the standard starting
+point on a 64-vCPU instance.
+
+#### 5. Build and validate the data artifacts
+
+```bash
+make curate SIZE=125m WORKERS=62
+make test-curator SIZE=125m
+
+make validate SIZE=125m
+make test-validate SIZE=125m
+
+make tokenizer SIZE=125m
+make tokenizer-test SIZE=125m
+
+make tokenize SIZE=125m
+make test-data-pipeline SIZE=125m
+```
+
+The final aggregate test inspects the existing curator, validation, tokenizer,
+and tokenized artifacts; it does not rerun the data stages. See
+[`docs/TESTING.md`](docs/TESTING.md) for the test layers and when each gate
+should run.
+
+#### 6. Upload and record the run
+
+```bash
+make artifacts-upload \
+  SIZE=125m \
+  ARTIFACT_STAGES="tokenized,tokenizer,metadata"
+
+cat "$DATA_DIR/runs/125m/RUN_ID"
+```
+
+The first upload creates the run ID used to restore these exact artifacts on a
+training host. Record the `run_id` value printed by the upload and stored in
+the `RUN_ID` file.
+
+If a stage fails, follow [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md).
+Rerunning the same curation command is the normal resume path because completed
+stages are reused only when their manifests still match.
+
+### Usage
+
+For a fresh NVIDIA training host, complete `.env` and restore the curation run
+by its recorded ID:
 
 ```bash
 make setup-gpu \
@@ -141,78 +205,7 @@ source .venv/bin/activate
 make test-upgrade-gpu
 ```
 
-### Configuration
-
-The Makefile reads these paths from `.env` and permits command-line overrides:
-
-```bash
-DATA_DIR=/data/slm/data
-RESULTS_DIR=/data/slm/results
-EXPORTS_DIR=/data/slm/exports
-```
-
-Populate credentials only for the services used by the selected workflow:
-
-```bash
-HF_TOKEN=...
-HF_USERNAME=tohio
-S3_BUCKET=...
-S3_PREFIX=slm/data
-AWS_ACCESS_KEY_ID=...
-AWS_SECRET_ACCESS_KEY=...
-AWS_DEFAULT_REGION=us-east-1
-WANDB_API_KEY=...
-WANDB_PROJECT=slm
-```
-
-The central pretraining data mix and token targets live in
-`config/data_mix.py`. SFT and DPO dataset contracts live in
-`finetune/configs/sft_data_sources.yaml` and
-`alignment/configs/dpo_data_sources.yaml`.
-
-### Usage
-
-#### 1. Build data artifacts
-
-Run the data stages on the data-processing host:
-
-```bash
-make curate SIZE=125m WORKERS=62
-make validate SIZE=125m
-make tokenizer SIZE=125m
-make tokenizer-test SIZE=125m
-make tokenize SIZE=125m
-```
-
-Validate the produced artifacts:
-
-```bash
-make test-curator SIZE=125m
-make test-validate SIZE=125m
-make test-tokenizer SIZE=125m
-```
-
-When training occurs on another host, upload the artifacts under the generated
-run ID:
-
-```bash
-make artifacts-upload \
-  SIZE=125m \
-  ARTIFACT_STAGES="tokenized,tokenizer,metadata"
-```
-
-Use the mini profile to exercise the complete data path with bounded
-per-source inputs:
-
-```bash
-make curate-mini
-make validate SIZE=mini
-make tokenizer SIZE=mini
-make tokenizer-test SIZE=mini
-make tokenize SIZE=mini
-```
-
-#### 2. Generate training configurations
+#### 1. Generate training configurations
 
 Run configuration generation on the target GPU host so GPU detection reflects
 the training hardware:
@@ -231,7 +224,7 @@ make config-gen SIZE=350m GPUS=4 GPU=h200 MODE=conservative
 written to `pretrain/configs/`, `finetune/configs/`, and
 `alignment/configs/`.
 
-#### 3. Train the base model
+#### 2. Train the base model
 
 The GPU setup path restores the run-specific tokenizer and activates it for
 training. When training from locally prepared artifacts instead, synchronize
@@ -252,7 +245,7 @@ make pretrain-resume SIZE=125m GPUS=1
 `$RESULTS_DIR/runs/125m/pretrain/final`, copies the tokenizer into the final
 checkpoint, and runs a raw-generation smoke check.
 
-#### 4. Train instruct, chat, and code branches
+#### 3. Train instruct, chat, and code branches
 
 Initialize the chat-only special-token embeddings before the first SFT stage:
 
@@ -381,29 +374,10 @@ Related repositories:
 
 ## Testing
 
-Run CPU/API contract tests without pipeline artifacts:
-
-```bash
-make test-unit
-```
-
-Validate the installed CUDA stack without downloading a dataset or loading a
-trained checkpoint:
-
-```bash
-make test-gpu-gate
-```
-
-Validate existing stage artifacts:
-
-```bash
-make test-data-pipeline SIZE=125m
-make test-gpu-pipeline SIZE=125m
-```
-
-The artifact targets intentionally fail when required outputs are absent.
-See [`tests/README.md`](tests/README.md) for the mini pipeline sequence and
-controlled SFT comparison workflow.
+Tests are split into CPU contracts, environment acceptance, and checks against
+artifacts produced by real data or training runs. Full training is never
+launched merely to test it. See [`docs/TESTING.md`](docs/TESTING.md) for the
+commands and required execution order.
 
 ## License
 
