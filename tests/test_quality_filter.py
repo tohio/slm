@@ -1,6 +1,12 @@
 """Focused unit tests for source-aware pretraining quality filters."""
 
 import pytest
+from datatrove.pipeline.filters import (
+    C4QualityFilter,
+    FineWebQualityFilter,
+    GopherQualityFilter,
+    GopherRepetitionFilter,
+)
 
 from curator.filters.quality import QualityFilter
 
@@ -14,14 +20,87 @@ def _long_line(index: int, punctuated: bool = True) -> str:
 
 
 def test_fineweb_defaults_match_pinned_datatrove_contract():
-    config = QualityFilter().config
+    quality = QualityFilter()
+    config = quality.config
 
     assert config.fineweb_sources == frozenset({"common_crawl"})
+    assert config.fineweb_filter_recipe == (
+        "gopher_repetition",
+        "gopher_quality",
+        "c4_quality",
+        "fineweb_quality",
+    )
     assert config.fineweb_line_punct_thr == 0.12
     assert config.fineweb_short_line_thr == 0.67
     assert config.fineweb_short_line_length == 30
     assert config.fineweb_char_duplicates_ratio == 0.01
     assert config.fineweb_new_line_ratio == 0.3
+    assert tuple(type(stage) for stage in quality._common_crawl_filter_recipe) == (
+        GopherRepetitionFilter,
+        GopherQualityFilter,
+        C4QualityFilter,
+        FineWebQualityFilter,
+    )
+    assert (
+        quality._common_crawl_filter_recipe[2].filter_no_terminal_punct is False
+    )
+
+
+def test_common_crawl_fineweb_recipe_runs_in_reference_order_and_persists_text():
+    calls = []
+
+    class RecordingFilter:
+        def __init__(self, name, replacement=None):
+            self.name = name
+            self.replacement = replacement
+
+        def filter(self, document):
+            calls.append(self.name)
+            if self.replacement is not None:
+                document.text = self.replacement
+            return True
+
+    quality = QualityFilter()
+    quality._common_crawl_filter_recipe = (
+        RecordingFilter("gopher_repetition"),
+        RecordingFilter("gopher_quality"),
+        RecordingFilter("c4_quality", replacement="Cleaned Common Crawl text."),
+        RecordingFilter("fineweb_quality"),
+    )
+    record = {"text": "Raw Common Crawl text.", "source": "common_crawl"}
+
+    assert quality._check_common_crawl_fineweb_recipe(record) == (True, None)
+    assert calls == list(quality.config.fineweb_filter_recipe)
+    assert record["text"] == "Cleaned Common Crawl text."
+
+
+def test_common_crawl_fineweb_recipe_stops_at_first_rejection():
+    calls = []
+
+    class RecordingFilter:
+        def __init__(self, name, result=True):
+            self.name = name
+            self.result = result
+
+        def filter(self, document):
+            calls.append(self.name)
+            return self.result
+
+    quality = QualityFilter()
+    quality._common_crawl_filter_recipe = (
+        RecordingFilter("gopher_repetition"),
+        RecordingFilter("gopher_quality", (False, "gopher_short_doc")),
+        RecordingFilter("c4_quality"),
+        RecordingFilter("fineweb_quality"),
+    )
+    record = {"text": "Raw Common Crawl text.", "source": "common_crawl"}
+
+    assert quality._check_common_crawl_fineweb_recipe(record) == (
+        False,
+        "gopher_short_doc",
+    )
+    assert calls == ["gopher_repetition", "gopher_quality"]
+    assert record["text"] == "Raw Common Crawl text."
 
 
 def test_fineweb_line_punctuation_threshold_is_inclusive():

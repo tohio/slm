@@ -46,7 +46,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from datatrove.data import Document
-from datatrove.pipeline.filters.fineweb_quality_filter import FineWebQualityFilter
+from datatrove.pipeline.filters import (
+    C4QualityFilter,
+    FineWebQualityFilter,
+    GopherQualityFilter,
+    GopherRepetitionFilter,
+)
 from datatrove.utils.text import TERMINAL_PUNCTUATION
 
 from config import (
@@ -170,12 +175,19 @@ class QualityConfig:
     # Language detection threshold
     min_language_score: float = 0.65
 
-    # FineWebQualityFilter defaults. These checks apply only to raw Common
+    # Pinned FineWeb filtering recipe. These checks apply only to raw Common
     # Crawl records; already-curated and non-web sources do not inherit them.
-    # Reference implementation:
-    # datatrove.pipeline.filters.fineweb_quality_filter.FineWebQualityFilter
+    # The stage order matches Datatrove v0.9.0 examples/fineweb.py after URL
+    # filtering, extraction, and language identification:
+    #   Gopher repetition -> Gopher quality -> C4 -> FineWeb quality.
     fineweb_sources: frozenset[str] = field(
         default_factory=lambda: frozenset({"common_crawl"})
+    )
+    fineweb_filter_recipe: tuple[str, ...] = (
+        "gopher_repetition",
+        "gopher_quality",
+        "c4_quality",
+        "fineweb_quality",
     )
     fineweb_line_punct_thr: float = 0.12
     fineweb_short_line_thr: float = 0.67
@@ -250,6 +262,14 @@ class QualityFilter:
             new_line_ratio=self.config.fineweb_new_line_ratio,
             language="en",
         )
+        self._common_crawl_filter_recipe = (
+            GopherRepetitionFilter(language="en"),
+            GopherQualityFilter(language="en"),
+            # FineWeb intentionally disabled C4's terminal-punctuation line
+            # removal after its ablation showed destructive over-filtering.
+            C4QualityFilter(filter_no_terminal_punct=False, language="en"),
+            self._fineweb_quality_filter,
+        )
         self.stats = {
             "total": 0,
             "kept": 0,
@@ -293,16 +313,36 @@ class QualityFilter:
             )
             return False, reason
 
-        # FineWeb's line-level quality contract is specific to raw web text.
-        # Applying it to books, papers, code, synthetic data, Wikipedia, or
-        # already-curated FineWeb variants would create unvalidated attrition.
+        # Raw Common Crawl follows the complete pinned FineWeb filtering
+        # sequence. URL filtering, Trafilatura extraction, and preliminary
+        # language identification happen in CommonCrawlSource; enforce the
+        # configured language-confidence threshold here before the four
+        # reference quality stages. Applying this recipe to books, papers,
+        # code, synthetic data, Wikipedia, or already-curated FineWeb variants
+        # would create unvalidated attrition.
         if source in self.config.fineweb_sources:
-            passed, reason = self._check_fineweb_quality(text)
+            model = _get_fasttext_model()
+            language_check = (
+                self._check_language_fasttext
+                if model is not None
+                else self._check_stop_words
+            )
+            passed, reason = language_check(text)
             if not passed:
                 self.stats["rejected"][reason] = (
                     self.stats["rejected"].get(reason, 0) + 1
                 )
                 return False, reason
+
+            passed, reason = self._check_common_crawl_fineweb_recipe(record)
+            if not passed:
+                self.stats["rejected"][reason] = (
+                    self.stats["rejected"].get(reason, 0) + 1
+                )
+                return False, reason
+
+            self.stats["kept"] += 1
+            return True, None
 
         # Tier 1: cheap structural checks (all sources)
         checks = [
@@ -414,11 +454,31 @@ class QualityFilter:
         return True, None
 
     def _check_fineweb_quality(self, text: str) -> tuple[bool, str | None]:
-        """Apply the pinned Datatrove FineWebQualityFilter implementation."""
+        """Apply the final FineWebQualityFilter component in isolation."""
         result = self._fineweb_quality_filter.filter(Document(text=text, id=""))
         if isinstance(result, tuple):
             return result
         return bool(result), None
+
+    def _check_common_crawl_fineweb_recipe(
+        self,
+        record: dict,
+    ) -> tuple[bool, str | None]:
+        """Apply the pinned FineWeb quality stages to one shared document."""
+        document = Document(text=record.get("text", ""), id="")
+        for quality_filter in self._common_crawl_filter_recipe:
+            result = quality_filter.filter(document)
+            if isinstance(result, tuple):
+                passed, reason = result
+            else:
+                passed, reason = bool(result), None
+            if not passed:
+                return False, reason
+
+        # C4 removes rejected lines and citations in-place. Persist the same
+        # transformed text that the reference Datatrove pipeline emits.
+        record["text"] = document.text
+        return True, None
 
     def _check_mean_word_length(self, text: str) -> tuple[bool, str | None]:
         words = text.split()
