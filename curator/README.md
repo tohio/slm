@@ -115,6 +115,11 @@ Filter manifests record input, accepted, rejected, per-reason, and FastText
 error counts. Dedup manifests record exact and fuzzy removals and the final
 document count, including the Common Crawl partition contract.
 
+Quality-filter routing is fail-closed. Every configured source belongs to one
+explicit corpus family, and each record's `source` field must match the source
+directory being processed. Adding an unclassified source or mixing source tags
+in a shard stops filtering instead of silently selecting a different profile.
+
 The blend stage:
 
 - converts target token shares into character budgets;

@@ -1,5 +1,7 @@
 """Focused unit tests for source-aware pretraining quality filters."""
 
+import pytest
+
 from curator.filters.quality import QualityFilter
 
 
@@ -90,3 +92,24 @@ def test_fineweb_metrics_apply_only_to_raw_common_crawl():
         True,
         None,
     )
+
+
+def test_filter_rejects_record_source_mismatch():
+    quality = QualityFilter()
+
+    with pytest.raises(RuntimeError, match="does not match configured source"):
+        quality.check(
+            {"text": "short", "source": "synthetic_arithmetic"},
+            expected_source="wikipedia",
+        )
+    assert quality.stats["total"] == 0
+
+
+def test_filter_rejects_missing_or_unclassified_source():
+    quality = QualityFilter()
+
+    with pytest.raises(ValueError, match="exactly one filter family"):
+        quality.check({"text": "content without a source"})
+    with pytest.raises(ValueError, match="exactly one filter family"):
+        quality.check({"text": "content", "source": "new_unclassified_source"})
+    assert quality.stats["total"] == 0

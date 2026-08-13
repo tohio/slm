@@ -3,12 +3,35 @@ from pathlib import Path
 
 import yaml
 
-from config import ALL_SOURCES, DEDUP_PRIORITY, consumed_tokens
+from config import (
+    ALL_SOURCES,
+    DEDUP_PRIORITY,
+    FILTER_SOURCE_FAMILIES,
+    consumed_tokens,
+    source_filter_family,
+)
 
 
 def test_dedup_priority_contains_every_source_exactly_once():
     assert len(DEDUP_PRIORITY) == len(set(DEDUP_PRIORITY))
     assert set(DEDUP_PRIORITY) == set(ALL_SOURCES)
+
+
+def test_filter_source_families_contain_every_source_exactly_once():
+    routed = [
+        source
+        for sources in FILTER_SOURCE_FAMILIES.values()
+        for source in sources
+    ]
+    assert len(routed) == len(set(routed))
+    assert set(routed) == set(ALL_SOURCES)
+    assert {
+        source: source_filter_family(source) for source in ALL_SOURCES
+    } == {
+        source: family
+        for family, sources in FILTER_SOURCE_FAMILIES.items()
+        for source in sources
+    }
 
 
 def test_static_pretrain_configs_match_consumed_token_contract():

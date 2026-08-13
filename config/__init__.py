@@ -23,6 +23,7 @@ from config.data_mix import (
     CODE_SOURCES,
     ALL_SOURCES,
     SYNTHETIC_SOURCES,
+    FILTER_SOURCE_FAMILIES,
     PROSE_HEURISTIC_SKIP_SOURCES,
     DEDUP_PRIORITY,
     # Token targets
@@ -39,6 +40,7 @@ from config.data_mix import (
     consumed_tokens,
     corpus_tokens_display,
     epochs,
+    source_filter_family,
     validate,
 )
 
@@ -51,6 +53,7 @@ __all__ = [
     "CODE_SOURCES",
     "ALL_SOURCES",
     "SYNTHETIC_SOURCES",
+    "FILTER_SOURCE_FAMILIES",
     "PROSE_HEURISTIC_SKIP_SOURCES",
     "DEDUP_PRIORITY",
     "TARGET_CONFIGS",
@@ -64,5 +67,6 @@ __all__ = [
     "consumed_tokens",
     "corpus_tokens_display",
     "epochs",
+    "source_filter_family",
     "validate",
 ]

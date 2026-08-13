@@ -48,7 +48,7 @@ from datatrove.data import Document
 from datatrove.pipeline.filters.fineweb_quality_filter import FineWebQualityFilter
 from datatrove.utils.text import TERMINAL_PUNCTUATION
 
-from config import PROSE_HEURISTIC_SKIP_SOURCES
+from config import PROSE_HEURISTIC_SKIP_SOURCES, source_filter_family
 
 log = logging.getLogger(__name__)
 
@@ -251,7 +251,12 @@ class QualityFilter:
         # debug-logged, which hides a systemic issue at scale.
         self._fasttext_errors = 0
 
-    def check(self, record: dict) -> tuple[bool, str | None]:
+    def check(
+        self,
+        record: dict,
+        *,
+        expected_source: str | None = None,
+    ) -> tuple[bool, str | None]:
         """
         Run all quality filters on a document.
 
@@ -259,9 +264,17 @@ class QualityFilter:
             (True, None) if the document passes all filters.
             (False, reason) if the document is rejected.
         """
-        self.stats["total"] += 1
         text = record.get("text", "")
         source = record.get("source", "")
+        if expected_source is not None and source != expected_source:
+            raise RuntimeError(
+                f"Record source {source!r} does not match configured source "
+                f"{expected_source!r}"
+            )
+        # Unknown or newly added sources must be explicitly classified rather
+        # than inheriting prose filters through a negative skip-list lookup.
+        source_filter_family(source)
+        self.stats["total"] += 1
 
         # Length uses per-source skip lists, so call it separately from
         # the uniform-signature checks below.

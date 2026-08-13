@@ -55,7 +55,7 @@ Section layout:
     3. Supplemental caps        fixed/supply-limited source controls
     4. OVERFLOW_SINK            which source absorbs supply deficits
     5. Source names + routing   NON_CODE_SOURCES, CODE_SOURCES, ALL_SOURCES,
-                                SYNTHETIC_SOURCES,
+                                SYNTHETIC_SOURCES, FILTER_SOURCE_FAMILIES,
                                 PROSE_HEURISTIC_SKIP_SOURCES, DEDUP_PRIORITY
     6. TARGET_CONFIGS           per-size corpus + epochs + CC crawls
     7. Curator constants        CHARS_PER_TOKEN, CC_CHARS_PER_SEGMENT,
@@ -286,6 +286,41 @@ SYNTHETIC_SOURCES: frozenset[str] = frozenset({
     "educational_qa_mcq_general",
     "factual_restraint",
 })
+
+# Exhaustive source-family contract for quality-filter routing. These families
+# describe corpus type; they do not make all families share web-data filters.
+# Every concrete source must appear exactly once so new sources cannot silently
+# inherit the generic prose path.
+FILTER_SOURCE_FAMILIES: dict[str, frozenset[str]] = {
+    "raw_web": frozenset({"common_crawl"}),
+    "curated_web": frozenset({"fineweb", "fineweb_edu"}),
+    "reference_prose": frozenset({
+        "wikipedia",
+        "pg19",
+        "pes2o",
+        "stackexchange",
+    }),
+    "specialized": frozenset({"nemotron_cc_math", "nemotron_specialized"}),
+    "code": frozenset(CODE_SOURCES),
+    "synthetic": SYNTHETIC_SOURCES,
+}
+
+
+def source_filter_family(source: str) -> str:
+    """Return the one configured filter family for a concrete source."""
+    matches = [
+        family
+        for family, family_sources in FILTER_SOURCE_FAMILIES.items()
+        if source in family_sources
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            f"Source {source!r} must belong to exactly one filter family; "
+            f"matches={matches}"
+        )
+    return matches[0]
+
+
 PROSE_HEURISTIC_SKIP_SOURCES: frozenset[str] = frozenset(
     set(CODE_SOURCES)
     | set(SYNTHETIC_SOURCES)
@@ -515,6 +550,7 @@ def validate() -> None:
       - Every TARGET_CONFIGS entry has the required keys
       - Every MINI_OVERRIDES key is a real source in ALL_SOURCES
       - DEDUP_PRIORITY contains every concrete source exactly once
+      - FILTER_SOURCE_FAMILIES contains every concrete source exactly once
     """
     top_total = sum(entry["pct"] for entry in DATA_MIX.values())
     assert abs(top_total - 100.0) < 1e-6, (
@@ -578,6 +614,19 @@ def validate() -> None:
     )
     assert SYNTHETIC_SOURCES <= set(ALL_SOURCES)
     assert PROSE_HEURISTIC_SKIP_SOURCES <= set(ALL_SOURCES)
+    routed_sources = [
+        source
+        for family_sources in FILTER_SOURCE_FAMILIES.values()
+        for source in family_sources
+    ]
+    assert len(routed_sources) == len(set(routed_sources)), (
+        "FILTER_SOURCE_FAMILIES contains a source in multiple families"
+    )
+    assert set(routed_sources) == set(ALL_SOURCES), (
+        "FILTER_SOURCE_FAMILIES must contain every ALL_SOURCES entry exactly "
+        f"once; missing={sorted(set(ALL_SOURCES) - set(routed_sources))}, "
+        f"unknown={sorted(set(routed_sources) - set(ALL_SOURCES))}"
+    )
 
 
 # Run the sanity check at import time — cheap, and catches typos the moment

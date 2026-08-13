@@ -87,6 +87,7 @@ from config import (
     CODE_SOURCES,
     ALL_SOURCES,
     SYNTHETIC_SOURCES,
+    FILTER_SOURCE_FAMILIES,
     PROSE_HEURISTIC_SKIP_SOURCES,
     DEDUP_PRIORITY,
     TARGET_CONFIGS,
@@ -96,6 +97,7 @@ from config import (
     PRETRAIN_VAL_FRACTION,
     MINI_OVERRIDES,
     SUPPLEMENTAL_CHAR_CAPS,
+    source_filter_family,
 )
 
 from config.data_mix import (
@@ -816,7 +818,7 @@ def _filter_shard(args: tuple[Path, Path, str]) -> tuple[str, str, dict]:
                 except Exception:
                     parse_errors += 1
                     continue
-                kept, _ = qf.check(record)
+                kept, _ = qf.check(record, expected_source=source)
                 if kept:
                     fout.write(orjson.dumps(record))
                     fout.write(b"\n")
@@ -869,6 +871,7 @@ def stage_filter(workers: int | None = None, sources: list[str] | None = None) -
     filter_contract = {
         "implementation_sha256": code_fingerprint(QualityFilter),
         "audit_schema_version": 1,
+        "source_families": FILTER_SOURCE_FAMILIES,
         "quality_config": vars(QualityFilter().config),
         "fasttext_model": (
             file_snapshot([fasttext_path], root=fasttext_path.parent)[0]
@@ -913,6 +916,7 @@ def stage_filter(workers: int | None = None, sources: list[str] | None = None) -
             "schema_version": 1,
             "stage": "filter",
             "source": source,
+            "source_family": source_filter_family(source),
             "shards": 0,
             "total": 0,
             "kept": 0,
