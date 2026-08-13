@@ -45,6 +45,12 @@ metadata.
 The JSON sidecars record the input digest, tokenizer fingerprint, binary
 format, and realized source/document/token counts. Training requires those
 sidecars and rejects a tokenizer that does not match the tokenized corpus.
+
+Production recipes resolve `max_steps` from the verified tokenized training
+count and the configured epoch contract at preflight/training time. The static
+YAML step and warmup values remain planning fallbacks; runtime preserves their
+warmup ratio. Mini and smoke recipes do not opt into this resolution, so their
+bounded step counts remain unchanged.
 The train/validation split is created by curation; pretraining does not split
 documents again.
 

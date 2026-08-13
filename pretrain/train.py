@@ -41,6 +41,7 @@ from config.paths import pretrain_dir, tokenized_dir as run_tokenized_dir, BASE_
 from config.runtime import configure_torch_runtime
 from curator.state import atomic_write_json, stable_digest
 from pretrain.data.mixture import validate_realized_mixture_report
+from pretrain.schedule import resolve_realized_token_schedule
 
 RESULTS_DIR = BASE_RESULTS_DIR
 PRETRAIN_AUDIT_FILENAME = "pretrain_run_audit.json"
@@ -773,12 +774,19 @@ def main():
     budget = train_ds.token_budget()
     log.info(f"Training tokens: {budget['total_training_tokens'] / 1e9:.2f}B")
 
-    training_args = build_training_args(cfg, output_dir, resume=args.resume)
     world_size = (
         args.expected_gpus
         if args.preflight_only and args.expected_gpus is not None
         else int(os.environ.get("WORLD_SIZE", "1"))
     )
+    cfg, realized_schedule = resolve_realized_token_schedule(
+        cfg,
+        run_size=run_size,
+        realized_train_tokens=budget["n_tokens"],
+        seq_len=seq_len,
+        world_size=world_size,
+    )
+    training_args = build_training_args(cfg, output_dir, resume=args.resume)
     distributed_strategy = resolve_distributed_strategy(
         args.distributed_strategy,
         world_size,
@@ -790,6 +798,15 @@ def main():
     )
     tokens_per_step = global_batch * seq_len
     scheduled_tokens = tokens_per_step * training_args.max_steps
+
+    if realized_schedule is not None:
+        log.info(
+            "Resolved schedule from tokenized train corpus: usable_tokens=%,d, "
+            "epochs=%d, rounding_excess_tokens=%,d",
+            realized_schedule["usable_train_tokens_per_epoch"],
+            realized_schedule["epochs"],
+            realized_schedule["rounding_excess_tokens"],
+        )
 
     log.info(
         "Training plan: strategy=%s, processes=%d, global_batch=%d sequences, "

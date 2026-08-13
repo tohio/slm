@@ -43,8 +43,10 @@ Supported planning modes:
 
 The generator computes hardware-dependent fields while preserving
 stage-specific objective and optimizer fields from its profiles. For
-pretraining, `max_steps` and warmup are derived from the configured corpus
-target, epochs, sequence length, and effective global batch.
+pretraining, the generated `max_steps` and warmup are planning values derived
+from the configured corpus target, epochs, sequence length, and effective
+global batch. Production pretraining replaces them from verified tokenized
+train tokens while preserving the generated warmup ratio.
 
 Outputs:
 

@@ -42,11 +42,11 @@ Token vocabulary:
                       availability, filtering loss, tokenizer behavior, and
                       validation outcomes.
 
-    consumed_tokens   corpus_tokens × epochs. The scheduling quantity used by
-                      config_gen/config_gen.py to compute max_steps. This is
-                      the number of target tokens the optimiser is expected to
-                      see over the whole pretraining run. Computed by the
-                      consumed_tokens() helper below; not a stored field.
+    consumed_tokens   corpus_tokens × epochs. The planning quantity used by
+                      config_gen/config_gen.py to propose max_steps before a
+                      corpus exists. Production training replaces that plan
+                      with tokenizer-measured train tokens × epochs. Computed
+                      by the consumed_tokens() helper below; not a stored field.
                       Do not confuse this with retained_tokens.
 
 Section layout:
@@ -363,9 +363,9 @@ DEDUP_PRIORITY: list[str] = [
 #                      count may be lower and should be measured from the
 #                      generated train/val artifacts after the run.
 #
-#                      Multiplying corpus_tokens by `epochs` gives
-#                      consumed_tokens, which is what config_gen uses to
-#                      compute max_steps.
+#                      Multiplying corpus_tokens by `epochs` gives the planning
+#                      consumed_tokens used by config_gen. Production max_steps
+#                      is resolved from measured tokenized train tokens.
 #
 #   epochs           — number of training epochs over the corpus target.
 #   cc_crawls        — Common Crawl snapshots to draw from at this scale.
@@ -503,8 +503,8 @@ def corpus_tokens(size: str) -> int:
     usable tokens; filtering, validation, source availability, blending,
     and tokenization can reduce the final artifact size.
 
-    Multiply by epochs(size) to get consumed_tokens, the scheduling
-    quantity used by config_gen to compute max_steps.
+    Multiply by epochs(size) to get the consumed_tokens planning quantity used
+    by config_gen before tokenized artifacts exist.
     """
     return TARGET_CONFIGS[size]["corpus_tokens"]
 
@@ -514,7 +514,8 @@ def consumed_tokens(size: str) -> int:
     Return corpus_tokens × epochs for a given size.
 
     This is the number of tokens the optimiser sees across the whole
-    pretraining run. Used by config_gen/config_gen.py to set max_steps.
+    pretraining run. Used by config_gen/config_gen.py to propose max_steps;
+    production training resolves the final schedule from tokenized train data.
 
     Do NOT report this number on model cards or in public docs — it
     conflates corpus size with epoch count, which is the exact ambiguity

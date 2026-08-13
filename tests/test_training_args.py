@@ -13,6 +13,7 @@ from alignment.train_dpo import build_dpo_args
 from config.data_mix import ALL_SOURCES
 from finetune.train_sft import build_sft_args
 from pretrain.data.mixture import build_realized_mixture_report
+from pretrain.schedule import resolve_realized_token_schedule
 from pretrain.train import (
     resolve_distributed_strategy,
     resolve_pretrain_checkpoint,
@@ -39,6 +40,77 @@ def _training() -> dict:
         "precision": "bf16",
         "group_by_length": True,
     }
+
+
+def test_realized_token_schedule_replaces_planning_steps():
+    cfg = {
+        "training": {
+            "schedule_from_realized_tokens": True,
+            "max_steps": 1000,
+            "warmup_steps": 100,
+            "micro_batch_size": 2,
+            "gradient_accumulation_steps": 4,
+        }
+    }
+
+    resolved, schedule = resolve_realized_token_schedule(
+        cfg,
+        run_size="125m",
+        realized_train_tokens=10_001,
+        seq_len=100,
+        world_size=2,
+    )
+
+    # 10,000 usable tokens × 2 epochs / (2 × 4 × 2 × 100) = 12.5 steps.
+    assert resolved["training"]["max_steps"] == 13
+    assert resolved["training"]["warmup_steps"] == 1
+    assert schedule["target_consumed_tokens"] == 20_000
+    assert schedule["scheduled_tokens"] == 20_800
+    assert schedule["rounding_excess_tokens"] == 800
+    assert schedule["tokens_discarded_by_sequence_packing"] == 1
+    assert cfg["training"]["max_steps"] == 1000
+
+
+def test_realized_token_schedule_leaves_bounded_recipe_unchanged():
+    cfg = {
+        "training": {
+            "max_steps": 8,
+            "warmup_steps": 2,
+            "micro_batch_size": 1,
+        }
+    }
+
+    resolved, schedule = resolve_realized_token_schedule(
+        cfg,
+        run_size="mini",
+        realized_train_tokens=1_000_000,
+        seq_len=1024,
+        world_size=1,
+    )
+
+    assert resolved == cfg
+    assert resolved is not cfg
+    assert schedule is None
+
+
+def test_realized_token_schedule_rejects_unusable_corpus():
+    cfg = {
+        "training": {
+            "schedule_from_realized_tokens": True,
+            "max_steps": 8,
+            "warmup_steps": 1,
+            "micro_batch_size": 1,
+        }
+    }
+
+    with pytest.raises(ValueError, match="cannot form one"):
+        resolve_realized_token_schedule(
+            cfg,
+            run_size="125m",
+            realized_train_tokens=100,
+            seq_len=1024,
+            world_size=1,
+        )
 
 
 def test_sft_config_uses_current_length_sampler(tmp_path: Path):

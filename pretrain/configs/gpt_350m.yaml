@@ -17,13 +17,16 @@ data:
   val_fraction: 0.005
 
 training:
+  # Runtime replaces the planning max/warmup steps below using verified
+  # tokenized train tokens while preserving the configured warmup ratio.
+  schedule_from_realized_tokens: true
   # ── Batch size ──────────────────────────────────────────────────────────────
   # Global batch = micro_batch_size × gradient_accumulation_steps × num_gpus
   # These values assume 1 GPU. Adjust before running multi-GPU training:
   #   divide gradient_accumulation_steps by num_gpus to hold global batch constant
   #   keep max_steps unchanged when global batch is held constant
   #
-  # Dataset: 25B curation target × 2 epochs = 50B consumed tokens
+  # Planning basis: 25B curation target × 2 epochs = 50B consumed tokens
   # Tokens/step (1 GPU): 4 × 16 × 1 × 2048 = ~131k tokens/step
   # 1 epoch  → ~190,734 steps
   # 2 epochs → ~381,469 steps

@@ -249,6 +249,13 @@ class TestUserOverrides:
         )
         assert 38_000 < cfg.max_steps < 38_300
 
+    def test_rendered_pretrain_config_enables_realized_token_schedule(self):
+        cfg = compute_pretrain_config("h200", "125m", 1)
+
+        rendered = yaml.safe_load(render_pretrain_yaml(cfg))
+
+        assert rendered["training"]["schedule_from_realized_tokens"] is True
+
 
 # ── Input validation ─────────────────────────────────────────────────────────
 

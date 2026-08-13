@@ -40,6 +40,7 @@ def test_static_pretrain_configs_match_consumed_token_contract():
         config = yaml.safe_load(path.read_text())
         training = config["training"]
         model = config["model"]
+        assert training["schedule_from_realized_tokens"] is True
         tokens_per_step = (
             training["micro_batch_size"]
             * training["gradient_accumulation_steps"]

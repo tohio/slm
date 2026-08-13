@@ -820,6 +820,8 @@ data:
   val_fraction: 0.005
 
 training:
+  # Runtime resolves max/warmup steps from verified tokenized train tokens.
+  schedule_from_realized_tokens: true
   # micro × accum × gpus = {cfg.micro_batch_size} × {cfg.gradient_accumulation_steps} × {cfg.num_gpus} = {cfg.actual_global_batch} sequences/step
   # tokens/step     = global × ctx = {cfg.tokens_per_step:,}
   # consumed_tokens = max_steps × tokens/step = {cfg.actual_consumed_tokens / 1e9:.2f}B
