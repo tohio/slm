@@ -52,8 +52,7 @@ make train-all \
 4. Runs the dataset-free CUDA, BF16, compile, and generation acceptance gate.
 5. Generates hardware-specific pretraining, SFT, and DPO configurations.
 6. Pretrains the base model.
-7. Finalizes and validates the base checkpoint's chat/control-token
-   embeddings.
+7. Validates the completed base checkpoint.
 8. Prepares, trains, and validates the instruct SFT branch.
 9. Trains and validates the independent code SFT branch.
 10. Prepares, trains, and validates the DPO chat branch.
@@ -136,19 +135,8 @@ $RESULTS_DIR/runs/<size>/pretrain/final/
 tokenizer fingerprint, tokenized-data identity, process count, and distributed
 strategy. Resume requires an exact match and never falls back to a new run.
 
-### Finalize chat/control-token embeddings
-
-Before SFT, finalize the chat-specific embedding rows:
-
-```bash
-make reinit-embeds SIZE=125m
-make test-training SIZE=125m
-```
-
-This intentionally updates the promoted base checkpoint in place and creates
-a timestamped backup first. Only the configured chat/control-token embedding
-rows change. The rewritten `pretrain/final` is the canonical base used by
-post-training.
+The promoted `pretrain/final` checkpoint is consumed directly by post-training;
+no embedding rows are reinitialized between pretraining and SFT.
 
 ### Train the instruct branch
 

@@ -149,14 +149,7 @@ process count, and distributed strategy. `--resume` requires the audit and
 latest checkpoint and refuses changed inputs instead of starting over.
 
 The audit is copied into `final/`. The final checkpoint is the parent of
-instruct SFT.
-
-Before using chat/control tokens in post-training, reinitialize their embedding
-rows in the final base checkpoint:
-
-```bash
-make reinit-embeds SIZE=125m
-```
+instruct SFT and is consumed without post-pretraining embedding mutation.
 
 Run the base generation smoke check after a completed pretraining run:
 

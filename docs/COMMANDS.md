@@ -217,12 +217,6 @@ Output:
 results/runs/<size>/pretrain/final
 ```
 
-Before SFT:
-
-```bash
-make reinit-embeds SIZE=125m
-```
-
 Bounded readiness gates:
 
 ```bash

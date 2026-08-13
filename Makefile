@@ -108,7 +108,7 @@ endif
         tokenizer tokenizer-test tokenize artifacts-upload artifacts-download \
         config-gen config-gen-pretrain config-gen-sft config-gen-dpo \
         accel-gen-ddp accel-gen-fsdp \
-        pretrain pretrain-preflight pretrain-mini pretrain-smoke pretrain-resume pretrain-resume-preflight reinit-embeds smoke-gen prepare-sft sft sft-instruct sft-mini sft-instruct-mini sft-resume sft-instruct-resume sft-code sft-code-mini sft-code-resume \
+        pretrain pretrain-preflight pretrain-mini pretrain-smoke pretrain-resume pretrain-resume-preflight smoke-gen prepare-sft sft sft-instruct sft-mini sft-instruct-mini sft-resume sft-instruct-resume sft-code sft-code-mini sft-code-resume \
         prepare-dpo dpo-chat dpo-chat-resume dpo-chat-mini dpo dpo-mini dpo-resume eval eval-base eval-instruct eval-chat eval-code eval-sanity eval-sanity-base eval-sanity-instruct eval-sanity-chat eval-sanity-code eval-mini serve serve-local \
         export export-base export-instruct export-chat export-code \
         export-local export-base-local export-instruct-local export-chat-local export-code-local \
@@ -186,7 +186,6 @@ train-all: check-env
 	$(MAKE) config-gen SIZE="$(SIZE)" GPUS="$(GPUS)"
 	$(MAKE) pretrain-preflight SIZE="$(SIZE)" GPUS="$(GPUS)"
 	$(MAKE) pretrain SIZE="$(SIZE)" GPUS="$(GPUS)"
-	$(MAKE) reinit-embeds SIZE="$(SIZE)"
 	$(MAKE) test-training SIZE="$(SIZE)"
 	$(MAKE) prepare-sft SIZE="$(SIZE)"
 	$(MAKE) sft-instruct SIZE="$(SIZE)" GPUS="$(GPUS)"
@@ -381,10 +380,6 @@ smoke-gen:
 			--greedy; \
 		echo ""; \
 	done	
-
-reinit-embeds:
-	@echo "==> Stage 4c: Re-init chat special-token embeddings ($(SIZE))"
-	$(PYTHON) scripts/reinit_special_embeds.py --size $(SIZE)
 
 # ── Stage 5: SFT ──────────────────────────────────────────────────────────────
 
@@ -949,7 +944,6 @@ help:
 	@echo "  pretrain-resume    Stage 4b — resume the latest compatible checkpoint"
 	@echo "  pretrain-mini      Stage 4b — mini pretrain run (auto-runs smoke-gen)"
 	@echo "  smoke-gen          Stage 4b — generate from \$$(RESULTS_DIR)/runs/\$$(SIZE)/pretrain/final to spot-check"
-	@echo "  reinit-embeds      Stage 4c — re-init chat special-token embeds before SFT"
 	@echo "  prepare-sft        Stage 5a — download SFT datasets"
 	@echo "  sft-instruct       Stage 5b — instruct supervised fine-tuning"
 	@echo "  sft-instruct-mini  Stage 5b — mini instruct SFT"

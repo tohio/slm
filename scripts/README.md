@@ -8,7 +8,6 @@ stages. Production logic owned by one stage belongs in that stage's directory.
 | File | Purpose |
 |---|---|
 | `sanity_train.py` | Known-good synthetic/Hugging Face training diagnostic |
-| `reinit_special_embeds.py` | Reinitialize chat/control embedding rows before SFT |
 | `run_lm_eval.py` | Register the local architecture and invoke lm-evaluation-harness |
 | `pretrain_hf_125m.py` | Standalone 125M pretraining diagnostic on a Hub dataset |
 | `sft_model_comparison.py` | Controlled SmolLM2/SLM response-to-SFT comparison |
@@ -48,31 +47,6 @@ The script exposes architecture, target-token, batch, learning-rate, warmup,
 logging/evaluation cadence, scratch-directory, save, and token-reuse controls.
 It is diagnostic evidence only; it does not create a pipeline pretraining
 checkpoint.
-
-## Special-token embedding initialization
-
-Run after base pretraining and before instruct SFT:
-
-```bash
-make reinit-embeds SIZE=125m
-```
-
-The default source and destination are the same final base checkpoint:
-
-```text
-$RESULTS_DIR/runs/<size>/pretrain/final/
-```
-
-Use explicit paths for recovery:
-
-```bash
-python scripts/reinit_special_embeds.py \
-  --src results/runs/125m/pretrain/checkpoint-152000 \
-  --dst results/runs/125m/pretrain/final
-```
-
-The script edits only the configured chat/control embedding rows and validates
-the result. It uses direct safetensors I/O to preserve the checkpoint layout.
 
 ## Evaluation wrapper
 
