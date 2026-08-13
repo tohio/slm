@@ -932,7 +932,7 @@ help:
 	@echo "Pipeline:"
 	@echo "  curate             Stage 1  — download, filter, deduplicate, and blend"
 	@echo "  curate-mini        Stage 1  — mini run for pipeline validation"
-	@echo "  validate           Stage 2  — perplexity filter on train + val splits"
+	@echo "  validate           Stage 2  — source-aware validation + KenLM audit"
 	@echo "  validate-upload    Upload validated artifacts through RUN_ID storage"
 	@echo "  tokenizer          Stage 3  — train BPE tokenizer"
 	@echo "  tokenize           Stage 4a — tokenize train + val to binaries"

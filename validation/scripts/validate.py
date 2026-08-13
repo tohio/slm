@@ -3,15 +3,13 @@ validation/scripts/validate.py
 --------------------------------
 Canonical source-aware data validation pipeline.
 
-Applies additional quality filters on top of the curator's heuristic
-filters. The primary addition is perplexity-based filtering using a
-KenLM language model — the most impactful filter for removing low-quality
-web text that passes heuristic checks.
+Applies additional source-aware checks on top of the curator's filters and
+records KenLM perplexity measurements for eligible prose.
 
 Pipeline (run independently for each split):
     1. Load curated JSONL from data/runs/<size>/curated/{train,val}.jsonl
     2. Apply source-aware C4/Gopher-style checks
-    3. Apply perplexity filter (KenLM 5-gram model)
+    3. Measure perplexity with a KenLM 5-gram model
     4. Write validated JSONL to data/runs/<size>/validated/{train,val}.jsonl
     5. Write per-split rejection stats
 
@@ -23,12 +21,12 @@ Running validation over both splits preserves the "same distribution"
 guarantee. Downstream eval loss is a meaningful comparison to training loss
 only when both splits passed the same filters.
 
-Perplexity filter:
-    Documents with perplexity > threshold are removed. The threshold is
-    auto-computed from train (90th percentile of train's perplexity
-    distribution) and reused for val — so the two splits are filtered by
-    the same cutoff, not two independently-computed ones. This keeps
-    train and val comparable even when val is much smaller.
+Perplexity policy:
+    KenLM is report-only by default. It records deterministic, bounded
+    per-source distribution summaries without changing corpus membership.
+    Documents are removed only when an explicit --perplexity-threshold is
+    supplied. This avoids treating a self-derived corpus percentile as a
+    validated quality boundary.
 
 KenLM model:
     Requires a 5-gram KenLM model trained on high-quality text (e.g.
@@ -51,6 +49,8 @@ Usage:
 """
 
 import argparse
+import hashlib
+import heapq
 import json
 import logging
 import os
@@ -92,50 +92,77 @@ def _skip_prose_heuristics(record: dict) -> bool:
 
 # ── Canonical validation ───────────────────────────────────────────────────────
 
-def _compute_perplexity_threshold(
-    kenlm_model,
-    input_path: Path,
-    sample_size: int,
-) -> float | None:
-    """Compute the 90th-percentile perplexity from prose-like train documents."""
-    log.info(
-        f"Computing perplexity threshold from up to {sample_size:,} prose-like documents..."
-    )
-    perplexities: list[float] = []
+class PerplexityAudit:
+    """Bounded deterministic per-source KenLM distribution summary."""
 
-    with open(input_path) as f:
-        for line in f:
-            if len(perplexities) >= sample_size:
-                break
-            if not line.strip():
-                continue
+    def __init__(self, sample_size: int):
+        if sample_size < 1:
+            raise ValueError("perplexity sample size must be positive")
+        self.sample_size = sample_size
+        self._sources: dict[str, dict] = {}
 
-            record = json.loads(line)
-            if _skip_prose_heuristics(record):
-                continue
-
-            text = record.get("text", "")
-            if not text:
-                continue
-
-            score = kenlm_model.perplexity(text[:1000])
-            perplexities.append(score)
-
-    if not perplexities:
-        log.warning(
-            "No prose-like documents available for perplexity threshold; "
-            "perplexity filtering will be skipped."
+    def observe(self, source: str, text: str, score: float) -> None:
+        if not isinstance(score, (int, float)) or not (0.0 <= score < float("inf")):
+            raise RuntimeError(
+                f"KenLM returned invalid perplexity for source {source!r}: {score!r}"
+            )
+        row = self._sources.setdefault(
+            source,
+            {
+                "documents": 0,
+                "sum": 0.0,
+                "min": float(score),
+                "max": float(score),
+                "sample": [],
+            },
         )
-        return None
+        value = float(score)
+        row["documents"] += 1
+        row["sum"] += value
+        row["min"] = min(row["min"], value)
+        row["max"] = max(row["max"], value)
 
-    perplexities.sort()
-    idx = min(int(0.9 * len(perplexities)), len(perplexities) - 1)
-    threshold = perplexities[idx]
-    log.info(
-        f"Auto perplexity threshold (90th percentile, n={len(perplexities):,}): "
-        f"{threshold:.1f}"
-    )
-    return threshold
+        digest = hashlib.sha256(
+            source.encode("utf-8") + b"\0" + text.encode("utf-8")
+        ).digest()
+        priority = int.from_bytes(digest[:8], "big")
+        candidate = (-priority, value)
+        sample = row["sample"]
+        if len(sample) < self.sample_size:
+            heapq.heappush(sample, candidate)
+        elif candidate > sample[0]:
+            heapq.heapreplace(sample, candidate)
+
+    @staticmethod
+    def _percentile(values: list[float], fraction: float) -> float:
+        index = round((len(values) - 1) * fraction)
+        return values[index]
+
+    def report(self, *, policy: str, threshold: float | None) -> dict:
+        by_source = {}
+        for source, row in sorted(self._sources.items()):
+            values = sorted(value for _, value in row["sample"])
+            by_source[source] = {
+                "documents_scored": row["documents"],
+                "sampled_documents": len(values),
+                "mean": row["sum"] / row["documents"],
+                "min": row["min"],
+                "p50": self._percentile(values, 0.50),
+                "p90": self._percentile(values, 0.90),
+                "p95": self._percentile(values, 0.95),
+                "p99": self._percentile(values, 0.99),
+                "max": row["max"],
+            }
+        return {
+            "policy": policy,
+            "threshold": threshold,
+            "sample_selection": "bottom_sha256_64_per_source",
+            "sample_size_per_source": self.sample_size,
+            "documents_scored": sum(
+                row["documents"] for row in self._sources.values()
+            ),
+            "by_source": by_source,
+        }
 
 
 def validate_manual_split(
@@ -144,6 +171,7 @@ def validate_manual_split(
     kenlm_model,
     perplexity_threshold: float | None,
     split: str,
+    perplexity_sample_size: int = 10_000,
 ) -> dict:
     """
     Manual validation for a single split (train or val).
@@ -151,7 +179,8 @@ def validate_manual_split(
     Applies:
         - Terminal punctuation check (C4-style) — prose sources only
         - Repeated line ratio (Gopher-style) — prose sources only
-        - Perplexity filter (KenLM, when enabled) — prose sources only
+        - Perplexity measurement (KenLM, when enabled) — prose sources only
+        - Perplexity filtering only with an explicit threshold
 
     Code sources (codesearchnet, stack_smol, stack_v1, jupyter, conala)
     bypass the structural prose checks because code does not always end
@@ -162,9 +191,10 @@ def validate_manual_split(
     Args:
         input_path: Input JSONL file.
         output_path: Output JSONL file.
-        kenlm_model: Loaded KenLM model, or None to skip perplexity filter.
-        perplexity_threshold: Max allowed perplexity, or None to skip.
+        kenlm_model: Loaded KenLM model, or None to skip KenLM measurement.
+        perplexity_threshold: Explicit maximum perplexity, or None to report only.
         split: "train" or "val" — used for log labels only.
+        perplexity_sample_size: Per-source bounded sample used for quantiles.
 
     Returns:
         Stats dict for this split.
@@ -179,6 +209,11 @@ def validate_manual_split(
         "rejected_perplexity": 0,
         "skipped_prose_heuristics": 0,
     }
+    perplexity_audit = (
+        PerplexityAudit(perplexity_sample_size)
+        if kenlm_model is not None
+        else None
+    )
 
     tmp_path = output_path.with_name(f".{output_path.name}.{os.getpid()}.tmp")
     try:
@@ -217,16 +252,21 @@ def validate_manual_split(
                         stats["rejected_repeated_lines"] += 1
                         continue
 
-                # KenLM perplexity is an English prose heuristic. It is not
-                # meaningful for code/templates/symbol-heavy math.
-                if (
-                    not skip_prose
-                    and kenlm_model is not None
-                    and perplexity_threshold is not None
-                ):
+                # KenLM is an English-prose distribution signal, not a
+                # universal quality boundary. Always measure eligible prose;
+                # remove only when the caller supplied an explicit threshold.
+                if not skip_prose and kenlm_model is not None:
                     try:
                         ppl = kenlm_model.perplexity(text[:2000])
-                        if ppl > perplexity_threshold:
+                        perplexity_audit.observe(
+                            str(record.get("source", "unknown")),
+                            text,
+                            ppl,
+                        )
+                        if (
+                            perplexity_threshold is not None
+                            and ppl > perplexity_threshold
+                        ):
                             stats["rejected_perplexity"] += 1
                             continue
                     except Exception as exc:
@@ -243,6 +283,25 @@ def validate_manual_split(
         tmp_path.unlink(missing_ok=True)
         raise
 
+    stats["perplexity_audit"] = (
+        perplexity_audit.report(
+            policy=(
+                "explicit_threshold"
+                if perplexity_threshold is not None
+                else "report_only"
+            ),
+            threshold=perplexity_threshold,
+        )
+        if perplexity_audit is not None
+        else {
+            "policy": "disabled",
+            "threshold": None,
+            "sample_selection": None,
+            "sample_size_per_source": 0,
+            "documents_scored": 0,
+            "by_source": {},
+        }
+    )
     return stats
 
 
@@ -262,7 +321,7 @@ def _load_kenlm(kenlm_model_path: Path | None):
         return model
     except ImportError as exc:
         raise RuntimeError(
-            "kenlm is required when perplexity filtering is enabled"
+            "kenlm is required when perplexity measurement is enabled"
         ) from exc
 
 
@@ -276,6 +335,9 @@ def _log_split_report(split: str, stats: dict) -> None:
     log.info(f"  Rejected (repeated lines):{stats['rejected_repeated_lines']:>10,}")
     log.info(f"  Rejected (perplexity):    {stats['rejected_perplexity']:>10,}")
     log.info(f"  Skipped prose heuristics: {stats.get('skipped_prose_heuristics', 0):>10,}")
+    audit = stats["perplexity_audit"]
+    log.info(f"  KenLM policy:             {audit['policy']:>10}")
+    log.info(f"  KenLM documents scored:   {audit['documents_scored']:>10,}")
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -317,20 +379,29 @@ def main():
         "--perplexity-threshold",
         type=float,
         default=None,
-        help="Max perplexity (auto-computed at 90th percentile of train if not set)",
+        help="Explicit maximum perplexity; omit for report-only KenLM scoring",
     )
     parser.add_argument(
         "--perplexity-sample-size",
         type=int,
         default=10_000,
-        help="Docs sampled from train to auto-compute perplexity threshold",
+        help="Deterministic scored-document sample retained per source for quantiles",
     )
     parser.add_argument(
         "--no-perplexity",
         action="store_true",
-        help="Skip perplexity filter",
+        help="Skip KenLM measurement and filtering",
     )
     args = parser.parse_args()
+
+    if args.perplexity_threshold is not None and args.perplexity_threshold <= 0:
+        parser.error("--perplexity-threshold must be positive")
+    if args.perplexity_sample_size < 1:
+        parser.error("--perplexity-sample-size must be positive")
+    if args.no_perplexity and args.perplexity_threshold is not None:
+        parser.error(
+            "--no-perplexity cannot be combined with --perplexity-threshold"
+        )
 
     run_curated_dir = curated_dir(args.size)
     run_validated_dir = validated_dir(args.size)
@@ -373,15 +444,9 @@ def main():
 
     kenlm_model = _load_kenlm(kenlm_path)
 
-    # Compute perplexity threshold from train sample (if not provided). Reuse
-    # the same threshold for val so both splits are filtered by the same
-    # cutoff — per-split thresholds would diverge for small val sets and
-    # invalidate the "same distribution" property.
+    # No threshold is inferred from the corpus. Without an explicit threshold,
+    # KenLM remains report-only and cannot silently force percentile attrition.
     perplexity_threshold = args.perplexity_threshold
-    if kenlm_model is not None and perplexity_threshold is None:
-        perplexity_threshold = _compute_perplexity_threshold(
-            kenlm_model, args.train, args.perplexity_sample_size,
-        )
 
     input_signature = stable_digest(
         {
@@ -393,6 +458,15 @@ def main():
         "implementation_sha256": code_fingerprint(validate_manual_split),
         "prose_heuristic_skip_sources": PROSE_HEURISTIC_SKIP_SOURCES,
         "perplexity_enabled": kenlm_model is not None,
+        "perplexity_policy": (
+            "disabled"
+            if kenlm_model is None
+            else (
+                "explicit_threshold"
+                if perplexity_threshold is not None
+                else "report_only"
+            )
+        ),
         "perplexity_threshold": perplexity_threshold,
         "perplexity_sample_size": args.perplexity_sample_size,
         "kenlm_model": (
@@ -423,6 +497,7 @@ def main():
         kenlm_model=kenlm_model,
         perplexity_threshold=perplexity_threshold,
         split="train",
+        perplexity_sample_size=args.perplexity_sample_size,
     )
     _log_split_report("train", train_stats)
 
@@ -435,6 +510,7 @@ def main():
             kenlm_model=kenlm_model,
             perplexity_threshold=perplexity_threshold,
             split="val",
+            perplexity_sample_size=args.perplexity_sample_size,
         )
         _log_split_report("val", val_stats)
 
@@ -461,6 +537,15 @@ def main():
             + (val_stats.get("skipped_prose_heuristics", 0) if val_stats else 0)
         ),
         "perplexity_threshold": perplexity_threshold,
+        "perplexity_policy": (
+            "disabled"
+            if kenlm_model is None
+            else (
+                "explicit_threshold"
+                if perplexity_threshold is not None
+                else "report_only"
+            )
+        ),
         "splits": {
             "train": train_stats,
             **({"val": val_stats} if val_stats else {}),
