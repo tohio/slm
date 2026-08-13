@@ -142,6 +142,7 @@ def write_manifest(
     contract: dict[str, Any],
     input_signature: str | None,
     output_pattern: str = "*.jsonl",
+    metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     output_dir = Path(output_dir)
     outputs = file_snapshot(output_dir.glob(output_pattern), root=output_dir)
@@ -158,6 +159,9 @@ def write_manifest(
         "outputs": outputs,
         "output_signature": stable_digest(outputs),
     }
+    if metadata is not None:
+        payload["metadata"] = _jsonable(metadata)
+        payload["metadata_sha256"] = stable_digest(payload["metadata"])
     atomic_write_json(output_dir / MANIFEST_NAME, payload)
     return payload
 
@@ -182,6 +186,10 @@ def manifest_outputs_match(
     """Verify a manifest's version and output files without its stage contract."""
     manifest = load_manifest(output_dir)
     if not manifest or manifest.get("manifest_version") != MANIFEST_VERSION:
+        return False
+    if "metadata_sha256" in manifest and manifest.get(
+        "metadata_sha256"
+    ) != stable_digest(manifest.get("metadata")):
         return False
     output_dir = Path(output_dir)
     current_outputs = file_snapshot(

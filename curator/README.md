@@ -110,6 +110,11 @@ preferred copy is retained. Fuzzy MinHash deduplication runs within each
 eligible source. Template-like synthetic sources skip fuzzy matching but still
 participate in exact deduplication.
 
+Each filtered and deduplicated source manifest stores durable audit metadata.
+Filter manifests record input, accepted, rejected, per-reason, and FastText
+error counts. Dedup manifests record exact and fuzzy removals and the final
+document count, including the Common Crawl partition contract.
+
 The blend stage:
 
 - converts target token shares into character budgets;

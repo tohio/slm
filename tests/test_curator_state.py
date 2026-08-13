@@ -72,6 +72,40 @@ def test_manifest_survives_staging_directory_rename(tmp_path: Path):
     )
 
 
+def test_manifest_persists_audit_metadata(tmp_path: Path):
+    output_dir = tmp_path / "stage"
+    output_dir.mkdir()
+    (output_dir / "part.jsonl").write_text('{"text":"one"}\n')
+
+    manifest = write_manifest(
+        output_dir,
+        stage="filter",
+        contract={"audit_schema_version": 1},
+        input_signature="input-a",
+        metadata={
+            "audit": {
+                "total": 2,
+                "kept": 1,
+                "rejected": 1,
+                "rejection_reasons": {"too_short": 1},
+            }
+        },
+    )
+
+    assert manifest["metadata"]["audit"] == {
+        "kept": 1,
+        "rejected": 1,
+        "rejection_reasons": {"too_short": 1},
+        "total": 2,
+    }
+    assert manifest_outputs_match(output_dir)
+
+    manifest_path = output_dir / "_SUCCESS.json"
+    stored = manifest_path.read_text()
+    manifest_path.write_text(stored.replace('"total": 2', '"total": 3'))
+    assert not manifest_outputs_match(output_dir)
+
+
 def test_tree_signature_is_root_relative(tmp_path: Path):
     first = tmp_path / "first"
     second = tmp_path / "second"

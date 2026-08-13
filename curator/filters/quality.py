@@ -329,10 +329,23 @@ class QualityFilter:
         self.stats = {"total": 0, "kept": 0, "rejected": {}}
         self._fasttext_errors = 0
 
-    def report(self) -> str:
+    def stats_snapshot(self) -> dict:
+        """Return stable, JSON-serializable audit counts for this filter."""
         total = self.stats["total"]
         kept = self.stats["kept"]
-        rejected = total - kept
+        return {
+            "total": total,
+            "kept": kept,
+            "rejected": total - kept,
+            "rejection_reasons": dict(sorted(self.stats["rejected"].items())),
+            "fasttext_prediction_errors": self._fasttext_errors,
+        }
+
+    def report(self) -> str:
+        snapshot = self.stats_snapshot()
+        total = snapshot["total"]
+        kept = snapshot["kept"]
+        rejected = snapshot["rejected"]
         lines = [
             "Quality filter report:",
             f"  Total:    {total:>10,}",
@@ -341,15 +354,16 @@ class QualityFilter:
             "  Rejection reasons:",
         ]
         for reason, count in sorted(
-            self.stats["rejected"].items(), key=lambda x: -x[1]
+            snapshot["rejection_reasons"].items(), key=lambda x: -x[1]
         ):
             lines.append(
                 f"    {reason:<40} {count:>8,}  "
                 f"({100 * count / max(total, 1):.1f}%)"
             )
-        if self._fasttext_errors > 0:
+        if snapshot["fasttext_prediction_errors"] > 0:
             lines.append(
-                f"  FastText prediction errors: {self._fasttext_errors:,} "
+                "  FastText prediction errors: "
+                f"{snapshot['fasttext_prediction_errors']:,} "
                 f"(documents passed through without language check)"
             )
         return "\n".join(lines)

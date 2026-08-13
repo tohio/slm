@@ -798,9 +798,9 @@ def _init_filter_worker() -> None:
     _worker_qf = QualityFilter()
 
 
-def _filter_shard(args: tuple[Path, Path]) -> str:
+def _filter_shard(args: tuple[Path, Path, str]) -> tuple[str, str, dict]:
     """Filter a single JSONL shard. Runs in a subprocess."""
-    shard, dst_dir = args
+    shard, dst_dir, source = args
     out_path = dst_dir / shard.name
     tmp_path = out_path.with_name(f".{out_path.name}.{os.getpid()}.tmp")
 
@@ -831,8 +831,18 @@ def _filter_shard(args: tuple[Path, Path]) -> str:
         tmp_path.unlink(missing_ok=True)
         raise
 
-    report = qf.report()
-    return report
+    return source, shard.name, qf.stats_snapshot()
+
+
+def _merge_filter_stats(aggregate: dict, shard_stats: dict) -> None:
+    """Merge one worker's filter counts into a per-source audit summary."""
+    aggregate["shards"] += 1
+    for field in ("total", "kept", "rejected", "fasttext_prediction_errors"):
+        aggregate[field] += int(shard_stats[field])
+    for reason, count in shard_stats["rejection_reasons"].items():
+        aggregate["rejection_reasons"][reason] = (
+            aggregate["rejection_reasons"].get(reason, 0) + int(count)
+        )
 
 
 def stage_filter(workers: int | None = None, sources: list[str] | None = None) -> None:
@@ -858,6 +868,7 @@ def stage_filter(workers: int | None = None, sources: list[str] | None = None) -
 
     filter_contract = {
         "implementation_sha256": code_fingerprint(QualityFilter),
+        "audit_schema_version": 1,
         "quality_config": vars(QualityFilter().config),
         "fasttext_model": (
             file_snapshot([fasttext_path], root=fasttext_path.parent)[0]
@@ -865,8 +876,9 @@ def stage_filter(workers: int | None = None, sources: list[str] | None = None) -
             else None
         ),
     }
-    all_work: list[tuple[Path, Path]] = []
+    all_work: list[tuple[Path, Path, str]] = []
     pending_sources: dict[str, tuple[Path, str]] = {}
+    filter_stats: dict[str, dict] = {}
     for source in selected_sources:
         src_dir = RAW_DIR / source
         dst_dir = FILTERED_DIR / source
@@ -895,8 +907,19 @@ def stage_filter(workers: int | None = None, sources: list[str] | None = None) -
         dst_dir.mkdir(parents=True, exist_ok=True)
 
         log.info(f"  {source}: {len(shards)} shards queued")
-        all_work.extend((shard, dst_dir) for shard in shards)
+        all_work.extend((shard, dst_dir, source) for shard in shards)
         pending_sources[source] = (dst_dir, input_signature)
+        filter_stats[source] = {
+            "schema_version": 1,
+            "stage": "filter",
+            "source": source,
+            "shards": 0,
+            "total": 0,
+            "kept": 0,
+            "rejected": 0,
+            "rejection_reasons": {},
+            "fasttext_prediction_errors": 0,
+        }
 
     if not all_work:
         log.info("All selected sources have verified filtered outputs")
@@ -912,16 +935,29 @@ def stage_filter(workers: int | None = None, sources: list[str] | None = None) -
         max_workers=n_workers,
         initializer=_init_filter_worker,
     ) as executor:
-        for report in executor.map(_filter_shard, all_work, chunksize=16):
+        for source, shard_name, shard_stats in executor.map(
+            _filter_shard, all_work, chunksize=16
+        ):
             processed += 1
-            log.debug(report)
+            _merge_filter_stats(filter_stats[source], shard_stats)
+            log.debug(
+                f"Filtered {source}/{shard_name}: "
+                f"kept={shard_stats['kept']:,}/{shard_stats['total']:,}"
+            )
 
     for source, (dst_dir, input_signature) in pending_sources.items():
+        stats = filter_stats[source]
+        if stats["total"] != stats["kept"] + stats["rejected"]:
+            raise RuntimeError(f"{source}: inconsistent aggregate filter counts")
+        stats["rejection_reasons"] = dict(
+            sorted(stats["rejection_reasons"].items())
+        )
         write_manifest(
             dst_dir,
             stage="filter",
             contract={**filter_contract, "source": source},
             input_signature=input_signature,
+            metadata={"audit": stats},
         )
 
     log.info(f"Filter complete — processed: {processed}")
@@ -965,6 +1001,7 @@ def stage_dedup(workers: int | None = None, sources: list[str] | None = None) ->
         contract = {
             "source": source,
             "implementation_sha256": code_fingerprint(Deduplicator),
+            "audit_schema_version": 1,
             "exact_hash": "sha256-normalized-prefix-128",
             "cross_source_priority": DEDUP_PRIORITY,
             "prior_exact_inputs": prior_dedup_signatures,
@@ -1007,15 +1044,11 @@ def stage_dedup(workers: int | None = None, sources: list[str] | None = None) ->
             log.info(
                 f"  {source}: running exact dedup; skipping fuzzy MinHash dedup"
             )
-            scratch_dir = working_dir / source
-            exact_dir = scratch_dir / "exact_deduped"
-            dedup.exact_dedup_source(src_dir=src_dir, dst_dir=exact_dir)
-
-            dst_dir.mkdir(parents=True, exist_ok=True)
-            for shard in sorted(exact_dir.glob("*.jsonl")):
-                shutil.copy2(shard, dst_dir / shard.name)
-
-            shutil.rmtree(scratch_dir, ignore_errors=True)
+            dedup.deduplicate_source_exact_only(
+                src_dir=src_dir,
+                dst_dir=dst_dir,
+                source_name=source,
+            )
         elif source in FUZZY_DEDUP_PARTITION_FIELDS:
             dedup.deduplicate_source_by_partition(
                 src_dir=src_dir,
@@ -1035,6 +1068,13 @@ def stage_dedup(workers: int | None = None, sources: list[str] | None = None) ->
             stage="dedup",
             contract=contract,
             input_signature=input_signature,
+            metadata={
+                "audit": {
+                    "schema_version": 1,
+                    "stage": "dedup",
+                    **dedup.stats_for(source),
+                }
+            },
         )
         prior_dedup_signatures.append(
             {

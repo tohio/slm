@@ -90,6 +90,66 @@ def _dir_size_gb(path: Path) -> float:
     return total / (1024 ** 3)
 
 
+def _count_jsonl_records(path: Path) -> int:
+    """Count records in flat JSONL shards without parsing document payloads."""
+    count = 0
+    for shard in sorted(Path(path).glob("*.jsonl")):
+        with open(shard, "rb", buffering=8 * 1024 * 1024) as handle:
+            last_byte = b""
+            for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+                count += chunk.count(b"\n")
+                last_byte = chunk[-1:]
+            if last_byte and last_byte != b"\n":
+                count += 1
+    return count
+
+
+def build_dedup_stats(
+    *,
+    source: str,
+    exact_stats: dict,
+    final_documents: int,
+    fuzzy_enabled: bool,
+    fuzzy_partition_field: str | None = None,
+    fuzzy_partitions: list[str] | None = None,
+) -> dict:
+    """Build and validate durable per-source deduplication counts."""
+    input_documents = int(exact_stats.get("total", 0))
+    exact_kept = int(exact_stats.get("kept", 0))
+    exact_duplicates = int(exact_stats.get("exact_duplicates", 0))
+    if input_documents != exact_kept + exact_duplicates:
+        raise RuntimeError(
+            f"{source}: inconsistent exact-dedup counts: "
+            f"input={input_documents}, kept={exact_kept}, "
+            f"duplicates={exact_duplicates}"
+        )
+    if final_documents < 0 or final_documents > exact_kept:
+        raise RuntimeError(
+            f"{source}: invalid fuzzy-dedup output count "
+            f"{final_documents} for {exact_kept} exact-kept documents"
+        )
+
+    fuzzy_duplicates = exact_kept - final_documents
+    if not fuzzy_enabled and fuzzy_duplicates:
+        raise RuntimeError(
+            f"{source}: fuzzy dedup is disabled but output removed "
+            f"{fuzzy_duplicates} documents"
+        )
+
+    return {
+        "source": source,
+        "input_documents": input_documents,
+        "exact_kept_documents": exact_kept,
+        "exact_duplicate_documents": exact_duplicates,
+        "fuzzy_enabled": fuzzy_enabled,
+        "fuzzy_partition_field": fuzzy_partition_field,
+        "fuzzy_partitions": sorted(fuzzy_partitions or []),
+        "fuzzy_kept_documents": final_documents,
+        "fuzzy_duplicate_documents": fuzzy_duplicates,
+        "final_documents": final_documents,
+    }
+
+
 # Pre-compiled for normalize() — previously compiled on every call, which at
 # 80M docs was a meaningful fraction of exact-dedup wall time.
 _PUNCT_RE = re.compile(r"[^\w\s]")
@@ -493,9 +553,15 @@ class Deduplicator:
         scratch_dir = self.working_dir / source_name
         exact_dir = scratch_dir / "exact_deduped"
         log.info(f"=== Deduplicating {source_name} ===")
-        self.exact_dedup_source(src_dir=src_dir, dst_dir=exact_dir)
+        exact_stats = self.exact_dedup_source(src_dir=src_dir, dst_dir=exact_dir)
         self.minhash_dedup_source(
             src_dir=exact_dir, dst_dir=dst_dir, source_name=source_name
+        )
+        self._stats[source_name] = build_dedup_stats(
+            source=source_name,
+            exact_stats=exact_stats,
+            final_documents=_count_jsonl_records(dst_dir),
+            fuzzy_enabled=True,
         )
 
         self._cleanup_completed_scratch(
@@ -520,7 +586,7 @@ class Deduplicator:
         log.info(
             f"=== Deduplicating {source_name} by {partition_field} partition ==="
         )
-        self.exact_dedup_source(src_dir=src_dir, dst_dir=exact_dir)
+        exact_stats = self.exact_dedup_source(src_dir=src_dir, dst_dir=exact_dir)
         partitions = partition_jsonl_by_field(
             input_dir=exact_dir,
             output_dir=partitioned_dir,
@@ -549,12 +615,56 @@ class Deduplicator:
                     "produced no output shards"
                 )
 
+        self._stats[source_name] = build_dedup_stats(
+            source=source_name,
+            exact_stats=exact_stats,
+            final_documents=_count_jsonl_records(dst_dir),
+            fuzzy_enabled=True,
+            fuzzy_partition_field=partition_field,
+            fuzzy_partitions=list(partitions),
+        )
+
         self._cleanup_completed_scratch(
             source_name=source_name,
             scratch_dir=scratch_dir,
             dst_dir=dst_dir,
         )
         log.info(f"Deduplication complete for {source_name} → {dst_dir}")
+
+    def deduplicate_source_exact_only(
+        self,
+        src_dir: Path,
+        dst_dir: Path,
+        source_name: str,
+    ) -> None:
+        """Run exact deduplication and record the same durable audit schema."""
+        scratch_dir = self.working_dir / source_name
+        exact_dir = scratch_dir / "exact_deduped"
+        log.info(f"=== Exact-deduplicating {source_name} ===")
+        exact_stats = self.exact_dedup_source(src_dir=src_dir, dst_dir=exact_dir)
+
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        for shard in sorted(exact_dir.glob("*.jsonl")):
+            shutil.copy2(shard, dst_dir / shard.name)
+
+        self._stats[source_name] = build_dedup_stats(
+            source=source_name,
+            exact_stats=exact_stats,
+            final_documents=_count_jsonl_records(dst_dir),
+            fuzzy_enabled=False,
+        )
+        self._cleanup_completed_scratch(
+            source_name=source_name,
+            scratch_dir=scratch_dir,
+            dst_dir=dst_dir,
+        )
+        log.info(f"Exact deduplication complete for {source_name} → {dst_dir}")
+
+    def stats_for(self, source_name: str) -> dict:
+        """Return completed audit counts for a source or fail closed."""
+        if source_name not in self._stats:
+            raise RuntimeError(f"No deduplication stats recorded for {source_name}")
+        return dict(self._stats[source_name])
 
     @staticmethod
     def _cleanup_completed_scratch(
@@ -584,5 +694,5 @@ class Deduplicator:
             f"  Raw digest payload:    {hash_mem_mb:>10.1f} MB\n"
             f"  MinHash LSH crossover: {MINHASH_LSH_CROSSOVER:>10.3f}\n"
             f"  (Python set/index overhead is additional)\n"
-            f"  (Fuzzy dedup stats available in datatrove logs)"
+            f"  (Per-source exact/fuzzy counts are stored in stage manifests)"
         )
