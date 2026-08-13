@@ -43,6 +43,12 @@ from config.data_mix import (
     source_filter_family,
     validate,
 )
+from config.benchmarks import (
+    BENCHMARKS,
+    LM_EVAL_REVISION,
+    LM_EVAL_VERSION,
+    benchmark_decontamination_contract,
+)
 
 __all__ = [
     "DATA_MIX",
@@ -69,4 +75,8 @@ __all__ = [
     "epochs",
     "source_filter_family",
     "validate",
+    "BENCHMARKS",
+    "LM_EVAL_REVISION",
+    "LM_EVAL_VERSION",
+    "benchmark_decontamination_contract",
 ]

@@ -98,6 +98,7 @@ from config import (
     MINI_OVERRIDES,
     SUPPLEMENTAL_CHAR_CAPS,
     source_filter_family,
+    benchmark_decontamination_contract,
 )
 
 from config.data_mix import (
@@ -115,6 +116,10 @@ from curator.filters.dedup import (
     Deduplicator,
 )
 from curator.filters.overlap import audit_exact_split_overlap
+from curator.filters.benchmark_contamination import (
+    BenchmarkContaminationAuditor,
+    build_benchmark_index,
+)
 from curator.filters.quality import QualityFilter, require_fasttext_model
 from curator.state import (
     MANIFEST_NAME,
@@ -1563,6 +1568,8 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
         "implementation_sha256": code_fingerprint(
             stage_blend,
             audit_exact_split_overlap,
+            build_benchmark_index,
+            BenchmarkContaminationAuditor,
         ),
         "target_tokens": total_tokens,
         "seed": seed,
@@ -1572,6 +1579,7 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
         "data_mix": DATA_MIX,
         "code_submix": CODE_SUBMIX,
         "overflow_sink": OVERFLOW_SINK,
+        "benchmark_decontamination": benchmark_decontamination_contract(),
     }
     if manifest_matches(
         CURATED_DIR,
@@ -1583,11 +1591,17 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
         log.info("Verified blend manifest matches inputs/configuration — reusing")
         return
 
+    # Resolve the small, pinned benchmark inputs before replacing any existing
+    # blend output. Network/cache failure therefore cannot destroy a previously
+    # completed corpus. The index remains in memory only for this stage.
+    benchmark_index = build_benchmark_index()
+
     for stale in (
         train_path,
         val_path,
         CURATED_DIR / "blend_stats.json",
         CURATED_DIR / "exact_overlap_report.json",
+        CURATED_DIR / "benchmark_contamination_report.json",
         CURATED_DIR / MANIFEST_NAME,
     ):
         stale.unlink(missing_ok=True)
@@ -1762,7 +1776,12 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
     # Full-corpus exact split audit. Use the same normalized hash contract as
     # deduplication, retain only the much smaller validation hash set in RAM,
     # and persist the report even when the gate fails.
-    overlap_report = audit_exact_split_overlap(train_path, val_path)
+    benchmark_auditor = BenchmarkContaminationAuditor(benchmark_index)
+    overlap_report = audit_exact_split_overlap(
+        train_path,
+        val_path,
+        record_observer=benchmark_auditor.observe,
+    )
     overlap_report["expected_train_documents"] = n_train
     overlap_report["expected_validation_documents"] = n_val
     overlap_report["split_counts_match"] = (
@@ -1774,6 +1793,20 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
     )
     overlap_report_path = CURATED_DIR / "exact_overlap_report.json"
     atomic_write_json(overlap_report_path, overlap_report)
+
+    benchmark_report = benchmark_auditor.report({
+        "train": overlap_report["train_documents"],
+        "validation": overlap_report["validation_documents"],
+    })
+    benchmark_report["split_counts_match"] = overlap_report["split_counts_match"]
+    benchmark_report["passed"] = (
+        benchmark_report["passed"] and benchmark_report["split_counts_match"]
+    )
+    benchmark_report_path = CURATED_DIR / "benchmark_contamination_report.json"
+    atomic_write_json(benchmark_report_path, benchmark_report)
+
+    # The shared scan is complete, so persist both reports before enforcing
+    # either gate. A failure in one audit must not hide the result of the other.
     if not overlap_report["passed"]:
         raise RuntimeError(
             "Exact split-overlap gate failed: "
@@ -1782,7 +1815,17 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
             f"train_validation_overlap_hashes="
             f"{overlap_report['train_validation_overlap_hashes']:,}. "
             f"split_counts_match={overlap_report['split_counts_match']}. "
-            f"See {overlap_report_path}."
+            f"See {overlap_report_path}; benchmark audit: "
+            f"{benchmark_report_path}."
+        )
+    if not benchmark_report["passed"]:
+        raise RuntimeError(
+            "Exact benchmark-contamination gate failed: "
+            f"matched_documents={benchmark_report['matched_documents']:,}, "
+            f"matched_unique_queries="
+            f"{benchmark_report['matched_unique_queries']:,}, "
+            f"split_counts_match={benchmark_report['split_counts_match']}. "
+            f"See {benchmark_report_path}."
         )
 
     # ── Write blend stats ──────────────────────────────────────────────────────
@@ -1799,6 +1842,7 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
             "val_fraction": val_fraction,
             "estimated_tokens_from_chars": total_chars // CHARS_PER_TOKEN,
             "exact_overlap_audit": overlap_report,
+            "benchmark_contamination_audit": benchmark_report,
             "token_count_status": (
                 "estimate_only; authoritative realized token counts are "
                 "written by pretrain/data/tokenize_data.py"

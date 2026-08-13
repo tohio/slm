@@ -18,7 +18,7 @@ spacy>=3.7.0
 #   make install-kenlm
 #   or: pip install https://github.com/kpu/kenlm/archive/master.zip
 
-lm-eval>=0.4.2
+lm-eval==0.4.9
 
 # ── Notebooks ─────────────────────────────────────────────────────────────────
 jupyter>=1.0.0

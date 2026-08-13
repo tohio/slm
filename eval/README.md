@@ -36,6 +36,10 @@ The benchmark wrapper supports:
 | `truthfulqa` | `truthfulqa_mc2` | 0 | accuracy |
 | `humaneval` | `humaneval` | 0 | pass@1 |
 
+Evaluation and curation share the version-locked benchmark contract in
+`config/benchmarks.py`. It pins lm-eval v0.4.9 task definitions and immutable
+Hugging Face dataset commits used by exact benchmark decontamination.
+
 Run a complete branch evaluation:
 
 ```bash

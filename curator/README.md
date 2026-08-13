@@ -126,6 +126,12 @@ contains exact duplicates or if any normalized document occurs in both splits.
 The full-corpus result is stored in `curated/exact_overlap_report.json` and in
 `blend_stats.json`.
 
+The same full-corpus pass checks exact normalized occurrences of the canonical
+inputs for all six configured evaluation benchmarks. Dataset commits and the
+lm-eval task-definition revision are immutable configuration. Any match blocks
+blend completion and is recorded without benchmark text in
+`curated/benchmark_contamination_report.json`.
+
 The blend stage:
 
 - converts target token shares into character budgets;
@@ -238,6 +244,7 @@ $DATA_DIR/runs/<size>/
     ├── val.jsonl
     ├── blend_stats.json
     ├── exact_overlap_report.json
+    ├── benchmark_contamination_report.json
     └── _SUCCESS.json
 ```
 

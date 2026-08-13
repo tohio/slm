@@ -1,6 +1,7 @@
 """Full-corpus overlap audits for finalized pretraining JSONL splits."""
 
 from pathlib import Path
+from typing import Callable
 
 import orjson
 
@@ -23,6 +24,7 @@ def audit_exact_split_overlap(
     val_path: Path,
     *,
     sample_limit: int = 20,
+    record_observer: Callable[[str, int, dict], None] | None = None,
 ) -> dict:
     """Audit normalized exact duplicates within val and across train/val.
 
@@ -43,6 +45,8 @@ def audit_exact_split_overlap(
     with open(val_path, "rb", buffering=8 * 1024 * 1024) as handle:
         for line_number, line in enumerate(handle, start=1):
             record = _load_record(line, val_path, line_number)
+            if record_observer is not None:
+                record_observer("validation", line_number, record)
             val_documents += 1
             digest = exact_hash(record["text"])
             if digest in val_hashes:
@@ -63,6 +67,8 @@ def audit_exact_split_overlap(
     with open(train_path, "rb", buffering=8 * 1024 * 1024) as handle:
         for line_number, line in enumerate(handle, start=1):
             record = _load_record(line, train_path, line_number)
+            if record_observer is not None:
+                record_observer("train", line_number, record)
             train_documents += 1
             digest = exact_hash(record["text"])
             if digest not in val_hashes:

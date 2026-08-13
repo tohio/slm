@@ -57,6 +57,8 @@ load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from config.benchmarks import BENCHMARKS
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -71,47 +73,6 @@ def _eval_results_dir() -> Path:
 
 
 # ── Benchmark definitions ──────────────────────────────────────────────────────
-
-# `metric` is the metric name WITHOUT filter suffix. metric_score() handles
-# filter resolution against lm-eval's "{metric},{filter}" key format.
-BENCHMARKS = {
-    "hellaswag": {
-        "task":        "hellaswag",
-        "metric":      "acc_norm",
-        "num_fewshot": 10,
-        "description": "Commonsense reasoning",
-    },
-    "arc_easy": {
-        "task":        "arc_easy",
-        "metric":      "acc_norm",
-        "num_fewshot": 25,
-        "description": "Science QA (easy)",
-    },
-    "arc_challenge": {
-        "task":        "arc_challenge",
-        "metric":      "acc_norm",
-        "num_fewshot": 25,
-        "description": "Science QA (challenge)",
-    },
-    "mmlu": {
-        "task":        "mmlu",
-        "metric":      "acc",
-        "num_fewshot": 5,
-        "description": "Broad knowledge (57 subjects)",
-    },
-    "truthfulqa": {
-        "task":        "truthfulqa_mc2",
-        "metric":      "acc",
-        "num_fewshot": 0,
-        "description": "Factual accuracy",
-    },
-    "humaneval": {
-        "task":        "humaneval",
-        "metric":      "pass@1",
-        "num_fewshot": 0,
-        "description": "Code generation",
-    },
-}
 
 ALL_TASKS   = list(BENCHMARKS.keys())
 QUICK_TASKS = ["hellaswag", "arc_easy", "arc_challenge"]
