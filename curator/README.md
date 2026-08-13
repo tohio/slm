@@ -91,6 +91,12 @@ when its manifest version, implementation/configuration fingerprint, input
 signature, and output signature match. File presence alone is not treated as
 completion.
 
+Raw `common_crawl` text receives the line-level checks from Datatrove's
+`FineWebQualityFilter`: punctuated-line fraction, short-line fraction,
+duplicate-line character fraction, and newline-to-word ratio. These web-corpus
+metrics are not applied to already-curated FineWeb variants or to reference,
+book, academic, code, math, and synthetic sources.
+
 Exact deduplication runs across sources in `DEDUP_PRIORITY` order so the
 preferred copy is retained. Fuzzy MinHash deduplication runs within each
 eligible source. Template-like synthetic sources skip fuzzy matching but still

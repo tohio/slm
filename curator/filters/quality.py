@@ -44,6 +44,10 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from datatrove.data import Document
+from datatrove.pipeline.filters.fineweb_quality_filter import FineWebQualityFilter
+from datatrove.utils.text import TERMINAL_PUNCTUATION
+
 from config import PROSE_HEURISTIC_SKIP_SOURCES
 
 log = logging.getLogger(__name__)
@@ -158,6 +162,22 @@ class QualityConfig:
     # Language detection threshold
     min_language_score: float = 0.65
 
+    # FineWebQualityFilter defaults. These checks apply only to raw Common
+    # Crawl records; already-curated and non-web sources do not inherit them.
+    # Reference implementation:
+    # datatrove.pipeline.filters.fineweb_quality_filter.FineWebQualityFilter
+    fineweb_sources: frozenset[str] = field(
+        default_factory=lambda: frozenset({"common_crawl"})
+    )
+    fineweb_line_punct_thr: float = 0.12
+    fineweb_short_line_thr: float = 0.67
+    fineweb_short_line_length: int = 30
+    fineweb_char_duplicates_ratio: float = 0.01
+    fineweb_new_line_ratio: float = 0.3
+    fineweb_stop_chars: tuple[str, ...] = field(
+        default_factory=lambda: tuple(sorted(TERMINAL_PUNCTUATION))
+    )
+
     # Per-filter skip lists default to the shared non-prose routing contract.
     # Kept as per-filter fields (rather than one shared set) so future
     # tuning can customize which filters skip which sources without schema
@@ -213,6 +233,15 @@ class QualityFilter:
 
     def __init__(self, config: QualityConfig | None = None):
         self.config = config or QualityConfig()
+        self._fineweb_quality_filter = FineWebQualityFilter(
+            line_punct_thr=self.config.fineweb_line_punct_thr,
+            stop_chars=self.config.fineweb_stop_chars,
+            short_line_thr=self.config.fineweb_short_line_thr,
+            short_line_length=self.config.fineweb_short_line_length,
+            char_duplicates_ratio=self.config.fineweb_char_duplicates_ratio,
+            new_line_ratio=self.config.fineweb_new_line_ratio,
+            language="en",
+        )
         self.stats = {
             "total": 0,
             "kept": 0,
@@ -242,6 +271,17 @@ class QualityFilter:
                 self.stats["rejected"].get(reason, 0) + 1
             )
             return False, reason
+
+        # FineWeb's line-level quality contract is specific to raw web text.
+        # Applying it to books, papers, code, synthetic data, Wikipedia, or
+        # already-curated FineWeb variants would create unvalidated attrition.
+        if source in self.config.fineweb_sources:
+            passed, reason = self._check_fineweb_quality(text)
+            if not passed:
+                self.stats["rejected"][reason] = (
+                    self.stats["rejected"].get(reason, 0) + 1
+                )
+                return False, reason
 
         # Tier 1: cheap structural checks (all sources)
         checks = [
@@ -337,6 +377,13 @@ class QualityFilter:
         ):
             return False, "too_long"
         return True, None
+
+    def _check_fineweb_quality(self, text: str) -> tuple[bool, str | None]:
+        """Apply the pinned Datatrove FineWebQualityFilter implementation."""
+        result = self._fineweb_quality_filter.filter(Document(text=text, id=""))
+        if isinstance(result, tuple):
+            return result
+        return bool(result), None
 
     def _check_mean_word_length(self, text: str) -> tuple[bool, str | None]:
         words = text.split()
