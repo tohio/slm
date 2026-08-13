@@ -120,6 +120,12 @@ explicit corpus family, and each record's `source` field must match the source
 directory being processed. Adding an unclassified source or mixing source tags
 in a shard stops filtering instead of silently selecting a different profile.
 
+After blending and splitting, every train and validation record receives the
+same normalized exact hash used by deduplication. Curation fails if validation
+contains exact duplicates or if any normalized document occurs in both splits.
+The full-corpus result is stored in `curated/exact_overlap_report.json` and in
+`blend_stats.json`.
+
 The blend stage:
 
 - converts target token shares into character budgets;
@@ -231,6 +237,7 @@ $DATA_DIR/runs/<size>/
     ├── train.jsonl
     ├── val.jsonl
     ├── blend_stats.json
+    ├── exact_overlap_report.json
     └── _SUCCESS.json
 ```
 

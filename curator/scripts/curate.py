@@ -114,6 +114,7 @@ from curator.filters.dedup import (
     MINHASH_LSH_CROSSOVER,
     Deduplicator,
 )
+from curator.filters.overlap import audit_exact_split_overlap
 from curator.filters.quality import QualityFilter, require_fasttext_model
 from curator.state import (
     MANIFEST_NAME,
@@ -1559,7 +1560,10 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
     )
     blend_contract = {
         "target": target,
-        "implementation_sha256": code_fingerprint(stage_blend),
+        "implementation_sha256": code_fingerprint(
+            stage_blend,
+            audit_exact_split_overlap,
+        ),
         "target_tokens": total_tokens,
         "seed": seed,
         "val_fraction": val_fraction,
@@ -1583,6 +1587,7 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
         train_path,
         val_path,
         CURATED_DIR / "blend_stats.json",
+        CURATED_DIR / "exact_overlap_report.json",
         CURATED_DIR / MANIFEST_NAME,
     ):
         stale.unlink(missing_ok=True)
@@ -1754,6 +1759,32 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
         f"(target {total_tokens / 1e9:.2f}B)"
     )
 
+    # Full-corpus exact split audit. Use the same normalized hash contract as
+    # deduplication, retain only the much smaller validation hash set in RAM,
+    # and persist the report even when the gate fails.
+    overlap_report = audit_exact_split_overlap(train_path, val_path)
+    overlap_report["expected_train_documents"] = n_train
+    overlap_report["expected_validation_documents"] = n_val
+    overlap_report["split_counts_match"] = (
+        overlap_report["train_documents"] == n_train
+        and overlap_report["validation_documents"] == n_val
+    )
+    overlap_report["passed"] = (
+        overlap_report["passed"] and overlap_report["split_counts_match"]
+    )
+    overlap_report_path = CURATED_DIR / "exact_overlap_report.json"
+    atomic_write_json(overlap_report_path, overlap_report)
+    if not overlap_report["passed"]:
+        raise RuntimeError(
+            "Exact split-overlap gate failed: "
+            f"validation_duplicate_hashes="
+            f"{overlap_report['validation_duplicate_hashes']:,}, "
+            f"train_validation_overlap_hashes="
+            f"{overlap_report['train_validation_overlap_hashes']:,}. "
+            f"split_counts_match={overlap_report['split_counts_match']}. "
+            f"See {overlap_report_path}."
+        )
+
     # ── Write blend stats ──────────────────────────────────────────────────────
     stats_path = CURATED_DIR / "blend_stats.json"
     atomic_write_json(
@@ -1767,6 +1798,7 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
             "val_documents": n_val,
             "val_fraction": val_fraction,
             "estimated_tokens_from_chars": total_chars // CHARS_PER_TOKEN,
+            "exact_overlap_audit": overlap_report,
             "token_count_status": (
                 "estimate_only; authoritative realized token counts are "
                 "written by pretrain/data/tokenize_data.py"
