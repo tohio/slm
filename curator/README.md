@@ -139,6 +139,15 @@ deduplication. It reports cross-split candidate clusters without deleting or
 rewriting records, and blocks completion on any match. Results are stored in
 `curated/near_overlap_report.json`.
 
+The shared full-corpus pass also audits sensitive content. Service-shaped
+credentials and private-key headers are marked for credential review. Email
+addresses, international phone numbers, and SSN-shaped values are marked for
+identifier review. Pattern matches do not establish that credentials are
+active or identifiers are private, so this audit does not automatically block,
+remove, or rewrite records. The durable report stores counts, locations, and
+one-way match fingerprints—not matched values or surrounding text—in
+`curated/sensitive_content_report.json`.
+
 The blend stage:
 
 - converts target token shares into character budgets;
@@ -253,6 +262,7 @@ $DATA_DIR/runs/<size>/
     ├── exact_overlap_report.json
     ├── benchmark_contamination_report.json
     ├── near_overlap_report.json
+    ├── sensitive_content_report.json
     └── _SUCCESS.json
 ```
 

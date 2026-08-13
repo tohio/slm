@@ -126,6 +126,10 @@ from curator.filters.near_overlap import (
     audit_minhash_split_overlap,
     build_cross_index_removals,
 )
+from curator.filters.sensitive_content import (
+    SENSITIVE_CONTENT_CONTRACT,
+    SensitiveContentAuditor,
+)
 from curator.filters.quality import QualityFilter, require_fasttext_model
 from curator.state import (
     MANIFEST_NAME,
@@ -1580,6 +1584,7 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
             build_cross_index_removals,
             JsonlByteRangeReader,
             NearOverlapReporter,
+            SensitiveContentAuditor,
         ),
         "target_tokens": total_tokens,
         "seed": seed,
@@ -1597,6 +1602,7 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
                 "lsh_probability_50pct": MINHASH_LSH_CROSSOVER,
             },
         },
+        "sensitive_content": SENSITIVE_CONTENT_CONTRACT,
     }
     if manifest_matches(
         CURATED_DIR,
@@ -1620,6 +1626,7 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
         CURATED_DIR / "exact_overlap_report.json",
         CURATED_DIR / "benchmark_contamination_report.json",
         CURATED_DIR / "near_overlap_report.json",
+        CURATED_DIR / "sensitive_content_report.json",
         CURATED_DIR / MANIFEST_NAME,
     ):
         stale.unlink(missing_ok=True)
@@ -1795,10 +1802,18 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
     # deduplication, retain only the much smaller validation hash set in RAM,
     # and persist the report even when the gate fails.
     benchmark_auditor = BenchmarkContaminationAuditor(benchmark_index)
+    sensitive_content_auditor = SensitiveContentAuditor()
+
+    def observe_finalized_record(
+        split: str, line_number: int, record: dict
+    ) -> None:
+        benchmark_auditor.observe(split, line_number, record)
+        sensitive_content_auditor.observe(split, line_number, record)
+
     overlap_report = audit_exact_split_overlap(
         train_path,
         val_path,
-        record_observer=benchmark_auditor.observe,
+        record_observer=observe_finalized_record,
     )
     overlap_report["expected_train_documents"] = n_train
     overlap_report["expected_validation_documents"] = n_val
@@ -1823,8 +1838,20 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
     benchmark_report_path = CURATED_DIR / "benchmark_contamination_report.json"
     atomic_write_json(benchmark_report_path, benchmark_report)
 
-    # The shared scan is complete, so persist both reports before enforcing
-    # either gate. A failure in one audit must not hide the result of the other.
+    sensitive_content_report = sensitive_content_auditor.report({
+        "train": overlap_report["train_documents"],
+        "validation": overlap_report["validation_documents"],
+    })
+    sensitive_content_report_path = (
+        CURATED_DIR / "sensitive_content_report.json"
+    )
+    atomic_write_json(
+        sensitive_content_report_path, sensitive_content_report
+    )
+
+    # The shared scan is complete, so persist all reports before enforcing
+    # scan-integrity and contamination gates. One failure must not hide the
+    # completed results of the other observers.
     if not overlap_report["passed"]:
         raise RuntimeError(
             "Exact split-overlap gate failed: "
@@ -1834,7 +1861,8 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
             f"{overlap_report['train_validation_overlap_hashes']:,}. "
             f"split_counts_match={overlap_report['split_counts_match']}. "
             f"See {overlap_report_path}; benchmark audit: "
-            f"{benchmark_report_path}."
+            f"{benchmark_report_path}; sensitive-content audit: "
+            f"{sensitive_content_report_path}."
         )
     if not benchmark_report["passed"]:
         raise RuntimeError(
@@ -1846,6 +1874,13 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
             f"{benchmark_report['ngram_matched_documents']:,}, "
             f"split_counts_match={benchmark_report['split_counts_match']}. "
             f"See {benchmark_report_path}."
+        )
+    if not sensitive_content_report["passed"]:
+        raise RuntimeError(
+            "Sensitive-content audit failed to scan every finalized record: "
+            f"split_counts_match="
+            f"{sensitive_content_report['split_counts_match']}. "
+            f"See {sensitive_content_report_path}."
         )
 
     near_overlap_working = DEDUP_SCRATCH_DIR / "split_near_overlap"
@@ -1895,6 +1930,7 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
             "estimated_tokens_from_chars": total_chars // CHARS_PER_TOKEN,
             "exact_overlap_audit": overlap_report,
             "benchmark_contamination_audit": benchmark_report,
+            "sensitive_content_audit": sensitive_content_report,
             "near_overlap_audit": near_overlap_report,
             "token_count_status": (
                 "estimate_only; authoritative realized token counts are "
