@@ -120,6 +120,12 @@ from curator.filters.benchmark_contamination import (
     BenchmarkContaminationAuditor,
     build_benchmark_index,
 )
+from curator.filters.near_overlap import (
+    JsonlByteRangeReader,
+    NearOverlapReporter,
+    audit_minhash_split_overlap,
+    build_cross_index_removals,
+)
 from curator.filters.quality import QualityFilter, require_fasttext_model
 from curator.state import (
     MANIFEST_NAME,
@@ -1570,6 +1576,10 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
             audit_exact_split_overlap,
             build_benchmark_index,
             BenchmarkContaminationAuditor,
+            audit_minhash_split_overlap,
+            build_cross_index_removals,
+            JsonlByteRangeReader,
+            NearOverlapReporter,
         ),
         "target_tokens": total_tokens,
         "seed": seed,
@@ -1580,6 +1590,13 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
         "code_submix": CODE_SUBMIX,
         "overflow_sink": OVERFLOW_SINK,
         "benchmark_decontamination": benchmark_decontamination_contract(),
+        "near_overlap": {
+            "algorithm": "datatrove_minhash_validation_index_lsh",
+            "minhash": {
+                **MINHASH_CONTRACT,
+                "lsh_probability_50pct": MINHASH_LSH_CROSSOVER,
+            },
+        },
     }
     if manifest_matches(
         CURATED_DIR,
@@ -1602,6 +1619,7 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
         CURATED_DIR / "blend_stats.json",
         CURATED_DIR / "exact_overlap_report.json",
         CURATED_DIR / "benchmark_contamination_report.json",
+        CURATED_DIR / "near_overlap_report.json",
         CURATED_DIR / MANIFEST_NAME,
     ):
         stale.unlink(missing_ok=True)
@@ -1820,12 +1838,46 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
         )
     if not benchmark_report["passed"]:
         raise RuntimeError(
-            "Exact benchmark-contamination gate failed: "
+            "Benchmark-contamination gate failed: "
             f"matched_documents={benchmark_report['matched_documents']:,}, "
             f"matched_unique_queries="
             f"{benchmark_report['matched_unique_queries']:,}, "
+            f"ngram_matched_documents="
+            f"{benchmark_report['ngram_matched_documents']:,}, "
             f"split_counts_match={benchmark_report['split_counts_match']}. "
             f"See {benchmark_report_path}."
+        )
+
+    near_overlap_working = DEDUP_SCRATCH_DIR / "split_near_overlap"
+    near_overlap_report = audit_minhash_split_overlap(
+        train_path,
+        val_path,
+        near_overlap_working,
+        workers=workers,
+    )
+    near_overlap_report["validation_documents"] = overlap_report[
+        "validation_documents"
+    ]
+    near_overlap_report["expected_train_documents"] = n_train
+    near_overlap_report["expected_validation_documents"] = n_val
+    near_overlap_report["split_counts_match"] = (
+        near_overlap_report["train_documents"] == n_train
+        and near_overlap_report["validation_documents"] == n_val
+    )
+    near_overlap_report["passed"] = (
+        near_overlap_report["passed"]
+        and near_overlap_report["split_counts_match"]
+    )
+    near_overlap_report_path = CURATED_DIR / "near_overlap_report.json"
+    atomic_write_json(near_overlap_report_path, near_overlap_report)
+    shutil.rmtree(near_overlap_working, ignore_errors=True)
+    if not near_overlap_report["passed"]:
+        raise RuntimeError(
+            "Train/validation MinHash near-overlap gate failed: "
+            f"matched_train_documents="
+            f"{near_overlap_report['matched_train_documents']:,}, "
+            f"split_counts_match={near_overlap_report['split_counts_match']}. "
+            f"See {near_overlap_report_path}."
         )
 
     # ── Write blend stats ──────────────────────────────────────────────────────
@@ -1843,6 +1895,7 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
             "estimated_tokens_from_chars": total_chars // CHARS_PER_TOKEN,
             "exact_overlap_audit": overlap_report,
             "benchmark_contamination_audit": benchmark_report,
+            "near_overlap_audit": near_overlap_report,
             "token_count_status": (
                 "estimate_only; authoritative realized token counts are "
                 "written by pretrain/data/tokenize_data.py"

@@ -1,7 +1,8 @@
-"""Version-locked evaluation and exact-decontamination benchmark contract."""
+"""Version-locked evaluation and benchmark-decontamination contract."""
 
 LM_EVAL_VERSION = "0.4.9"
 LM_EVAL_REVISION = "452749513f817315042df9286241a61051392470"
+LM_EVAL_DECONTAMINATION_NGRAM_SIZE = 13
 
 # Dataset revisions were resolved from the Hugging Face repositories and are
 # immutable inputs to curation. `query_extractor` names the local implementation
@@ -81,6 +82,7 @@ def benchmark_decontamination_contract() -> dict:
     return {
         "lm_eval_version": LM_EVAL_VERSION,
         "lm_eval_revision": LM_EVAL_REVISION,
+        "decontamination_ngram_size": LM_EVAL_DECONTAMINATION_NGRAM_SIZE,
         "benchmarks": {
             name: {
                 key: spec[key]

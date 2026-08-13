@@ -126,11 +126,18 @@ contains exact duplicates or if any normalized document occurs in both splits.
 The full-corpus result is stored in `curated/exact_overlap_report.json` and in
 `blend_stats.json`.
 
-The same full-corpus pass checks exact normalized occurrences of the canonical
-inputs for all six configured evaluation benchmarks. Dataset commits and the
-lm-eval task-definition revision are immutable configuration. Any match blocks
-blend completion and is recorded without benchmark text in
+The same full-corpus pass checks both exact normalized benchmark inputs and
+lm-eval's case- and punctuation-normalized 13-word benchmark n-grams for all
+six configured evaluation benchmarks. Dataset commits, task definitions, and
+the n-gram size are immutable configuration. Any match blocks blend completion
+and is recorded without benchmark text in
 `curated/benchmark_contamination_report.json`.
+
+A separate disk-backed audit builds a validation MinHash index and checks every
+training document with the same five-word, 14×8 configuration used for fuzzy
+deduplication. It reports cross-split candidate clusters without deleting or
+rewriting records, and blocks completion on any match. Results are stored in
+`curated/near_overlap_report.json`.
 
 The blend stage:
 
@@ -245,6 +252,7 @@ $DATA_DIR/runs/<size>/
     ├── blend_stats.json
     ├── exact_overlap_report.json
     ├── benchmark_contamination_report.json
+    ├── near_overlap_report.json
     └── _SUCCESS.json
 ```
 

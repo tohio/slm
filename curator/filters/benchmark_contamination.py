@@ -1,9 +1,10 @@
-"""Exact benchmark-query contamination audit for finalized corpus splits."""
+"""Exact and 13-word benchmark contamination audits for finalized splits."""
 
 from __future__ import annotations
 
 import hashlib
 import re
+import string
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,8 +12,32 @@ from typing import Any
 
 import orjson
 
-from config.benchmarks import BENCHMARKS, benchmark_decontamination_contract
+from config.benchmarks import (
+    BENCHMARKS,
+    LM_EVAL_DECONTAMINATION_NGRAM_SIZE,
+    benchmark_decontamination_contract,
+)
 from curator.filters.dedup import normalize
+
+
+_LM_EVAL_TRANSLATION = str.maketrans(
+    string.ascii_lowercase + string.ascii_uppercase,
+    string.ascii_lowercase * 2,
+    string.punctuation,
+)
+
+
+def normalize_decontamination_text(text: str) -> str:
+    """Apply lm-eval's case/punctuation/whitespace n-gram normalization."""
+    return " ".join(text.translate(_LM_EVAL_TRANSLATION).split())
+
+
+def word_ngrams(text: str, size: int) -> list[str]:
+    """Return contiguous word n-grams from already-normalized text."""
+    words = text.split()
+    if len(words) < size:
+        return []
+    return [" ".join(words[i : i + size]) for i in range(len(words) - size + 1)]
 
 
 def _hellaswag_preprocess(text: str) -> str:
@@ -47,15 +72,19 @@ def extract_benchmark_query(extractor: str, row: dict) -> str:
 @dataclass
 class BenchmarkIndex:
     matcher: Any
+    ngram_matcher: Any
     query_count: int
     unique_pattern_count: int
+    ngram_size: int
+    unique_ngram_count: int
+    queries_with_ngrams: int
     task_query_counts: dict[str, int]
     query_sha256: str
     contract: dict
 
 
 def build_benchmark_index() -> BenchmarkIndex:
-    """Load pinned benchmark splits and build an in-memory exact matcher."""
+    """Load pinned benchmark splits and build exact and 13-word matchers."""
     try:
         import ahocorasick
     except ImportError as exc:
@@ -66,7 +95,9 @@ def build_benchmark_index() -> BenchmarkIndex:
     from curator.sources.hf import load_dataset
 
     patterns: dict[str, list[dict]] = {}
+    ngram_patterns: dict[str, list[dict]] = {}
     task_counts: Counter[str] = Counter()
+    queries_with_ngrams = 0
     digest = hashlib.sha256()
 
     for benchmark, spec in BENCHMARKS.items():
@@ -95,6 +126,23 @@ def build_benchmark_index() -> BenchmarkIndex:
             }
             pattern = f" {normalized} "
             patterns.setdefault(pattern, []).append(reference)
+            normalized_ngram_text = normalize_decontamination_text(query)
+            query_has_ngrams = False
+            for ngram in word_ngrams(
+                normalized_ngram_text,
+                LM_EVAL_DECONTAMINATION_NGRAM_SIZE,
+            ):
+                query_has_ngrams = True
+                ngram_reference = {
+                    **reference,
+                    "ngram_sha256": hashlib.sha256(
+                        ngram.encode("utf-8")
+                    ).hexdigest(),
+                }
+                ngram_patterns.setdefault(
+                    f" {ngram} ", []
+                ).append(ngram_reference)
+            queries_with_ngrams += int(query_has_ngrams)
             task_counts[benchmark] += 1
             digest.update(query_id.encode("utf-8"))
             digest.update(b"\0")
@@ -106,10 +154,19 @@ def build_benchmark_index() -> BenchmarkIndex:
         matcher.add_word(pattern, tuple(references))
     matcher.make_automaton()
 
+    ngram_matcher = ahocorasick.Automaton()
+    for pattern, references in sorted(ngram_patterns.items()):
+        ngram_matcher.add_word(pattern, tuple(references))
+    ngram_matcher.make_automaton()
+
     return BenchmarkIndex(
         matcher=matcher,
+        ngram_matcher=ngram_matcher,
         query_count=sum(task_counts.values()),
         unique_pattern_count=len(patterns),
+        ngram_size=LM_EVAL_DECONTAMINATION_NGRAM_SIZE,
+        unique_ngram_count=len(ngram_patterns),
+        queries_with_ngrams=queries_with_ngrams,
         task_query_counts=dict(sorted(task_counts.items())),
         query_sha256=digest.hexdigest(),
         contract=benchmark_decontamination_contract(),
@@ -122,7 +179,7 @@ def audit_benchmark_contamination(
     *,
     sample_limit: int = 20,
 ) -> dict:
-    """Scan every finalized document for exact normalized benchmark queries."""
+    """Scan every finalized document for exact and 13-word benchmark matches."""
     auditor = BenchmarkContaminationAuditor(index, sample_limit=sample_limit)
     split_documents: dict[str, int] = {}
     for split, path in sorted(split_paths.items()):
@@ -154,9 +211,13 @@ class BenchmarkContaminationAuditor:
             raise ValueError("sample_limit must be non-negative")
         self.index = index
         self.sample_limit = sample_limit
+        self.contaminated_documents = 0
         self.matched_documents = 0
         self.matched_query_ids: set[str] = set()
         self.matched_documents_by_task: Counter[str] = Counter()
+        self.ngram_matched_documents = 0
+        self.ngram_matched_query_ids: set[str] = set()
+        self.ngram_matched_documents_by_task: Counter[str] = Counter()
         self.samples: list[dict] = []
 
     def observe(self, split: str, line_number: int, record: dict) -> None:
@@ -167,43 +228,90 @@ class BenchmarkContaminationAuditor:
         for _, references in self.index.matcher.iter(normalized_document):
             for reference in references:
                 document_matches[reference["query_id"]] = reference
-        if not document_matches:
+        ngram_matches: dict[tuple[str, str], dict] = {}
+        normalized_ngram_document = (
+            f" {normalize_decontamination_text(text)} "
+        )
+        for _, references in self.index.ngram_matcher.iter(
+            normalized_ngram_document
+        ):
+            for reference in references:
+                key = (reference["query_id"], reference["ngram_sha256"])
+                ngram_matches[key] = reference
+
+        if not document_matches and not ngram_matches:
             return
 
-        self.matched_documents += 1
-        tasks_in_document = {
-            reference["benchmark"] for reference in document_matches.values()
-        }
-        for task in tasks_in_document:
-            self.matched_documents_by_task[task] += 1
-        self.matched_query_ids.update(document_matches)
+        self.contaminated_documents += 1
+        if document_matches:
+            self.matched_documents += 1
+            tasks_in_document = {
+                reference["benchmark"]
+                for reference in document_matches.values()
+            }
+            for task in tasks_in_document:
+                self.matched_documents_by_task[task] += 1
+            self.matched_query_ids.update(document_matches)
+        if ngram_matches:
+            self.ngram_matched_documents += 1
+            ngram_tasks = {
+                reference["benchmark"] for reference in ngram_matches.values()
+            }
+            for task in ngram_tasks:
+                self.ngram_matched_documents_by_task[task] += 1
+            self.ngram_matched_query_ids.update(
+                reference["query_id"] for reference in ngram_matches.values()
+            )
         if len(self.samples) < self.sample_limit:
             self.samples.append({
                 "split": split,
                 "line": line_number,
                 "source": record.get("source"),
+                "exact_match_count": len(document_matches),
                 "matches": sorted(
                     document_matches.values(), key=lambda x: x["query_id"]
-                ),
+                )[:20],
+                "ngram_match_count": len(ngram_matches),
+                "ngram_matches": sorted(
+                    ngram_matches.values(),
+                    key=lambda x: (x["query_id"], x["ngram_sha256"]),
+                )[:20],
             })
 
     def report(self, split_documents: dict[str, int]) -> dict:
         """Return the durable report after all records have been observed."""
         return {
-            "schema_version": 1,
-            "algorithm": "normalized_exact_query_substring_aho_corasick",
+            "schema_version": 2,
+            "algorithm": {
+                "exact": "normalized_exact_query_substring_aho_corasick",
+                "approximate": "lm_eval_normalized_13_word_ngram_aho_corasick",
+            },
             "scope": "full_corpus",
             "contract": self.index.contract,
             "query_count": self.index.query_count,
             "unique_pattern_count": self.index.unique_pattern_count,
+            "ngram_size": self.index.ngram_size,
+            "unique_ngram_count": self.index.unique_ngram_count,
+            "queries_with_ngrams": self.index.queries_with_ngrams,
             "task_query_counts": self.index.task_query_counts,
             "query_sha256": self.index.query_sha256,
             "split_documents": dict(sorted(split_documents.items())),
+            "contaminated_documents": self.contaminated_documents,
             "matched_documents": self.matched_documents,
             "matched_unique_queries": len(self.matched_query_ids),
             "matched_documents_by_benchmark": dict(
                 sorted(self.matched_documents_by_task.items())
             ),
-            "passed": self.matched_documents == 0,
+            "ngram_matched_documents": self.ngram_matched_documents,
+            "ngram_matched_unique_queries": len(
+                self.ngram_matched_query_ids
+            ),
+            "ngram_matched_documents_by_benchmark": dict(
+                sorted(self.ngram_matched_documents_by_task.items())
+            ),
+            "passed": (
+                self.matched_documents == 0
+                and self.ngram_matched_documents == 0
+            ),
             "samples": self.samples,
         }

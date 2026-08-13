@@ -45,6 +45,7 @@ from config.data_mix import (
 )
 from config.benchmarks import (
     BENCHMARKS,
+    LM_EVAL_DECONTAMINATION_NGRAM_SIZE,
     LM_EVAL_REVISION,
     LM_EVAL_VERSION,
     benchmark_decontamination_contract,
@@ -76,6 +77,7 @@ __all__ = [
     "source_filter_family",
     "validate",
     "BENCHMARKS",
+    "LM_EVAL_DECONTAMINATION_NGRAM_SIZE",
     "LM_EVAL_REVISION",
     "LM_EVAL_VERSION",
     "benchmark_decontamination_contract",
