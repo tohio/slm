@@ -46,13 +46,17 @@ from tqdm import tqdm
 log = logging.getLogger(__name__)
 
 MINHASH_CONTRACT = {
+    "hash_fc": "sha1",
     "precision": 64,
     "num_buckets": 14,
     "hashes_per_bucket": 8,
     "n_grams": 5,
 }
 MINHASH_CONFIG = MinhashConfig(
-    hash_config=HashConfig(precision=MINHASH_CONTRACT["precision"]),
+    hash_config=HashConfig(
+        precision=MINHASH_CONTRACT["precision"],
+        hash_fc=MINHASH_CONTRACT["hash_fc"],
+    ),
     num_buckets=MINHASH_CONTRACT["num_buckets"],
     hashes_per_bucket=MINHASH_CONTRACT["hashes_per_bucket"],
     n_grams=MINHASH_CONTRACT["n_grams"],
@@ -195,6 +199,7 @@ def run_minhash_dedup(
     working_dir: Path,
     workers: int | None = None,
     tasks: int | None = None,
+    output_filename: str = "${rank}.jsonl",
 ) -> None:
     """
     Run datatrove's 4-stage disk-based MinHash deduplication.
@@ -205,6 +210,8 @@ def run_minhash_dedup(
         working_dir: Scratch directory for datatrove intermediate state.
         workers:     Parallel workers. Defaults to cpu_count - 2.
         tasks:       Task count. Defaults to number of input shards.
+        output_filename: Datatrove output template. Partitioned runs must use
+                         distinct templates when sharing an output directory.
     """
     input_dir = Path(input_dir)
     output_dir = Path(output_dir)
@@ -291,7 +298,7 @@ def run_minhash_dedup(
             ),
             JsonlWriter(
                 str(output_dir),
-                output_filename="${rank}.jsonl",
+                output_filename=output_filename,
                 compression=None,
             ),
         ],
@@ -301,6 +308,84 @@ def run_minhash_dedup(
     ).run()
 
     log.info(f"MinHash dedup complete → {output_dir}")
+
+
+_PARTITION_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def partition_jsonl_by_field(
+    input_dir: Path,
+    output_dir: Path,
+    field: str,
+) -> dict[str, Path]:
+    """Partition flat JSONL shards by a required top-level string field.
+
+    Single-partition shards are hard-linked when possible, so the normal
+    Common Crawl layout does not duplicate the exact-deduped corpus in scratch.
+    Mixed shards are split without changing their serialized records.
+    """
+    input_dir = Path(input_dir)
+    output_dir = Path(output_dir)
+    partitions: dict[str, Path] = {}
+
+    for shard in sorted(input_dir.glob("*.jsonl")):
+        values: set[str] = set()
+        with open(shard, "rb", buffering=8 * 1024 * 1024) as handle:
+            for line_number, line in enumerate(handle, start=1):
+                try:
+                    record = orjson.loads(line)
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Invalid JSONL record in {shard}:{line_number}"
+                    ) from exc
+                value = record.get(field)
+                if not isinstance(value, str) or not value:
+                    raise RuntimeError(
+                        f"Missing required string field {field!r} in "
+                        f"{shard}:{line_number}"
+                    )
+                if not _PARTITION_NAME_RE.fullmatch(value):
+                    raise RuntimeError(
+                        f"Unsafe {field!r} partition value {value!r} in "
+                        f"{shard}:{line_number}"
+                    )
+                values.add(value)
+
+        if not values:
+            continue
+
+        for value in values:
+            partition_dir = output_dir / value
+            partition_dir.mkdir(parents=True, exist_ok=True)
+            partitions[value] = partition_dir
+
+        if len(values) == 1:
+            value = next(iter(values))
+            destination = partitions[value] / shard.name
+            try:
+                os.link(shard, destination)
+            except OSError:
+                shutil.copy2(shard, destination)
+            continue
+
+        writers = {
+            value: open(
+                partitions[value] / shard.name,
+                "wb",
+                buffering=8 * 1024 * 1024,
+            )
+            for value in values
+        }
+        try:
+            with open(shard, "rb", buffering=8 * 1024 * 1024) as handle:
+                for line in handle:
+                    record = orjson.loads(line)
+                    writers[record[field]].write(line)
+        finally:
+            for writer in writers.values():
+                writer.close()
+
+    return dict(sorted(partitions.items()))
 
 
 # ── Top-level dedup entry point ────────────────────────────────────────────────
@@ -413,8 +498,71 @@ class Deduplicator:
             src_dir=exact_dir, dst_dir=dst_dir, source_name=source_name
         )
 
-        # Verify dst_dir actually has output before removing scratch — cheap
-        # insurance against a silent MinHash failure that produces no shards.
+        self._cleanup_completed_scratch(
+            source_name=source_name,
+            scratch_dir=scratch_dir,
+            dst_dir=dst_dir,
+        )
+        log.info(f"Deduplication complete for {source_name} → {dst_dir}")
+
+    def deduplicate_source_by_partition(
+        self,
+        src_dir: Path,
+        dst_dir: Path,
+        source_name: str,
+        partition_field: str,
+    ) -> None:
+        """Exact-dedup globally, then fuzzy-dedup each field value alone."""
+        scratch_dir = self.working_dir / source_name
+        exact_dir = scratch_dir / "exact_deduped"
+        partitioned_dir = scratch_dir / "partitioned"
+
+        log.info(
+            f"=== Deduplicating {source_name} by {partition_field} partition ==="
+        )
+        self.exact_dedup_source(src_dir=src_dir, dst_dir=exact_dir)
+        partitions = partition_jsonl_by_field(
+            input_dir=exact_dir,
+            output_dir=partitioned_dir,
+            field=partition_field,
+        )
+        if not partitions:
+            raise RuntimeError(
+                f"{source_name}: no non-empty {partition_field!r} partitions"
+            )
+
+        for partition, partition_dir in partitions.items():
+            log.info(
+                f"  {source_name}: fuzzy MinHash partition "
+                f"{partition_field}={partition}"
+            )
+            run_minhash_dedup(
+                input_dir=partition_dir,
+                output_dir=dst_dir,
+                working_dir=scratch_dir / "minhash" / partition,
+                workers=self.workers,
+                output_filename=f"{partition}_${{rank}}.jsonl",
+            )
+            if not any(dst_dir.glob(f"{partition}_*.jsonl")):
+                raise RuntimeError(
+                    f"{source_name}: MinHash partition {partition!r} "
+                    "produced no output shards"
+                )
+
+        self._cleanup_completed_scratch(
+            source_name=source_name,
+            scratch_dir=scratch_dir,
+            dst_dir=dst_dir,
+        )
+        log.info(f"Deduplication complete for {source_name} → {dst_dir}")
+
+    @staticmethod
+    def _cleanup_completed_scratch(
+        source_name: str,
+        scratch_dir: Path,
+        dst_dir: Path,
+    ) -> None:
+        """Remove scratch only after a dedup run produced output shards."""
         if dst_dir.exists() and any(dst_dir.glob("*.jsonl")):
             scratch_size_gb = _dir_size_gb(scratch_dir)
             log.info(
@@ -427,7 +575,6 @@ class Deduplicator:
                 f"  {source_name}: dst_dir {dst_dir} has no JSONL output — "
                 f"keeping scratch at {scratch_dir} for inspection"
             )
-        log.info(f"Deduplication complete for {source_name} → {dst_dir}")
 
     def report(self) -> str:
         hash_mem_mb = len(self.seen_hashes) * 16 / 1024 / 1024

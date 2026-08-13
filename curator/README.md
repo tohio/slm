@@ -101,6 +101,10 @@ The Common Crawl extractor also runs Datatrove's integrated `URLFilter` before
 Trafilatura. URLs matching its blocked domains, URLs, hard terms, soft-term
 threshold, or banned substrings are discarded before HTML extraction.
 
+Raw Common Crawl fuzzy deduplication uses FineWeb's 64-bit SHA-1, five-word,
+14×8 MinHash configuration independently for each configured crawl snapshot.
+Exact normalized deduplication still operates across snapshots and sources.
+
 Exact deduplication runs across sources in `DEDUP_PRIORITY` order so the
 preferred copy is retained. Fuzzy MinHash deduplication runs within each
 eligible source. Template-like synthetic sources skip fuzzy matching but still

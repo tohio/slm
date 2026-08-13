@@ -199,6 +199,13 @@ def configure_data_dirs(target: str) -> None:
 # MinHash so near-duplicate templates remain available as training signal.
 SKIP_FUZZY_DEDUP_SOURCES = SYNTHETIC_SOURCES
 
+# FineWeb applies MinHash independently to each Common Crawl dump. Exact
+# normalized dedup remains cross-source and cross-dump; only fuzzy candidate
+# clustering is partitioned here.
+FUZZY_DEDUP_PARTITION_FIELDS = {
+    "common_crawl": "crawl",
+}
+
 # Synthetic sources are externally generated and published to Hugging Face.
 # They are controlled behavior supplements, not bulk reservoirs. If they
 # underfill, use the scalable specialized synthetic source first, then cleaner
@@ -962,6 +969,7 @@ def stage_dedup(workers: int | None = None, sources: list[str] | None = None) ->
             "cross_source_priority": DEDUP_PRIORITY,
             "prior_exact_inputs": prior_dedup_signatures,
             "fuzzy_enabled": source not in SKIP_FUZZY_DEDUP_SOURCES,
+            "fuzzy_partition_field": FUZZY_DEDUP_PARTITION_FIELDS.get(source),
             "minhash": {
                 **MINHASH_CONTRACT,
                 "lsh_probability_50pct": MINHASH_LSH_CROSSOVER,
@@ -1008,6 +1016,13 @@ def stage_dedup(workers: int | None = None, sources: list[str] | None = None) ->
                 shutil.copy2(shard, dst_dir / shard.name)
 
             shutil.rmtree(scratch_dir, ignore_errors=True)
+        elif source in FUZZY_DEDUP_PARTITION_FIELDS:
+            dedup.deduplicate_source_by_partition(
+                src_dir=src_dir,
+                dst_dir=dst_dir,
+                source_name=source,
+                partition_field=FUZZY_DEDUP_PARTITION_FIELDS[source],
+            )
         else:
             dedup.deduplicate_source(
                 src_dir=src_dir,
