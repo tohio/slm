@@ -97,6 +97,10 @@ duplicate-line character fraction, and newline-to-word ratio. These web-corpus
 metrics are not applied to already-curated FineWeb variants or to reference,
 book, academic, code, math, and synthetic sources.
 
+The Common Crawl extractor also runs Datatrove's integrated `URLFilter` before
+Trafilatura. URLs matching its blocked domains, URLs, hard terms, soft-term
+threshold, or banned substrings are discarded before HTML extraction.
+
 Exact deduplication runs across sources in `DEDUP_PRIORITY` order so the
 preferred copy is retained. Fuzzy MinHash deduplication runs within each
 eligible source. Template-like synthetic sources skip fuzzy matching but still

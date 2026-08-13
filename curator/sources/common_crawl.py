@@ -69,6 +69,8 @@ from pathlib import Path
 
 import orjson
 import requests
+from datatrove.data import Document
+from datatrove.pipeline.filters.url_filter import URLFilter
 from tqdm import tqdm
 from warcio.archiveiterator import ArchiveIterator
 
@@ -114,6 +116,7 @@ _FT_MODEL_PATH = os.environ.get(
 # trafilatura can take ~1s so per-WARC imports would be painful.
 
 _ft_model = None
+_url_filter = None
 
 
 def _init_extract_worker() -> None:
@@ -123,8 +126,14 @@ def _init_extract_worker() -> None:
     Called once when each worker starts. The model is cached in module
     globals for the lifetime of the worker.
     """
-    global _ft_model
+    global _ft_model, _url_filter
     import fasttext
+
+    # FineWeb filters URLs before HTML extraction. Load Datatrove's integrated
+    # domain/URL/adult-term lists once per extraction worker so rejected pages
+    # do not consume Trafilatura work.
+    _url_filter = URLFilter()
+    _url_filter.download_data()
 
     # Common Crawl contains many malformed, empty, non-HTML, wrongly encoded,
     # or otherwise junk pages. trafilatura/lxml log those as parser errors even
@@ -152,6 +161,21 @@ def _init_extract_worker() -> None:
             f"Worker could not load fasttext model at {_FT_MODEL_PATH}: {e}"
         )
         _ft_model = None
+
+
+def _url_is_allowed(target_url: str, url_filter=None) -> bool:
+    """Return the decision from Datatrove's FineWeb URL filter contract."""
+    if not target_url:
+        return False
+
+    active_filter = url_filter or _url_filter
+    if active_filter is None:
+        raise RuntimeError("Common Crawl URL filter was not initialized")
+
+    result = active_filter.filter(
+        Document(text="", id=target_url, metadata={"url": target_url})
+    )
+    return bool(result[0]) if isinstance(result, tuple) else bool(result)
 
 
 def _extract_from_warc_file(
@@ -191,6 +215,8 @@ def _extract_from_warc_file(
                 target_url = record.rec_headers.get_header("WARC-Target-URI", "")
                 content_type = record.http_headers.get_header("Content-Type", "") or ""
                 if "text/html" not in content_type:
+                    continue
+                if not _url_is_allowed(target_url):
                     continue
 
                 html = record.content_stream().read()
