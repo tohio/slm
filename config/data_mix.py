@@ -327,6 +327,20 @@ PROSE_HEURISTIC_SKIP_SOURCES: frozenset[str] = frozenset(
     | {"nemotron_cc_math", "nemotron_specialized"}
 )
 
+# Long records from these prose families are segmented before quality
+# filtering instead of being discarded solely for exceeding max_chars.
+# PG-19 is absent because books already bypass the maximum-length check and
+# remain intact. Code, synthetic, and specialized sources retain their
+# existing source-specific behavior.
+LONG_DOCUMENT_SEGMENT_SOURCES: frozenset[str] = frozenset(
+    (
+        set(FILTER_SOURCE_FAMILIES["raw_web"])
+        | set(FILTER_SOURCE_FAMILIES["curated_web"])
+        | set(FILTER_SOURCE_FAMILIES["reference_prose"])
+    )
+    - {"pg19"}
+)
+
 # Exact cross-source duplicates are retained from the first source processed.
 # Keep curated/reference/specialized corpora ahead of broad web crawls so the
 # preferred copy wins deterministically.
@@ -615,6 +629,8 @@ def validate() -> None:
     )
     assert SYNTHETIC_SOURCES <= set(ALL_SOURCES)
     assert PROSE_HEURISTIC_SKIP_SOURCES <= set(ALL_SOURCES)
+    assert LONG_DOCUMENT_SEGMENT_SOURCES <= set(ALL_SOURCES)
+    assert not (LONG_DOCUMENT_SEGMENT_SOURCES & PROSE_HEURISTIC_SKIP_SOURCES)
     routed_sources = [
         source
         for family_sources in FILTER_SOURCE_FAMILIES.values()

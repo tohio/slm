@@ -18,10 +18,11 @@ Source-conditional filter skips:
     The shared PROSE_HEURISTIC_SKIP_SOURCES contract in config.data_mix
     controls this routing for curation and validation.
 
-    Length filters (min_chars / max_chars) have separate per-source skip
-    lists because a source may legitimately fail one bound without the
-    other — pg19 books exceed max_chars, conala NL→code pairs fall
-    below min_chars, and jupyter notebooks can fall on either side.
+    Eligible long prose is segmented before this filter. Length filters
+    (min_chars / max_chars) retain separate per-source skip lists because a
+    source may legitimately fail one bound without the other — pg19 books
+    exceed max_chars, conala NL→code pairs fall below min_chars, and jupyter
+    notebooks can fall on either side.
 
 FastText language detection:
     Requires the fasttext lid.176.ftz model — download once via:
@@ -48,7 +49,11 @@ from datatrove.data import Document
 from datatrove.pipeline.filters.fineweb_quality_filter import FineWebQualityFilter
 from datatrove.utils.text import TERMINAL_PUNCTUATION
 
-from config import PROSE_HEURISTIC_SKIP_SOURCES, source_filter_family
+from config import (
+    LONG_DOCUMENT_SEGMENT_SOURCES,
+    PROSE_HEURISTIC_SKIP_SOURCES,
+    source_filter_family,
+)
 
 log = logging.getLogger(__name__)
 
@@ -136,6 +141,9 @@ class QualityConfig:
     # skip_min_length_sources / skip_max_length_sources.
     min_chars: int = 500
     max_chars: int = 50_000
+    long_document_segment_sources: frozenset[str] = field(
+        default_factory=lambda: LONG_DOCUMENT_SEGMENT_SOURCES
+    )
 
     # Word-level signals
     min_mean_word_length: float = 3.0

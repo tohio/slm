@@ -131,6 +131,7 @@ from curator.filters.sensitive_content import (
     SensitiveContentAuditor,
 )
 from curator.filters.quality import QualityFilter, require_fasttext_model
+from curator.filters.segments import segment_long_document
 from curator.state import (
     MANIFEST_NAME,
     atomic_write_json,
@@ -825,6 +826,9 @@ def _filter_shard(args: tuple[Path, Path, str]) -> tuple[str, str, dict]:
     qf = _worker_qf or QualityFilter()
     qf.reset_stats()
     parse_errors = 0
+    input_documents = 0
+    segmented_input_documents = 0
+    produced_segments = 0
     try:
         with open(shard, "rb", buffering=8 * 1024 * 1024) as fin, \
              open(tmp_path, "wb", buffering=8 * 1024 * 1024) as fout:
@@ -834,10 +838,20 @@ def _filter_shard(args: tuple[Path, Path, str]) -> tuple[str, str, dict]:
                 except Exception:
                     parse_errors += 1
                     continue
-                kept, _ = qf.check(record, expected_source=source)
-                if kept:
-                    fout.write(orjson.dumps(record))
-                    fout.write(b"\n")
+                input_documents += 1
+                records = segment_long_document(
+                    record,
+                    eligible_sources=qf.config.long_document_segment_sources,
+                    max_chars=qf.config.max_chars,
+                    min_chars=qf.config.min_chars,
+                )
+                produced_segments += len(records)
+                segmented_input_documents += int(len(records) > 1)
+                for candidate in records:
+                    kept, _ = qf.check(candidate, expected_source=source)
+                    if kept:
+                        fout.write(orjson.dumps(candidate))
+                        fout.write(b"\n")
             fout.flush()
             os.fsync(fout.fileno())
         if parse_errors:
@@ -849,12 +863,26 @@ def _filter_shard(args: tuple[Path, Path, str]) -> tuple[str, str, dict]:
         tmp_path.unlink(missing_ok=True)
         raise
 
-    return source, shard.name, qf.stats_snapshot()
+    stats = qf.stats_snapshot()
+    if stats["total"] != produced_segments:
+        raise RuntimeError(f"{shard}: segmentation/filter count mismatch")
+    stats.update({
+        "input_documents": input_documents,
+        "segmented_input_documents": segmented_input_documents,
+        "produced_segments": produced_segments,
+    })
+    return source, shard.name, stats
 
 
 def _merge_filter_stats(aggregate: dict, shard_stats: dict) -> None:
     """Merge one worker's filter counts into a per-source audit summary."""
     aggregate["shards"] += 1
+    for field in (
+        "input_documents",
+        "segmented_input_documents",
+        "produced_segments",
+    ):
+        aggregate[field] += int(shard_stats[field])
     for field in ("total", "kept", "rejected", "fasttext_prediction_errors"):
         aggregate[field] += int(shard_stats[field])
     for reason, count in shard_stats["rejection_reasons"].items():
@@ -885,8 +913,11 @@ def stage_filter(workers: int | None = None, sources: list[str] | None = None) -
         require_fasttext_model()
 
     filter_contract = {
-        "implementation_sha256": code_fingerprint(QualityFilter),
-        "audit_schema_version": 1,
+        "implementation_sha256": code_fingerprint(
+            QualityFilter,
+            segment_long_document,
+        ),
+        "audit_schema_version": 2,
         "source_families": FILTER_SOURCE_FAMILIES,
         "quality_config": vars(QualityFilter().config),
         "fasttext_model": (
@@ -929,11 +960,14 @@ def stage_filter(workers: int | None = None, sources: list[str] | None = None) -
         all_work.extend((shard, dst_dir, source) for shard in shards)
         pending_sources[source] = (dst_dir, input_signature)
         filter_stats[source] = {
-            "schema_version": 1,
+            "schema_version": 2,
             "stage": "filter",
             "source": source,
             "source_family": source_filter_family(source),
             "shards": 0,
+            "input_documents": 0,
+            "segmented_input_documents": 0,
+            "produced_segments": 0,
             "total": 0,
             "kept": 0,
             "rejected": 0,
@@ -969,6 +1003,8 @@ def stage_filter(workers: int | None = None, sources: list[str] | None = None) -
         stats = filter_stats[source]
         if stats["total"] != stats["kept"] + stats["rejected"]:
             raise RuntimeError(f"{source}: inconsistent aggregate filter counts")
+        if stats["total"] != stats["produced_segments"]:
+            raise RuntimeError(f"{source}: inconsistent segmentation counts")
         stats["rejection_reasons"] = dict(
             sorted(stats["rejection_reasons"].items())
         )

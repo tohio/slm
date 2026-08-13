@@ -120,6 +120,15 @@ explicit corpus family, and each record's `source` field must match the source
 directory being processed. Adding an unclassified source or mixing source tags
 in a shard stops filtering instead of silently selecting a different profile.
 
+Prose records that exceed the existing 50,000-character quality bound are
+split into deterministic, non-overlapping segments before filtering and
+deduplication. Splitting prefers paragraph and sentence boundaries, preserves
+the source fields, and records a parent fingerprint plus segment position.
+PG-19 books remain intact under their existing maximum-length exemption;
+code, synthetic, and specialized sources retain their existing behavior.
+Filter manifests record input documents, segmented inputs, and produced
+segments so segmentation cannot silently change document accounting.
+
 After blending and splitting, every train and validation record receives the
 same normalized exact hash used by deduplication. Curation fails if validation
 contains exact duplicates or if any normalized document occurs in both splits.

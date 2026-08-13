@@ -23,6 +23,9 @@ def test_quality_filter_stats_snapshot_is_machine_readable():
 def test_filter_worker_stats_merge_by_reason():
     aggregate = {
         "shards": 0,
+        "input_documents": 0,
+        "segmented_input_documents": 0,
+        "produced_segments": 0,
         "total": 0,
         "kept": 0,
         "rejected": 0,
@@ -32,6 +35,9 @@ def test_filter_worker_stats_merge_by_reason():
     _merge_filter_stats(
         aggregate,
         {
+            "input_documents": 8,
+            "segmented_input_documents": 2,
+            "produced_segments": 10,
             "total": 10,
             "kept": 7,
             "rejected": 3,
@@ -42,6 +48,9 @@ def test_filter_worker_stats_merge_by_reason():
     _merge_filter_stats(
         aggregate,
         {
+            "input_documents": 5,
+            "segmented_input_documents": 0,
+            "produced_segments": 5,
             "total": 5,
             "kept": 4,
             "rejected": 1,
@@ -52,6 +61,9 @@ def test_filter_worker_stats_merge_by_reason():
 
     assert aggregate == {
         "shards": 2,
+        "input_documents": 13,
+        "segmented_input_documents": 2,
+        "produced_segments": 15,
         "total": 15,
         "kept": 11,
         "rejected": 4,

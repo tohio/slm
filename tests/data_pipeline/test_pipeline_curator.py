@@ -140,6 +140,19 @@ class TestFilteredData:
         shards = list(pipeline_path("filtered", source).glob("*.jsonl"))
         assert len(shards) > 0, f"No filtered shards for {source}"
 
+    @pytest.mark.parametrize("source", ALL_SOURCES)
+    def test_filtered_manifest_accounts_for_segmentation(self, source):
+        manifest_path = pipeline_path("filtered", source, "_SUCCESS.json")
+        with open(manifest_path) as handle:
+            manifest = json.load(handle)
+        audit = manifest["metadata"]["audit"]
+
+        assert audit["schema_version"] == 2
+        assert audit["input_documents"] >= 0
+        assert audit["segmented_input_documents"] >= 0
+        assert audit["produced_segments"] == audit["total"]
+        assert audit["segmented_input_documents"] <= audit["input_documents"]
+
     def test_filtered_docs_pass_quality_checks(self):
         """Every sampled document in filtered output should pass quality filters."""
         qf = QualityFilter()
