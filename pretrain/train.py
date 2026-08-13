@@ -40,6 +40,7 @@ DATA_DIR    = Path(os.environ.get("DATA_DIR", "data"))
 from config.paths import pretrain_dir, tokenized_dir as run_tokenized_dir, BASE_RESULTS_DIR
 from config.runtime import configure_torch_runtime
 from curator.state import atomic_write_json, stable_digest
+from pretrain.data.mixture import validate_realized_mixture_report
 
 RESULTS_DIR = BASE_RESULTS_DIR
 PRETRAIN_AUDIT_FILENAME = "pretrain_run_audit.json"
@@ -339,6 +340,7 @@ def tokenized_data_identity(tokenized_dir: Path) -> dict:
         )
 
     splits = {}
+    split_metadata = {}
     for split in ("train", "val"):
         metadata_path = tokenized_dir / f"{split}.json"
         binary_path = tokenized_dir / f"{split}.bin"
@@ -368,6 +370,7 @@ def tokenized_data_identity(tokenized_dir: Path) -> dict:
             )
         if not binary_path.is_file():
             raise FileNotFoundError(f"Missing tokenized {split} binary: {binary_path}")
+        split_metadata[split] = metadata
         splits[split] = {
             "metadata_sha256": stable_digest(metadata),
             "binary_bytes": binary_path.stat().st_size,
@@ -390,12 +393,25 @@ def tokenized_data_identity(tokenized_dir: Path) -> dict:
             "Train and validation binaries were created with different tokenizers"
         )
 
+    mixture_path = tokenized_dir / "token_mixture.json"
+    mixture = _read_required_json(mixture_path, "realized token mixture report")
+    validate_realized_mixture_report(
+        mixture,
+        split_metadata["train"],
+        split_metadata["val"],
+    )
+
     return {
         "manifest": {
             field: completion[field]
             for field in required_manifest_fields
         },
         "splits": splits,
+        "realized_mixture": {
+            "report_sha256": stable_digest(mixture),
+            "contract_sha256": mixture["contract_sha256"],
+            "status": mixture["status"],
+        },
     }
 
 

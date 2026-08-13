@@ -31,7 +31,16 @@ $DATA_DIR/runs/<size>/tokenized/train.bin
 $DATA_DIR/runs/<size>/tokenized/train.json
 $DATA_DIR/runs/<size>/tokenized/val.bin
 $DATA_DIR/runs/<size>/tokenized/val.json
+$DATA_DIR/runs/<size>/tokenized/token_mixture.json
 ```
+
+`token_mixture.json` expands the configured code bucket into concrete sources
+and compares those intended shares with the combined train/validation token
+counts measured by the tokenizer. It records percentage-point deviations but
+does not impose an uncalibrated deviation threshold. Tokenization fails on
+unknown or corpus-wide missing sources and inconsistent counts; pretraining
+requires the report to match both the current data-mix contract and split
+metadata.
 
 The JSON sidecars record the input digest, tokenizer fingerprint, binary
 format, and realized source/document/token counts. Training requires those

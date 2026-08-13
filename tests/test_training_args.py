@@ -10,7 +10,9 @@ from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 
 from alignment.train_dpo import build_dpo_args
+from config.data_mix import ALL_SOURCES
 from finetune.train_sft import build_sft_args
+from pretrain.data.mixture import build_realized_mixture_report
 from pretrain.train import (
     resolve_distributed_strategy,
     resolve_pretrain_checkpoint,
@@ -192,10 +194,16 @@ def test_tokenized_data_identity_captures_manifest_and_splits(tmp_path: Path):
         json.dumps(completion),
         encoding="utf-8",
     )
-    for split, tokens in (("train", 4), ("val", 2)):
+    split_metadata = {}
+    for split, multiplier in (("train", 2), ("val", 1)):
+        source_counts = {
+            source: {"documents": multiplier, "tokens": multiplier}
+            for source in ALL_SOURCES
+        }
+        tokens = sum(row["tokens"] for row in source_counts.values())
         metadata = {
             "n_tokens": tokens,
-            "n_docs": 1,
+            "n_docs": sum(row["documents"] for row in source_counts.values()),
             "bos_id": 2,
             "eos_id": 3,
             "dtype": "uint16",
@@ -203,18 +211,31 @@ def test_tokenized_data_identity_captures_manifest_and_splits(tmp_path: Path):
             "input_sha256": f"{split}-input",
             "tokenizer_sha256": "tokenizer",
             "implementation_sha256": "implementation",
+            "source_counts": source_counts,
         }
+        split_metadata[split] = metadata
         (tmp_path / f"{split}.json").write_text(
             json.dumps(metadata),
             encoding="utf-8",
         )
         (tmp_path / f"{split}.bin").write_bytes(b"\0\0" * tokens)
 
+    mixture = build_realized_mixture_report(
+        split_metadata["train"], split_metadata["val"]
+    )
+    (tmp_path / "token_mixture.json").write_text(
+        json.dumps(mixture),
+        encoding="utf-8",
+    )
+
     identity = tokenized_data_identity(tmp_path)
 
     assert identity["manifest"] == completion
-    assert identity["splits"]["train"]["binary_bytes"] == 8
-    assert identity["splits"]["val"]["n_tokens"] == 2
+    assert identity["splits"]["train"]["binary_bytes"] == 4 * len(ALL_SOURCES)
+    assert identity["splits"]["val"]["n_tokens"] == len(ALL_SOURCES)
+    assert identity["realized_mixture"]["status"] == (
+        "passed_structural_checks_report_only"
+    )
 
 
 def test_pretrain_audit_rejects_changed_resume_contract(tmp_path: Path):

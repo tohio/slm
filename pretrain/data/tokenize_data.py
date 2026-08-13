@@ -24,6 +24,8 @@ Output:
     data/runs/<size>/tokenized/train.json   — metadata (n_tokens, n_docs, dtype, vocab_size)
     data/runs/<size>/tokenized/val.bin      — same, for validation split
     data/runs/<size>/tokenized/val.json
+    data/runs/<size>/tokenized/token_mixture.json
+                                              — configured vs realized token shares
 
 Inputs:
     By default both validated/train.jsonl and validated/val.jsonl are tokenized.
@@ -78,6 +80,7 @@ from curator.state import (
     stable_digest,
     write_manifest,
 )
+from pretrain.data.mixture import build_realized_mixture_report
 
 logging.basicConfig(
     level=logging.INFO,
@@ -612,6 +615,11 @@ def main():
                 chunk_size=args.chunk_size,
             )
 
+    mixture_report = build_realized_mixture_report(train_meta, val_meta)
+    mixture_report_path = args.output / "token_mixture.json"
+    atomic_write_json(mixture_report_path, mixture_report)
+    log.info("Realized token mixture report saved: %s", mixture_report_path)
+
     tokenization_contract = {
         "implementation_sha256": code_fingerprint(_tokenize_split),
         "format_version": TOKENIZED_FORMAT_VERSION,
@@ -621,6 +629,7 @@ def main():
             "train": train_meta["input_sha256"],
             "val": val_meta["input_sha256"],
         },
+        "mixture_contract_sha256": mixture_report["contract_sha256"],
     }
     write_manifest(
         args.output,
