@@ -85,6 +85,36 @@ BOILERPLATE_PATTERNS = [
 ]
 _BOILERPLATE_RE = re.compile("|".join(BOILERPLATE_PATTERNS), re.IGNORECASE)
 
+# Raw Common Crawl needs a small post-extraction guard beyond FineWeb's
+# document-level rules. These signatures target deterministic corruption and
+# page chrome observed after Trafilatura extraction; they are intentionally
+# not applied to already-curated FineWeb variants or reference corpora.
+_COMMON_CRAWL_MOJIBAKE_MARKERS = (
+    "\ufffd",
+    "â€",
+    "Ã‚",
+    "Ãƒ",
+    "Â ",
+    "ï»¿",
+    "ðŸ",
+    "‚Ä",
+)
+_COMMON_CRAWL_BOILERPLATE_LINE_RE = re.compile(
+    "|".join(
+        (
+            r"not logged in",
+            r"log in or register",
+            r"subscribe to (?:the )?(?:list|feed|newsfeed)",
+            r"syndicated newsfeeds?",
+            r"to leave or reply to comments",
+            r"download (?:the )?(?:free )?.{0,40}\bapp\b",
+            r"get your .{0,40}\bmerch\b",
+        )
+    ),
+    re.IGNORECASE,
+)
+_ASCII_SHORT_LINE_END = re.compile(r"(?:^|\s)[A-Za-z]{1,3}$")
+
 # FastText model path
 _FASTTEXT_MODEL_PATH = Path(
     os.environ.get("DATA_DIR", "data")
@@ -197,6 +227,11 @@ class QualityConfig:
     fineweb_stop_chars: tuple[str, ...] = field(
         default_factory=lambda: tuple(sorted(TERMINAL_PUNCTUATION))
     )
+    common_crawl_max_residual_mojibake_matches: int = 1
+    common_crawl_fragment_min_long_lines: int = 4
+    common_crawl_fragment_min_abrupt_lines: int = 3
+    common_crawl_fragment_max_abrupt_ratio: float = 0.5
+    common_crawl_boilerplate_max_line_ratio: float = 0.3
 
     # Per-filter skip lists default to the shared non-prose routing contract.
     # Kept as per-filter fields (rather than one shared set) so future
@@ -321,6 +356,18 @@ class QualityFilter:
         # code, synthetic data, Wikipedia, or already-curated FineWeb variants
         # would create unvalidated attrition.
         if source in self.config.fineweb_sources:
+            for check in (
+                self._check_common_crawl_mojibake,
+                self._check_common_crawl_fragments,
+                self._check_common_crawl_boilerplate,
+            ):
+                passed, reason = check(text)
+                if not passed:
+                    self.stats["rejected"][reason] = (
+                        self.stats["rejected"].get(reason, 0) + 1
+                    )
+                    return False, reason
+
             model = _get_fasttext_model()
             language_check = (
                 self._check_language_fasttext
@@ -478,6 +525,60 @@ class QualityFilter:
         # C4 removes rejected lines and citations in-place. Persist the same
         # transformed text that the reference Datatrove pipeline emits.
         record["text"] = document.text
+        return True, None
+
+    def _check_common_crawl_mojibake(
+        self, text: str
+    ) -> tuple[bool, str | None]:
+        """Reject Common Crawl text that remains corrupted after ftfy repair."""
+        matches = sum(text.count(marker) for marker in _COMMON_CRAWL_MOJIBAKE_MARKERS)
+        if matches > self.config.common_crawl_max_residual_mojibake_matches:
+            return False, "residual_mojibake"
+        return True, None
+
+    def _check_common_crawl_fragments(
+        self, text: str
+    ) -> tuple[bool, str | None]:
+        """Reject pages dominated by abruptly truncated article-preview lines."""
+        long_lines = [
+            line.strip()
+            for line in text.splitlines()
+            if len(line.strip()) >= 80
+        ]
+        if len(long_lines) < self.config.common_crawl_fragment_min_long_lines:
+            return True, None
+
+        abrupt = sum(
+            1
+            for line in long_lines
+            if line[-1].isalpha()
+            and _ASCII_SHORT_LINE_END.search(line) is not None
+        )
+        ratio = abrupt / len(long_lines)
+        if (
+            abrupt >= self.config.common_crawl_fragment_min_abrupt_lines
+            and ratio >= self.config.common_crawl_fragment_max_abrupt_ratio
+        ):
+            return False, "abrupt_line_fragments"
+        return True, None
+
+    def _check_common_crawl_boilerplate(
+        self, text: str
+    ) -> tuple[bool, str | None]:
+        """Reject pages whose extracted lines are dominated by site chrome."""
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if not lines:
+            return False, "no_lines"
+
+        total_chars = sum(len(line) for line in lines)
+        boilerplate_chars = sum(
+            len(line)
+            for line in lines
+            if _COMMON_CRAWL_BOILERPLATE_LINE_RE.search(line)
+        )
+        ratio = boilerplate_chars / max(total_chars, 1)
+        if ratio >= self.config.common_crawl_boilerplate_max_line_ratio:
+            return False, "boilerplate_dominated"
         return True, None
 
     def _check_mean_word_length(self, text: str) -> tuple[bool, str | None]:

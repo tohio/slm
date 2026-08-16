@@ -4,8 +4,9 @@ curator/sources/wikipedia.py
 Wikipedia English data source.
 
 Downloads the English Wikipedia dump via HuggingFace datasets.
-The HuggingFace wikipedia dataset is already clean (no wikitext markup,
-no templates), so no cleaning is applied beyond whitespace normalization.
+The HuggingFace wikipedia dataset is already stripped of wikitext markup and
+templates. Terminal reference/navigation sections are removed before long
+articles are segmented so small low-information tails are not emitted.
 
 Output: JSONL with one article per line:
     {"text": "...", "source": "wikipedia", "title": "...", "url": "..."}
@@ -26,6 +27,27 @@ from tqdm import tqdm
 from config import CHARS_PER_TOKEN
 
 log = logging.getLogger(__name__)
+
+
+_TERMINAL_SECTION_HEADINGS = frozenset({
+    "see also",
+    "notes",
+    "footnotes",
+    "references",
+    "sources",
+    "bibliography",
+    "further reading",
+    "external links",
+})
+
+
+def _trim_terminal_sections(text: str) -> str:
+    """Drop Wikipedia's terminal navigation and reference sections."""
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip().casefold() in _TERMINAL_SECTION_HEADINGS:
+            return "\n".join(lines[:index]).rstrip()
+    return text.strip()
 
 
 class WikipediaSource:
@@ -135,7 +157,7 @@ class WikipediaSource:
 
     def _clean(self, text: str) -> str:
         """
-        Normalize whitespace on Wikipedia article text.
+        Normalize Wikipedia text and remove terminal non-article sections.
 
         The HuggingFace wikipedia dataset is already stripped of wikitext
         markup, templates, and most structural artifacts. We intentionally
@@ -144,7 +166,7 @@ class WikipediaSource:
         sentence facts, and table rows. On a corpus of this quality that
         cost real tokens without any quality benefit.
         """
-        return text.strip()
+        return _trim_terminal_sections(text)
 
     def _write_shard(self, records: list[dict], shard_idx: int) -> Path:
         """Write records to a JSONL shard."""

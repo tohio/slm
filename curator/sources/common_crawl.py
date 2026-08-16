@@ -71,6 +71,7 @@ import orjson
 import requests
 from datatrove.data import Document
 from datatrove.pipeline.filters.url_filter import URLFilter
+from ftfy import fix_text
 from tqdm import tqdm
 from warcio.archiveiterator import ArchiveIterator
 
@@ -237,7 +238,15 @@ def _extract_from_warc_file(
             except Exception:
                 continue
 
-            if text is None or len(text) < min_text_length:
+            if text is None:
+                continue
+
+            # Trafilatura handles declared/guessed encodings, but pages that
+            # were already stored with double-decoded text can still contain
+            # mojibake. Repair those deterministic Unicode errors before
+            # language and downstream quality checks inspect the document.
+            text = fix_text(text, normalization="NFC").strip()
+            if len(text) < min_text_length:
                 continue
 
             # Language detection on first 500 chars.
@@ -256,7 +265,7 @@ def _extract_from_warc_file(
                     continue
 
             records.append({
-                "text": text.strip(),
+                "text": text,
                 "source": "common_crawl",
                 "url": target_url,
                 "crawl": crawl,
