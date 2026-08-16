@@ -78,8 +78,8 @@ class ConalaSource:
         log.info(f"Loading {self.DATASET_NAME}/{self.DATASET_CONFIG} from HuggingFace...")
         dataset = load_dataset(
             self.DATASET_NAME,
-            self.DATASET_CONFIG,
             split="train",
+            data_dir=self.DATASET_CONFIG,
             revision=self.DATASET_REVISION,
         )
         log.info(f"CoNaLa: {len(dataset):,} pairs loaded")
