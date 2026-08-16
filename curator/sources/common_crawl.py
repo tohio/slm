@@ -105,7 +105,9 @@ _PROGRESS_FILE = "cc_progress.json"
 # fasttext model path (resolved at import time in extraction workers)
 _FT_MODEL_PATH = os.environ.get(
     "FASTTEXT_MODEL_PATH",
-    "data/models/lid.176.ftz",
+    str(
+        Path(os.environ.get("DATA_DIR", "data")) / "models" / "lid.176.ftz"
+    ),
 )
 
 
