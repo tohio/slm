@@ -28,6 +28,7 @@ import logging
 import os
 import re
 import secrets
+import sys
 import threading
 from datetime import date
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -41,6 +42,11 @@ from dotenv import load_dotenv
 from tqdm import tqdm
 
 load_dotenv()
+
+# Direct execution (``python curator/scripts/upload_s3.py``) places only the
+# scripts directory on sys.path. Add the repository root before importing the
+# shared config and curator packages, matching the other pipeline entry points.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from config.data_mix import ALL_SOURCES
 from curator.state import file_snapshot, manifest_outputs_match
