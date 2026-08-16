@@ -53,7 +53,7 @@ def code_fingerprint(*objects: Any) -> str:
     """Hash the Python source files that implement a stage contract."""
     files: set[Path] = set()
     for obj in objects:
-        source = inspect.getsourcefile(obj)
+        source = inspect.getsourcefile(inspect.unwrap(obj))
         if source is None:
             raise RuntimeError(f"Cannot resolve source file for {obj!r}")
         files.add(Path(source).resolve())
