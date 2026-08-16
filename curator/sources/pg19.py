@@ -3,19 +3,14 @@ curator/sources/pg19.py
 ------------------------
 Project Gutenberg 19 (pg19) data source.
 
-Downloads the pg19 dataset via HuggingFace datasets — ~28k public-domain
-books published before 1919, ~2.9B tokens total. Provides long-form
-coherent prose that complements the web-heavy sources (FineWeb, CC) and
-the short-form reference sources (Wikipedia).
+Downloads ~28k public-domain books published before 1919. The train split
+index is loaded from an immutable revision of the canonical Hugging Face
+repository, while metadata and book text are fetched directly from DeepMind's
+canonical PG-19 storage. This avoids the repository's legacy dataset loading
+script, which current versions of Hugging Face Datasets no longer execute.
 
-We use streaming mode instead of materializing the full dataset. pg19
-on HF stores each book as an individual parquet file (~30k files total),
-so a non-streaming load_dataset call triggers ~30k sequential HTTP
-requests just to populate the cache — pathologically slow even at
-125m/350m/1b scale, and utterly wasted for mini (50 books). Streaming
-pulls parquet files lazily as iteration progresses, so the number of
-downloads is proportional to how many books we actually read, not
-the full corpus size.
+Books are fetched lazily in the pinned split order, so mini and character-
+capped runs download only the source documents they consume.
 
 Split: train only (validation/test are held out for downstream use).
 
@@ -34,14 +29,18 @@ Usage:
     source.download()
 """
 
+import csv
 import logging
+import time
 from pathlib import Path
 
 import orjson
-from curator.sources.hf import load_dataset
+import requests
+from huggingface_hub import hf_hub_download
 from tqdm import tqdm
 
 from config import CHARS_PER_TOKEN
+from curator.sources.hf import resolve_dataset_revision
 
 log = logging.getLogger(__name__)
 
@@ -49,11 +48,16 @@ log = logging.getLogger(__name__)
 # character budget, so the source only needs enough raw text to survive
 # filtering/dedup with headroom.
 PG19_CHAR_OVERFETCH_FACTOR = 1.30
+PG19_ASSET_ROOT_URL = "https://storage.googleapis.com/deepmind-gutenberg"
+PG19_METADATA_URL = f"{PG19_ASSET_ROOT_URL}/metadata.csv"
+PG19_TRAIN_FILES = "data/train_files.txt"
+PG19_DOWNLOAD_RETRIES = 5
+PG19_BACKOFF_MAX_SECONDS = 30
 
 
 class PG19Source:
     """
-    Downloads and extracts pg19 public-domain books via HF streaming.
+    Downloads and extracts PG-19 public-domain books from canonical storage.
 
     pg19 books are long (mean ~100k tokens each), so shard_size is
     kept small to keep individual JSONL files manageable.
@@ -67,9 +71,8 @@ class PG19Source:
             mini runs to validate the pipeline.
     """
 
-    # Canonical namespaced name. The bare "pg19" alias redirects to an
-    # old loading-script path that 404s on dataset_infos.json on
-    # newer datasets releases, causing silent load failures.
+    # The repository supplies the canonical split membership. Its legacy
+    # loading script is intentionally not executed.
     DATASET_NAME = "deepmind/pg19"
     SOURCE_TAG = "pg19"
 
@@ -97,11 +100,23 @@ class PG19Source:
                 "curator's manifest-aware restart/replacement flow."
             )
 
-        log.info(f"Streaming {self.DATASET_NAME} from HuggingFace...")
-        dataset = load_dataset(
+        revision = resolve_dataset_revision(self.DATASET_NAME)
+        split_path = hf_hub_download(
+            repo_id=self.DATASET_NAME,
+            repo_type="dataset",
+            filename=PG19_TRAIN_FILES,
+            revision=revision,
+        )
+        train_files = sorted(
+            line.strip()
+            for line in Path(split_path).read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        )
+
+        log.info(
+            "Streaming %s canonical assets using pinned revision %s...",
             self.DATASET_NAME,
-            split="train",
-            streaming=True,
+            revision,
         )
 
         if self.max_docs:
@@ -117,52 +132,71 @@ class PG19Source:
         total_skipped = 0
         stop = False
 
-        # Streaming dataset has no len(); use tqdm without a total.
-        pbar = tqdm(desc="Processing pg19", unit="book")
+        with requests.Session() as session:
+            metadata = self._load_metadata(session)
+            pbar = tqdm(train_files, desc="Processing pg19", unit="book")
 
-        for book in dataset:
-            text = (book.get("text") or "").strip()
-            if len(text) < self.min_length:
-                total_skipped += 1
-                pbar.update(1)
-                continue
+            for relative_path in pbar:
+                book_id = Path(relative_path).stem
+                book_metadata = metadata.get(book_id)
+                if book_metadata is None:
+                    raise RuntimeError(
+                        f"PG-19 metadata is missing book id {book_id}"
+                    )
 
-            buffer.append({
-                "text": text,
-                "source": self.SOURCE_TAG,
-                "title": book.get("short_book_title", ""),
-                "publication_date": str(book.get("publication_date", "")),
-                "url": book.get("url", ""),
-            })
-            pbar.update(1)
+                text = self._download_text(
+                    session,
+                    f"{PG19_ASSET_ROOT_URL}/{relative_path}",
+                ).strip()
+                if len(text) < self.min_length:
+                    total_skipped += 1
+                    continue
 
-            if len(buffer) >= self.shard_size:
-                path = self._write_shard(buffer, shard_idx)
-                output_files.append(path)
-                shard_idx += 1
-                total_written += len(buffer)
-                total_chars_written += sum(len(r.get("text", "")) for r in buffer)
-                buffer = []
+                buffer.append({
+                    "text": text,
+                    "source": self.SOURCE_TAG,
+                    "title": book_metadata.get("short_book_title", ""),
+                    "publication_date": str(
+                        book_metadata.get("publication_date", "")
+                    ),
+                    "url": book_metadata.get("url", ""),
+                })
 
-            buffered_chars = sum(len(r.get("text", "")) for r in buffer)
+                if len(buffer) >= self.shard_size:
+                    path = self._write_shard(buffer, shard_idx)
+                    output_files.append(path)
+                    shard_idx += 1
+                    total_written += len(buffer)
+                    total_chars_written += sum(
+                        len(record.get("text", "")) for record in buffer
+                    )
+                    buffer = []
 
-            if self.max_docs is not None and total_written + len(buffer) >= self.max_docs:
-                trim_to = max(0, self.max_docs - total_written)
-                buffer = buffer[:trim_to]
-                stop = True
-                break
+                buffered_chars = sum(
+                    len(record.get("text", "")) for record in buffer
+                )
 
-            if self.max_chars is not None and total_chars_written + buffered_chars >= self.max_chars:
-                stop = True
-                break
+                if (
+                    self.max_docs is not None
+                    and total_written + len(buffer) >= self.max_docs
+                ):
+                    trim_to = max(0, self.max_docs - total_written)
+                    buffer = buffer[:trim_to]
+                    stop = True
+                    break
+
+                if (
+                    self.max_chars is not None
+                    and total_chars_written + buffered_chars >= self.max_chars
+                ):
+                    stop = True
+                    break
 
         if buffer:
             path = self._write_shard(buffer, shard_idx)
             output_files.append(path)
             total_written += len(buffer)
             total_chars_written += sum(len(r.get("text", "")) for r in buffer)
-
-        pbar.close()
 
         log.info(
             f"pg19 complete — "
@@ -173,6 +207,42 @@ class PG19Source:
             f"{' (stopped at cap)' if stop else ''}"
         )
         return output_files
+
+    def _load_metadata(self, session: requests.Session) -> dict[str, dict[str, str]]:
+        """Load canonical PG-19 book metadata keyed by Gutenberg id."""
+        metadata_text = self._download_text(session, PG19_METADATA_URL)
+        fields = ["_id", "short_book_title", "publication_date", "url"]
+        return {
+            row["_id"]: row
+            for row in csv.DictReader(metadata_text.splitlines(), fieldnames=fields)
+        }
+
+    @staticmethod
+    def _download_text(session: requests.Session, url: str) -> str:
+        """Fetch one UTF-8 PG-19 asset with bounded retries."""
+        for attempt in range(1, PG19_DOWNLOAD_RETRIES + 1):
+            try:
+                response = session.get(url, timeout=(10, 120))
+                response.raise_for_status()
+                return response.content.decode("utf-8")
+            except (requests.RequestException, UnicodeDecodeError) as exc:
+                if attempt == PG19_DOWNLOAD_RETRIES:
+                    raise RuntimeError(
+                        f"Failed to download PG-19 asset after {attempt} attempts: "
+                        f"{url}"
+                    ) from exc
+                delay = min(PG19_BACKOFF_MAX_SECONDS, 2 ** (attempt - 1))
+                log.warning(
+                    "PG-19 asset download failed (attempt %d/%d); retrying "
+                    "in %ds: %s",
+                    attempt,
+                    PG19_DOWNLOAD_RETRIES,
+                    delay,
+                    url,
+                )
+                time.sleep(delay)
+
+        raise AssertionError("unreachable")
 
     def _write_shard(self, records: list[dict], shard_idx: int) -> Path:
         """Write records to a JSONL shard."""
