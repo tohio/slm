@@ -220,8 +220,8 @@ class BenchmarkContaminationAuditor:
         self.ngram_matched_documents_by_task: Counter[str] = Counter()
         self.samples: list[dict] = []
 
-    def observe(self, split: str, line_number: int, record: dict) -> None:
-        """Inspect one already-validated corpus record."""
+    def observe(self, split: str, line_number: int, record: dict) -> bool:
+        """Inspect one record and return whether it matches a benchmark."""
         text = record["text"]
         document_matches: dict[str, dict] = {}
         normalized_document = f" {normalize(text)} "
@@ -240,7 +240,7 @@ class BenchmarkContaminationAuditor:
                 ngram_matches[key] = reference
 
         if not document_matches and not ngram_matches:
-            return
+            return False
 
         self.contaminated_documents += 1
         if document_matches:
@@ -277,6 +277,7 @@ class BenchmarkContaminationAuditor:
                     key=lambda x: (x["query_id"], x["ngram_sha256"]),
                 )[:20],
             })
+        return True
 
     def report(self, split_documents: dict[str, int]) -> dict:
         """Return the durable report after all records have been observed."""

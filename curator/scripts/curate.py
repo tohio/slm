@@ -1184,39 +1184,75 @@ def _write_staging(args: tuple) -> tuple[str, int, int]:
     return source, docs, chars
 
 
-def _append_overflow(args: tuple) -> tuple[int, int]:
+def _remove_benchmark_matches_from_staging(
+    source: str,
+    staging_path: Path,
+    auditor: BenchmarkContaminationAuditor,
+) -> tuple[int, int, int, int]:
+    """Remove benchmark-matching records from one blend staging file."""
+    clean_path = staging_path.with_name(f".{staging_path.name}.clean.tmp")
+    kept_docs = kept_chars = removed_docs = removed_chars = 0
+    try:
+        with open(staging_path, "rb", buffering=8 * 1024 * 1024) as fin, open(
+            clean_path, "wb", buffering=8 * 1024 * 1024
+        ) as fout:
+            for line_number, line in enumerate(fin, start=1):
+                try:
+                    record = orjson.loads(line)
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Invalid blend staging JSONL record in {staging_path}"
+                    ) from exc
+                text_len = len(record.get("text", ""))
+                if auditor.observe("blend_candidate", line_number, record):
+                    removed_docs += 1
+                    removed_chars += text_len
+                    continue
+                fout.write(line)
+                kept_docs += 1
+                kept_chars += text_len
+        clean_path.replace(staging_path)
+    except Exception:
+        clean_path.unlink(missing_ok=True)
+        raise
+
+    if removed_docs:
+        log.warning(
+            f"  {source}: removed {removed_docs:,} benchmark-matching docs "
+            f"({removed_chars:,} chars) before blending"
+        )
+    return kept_docs, kept_chars, removed_docs, removed_chars
+
+
+def _append_overflow(
+    src_dir: str,
+    staging_path: str,
+    overflow_chars: int,
+    skip_docs: int,
+    benchmark_auditor: BenchmarkContaminationAuditor,
+) -> tuple[int, int, int, int, int]:
     """
     Append overflow-source docs to its staging file to cover the total deficit.
-    Runs in a subprocess.
 
-    Reads OVERFLOW_SINK deduped shards from where the initial staging pass
-    left off (determined by counting chars already in the staging file)
-    and appends until `overflow_chars` additional chars have been written.
+    Reads deduplicated shards from the source cursor left by earlier staging
+    and appends clean records until `overflow_chars` additional characters
+    have been written. Benchmark matches advance the source cursor but are
+    never appended.
 
-    Returns: (docs_appended, chars_appended)
+    Returns:
+        (docs_appended, chars_appended, docs_examined,
+         rejected_docs, rejected_chars)
     """
-    src_dir, staging_path, overflow_chars = args
     if overflow_chars <= 0:
-        return 0, 0
-
-    # Count chars already in staging so we can skip those shard contents.
-    # Staging files are written in shard-sorted order, so counting chars
-    # tells us where to resume.
-    already_chars = 0
-    with open(staging_path, "rb", buffering=8 * 1024 * 1024) as fin:
-        for line in fin:
-            try:
-                record = orjson.loads(line)
-            except Exception as exc:
-                raise RuntimeError(
-                    f"Invalid blend staging JSONL record in {staging_path}"
-                ) from exc
-            already_chars += len(record.get("text", ""))
+        return 0, 0, 0, 0, 0
 
     shards = sorted(Path(src_dir).glob("*.jsonl"))
-    chars_seen = 0
+    docs_seen = 0
+    docs_examined = 0
     chars_appended = 0
     docs_appended = 0
+    rejected_docs = 0
+    rejected_chars = 0
 
     with open(staging_path, "ab", buffering=8 * 1024 * 1024) as fout:
         for shard in shards:
@@ -1231,10 +1267,16 @@ def _append_overflow(args: tuple) -> tuple[int, int]:
                             f"Invalid deduplicated JSONL record in {shard}"
                         ) from exc
                     record = flatten_datatrove_record(record)
+                    docs_seen += 1
+                    if docs_seen <= skip_docs:
+                        continue
+                    docs_examined += 1
                     text_len = len(record.get("text", ""))
-                    chars_seen += text_len
-                    # Skip chars already in staging from the initial write
-                    if chars_seen <= already_chars:
+                    if benchmark_auditor.observe(
+                        "overflow_candidate", docs_seen, record
+                    ):
+                        rejected_docs += 1
+                        rejected_chars += text_len
                         continue
                     fout.write(orjson.dumps(record))
                     fout.write(b"\n")
@@ -1243,7 +1285,13 @@ def _append_overflow(args: tuple) -> tuple[int, int]:
                     if chars_appended >= overflow_chars:
                         break
 
-    return docs_appended, chars_appended
+    return (
+        docs_appended,
+        chars_appended,
+        docs_examined,
+        rejected_docs,
+        rejected_chars,
+    )
 
 
 def _append_overflow_to_source(
@@ -1252,6 +1300,9 @@ def _append_overflow_to_source(
     source_dirs: dict[str, Path],
     staging_paths: dict[str, Path],
     source_stats: dict[str, dict],
+    benchmark_auditor: BenchmarkContaminationAuditor,
+    benchmark_candidates_by_source: dict[str, int],
+    benchmark_removals_by_source: dict[str, dict[str, int]],
 ) -> tuple[int, int]:
     # Append additional docs from one overflow source into its staging file.
     if requested_chars <= 0:
@@ -1272,10 +1323,15 @@ def _append_overflow_to_source(
         )
         return 0, 0
 
-    docs, chars = _append_overflow(
-        (str(src_dir), str(staging_paths[overflow_source]), requested_chars)
+    docs, chars, examined, rejected_docs, rejected_chars = _append_overflow(
+        str(src_dir),
+        str(staging_paths[overflow_source]),
+        requested_chars,
+        source_stats[overflow_source]["source_docs_consumed"],
+        benchmark_auditor,
     )
 
+    source_stats[overflow_source]["source_docs_consumed"] += examined
     source_stats[overflow_source]["docs"] += docs
     source_stats[overflow_source]["chars"] += chars
     source_stats[overflow_source]["overflow_docs"] = (
@@ -1284,6 +1340,10 @@ def _append_overflow_to_source(
     source_stats[overflow_source]["overflow_chars"] = (
         source_stats[overflow_source].get("overflow_chars", 0) + chars
     )
+    benchmark_candidates_by_source[overflow_source] += examined
+    removals = benchmark_removals_by_source[overflow_source]
+    removals["docs"] += rejected_docs
+    removals["chars"] += rejected_chars
 
     log.info(
         f"  {overflow_source} overflow: +{docs:,} docs, "
@@ -1660,6 +1720,7 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
         val_path,
         CURATED_DIR / "blend_stats.json",
         CURATED_DIR / "exact_overlap_report.json",
+        CURATED_DIR / "benchmark_decontamination_report.json",
         CURATED_DIR / "benchmark_contamination_report.json",
         CURATED_DIR / "near_overlap_report.json",
         CURATED_DIR / "sensitive_content_report.json",
@@ -1705,6 +1766,7 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
             source_stats[source] = {
                 "docs": docs,
                 "chars": chars,
+                "source_docs_consumed": docs,
                 "target_chars": target_chars[source],
                 "initial_deficit": max(0, target_chars[source] - chars),
                 "deficit": max(0, target_chars[source] - chars),
@@ -1728,6 +1790,38 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
     source_stats = {
         source: source_stats[source] for source in ALL_SOURCES
     }
+
+    # Remove benchmark matches from each source before overflow. Overflow
+    # candidates are checked by the same auditor before they are appended, so
+    # the final blend never admits a known exact or 13-word benchmark match.
+    benchmark_decontamination_auditor = BenchmarkContaminationAuditor(
+        benchmark_index
+    )
+    benchmark_candidates_by_source = {
+        source: source_stats[source]["docs"] for source in ALL_SOURCES
+    }
+    benchmark_removals_by_source = {
+        source: {"docs": 0, "chars": 0} for source in ALL_SOURCES
+    }
+    for source in ALL_SOURCES:
+        stats = source_stats[source]
+        stats["pre_decontamination_docs"] = stats["docs"]
+        stats["pre_decontamination_chars"] = stats["chars"]
+        kept_docs, kept_chars, removed_docs, removed_chars = (
+            _remove_benchmark_matches_from_staging(
+                source,
+                staging_paths[source],
+                benchmark_decontamination_auditor,
+            )
+        )
+        stats["docs"] = kept_docs
+        stats["chars"] = kept_chars
+        stats["initial_deficit"] = max(
+            0, target_chars[source] - kept_chars
+        )
+        stats["deficit"] = stats["initial_deficit"]
+        benchmark_removals_by_source[source]["docs"] += removed_docs
+        benchmark_removals_by_source[source]["chars"] += removed_chars
 
     # ── Pass 2: source-aware overflow ─────────────────────────────────────────
     overflow_chains = {
@@ -1765,6 +1859,9 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
                 source_dirs=source_dirs,
                 staging_paths=staging_paths,
                 source_stats=source_stats,
+                benchmark_auditor=benchmark_decontamination_auditor,
+                benchmark_candidates_by_source=benchmark_candidates_by_source,
+                benchmark_removals_by_source=benchmark_removals_by_source,
             )
             remaining_deficit = max(0, remaining_deficit - chars)
 
@@ -1774,6 +1871,53 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
                 f"{remaining_deficit / 1e9:.3f}B chars"
             )
         stats["deficit"] = remaining_deficit
+
+    benchmark_decontamination_report = (
+        benchmark_decontamination_auditor.report({})
+    )
+    benchmark_decontamination_report.pop("split_documents", None)
+    benchmark_decontamination_report.update({
+        "scope": "pre_blend_candidate_removal",
+        "candidate_documents": sum(
+            benchmark_candidates_by_source.values()
+        ),
+        "candidate_documents_by_source": dict(
+            sorted(benchmark_candidates_by_source.items())
+        ),
+        "removed_documents": sum(
+            item["docs"] for item in benchmark_removals_by_source.values()
+        ),
+        "removed_characters": sum(
+            item["chars"] for item in benchmark_removals_by_source.values()
+        ),
+        "removed_by_source": {
+            source: values
+            for source, values in sorted(
+                benchmark_removals_by_source.items()
+            )
+            if values["docs"]
+        },
+    })
+    benchmark_decontamination_report["passed"] = (
+        benchmark_decontamination_report["contaminated_documents"]
+        == benchmark_decontamination_report["removed_documents"]
+    )
+    benchmark_decontamination_report_path = (
+        CURATED_DIR / "benchmark_decontamination_report.json"
+    )
+    atomic_write_json(
+        benchmark_decontamination_report_path,
+        benchmark_decontamination_report,
+    )
+    if not benchmark_decontamination_report["passed"]:
+        raise RuntimeError(
+            "Benchmark decontamination removal count mismatch: "
+            f"matched="
+            f"{benchmark_decontamination_report['contaminated_documents']:,}, "
+            f"removed="
+            f"{benchmark_decontamination_report['removed_documents']:,}. "
+            f"See {benchmark_decontamination_report_path}."
+        )
 
     unresolved_deficit = sum(
         stats.get("deficit", 0) for stats in source_stats.values()
@@ -1965,6 +2109,7 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
             "val_fraction": val_fraction,
             "estimated_tokens_from_chars": total_chars // CHARS_PER_TOKEN,
             "exact_overlap_audit": overlap_report,
+            "benchmark_decontamination": benchmark_decontamination_report,
             "benchmark_contamination_audit": benchmark_report,
             "sensitive_content_audit": sensitive_content_report,
             "near_overlap_audit": near_overlap_report,
@@ -1978,6 +2123,12 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
                     "chars": v["chars"],
                     "target_chars": v["target_chars"],
                     "initial_deficit": v["initial_deficit"],
+                    "benchmark_removed_docs": (
+                        benchmark_removals_by_source[s]["docs"]
+                    ),
+                    "benchmark_removed_chars": (
+                        benchmark_removals_by_source[s]["chars"]
+                    ),
                     "unresolved_deficit": v["deficit"],
                     "val_docs": val_source_counts.get(s, 0),
                     **(
