@@ -55,6 +55,7 @@ class ConalaSource:
 
     DATASET_NAME = "neulab/conala"
     DATASET_CONFIG = "mined"
+    DATASET_REVISION = "798cef31a9b480d9c31aed21e745c9e485ed2647"
     SOURCE_TAG = "conala"
 
     def __init__(
@@ -79,6 +80,7 @@ class ConalaSource:
             self.DATASET_NAME,
             self.DATASET_CONFIG,
             split="train",
+            revision=self.DATASET_REVISION,
         )
         log.info(f"CoNaLa: {len(dataset):,} pairs loaded")
 
