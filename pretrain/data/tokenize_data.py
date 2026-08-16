@@ -99,7 +99,7 @@ UINT16_MAX_VOCAB = 65_536
 
 # Bump this whenever the binary token stream format changes.
 # Used to prevent silently reusing stale tokenized files.
-TOKENIZED_FORMAT_VERSION = "bos_doc_eos_ordered_v2"
+TOKENIZED_FORMAT_VERSION = "bos_doc_eos_literal_safe_v3"
 
 # Global tokenizer instance — loaded once per worker process via initializer,
 # not once per document. Avoids one tokenizer load per document in the
@@ -107,6 +107,31 @@ TOKENIZED_FORMAT_VERSION = "bos_doc_eos_ordered_v2"
 _worker_tokenizer = None
 _worker_bos_id    = None
 _worker_eos_id    = None
+
+
+def _configure_pretraining_tokenizer(tokenizer) -> None:
+    """Encode reserved-token strings as text, not as structural token IDs."""
+    # In Hugging Face tokenizers, this counterintuitive flag means special
+    # token strings found in input are passed through the normal model instead
+    # of being recognized as AddedToken IDs. The pipeline still inserts the
+    # real BOS/EOS IDs explicitly around each encoded document below.
+    tokenizer.encode_special_tokens = True
+
+    # Fail at worker startup if a future tokenizers release changes this
+    # behavior. Every registered special token must be representable as
+    # ordinary text without emitting its reserved ID.
+    for token_id, added_token in tokenizer.get_added_tokens_decoder().items():
+        if not added_token.special:
+            continue
+        probe = tokenizer.encode(
+            added_token.content,
+            add_special_tokens=False,
+        )
+        if token_id in probe.ids:
+            raise RuntimeError(
+                f"Tokenizer encoded literal reserved token "
+                f"{added_token.content!r} as structural ID {token_id}"
+            )
 
 
 def tokenizer_fingerprint(tokenizer_path: Path) -> str:
@@ -175,6 +200,7 @@ def _worker_init(tokenizer_path: str, bos_id: int, eos_id: int) -> None:
     global _worker_tokenizer, _worker_bos_id, _worker_eos_id
     from tokenizers import Tokenizer
     _worker_tokenizer = Tokenizer.from_file(tokenizer_path)
+    _configure_pretraining_tokenizer(_worker_tokenizer)
     _worker_bos_id    = bos_id
     _worker_eos_id    = eos_id
 
@@ -457,23 +483,23 @@ def verify_dataset(bin_path: Path, meta_path: Path) -> None:
     bos_count = int((arr == meta["bos_id"]).sum())
     eos_count = int((arr == meta["eos_id"]).sum())
     
-    log.info(f"  BOS count:    {bos_count:,} (>= n_docs={meta['n_docs']:,})")
-    log.info(f"  EOS count:    {eos_count:,} (>= n_docs={meta['n_docs']:,})")  
+    log.info(f"  BOS count:    {bos_count:,} (expected n_docs={meta['n_docs']:,})")
+    log.info(f"  EOS count:    {eos_count:,} (expected n_docs={meta['n_docs']:,})")
     log.info(f"  First 20 IDs: {arr[:20].tolist()}")
 
     assert len(arr) == meta["n_tokens"], "Token count mismatch"
 
-    if bos_count < meta["n_docs"]:
+    if bos_count != meta["n_docs"]:
         raise RuntimeError(
-            f"BOS count too small: BOS={bos_count:,}, n_docs={meta['n_docs']:,}"
+            f"BOS count mismatch: BOS={bos_count:,}, n_docs={meta['n_docs']:,}"
         )
 
-    if eos_count < meta["n_docs"]:
+    if eos_count != meta["n_docs"]:
         raise RuntimeError(
-            f"EOS count too small: EOS={eos_count:,}, n_docs={meta['n_docs']:,}"
+            f"EOS count mismatch: EOS={eos_count:,}, n_docs={meta['n_docs']:,}"
         )
 
-    # Layout check: a bos_doc_eos_v1 binary must start with BOS.
+    # Every supported BOS/document/EOS binary layout must start with BOS.
     # Catches the case where BOS prepending is broken in a way that
     # still produces the right BOS count but wrong layout.
     if int(arr[0]) != meta["bos_id"]:

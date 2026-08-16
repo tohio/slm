@@ -82,7 +82,7 @@ make check-env
 make setup-data-dir DATA_DIR=/data/slm/data
 make download-fasttext-model DATA_DIR=/data/slm/data
 make download-kenlm-model DATA_DIR=/data/slm/data
-.venv/bin/python infra/verify_environment.py
+.venv/bin/python infra/verify_environment.py --profile curation
 ```
 
 ### Corpus construction

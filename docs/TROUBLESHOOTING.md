@@ -14,7 +14,7 @@ grep -nE '=\.\.\.|^[A-Z][A-Z0-9_]*=[[:space:]]*(#.*)?$' .env
 No output means the check passed. Verify the installed package contract:
 
 ```bash
-.venv/bin/python infra/verify_environment.py
+.venv/bin/python infra/verify_environment.py --profile curation
 ```
 
 ## Hugging Face dataset access

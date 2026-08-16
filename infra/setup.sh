@@ -224,28 +224,16 @@ echo "==> Validating environment..."
 
 ERRORS=0
 
-# Check Python packages
-# fasttext is installed via fasttext-wheel — import as 'fasttext'
-# langdetect is no longer used — replaced by fasttext for language detection
+# Verify the curation stack. The GPU training stack is installed and checked
+# separately by setup_gpu_instance.sh.
+python "${REPO_DIR}/infra/verify_environment.py" --profile curation \
+    || ERRORS=$((ERRORS + 1))
+
+# Check unpinned curation packages that are outside the version contract.
 python -c "
-import sys
-packages = [
-    'torch', 'transformers', 'datasets', 'tokenizers',
-    'accelerate', 'trl', 'trafilatura', 'fasttext',
-    'warcio', 'datatrove', 'orjson', 'spacy',
-    'boto3', 'dotenv', 'tqdm', 'requests', 'kenlm',
-]
-missing = []
-for pkg in packages:
-    try:
-        __import__(pkg.replace('-', '_'))
-    except ImportError:
-        missing.append(pkg)
-if missing:
-    print(f'  MISSING packages: {missing}')
-    sys.exit(1)
-else:
-    print(f'  All {len(packages)} packages importable')
+import boto3, datatrove, dotenv, fasttext, kenlm, orjson, requests, spacy
+import trafilatura, tqdm, warcio
+print('  Curation packages importable')
 " || ERRORS=$((ERRORS + 1))
 
 # Check spaCy model

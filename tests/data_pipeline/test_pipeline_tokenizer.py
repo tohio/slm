@@ -292,7 +292,7 @@ class TestTokenizedBinIntegrity:
             metadata = json.load(handle)
         assert len(metadata["input_sha256"]) == 64
         assert len(metadata["tokenizer_sha256"]) == 64
-        assert metadata["format_version"] == "bos_doc_eos_ordered_v2"
+        assert metadata["format_version"] == "bos_doc_eos_literal_safe_v3"
         assert metadata["source_counts"]
         assert sum(
             row["documents"] for row in metadata["source_counts"].values()

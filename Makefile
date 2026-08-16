@@ -151,7 +151,7 @@ curate-all: check-env
 	$(MAKE) setup-data-dir DATA_DIR="$(DATA_DIR)"
 	$(MAKE) download-fasttext-model DATA_DIR="$(DATA_DIR)"
 	$(MAKE) download-kenlm-model DATA_DIR="$(DATA_DIR)"
-	$(PYTHON) infra/verify_environment.py
+	$(PYTHON) infra/verify_environment.py --profile curation
 	$(MAKE) curate SIZE="$(SIZE)" WORKERS="$(WORKERS)"
 	$(MAKE) test-curator SIZE="$(SIZE)"
 	$(MAKE) validate SIZE="$(SIZE)"

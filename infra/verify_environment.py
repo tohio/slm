@@ -7,16 +7,26 @@ import argparse
 import importlib.metadata
 import subprocess
 
-import torch
-
-
-EXPECTED = {
+TRAINING_EXPECTED = {
     "torch": "2.13.0",
     "transformers": "5.14.1",
     "accelerate": "1.14.0",
     "trl": "1.9.0",
     "datasets": "5.0.0",
 }
+
+CURATION_EXPECTED = {
+    "transformers": "4.57.6",
+    "datasets": "5.0.0",
+    "tokenizers": "0.22.2",
+    "huggingface-hub": "0.36.2",
+    "fsspec": "2026.4.0",
+    "datatrove": "0.9.0",
+}
+
+# Backwards-compatible training contract used by the GPU smoke test and
+# existing imports.
+EXPECTED = TRAINING_EXPECTED
 MIN_CUDA_DRIVER = (580, 65, 6)
 
 
@@ -38,18 +48,22 @@ def _driver_version() -> str:
     return result.stdout.splitlines()[0].strip()
 
 
-def verify_versions() -> None:
+def verify_versions(expected: dict[str, str] = TRAINING_EXPECTED) -> None:
     failures = []
-    for package, expected in EXPECTED.items():
+    for package, expected_version in expected.items():
         installed = importlib.metadata.version(package)
         print(f"{package}={installed}")
-        if installed.split("+", 1)[0] != expected:
-            failures.append(f"{package}: expected {expected}, found {installed}")
+        if installed.split("+", 1)[0] != expected_version:
+            failures.append(
+                f"{package}: expected {expected_version}, found {installed}"
+            )
     if failures:
         raise SystemExit("Version mismatch:\n  " + "\n  ".join(failures))
 
 
 def verify_cuda() -> None:
+    import torch
+
     if not torch.cuda.is_available():
         raise SystemExit("CUDA is required but torch.cuda.is_available() is false")
     if torch.version.cuda != "13.0":
@@ -85,9 +99,23 @@ def main() -> None:
         action="store_true",
         help="Also require CUDA 13.0, a compatible driver, native SM, and BF16",
     )
+    parser.add_argument(
+        "--profile",
+        choices=("training", "curation"),
+        default="training",
+        help="Dependency contract to verify",
+    )
     args = parser.parse_args()
 
-    verify_versions()
+    if args.require_cuda and args.profile != "training":
+        parser.error("--require-cuda requires --profile training")
+
+    expected = (
+        TRAINING_EXPECTED
+        if args.profile == "training"
+        else CURATION_EXPECTED
+    )
+    verify_versions(expected)
     if args.require_cuda:
         verify_cuda()
     print("Environment verification passed.")
