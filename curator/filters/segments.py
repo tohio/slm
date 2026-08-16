@@ -8,21 +8,57 @@ from collections.abc import Collection
 
 
 _PARAGRAPH_BREAK = re.compile(r"\n\s*\n+")
+# Ordered from strongest semantic boundary to weakest fallback. Selecting the
+# first available boundary preserves a complete paragraph or sentence even
+# when a later comma or space exists closer to the hard size limit.
 _BOUNDARIES = ("\n", ". ", "! ", "? ", "; ", ", ", " ")
+_HEADING_MAX_CHARS = 120
+_HEADING_MAX_WORDS = 16
 
 
 def _cut_position(text: str, limit: int, minimum: int) -> int:
-    """Find the latest readable boundary in [minimum, limit]."""
-    best = -1
-    best_width = 0
+    """Find a boundary in [minimum, limit], preferring semantic strength."""
     for boundary in _BOUNDARIES:
         position = text.rfind(boundary, minimum, limit + 1)
-        if position > best:
-            best = position
-            best_width = len(boundary.rstrip())
-    if best < minimum:
-        return limit
-    return best + best_width
+        if position >= minimum:
+            return position + len(boundary.rstrip())
+    return limit
+
+
+def _looks_like_standalone_heading(text: str) -> bool:
+    """Return True for a short paragraph that should lead the next chunk."""
+    stripped = text.strip()
+    if not stripped or "\n" in stripped:
+        return False
+    words = stripped.split()
+    return (
+        len(stripped) <= _HEADING_MAX_CHARS
+        and len(words) <= _HEADING_MAX_WORDS
+        and any(character.isalpha() for character in stripped)
+        and not stripped.endswith((".", "!", "?", ";", ","))
+    )
+
+
+def _move_orphaned_headings(
+    chunks: list[str],
+    *,
+    max_chars: int,
+    min_chars: int,
+) -> list[str]:
+    """Move a trailing section heading to the following chunk when safe."""
+    for index in range(len(chunks) - 1):
+        paragraphs = _PARAGRAPH_BREAK.split(chunks[index])
+        if len(paragraphs) < 2:
+            continue
+        heading = paragraphs[-1].strip()
+        if not _looks_like_standalone_heading(heading):
+            continue
+        left = "\n\n".join(paragraphs[:-1]).strip()
+        right = f"{heading}\n\n{chunks[index + 1]}"
+        if len(left) >= min_chars and len(right) <= max_chars:
+            chunks[index] = left
+            chunks[index + 1] = right
+    return chunks
 
 
 def _split_oversized_block(text: str, max_chars: int) -> list[str]:
@@ -82,6 +118,12 @@ def split_long_text(text: str, *, max_chars: int, min_chars: int) -> list[str]:
             and min_chars <= len(right) <= max_chars
         ):
             chunks[-2:] = [left, right]
+
+    chunks = _move_orphaned_headings(
+        chunks,
+        max_chars=max_chars,
+        min_chars=min_chars,
+    )
 
     if not chunks or any(not chunk or len(chunk) > max_chars for chunk in chunks):
         raise RuntimeError("Long-document segmentation violated its size contract")

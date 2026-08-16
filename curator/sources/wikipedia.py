@@ -32,12 +32,14 @@ log = logging.getLogger(__name__)
 _TERMINAL_SECTION_HEADINGS = frozenset({
     "see also",
     "notes",
+    "notes and references",
     "footnotes",
     "references",
     "sources",
     "bibliography",
     "further reading",
     "external links",
+    "gallery",
 })
 
 
