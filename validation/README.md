@@ -7,6 +7,8 @@ train and validation splits. It removes structurally broken prose and
 excessive line repetition while preserving code, math, and other non-prose
 sources for which English-prose heuristics are inappropriate. KenLM measures
 eligible prose by default and filters only when an explicit threshold is set.
+The scorer reproduces CCNet's normalization and applies the matching
+SentencePiece model before KenLM.
 
 It does not load sources, deduplicate documents, train the tokenizer, or
 tokenize the corpus.
@@ -71,17 +73,18 @@ fallback for a missing model.
 
 ## Prerequisites
 
-Install the KenLM bindings and download the English model:
+Install the KenLM bindings and download the matched English model pair:
 
 ```bash
 make install-kenlm
 make download-kenlm-model DATA_DIR=/data/slm/data
 ```
 
-The default model path is:
+The default model paths are:
 
 ```text
 $DATA_DIR/models/en.arpa.bin
+$DATA_DIR/models/en.sp.model
 ```
 
 ## Usage
@@ -116,12 +119,14 @@ python validation/scripts/validate.py \
   --train /data/slm/data/runs/125m/curated/train.jsonl \
   --val /data/slm/data/runs/125m/curated/val.jsonl \
   --train-output /data/slm/data/runs/125m/validated/train.jsonl \
-  --val-output /data/slm/data/runs/125m/validated/val.jsonl
+  --val-output /data/slm/data/runs/125m/validated/val.jsonl \
+  --kenlm-model /data/slm/data/models/en.arpa.bin \
+  --kenlm-sentencepiece-model /data/slm/data/models/en.sp.model
 ```
 
 The validator reuses an existing output only when its completion manifest
-matches the input files, implementation, KenLM selection, threshold policy,
-report sample size, and current outputs.
+matches the input files, implementation, matched KenLM/SentencePiece selection,
+threshold policy, report sample size, and current outputs.
 
 ## Artifact Transfer
 
@@ -160,7 +165,7 @@ when they are absent.
 
 - Omitting `--perplexity-threshold` is report-only; it does not remove the
   highest-scoring percentile.
-- Changing the KenLM model or threshold changes the stage contract.
+- Changing either CCNet model file or the threshold changes the stage contract.
 - `validation_stats.json` contains the KenLM policy, per-source distributions,
   measured rejection counts, and any explicit threshold; inspect it before
   tokenizer training.

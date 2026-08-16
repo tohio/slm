@@ -29,16 +29,15 @@ Perplexity policy:
     validated quality boundary.
 
 KenLM model:
-    Requires a 5-gram KenLM model trained on high-quality text (e.g.
-    Wikipedia). The model scores how "natural" each document is according
-    to its language model. Download or train:
+    Requires the matched CCNet English model pair. CCNet's KenLM model was
+    trained on normalized SentencePiece output, so raw text must be processed
+    with en.sp.model before en.arpa.bin can score it:
 
-    # Download pre-trained English KenLM (from CCNet/FineWeb):
+    # Download the pretrained English CCNet pair:
     wget https://dl.fbaipublicfiles.com/cc_net/lm/en.arpa.bin
+    wget https://dl.fbaipublicfiles.com/cc_net/lm/en.sp.model
 
-    # Or train on Wikipedia text:
-    lmplz -o 5 < wikipedia_text.txt > en.arpa
-    build_binary en.arpa en.arpa.bin
+    Use ``make download-kenlm-model`` so both files are installed together.
 
 Usage:
     python validation/scripts/validate.py
@@ -74,6 +73,10 @@ from curator.state import (
     manifest_outputs_match,
     stable_digest,
     write_manifest,
+)
+from validation.ccnet_perplexity import (
+    CCNetPerplexityScorer,
+    normalize_ccnet_text,
 )
 
 logging.basicConfig(
@@ -305,24 +308,35 @@ def validate_manual_split(
     return stats
 
 
-def _load_kenlm(kenlm_model_path: Path | None):
-    """Load the required KenLM model, or return None when explicitly disabled."""
+def _load_kenlm(
+    kenlm_model_path: Path | None,
+    sentencepiece_model_path: Path | None,
+):
+    """Load a matched CCNet model pair, or return None when disabled."""
     if kenlm_model_path is None:
+        if sentencepiece_model_path is not None:
+            raise ValueError("SentencePiece model must be disabled with KenLM")
         return None
-    if not kenlm_model_path.exists():
+    if sentencepiece_model_path is None:
+        raise ValueError("CCNet SentencePiece model is required with KenLM")
+    missing = [
+        path
+        for path in (kenlm_model_path, sentencepiece_model_path)
+        if not path.exists()
+    ]
+    if missing:
         raise FileNotFoundError(
-            f"KenLM model not found: {kenlm_model_path}. Download/configure it, "
+            f"CCNet model file not found: {missing[0]}. Download the matched "
+            "en.arpa.bin and en.sp.model pair, "
             f"or pass --no-perplexity to explicitly record a no-KenLM run."
         )
-    try:
-        import kenlm
-        model = kenlm.Model(str(kenlm_model_path))
-        log.info(f"Loaded KenLM model from {kenlm_model_path}")
-        return model
-    except ImportError as exc:
-        raise RuntimeError(
-            "kenlm is required when perplexity measurement is enabled"
-        ) from exc
+    scorer = CCNetPerplexityScorer(
+        kenlm_model_path,
+        sentencepiece_model_path,
+    )
+    log.info(f"Loaded CCNet KenLM model from {kenlm_model_path}")
+    log.info(f"Loaded CCNet SentencePiece model from {sentencepiece_model_path}")
+    return scorer
 
 
 def _log_split_report(split: str, stats: dict) -> None:
@@ -376,6 +390,12 @@ def main():
         help="Path to KenLM binary model",
     )
     parser.add_argument(
+        "--kenlm-sentencepiece-model",
+        type=Path,
+        default=DATA_DIR / "models" / "en.sp.model",
+        help="Path to the matching CCNet SentencePiece model",
+    )
+    parser.add_argument(
         "--perplexity-threshold",
         type=float,
         default=None,
@@ -411,6 +431,9 @@ def main():
     args.val_output = args.val_output or (run_validated_dir / "val.jsonl")
 
     kenlm_path = None if args.no_perplexity else args.kenlm_model
+    sentencepiece_path = (
+        None if args.no_perplexity else args.kenlm_sentencepiece_model
+    )
 
     log.info(f"=== SLM Data Validation ===")
     log.info(f"Train input:  {args.train}")
@@ -418,6 +441,7 @@ def main():
     log.info(f"Train output: {args.train_output}")
     log.info(f"Val output:   {args.val_output}")
     log.info(f"KenLM:        {kenlm_path or 'disabled'}")
+    log.info(f"SentencePiece:{sentencepiece_path or 'disabled'}")
 
     if not args.train.exists():
         raise FileNotFoundError(f"Train input not found: {args.train}")
@@ -442,7 +466,7 @@ def main():
     # ── Manual path ───────────────────────────────────────────────────────────
     log.info("Using canonical source-aware validation pipeline...")
 
-    kenlm_model = _load_kenlm(kenlm_path)
+    kenlm_model = _load_kenlm(kenlm_path, sentencepiece_path)
 
     # No threshold is inferred from the corpus. Without an explicit threshold,
     # KenLM remains report-only and cannot silently force percentile attrition.
@@ -455,7 +479,11 @@ def main():
         }
     )
     validation_contract = {
-        "implementation_sha256": code_fingerprint(validate_manual_split),
+        "implementation_sha256": code_fingerprint(
+            validate_manual_split,
+            CCNetPerplexityScorer,
+            normalize_ccnet_text,
+        ),
         "prose_heuristic_skip_sources": PROSE_HEURISTIC_SKIP_SOURCES,
         "perplexity_enabled": kenlm_model is not None,
         "perplexity_policy": (
@@ -469,9 +497,16 @@ def main():
         ),
         "perplexity_threshold": perplexity_threshold,
         "perplexity_sample_size": args.perplexity_sample_size,
-        "kenlm_model": (
-            file_snapshot([kenlm_path], root=kenlm_path.parent)[0]
-            if kenlm_path is not None
+        "kenlm_models": (
+            {
+                "language_model": file_snapshot(
+                    [kenlm_path], root=kenlm_path.parent
+                )[0],
+                "sentencepiece_model": file_snapshot(
+                    [sentencepiece_path], root=sentencepiece_path.parent
+                )[0],
+            }
+            if kenlm_path is not None and sentencepiece_path is not None
             else None
         ),
     }

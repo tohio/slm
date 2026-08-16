@@ -280,11 +280,11 @@ else
     echo "           Required before running: make curate-filter"
 fi
 
-# Check KenLM model — warn only (downloaded separately)
-if [ -f "${DATA_DIR}/models/en.arpa.bin" ]; then
-    echo "  OK: KenLM model found"
+# Check matched CCNet model pair — warn only (downloaded separately)
+if [ -f "${DATA_DIR}/models/en.arpa.bin" ] && [ -f "${DATA_DIR}/models/en.sp.model" ]; then
+    echo "  OK: CCNet KenLM and SentencePiece models found"
 else
-    echo "  WARNING: KenLM model not found — run: make download-kenlm-model DATA_DIR=${DATA_DIR}"
+    echo "  WARNING: CCNet model pair incomplete — run: make download-kenlm-model DATA_DIR=${DATA_DIR}"
     echo "           Required before running: make validate"
 fi
 

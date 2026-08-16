@@ -30,6 +30,7 @@ orjson>=3.9.0
 spacy>=3.7.0
 
 # ── Validation ────────────────────────────────────────────────────────────────
+sentencepiece>=0.2.0,<0.3.0
 # kenlm — install from source (not on PyPI):
 #   make install-kenlm
 #   or: pip install https://github.com/kpu/kenlm/archive/master.zip

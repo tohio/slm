@@ -31,6 +31,12 @@ COMPARE_EVAL_EXAMPLES ?= 32
 COMPARE_MAX_STEPS ?= 60
 EXPORT_VARIANT ?= base
 
+# Integrity values published in the CCNet objects' S3 metadata. These are
+# content checks, not security primitives; they prevent truncated or mismatched
+# model files from being accepted as a usable pair.
+CCNET_EN_ARPA_MD5 := 3f5f659c62cf72d1446fdd36d6e04a57
+CCNET_EN_SP_MD5   := e55b10980b6bdbd8599a3fd3a54eb9ed
+
 REQUIRED_ENV_VARS := \
 	S3_BUCKET S3_PREFIX AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY \
 	AWS_DEFAULT_REGION DATA_DIR RESULTS_DIR EXPORTS_DIR HF_HOME \
@@ -636,12 +642,33 @@ install-gpu:
 test-upgrade-gpu: test-gpu-gate
 
 download-kenlm-model:
-	@echo "==> Downloading KenLM English model (~4GB)..."
+	@echo "==> Downloading matched CCNet English model pair (~4GB)..."
 	mkdir -p $(DATA_DIR)/models
-	wget -q --show-progress \
-		https://dl.fbaipublicfiles.com/cc_net/lm/en.arpa.bin \
-		-O $(DATA_DIR)/models/en.arpa.bin
-	@echo "  Saved to $(DATA_DIR)/models/en.arpa.bin"
+	@if [ -s "$(DATA_DIR)/models/en.arpa.bin" ] && \
+		echo "$(CCNET_EN_ARPA_MD5)  $(DATA_DIR)/models/en.arpa.bin" | md5sum -c --status; then \
+		echo "  Reusing $(DATA_DIR)/models/en.arpa.bin"; \
+	else \
+		wget -q --show-progress -c \
+			https://dl.fbaipublicfiles.com/cc_net/lm/en.arpa.bin \
+			-O "$(DATA_DIR)/models/en.arpa.bin.partial"; \
+		echo "$(CCNET_EN_ARPA_MD5)  $(DATA_DIR)/models/en.arpa.bin.partial" | \
+			md5sum -c - || { rm -f "$(DATA_DIR)/models/en.arpa.bin.partial"; exit 1; }; \
+		mv "$(DATA_DIR)/models/en.arpa.bin.partial" \
+			"$(DATA_DIR)/models/en.arpa.bin"; \
+	fi
+	@if [ -s "$(DATA_DIR)/models/en.sp.model" ] && \
+		echo "$(CCNET_EN_SP_MD5)  $(DATA_DIR)/models/en.sp.model" | md5sum -c --status; then \
+		echo "  Reusing $(DATA_DIR)/models/en.sp.model"; \
+	else \
+		wget -q --show-progress -c \
+			https://dl.fbaipublicfiles.com/cc_net/lm/en.sp.model \
+			-O "$(DATA_DIR)/models/en.sp.model.partial"; \
+		echo "$(CCNET_EN_SP_MD5)  $(DATA_DIR)/models/en.sp.model.partial" | \
+			md5sum -c - || { rm -f "$(DATA_DIR)/models/en.sp.model.partial"; exit 1; }; \
+		mv "$(DATA_DIR)/models/en.sp.model.partial" \
+			"$(DATA_DIR)/models/en.sp.model"; \
+	fi
+	@echo "  CCNet KenLM and SentencePiece models are ready"
 
 download-fasttext-model:
 	@echo "==> Downloading fasttext language identification model (~1MB)..."
@@ -880,7 +907,7 @@ help:
 	@echo "  setup-gpu                Bootstrap a GPU training instance"
 	@echo "  setup-data-dir           Bootstrap with custom data dir"
 	@echo "  download-fasttext-model  Download fasttext language ID model (~1MB)"
-	@echo "  download-kenlm-model     Download KenLM English model (~4GB)"
+	@echo "  download-kenlm-model     Download CCNet English model pair (~4GB)"
 	@echo "  accelerate-config        Configure accelerate interactively"
 	@echo "  install                  Install dependencies (pip)"
 	@echo "  install-gpu              Install pinned CUDA 13 training dependencies"
