@@ -51,14 +51,15 @@ Counts are unique trainable parameters; tied embeddings are counted once.
 
 | Size | Parameters | Layers | Hidden | Intermediate | Q heads | KV heads | Context |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `mini` | 21.7M | 6 | 384 | 1,024 | 6 | 2 | 1,024 |
+| `smoke` | 21.7M | 6 | 384 | 1,024 | 6 | 2 | 1,024 |
+| `mini` | 69.9M | 17 | 512 | 1,536 | 8 | 4 | 2,048 |
 | `125m` | 125.3M | 16 | 768 | 2,048 | 12 | 4 | 2,048 |
 | `350m` | 351.3M | 27 | 1,024 | 2,816 | 16 | 8 | 2,048 |
 | `1b` | 1.012B | 21 | 2,048 | 5,632 | 32 | 8 | 4,096 |
 
 `pretrain/configs/` is the training source of truth for complete model
-profiles. `SLM_125M`, `SLM_350M`, and `SLM_1B` in `config.py` provide matching
-programmatic defaults.
+profiles. `SLM_SMOKE`, `SLM_MINI`, `SLM_125M`, `SLM_350M`, and `SLM_1B` in
+`config.py` provide matching programmatic defaults.
 
 ## API
 

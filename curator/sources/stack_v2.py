@@ -17,7 +17,7 @@ SWH issues encountered (documented 2026-04-24):
 To revive:
     1. Re-add import in curator/scripts/curate.py
     2. Re-add _build_source branch for "stack_v2"
-    3. Re-add "stack_v2" entry to CODE_SUBMIX and MINI_OVERRIDES in
+    3. Re-add "stack_v2" entry to CODE_SUBMIX and SMOKE_OVERRIDES in
        config/data_mix.py
     4. Add "stack_v2" to the centralized source-routing sets in
        config/data_mix.py as appropriate; filters and validation consume

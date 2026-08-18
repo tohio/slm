@@ -18,6 +18,10 @@ Generate every recipe for a size:
 make config-gen SIZE=125m GPUS=1
 ```
 
+`SIZE=smoke` and `SIZE=mini` generate their pretraining recipes only. Mini SFT
+and DPO retain the existing bounded checked-in recipes; scaling those stages is
+a separate change.
+
 Generate one stage:
 
 ```bash
@@ -45,8 +49,8 @@ The generator computes hardware-dependent fields while preserving
 stage-specific objective and optimizer fields from its profiles. For
 pretraining, the generated `max_steps` and warmup are planning values derived
 from the configured corpus target, epochs, sequence length, and effective
-global batch. Production pretraining replaces them from verified tokenized
-train tokens while preserving the generated warmup ratio.
+global batch. Functional mini and production pretraining replace them from
+verified tokenized train tokens while preserving the generated warmup ratio.
 
 Outputs:
 

@@ -8,7 +8,8 @@ Practical hardware guidance for running the SLM pipeline. These are operational 
 
 | Size | Recommended CPU | Recommended RAM | Notes |
 |---|---:|---:|---|
-| `mini` | 4+ vCPU | 16 GB+ | pipeline validation |
+| `smoke` | 4+ vCPU | 16 GB+ | pipeline validation |
+| `mini` | 32+ vCPU | 128 GB+ | 1.4B-token functional pilot |
 | `125m` | 64+ vCPU | 256–384 GB | practical full run |
 | `350m` | 64–96+ vCPU | 384 GB+ | larger curation run |
 | `1b` | 96+ vCPU | 512 GB+ | largest supported run |
@@ -25,7 +26,8 @@ Recommended starting points:
 
 | Run | Storage |
 |---|---:|
-| `mini` | boot disk is fine |
+| `smoke` | boot disk is fine |
+| `mini` | 250 GB+ |
 | `125m` | 1 TB+ |
 | `350m` | 1–2 TB+ |
 | `1b` | 2 TB+ |
@@ -38,7 +40,8 @@ See [Disk setup](DISK_SETUP.md) for mounting a secondary disk at `/data`.
 
 | Size | Practical GPU recommendation | Notes |
 |---|---|---|
-| `mini` | 1× 16 GB+ GPU | loop validation |
+| `smoke` | 1× 16 GB+ GPU | loop validation |
+| `mini` | 1× 24 GB+ GPU | functional pilot |
 | `125m` | 1× A100 80GB / H100 / H200, or better | practical full run |
 | `350m` | 1–4× A100 80GB / H100 / H200, or better | use multi-GPU when available |
 | `1b` | 4–8× A100 80GB / H100 / H200, or better | prefer FSDP/multi-GPU |

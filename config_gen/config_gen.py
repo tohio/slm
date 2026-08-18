@@ -143,6 +143,9 @@ class PretrainProfile:
     # Recipe (preserved verbatim)
     lr: float
     warmup_frac: float
+    schedule_from_realized_tokens: bool = True
+    max_steps_cap: int | None = None
+    minimum_warmup_steps: int = 100
     weight_decay: float = 0.1
     beta1: float = 0.9
     beta2: float = 0.95
@@ -220,6 +223,18 @@ class DPOProfile:
 # and epoch count. These values evolve automatically when TARGET_CONFIGS is
 # edited; do not duplicate hard-coded token targets in this file.
 SIZE_PROFILES: dict[str, PretrainProfile] = {
+    "smoke": PretrainProfile(
+        state_gb=0.5, act_per_seq_gb_no_ckpt=0.25, act_per_seq_gb_ckpt=0.10,
+        ctx=1024, ref_global_batch=8, consumed_tokens=data_mix.consumed_tokens("smoke"),
+        schedule_from_realized_tokens=False, max_steps_cap=8,
+        minimum_warmup_steps=1, lr=3.0e-4, warmup_frac=0.01,
+        hidden=384, layers=6, heads=6, kv_heads=2,
+    ),
+    "mini": PretrainProfile(
+        state_gb=1.2, act_per_seq_gb_no_ckpt=1.0, act_per_seq_gb_ckpt=0.35,
+        ctx=2048, ref_global_batch=32, consumed_tokens=data_mix.consumed_tokens("mini"),
+        lr=3.0e-4, warmup_frac=0.01, hidden=512, layers=17, heads=8, kv_heads=4,
+    ),
     "125m": PretrainProfile(
         state_gb=2.0, act_per_seq_gb_no_ckpt=1.75, act_per_seq_gb_ckpt=0.60,
         ctx=2048, ref_global_batch=32, consumed_tokens=data_mix.consumed_tokens("125m"),
@@ -517,8 +532,13 @@ def compute_pretrain_config(
     actual_global = micro * accum * num_gpus
     tokens_per_step = actual_global * profile.ctx
     max_steps = target_consumed // tokens_per_step
+    if profile.max_steps_cap is not None:
+        max_steps = min(max_steps, profile.max_steps_cap)
     actual_consumed = max_steps * tokens_per_step
-    warmup = max(100, int(max_steps * profile.warmup_frac))
+    warmup = min(
+        max_steps,
+        max(profile.minimum_warmup_steps, int(max_steps * profile.warmup_frac)),
+    )
 
     # Pretrain-specific warnings
     rounding_loss = abs(actual_consumed - target_consumed) / target_consumed
@@ -821,7 +841,7 @@ data:
 
 training:
   # Runtime resolves max/warmup steps from verified tokenized train tokens.
-  schedule_from_realized_tokens: true
+  schedule_from_realized_tokens: {str(profile.schedule_from_realized_tokens).lower()}
   # micro × accum × gpus = {cfg.micro_batch_size} × {cfg.gradient_accumulation_steps} × {cfg.num_gpus} = {cfg.actual_global_batch} sequences/step
   # tokens/step     = global × ctx = {cfg.tokens_per_step:,}
   # consumed_tokens = max_steps × tokens/step = {cfg.actual_consumed_tokens / 1e9:.2f}B
@@ -1069,7 +1089,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     src.add_argument("--detect", action="store_true")
 
     parser.add_argument("--size", required=True,
-                        help="125m, 350m, or 1b")
+                        help="smoke, mini, 125m, 350m, or 1b")
     parser.add_argument("--gpus", type=int, default=1)
 
     parser.add_argument("--mode", choices=sorted(MODES), default="balanced")

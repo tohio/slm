@@ -7,7 +7,7 @@ uploaded, training-ready corpus.
 
 | Input | Purpose |
 |---|---|
-| `SIZE` | Data/model profile: `mini`, `125m`, `350m`, or `1b` |
+| `SIZE` | Data/model profile: `smoke`, `mini`, `125m`, `350m`, or `1b` |
 | `WORKERS` | CPU workers reserved for parallel curation |
 | `DATA_DIR` | Persistent storage root for datasets and artifacts |
 | `.env` | AWS, Hugging Face, W&B, cache, results, and export configuration |
@@ -91,6 +91,10 @@ make download-kenlm-model DATA_DIR=/data/slm/data
 make curate SIZE=125m WORKERS=62
 make test-curator SIZE=125m
 ```
+
+Use `make curate-smoke` for the capped 1M-token execution rehearsal. Use
+`make curate-mini` for the uncapped 1.4B-token functional pilot. Both write to
+their own `$DATA_DIR/runs/<size>` namespace.
 
 ### Validation
 

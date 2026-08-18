@@ -9,8 +9,9 @@ models, from corpus construction through native Hugging Face export.
 
 SLM is a stage-based research pipeline for building small language models
 without starting from an existing foundation-model checkpoint. It keeps data,
-tokenizer, model, training, and export contracts explicit so the same workflow
-can be exercised with the `mini` profile and scaled to 125M, 350M, and 1B.
+tokenizer, model, training, and export contracts explicit so execution can be
+rehearsed with `smoke`, functionality can be exercised with `mini`, and the
+same workflow can scale to 125M, 350M, and 1B.
 
 The repository produces four model variants:
 
@@ -33,7 +34,8 @@ inference and vLLM serving.
 
 | Size | Parameters | Layers | Hidden size | Q/KV heads | Context |
 |---|---:|---:|---:|---:|---:|
-| `mini` | 22M | 6 | 384 | 6 / 2 | 1,024 |
+| `smoke` | 22M | 6 | 384 | 6 / 2 | 1,024 |
+| `mini` | 69.9M | 17 | 512 | 8 / 4 | 2,048 |
 | `125m` | 125M | 16 | 768 | 12 / 4 | 2,048 |
 | `350m` | 350M | 27 | 1,024 | 16 / 8 | 2,048 |
 | `1b` | 1B | 21 | 2,048 | 32 / 8 | 4,096 |

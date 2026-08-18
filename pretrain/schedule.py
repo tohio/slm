@@ -18,8 +18,8 @@ def resolve_realized_token_schedule(
 ) -> tuple[dict, dict | None]:
     """Resolve production steps from usable tokenized training tokens.
 
-    Static YAML steps remain a planning fallback and preserve bounded mini and
-    smoke recipes. Production configs opt in explicitly.
+    Static YAML steps remain a planning fallback. Functional mini and
+    production configs opt in; the smoke recipe remains bounded.
     """
     resolved = copy.deepcopy(cfg)
     training = resolved["training"]

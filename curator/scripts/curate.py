@@ -53,7 +53,7 @@ Blend stage:
 
 Usage:
     python curator/scripts/curate.py --target 125m
-    python curator/scripts/curate.py --target mini --mini
+    python curator/scripts/curate.py --target smoke --smoke
     python curator/scripts/curate.py --target 125m --stage download
 """
 
@@ -95,7 +95,7 @@ from config import (
     CC_CHARS_PER_SEGMENT,
     SHUFFLE_RAM_BUDGET_GB,
     PRETRAIN_VAL_FRACTION,
-    MINI_OVERRIDES,
+    SMOKE_OVERRIDES,
     SUPPLEMENTAL_CHAR_CAPS,
     source_filter_family,
     benchmark_decontamination_contract,
@@ -531,21 +531,21 @@ def flatten_datatrove_record(record: dict) -> dict:
 
 def _build_source(
     name: str,
-    mini: bool,
+    smoke: bool,
     target: str,
     workers: int,
     raw_root: Path | None = None,
 ) -> object:
-    """Construct a source instance with mini caps applied when mini=True."""
+    """Construct a source instance with smoke caps applied when smoke=True."""
     raw_dir = (raw_root or RAW_DIR) / name
 
     # Resolve the doc cap:
-    #   - mini: from MINI_OVERRIDES (per-source small caps for pipeline testing)
-    #   - non-mini: derived from target token budget × share × inflation
+    #   - smoke: from SMOKE_OVERRIDES (small caps for pipeline testing)
+    #   - non-smoke: derived from target token budget × share × inflation
     #               (None for sources not in the derivation table — currently
     #                codesearchnet and conala, both supply-bound at 350m+)
-    if mini:
-        cap = MINI_OVERRIDES.get(name)
+    if smoke:
+        cap = SMOKE_OVERRIDES.get(name)
     else:
         cap = _derive_max_docs(name, target)
         if cap is not None:
@@ -565,8 +565,8 @@ def _build_source(
     # CC has different 'cap' semantics: max_segments, and needs crawls + workers.
     if name == "common_crawl":
         cfg = TARGET_CONFIGS[target]
-        if mini:
-            max_segments = MINI_OVERRIDES.get(name)
+        if smoke:
+            max_segments = SMOKE_OVERRIDES.get(name)
         else:
             max_segments = compute_cc_segments(cfg["corpus_tokens"])
 
@@ -581,9 +581,9 @@ def _build_source(
         cc_in_flight = min(64, max(2, cc_download_workers * 2))
 
         # Full runs have enough WARC segments to benefit from the dynamic
-        # worker split above. Mini runs usually process only a few segments,
+        # worker split above. Smoke runs usually process only a few segments,
         # so clamp worker pools to the amount of actual segment work available.
-        # This avoids spawning dozens of idle workers for `curate-mini` while
+        # This avoids spawning dozens of idle workers for `curate-smoke` while
         # preserving the higher-throughput defaults for full curation.
         if max_segments is not None:
             cc_download_workers = min(
@@ -622,7 +622,7 @@ def _build_source(
         # 350m and 1b. Keep small runs cheap and use the 100BT sample where
         # the requested retained share exceeds the small sample's safe range.
         edu_config = (
-            "sample-100BT" if target in {"350m", "1b"} and not mini
+            "sample-100BT" if target in {"350m", "1b"} and not smoke
             else "sample-10BT"
         )
         return FineWebEduSource(
@@ -633,7 +633,7 @@ def _build_source(
     if name == "wikipedia":
         return WikipediaSource(output_dir=raw_dir, max_docs=cap)
     if name == "pg19":
-        char_cap = None if mini else _derive_max_chars(name, target)
+        char_cap = None if smoke else _derive_max_chars(name, target)
         if char_cap is not None:
             log.info(
                 f"pg19 char cap derived from {target}: {char_cap:,} chars "
@@ -676,7 +676,7 @@ def _build_source(
 
 def stage_download(
     target: str,
-    mini: bool = False,
+    smoke: bool = False,
     workers: int | None = None,
     sources: list[str] | None = None,
     force: bool = False,
@@ -689,11 +689,11 @@ def stage_download(
     filtered-stream cursor from the number of output shards.
     """
     n_workers = workers or default_workers()
-    log.info(f"=== Stage 1: Download (target={target}, mini={mini}) ===")
+    log.info(f"=== Stage 1: Download (target={target}, smoke={smoke}) ===")
 
     selected_sources = sources or list(ALL_SOURCES)
 
-    if not mini and "common_crawl" in selected_sources:
+    if not smoke and "common_crawl" in selected_sources:
         cc_segments = compute_cc_segments(TARGET_CONFIGS[target]["corpus_tokens"])
         log.info(
             f"Common Crawl: computed {cc_segments} segments from "
@@ -709,7 +709,7 @@ def stage_download(
 
         contract_source = _build_source(
             name,
-            mini=mini,
+            smoke=smoke,
             target=target,
             workers=n_workers,
             raw_root=RAW_DIR,
@@ -724,7 +724,10 @@ def stage_download(
         contract = {
             "source": name,
             "target": target,
-            "mini": mini,
+            # Keep the historical manifest field name so existing full-run
+            # raw artifacts remain reusable. The value now means bounded
+            # smoke-source caps; a redefined mini run correctly records false.
+            "mini": smoke,
             "implementation": (
                 f"{contract_source.__class__.__module__}."
                 f"{contract_source.__class__.__qualname__}"
@@ -771,7 +774,7 @@ def stage_download(
         log.info(f"Downloading {name} into isolated staging...")
         source = _build_source(
             name,
-            mini=mini,
+            smoke=smoke,
             target=target,
             workers=n_workers,
             raw_root=partial_root,
@@ -2170,7 +2173,11 @@ def main():
         default="125m",
     )
     parser.add_argument("--stage", choices=STAGES, default="all")
-    parser.add_argument("--mini", action="store_true")
+    parser.add_argument(
+        "--smoke",
+        action="store_true",
+        help="Apply bounded per-source caps for the smoke profile",
+    )
     parser.add_argument(
         "--sources",
         default=None,
@@ -2197,11 +2204,8 @@ def main():
     )
     args = parser.parse_args()
 
-    if args.mini and args.target != "mini":
-        log.warning(
-            f"--mini set but --target is '{args.target}'. "
-            f"Consider --target mini."
-        )
+    if args.smoke and args.target != "smoke":
+        parser.error("--smoke requires --target smoke")
 
     configure_data_dirs(args.target)
 
@@ -2219,7 +2223,7 @@ def main():
     log.info(
         f"SLM Curation — "
         f"target={args.target}, stage={args.stage}, "
-        f"mini={args.mini}, workers={n_workers} (cpu_count={os.cpu_count()}), "
+        f"smoke={args.smoke}, workers={n_workers} (cpu_count={os.cpu_count()}), "
         f"data_dir={DATA_DIR}, "
         f"sources={','.join(selected_sources) if source_scoped else 'all'}"
     )
@@ -2227,7 +2231,7 @@ def main():
     if args.stage in ("download", "all"):
         stage_download(
             args.target,
-            mini=args.mini,
+            smoke=args.smoke,
             workers=n_workers,
             sources=selected_sources,
             force=args.force,

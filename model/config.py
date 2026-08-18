@@ -273,7 +273,29 @@ def _validate_serialized_rope_parameters(
         )
 
 
-# ── Predefined configs for the three model tiers ──────────────────────────────
+# ── Predefined configs for the model tiers ────────────────────────────────────
+
+SLM_SMOKE = SLMConfig(
+    vocab_size=32000,
+    hidden_size=384,
+    intermediate_size=1024,
+    num_hidden_layers=6,
+    num_attention_heads=6,
+    num_key_value_heads=2,
+    max_position_embeddings=1024,
+    rope_theta=500000.0,
+)
+
+SLM_MINI = SLMConfig(
+    vocab_size=32000,
+    hidden_size=512,
+    intermediate_size=1536,
+    num_hidden_layers=17,
+    num_attention_heads=8,
+    num_key_value_heads=4,
+    max_position_embeddings=2048,
+    rope_theta=500000.0,
+)
 
 SLM_125M = SLMConfig(
     vocab_size=32000,
@@ -306,6 +328,8 @@ SLM_1B = SLMConfig(
 )
 
 CONFIGS = {
+    "smoke": SLM_SMOKE,
+    "mini": SLM_MINI,
     "125m": SLM_125M,
     "350m": SLM_350M,
     "1b": SLM_1B,

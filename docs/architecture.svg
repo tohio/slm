@@ -117,26 +117,31 @@
   <text x="340" y="535" text-anchor="middle" font-size="11" fill="#1e40af">RoPE · RMSNorm · SwiGLU · GQA · tied embeddings · no bias</text>
 
   <!-- arrows arch → models -->
-  <line x1="102" y1="548" x2="102" y2="572" stroke="#93c5fd" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <line x1="258" y1="548" x2="258" y2="572" stroke="#93c5fd" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <line x1="414" y1="548" x2="414" y2="572" stroke="#93c5fd" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <line x1="570" y1="548" x2="570" y2="572" stroke="#93c5fd" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="88" y1="548" x2="88" y2="572" stroke="#93c5fd" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="212" y1="548" x2="212" y2="572" stroke="#93c5fd" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="336" y1="548" x2="336" y2="572" stroke="#93c5fd" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="460" y1="548" x2="460" y2="572" stroke="#93c5fd" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="584" y1="548" x2="584" y2="572" stroke="#93c5fd" stroke-width="1.5" marker-end="url(#arrow)"/>
 
   <!-- ══ MODEL SIZES ══ -->
-  <rect x="32" y="572" width="140" height="56" rx="10" fill="#eff6ff" stroke="#93c5fd" stroke-width="0.75"/>
-  <text x="102" y="597" text-anchor="middle" font-size="14" font-weight="700" fill="#1d4ed8">slm-mini</text>
-  <text x="102" y="615" text-anchor="middle" font-size="11" fill="#1e40af">21.7M parameters</text>
+  <rect x="32" y="572" width="112" height="56" rx="10" fill="#eff6ff" stroke="#93c5fd" stroke-width="0.75"/>
+  <text x="88" y="597" text-anchor="middle" font-size="12" font-weight="700" fill="#1d4ed8">slm-smoke</text>
+  <text x="88" y="615" text-anchor="middle" font-size="10" fill="#1e40af">21.7M parameters</text>
 
-  <rect x="188" y="572" width="140" height="56" rx="10" fill="#eff6ff" stroke="#93c5fd" stroke-width="0.75"/>
-  <text x="258" y="597" text-anchor="middle" font-size="14" font-weight="700" fill="#1d4ed8">slm-125m</text>
-  <text x="258" y="615" text-anchor="middle" font-size="11" fill="#1e40af">125.3M parameters</text>
+  <rect x="156" y="572" width="112" height="56" rx="10" fill="#eff6ff" stroke="#93c5fd" stroke-width="0.75"/>
+  <text x="212" y="597" text-anchor="middle" font-size="12" font-weight="700" fill="#1d4ed8">slm-mini</text>
+  <text x="212" y="615" text-anchor="middle" font-size="10" fill="#1e40af">69.9M parameters</text>
 
-  <rect x="344" y="572" width="140" height="56" rx="10" fill="#eff6ff" stroke="#93c5fd" stroke-width="0.75"/>
-  <text x="414" y="597" text-anchor="middle" font-size="14" font-weight="700" fill="#1d4ed8">slm-350m</text>
-  <text x="414" y="615" text-anchor="middle" font-size="11" fill="#1e40af">351.3M parameters</text>
+  <rect x="280" y="572" width="112" height="56" rx="10" fill="#eff6ff" stroke="#93c5fd" stroke-width="0.75"/>
+  <text x="336" y="597" text-anchor="middle" font-size="12" font-weight="700" fill="#1d4ed8">slm-125m</text>
+  <text x="336" y="615" text-anchor="middle" font-size="10" fill="#1e40af">125.3M parameters</text>
 
-  <rect x="500" y="572" width="140" height="56" rx="10" fill="#eff6ff" stroke="#93c5fd" stroke-width="0.75"/>
-  <text x="570" y="597" text-anchor="middle" font-size="14" font-weight="700" fill="#1d4ed8">slm-1b</text>
-  <text x="570" y="615" text-anchor="middle" font-size="11" fill="#1e40af">1.012B parameters</text>
+  <rect x="404" y="572" width="112" height="56" rx="10" fill="#eff6ff" stroke="#93c5fd" stroke-width="0.75"/>
+  <text x="460" y="597" text-anchor="middle" font-size="12" font-weight="700" fill="#1d4ed8">slm-350m</text>
+  <text x="460" y="615" text-anchor="middle" font-size="10" fill="#1e40af">351.3M parameters</text>
+
+  <rect x="528" y="572" width="112" height="56" rx="10" fill="#eff6ff" stroke="#93c5fd" stroke-width="0.75"/>
+  <text x="584" y="597" text-anchor="middle" font-size="12" font-weight="700" fill="#1d4ed8">slm-1b</text>
+  <text x="584" y="615" text-anchor="middle" font-size="10" fill="#1e40af">1.012B parameters</text>
 
 </svg>

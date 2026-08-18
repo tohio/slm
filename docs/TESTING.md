@@ -123,13 +123,26 @@ bounded response:
 make test-vllm-export SIZE=125m EXPORT_VARIANT=base
 ```
 
-## Bounded pipeline rehearsal
+## Smoke rehearsal and functional mini
 
-Use the `mini` profile only when a code change requires an end-to-end pipeline
-rehearsal and suitable artifacts do not already exist:
+Use the isolated `smoke` namespace for the bounded curation and pretraining
+execution rehearsal:
 
 ```bash
-make curate-mini
+make curate-smoke
+make validate SIZE=smoke
+make tokenizer SIZE=smoke
+make tokenizer-test SIZE=smoke
+make tokenize SIZE=smoke
+make restore-size-tokenizer SIZE=smoke
+make pretrain-smoke SIZE=smoke GPUS=1
+```
+
+Use `mini` for the 69.9M-parameter functional pilot. Its pretraining schedule
+is derived from the realized tokenized corpus and the one-epoch contract:
+
+```bash
+make curate-mini WORKERS=62
 make validate SIZE=mini
 make tokenizer SIZE=mini
 make tokenizer-test SIZE=mini
@@ -144,8 +157,9 @@ make dpo-chat-mini SIZE=mini GPUS=1
 make test-artifacts SIZE=mini
 ```
 
-This validates execution and artifact contracts; it is not a quality
-benchmark.
+The smoke run validates execution, not model quality. Mini post-training keeps
+the existing bounded SFT and DPO recipes until those stages are scaled in a
+separate change.
 
 ## Controlled SFT comparison
 

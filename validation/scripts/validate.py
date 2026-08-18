@@ -358,7 +358,7 @@ def _log_split_report(split: str, stats: dict) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description="SLM data validation pipeline")
-    parser.add_argument("--size", default=os.environ.get("SIZE", "125m"), help="Run size: mini, 125m, 350m, or 1b")
+    parser.add_argument("--size", default=os.environ.get("SIZE", "125m"), help="Run size: smoke, mini, 125m, 350m, or 1b")
     parser.add_argument(
         "--train",
         type=Path,

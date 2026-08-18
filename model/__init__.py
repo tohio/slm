@@ -6,7 +6,7 @@ SLM model package — custom decoder-only transformer architecture.
 Public API:
 
     from model import SLMConfig, SLMForCausalLM, SLMModel
-    from model import SLM_125M, SLM_350M, SLM_1B, CONFIGS
+    from model import SLM_SMOKE, SLM_MINI, SLM_125M, SLM_350M, SLM_1B, CONFIGS
 
 Register with HuggingFace AutoModel so the model can be loaded with:
 
@@ -22,13 +22,23 @@ Published Hub checkpoints use the native LlamaForCausalLM export contract and
 do not require this registration.
 """
 
-from .config import CONFIGS, SLM_125M, SLM_350M, SLM_1B, SLMConfig
+from .config import (
+    CONFIGS,
+    SLM_1B,
+    SLM_125M,
+    SLM_350M,
+    SLM_MINI,
+    SLM_SMOKE,
+    SLMConfig,
+)
 from .model import SLMForCausalLM, SLMModel
 
 __all__ = [
     "SLMConfig",
     "SLMModel",
     "SLMForCausalLM",
+    "SLM_SMOKE",
+    "SLM_MINI",
     "SLM_125M",
     "SLM_350M",
     "SLM_1B",

@@ -46,18 +46,17 @@ The JSON sidecars record the input digest, tokenizer fingerprint, binary
 format, and realized source/document/token counts. Training requires those
 sidecars and rejects a tokenizer that does not match the tokenized corpus.
 
-Production recipes resolve `max_steps` from the verified tokenized training
+Functional and production recipes resolve `max_steps` from the verified tokenized training
 count and the configured epoch contract at preflight/training time. The static
 YAML step and warmup values remain planning fallbacks; runtime preserves their
-warmup ratio. Mini and smoke recipes do not opt into this resolution, so their
-bounded step counts remain unchanged.
+warmup ratio. The smoke recipe remains fixed at eight optimizer steps.
 The train/validation split is created by curation; pretraining does not split
 documents again.
 
-The mini profile runs 1,000 optimizer steps, consuming approximately 8.2M
-tokens. This keeps the GPU rehearsal bounded while exercising warmup, cosine
-decay, evaluation, checkpointing, final promotion, and smoke generation. It
-reuses the existing mini artifacts and is not a model-quality benchmark.
+The smoke profile uses the 21.7M-parameter architecture and capped 1M-token
+corpus only to exercise execution and artifact contracts. The mini profile is
+a 69.9M-parameter functional pilot trained for one epoch over its realized
+tokenized corpus, with a 1.4B-token curation planning target.
 
 `dataset.py` memory maps the flat token arrays and returns fixed-length causal
 language-model windows without loading the entire corpus into memory.
@@ -79,6 +78,9 @@ Generate the selected recipe on the target training host:
 ```bash
 make config-gen-pretrain SIZE=125m GPUS=1
 ```
+
+`SIZE=smoke` and `SIZE=mini` generate pretraining recipes only. Their
+post-training recipes remain the checked-in bounded mini configurations.
 
 To generate pretraining, SFT, and DPO recipes together:
 
@@ -135,7 +137,13 @@ as `--num_processes`, producing one process per GPU:
 make pretrain SIZE=350m GPUS=4
 ```
 
-The bounded architecture/data rehearsal uses the mini recipe:
+Run the bounded execution rehearsal:
+
+```bash
+make pretrain-smoke SIZE=smoke GPUS=1
+```
+
+Run the functional mini pilot:
 
 ```bash
 make pretrain-mini SIZE=mini GPUS=1

@@ -34,7 +34,7 @@ from config.data_mix import (
     CC_CHARS_PER_SEGMENT,
     SHUFFLE_RAM_BUDGET_GB,
     PRETRAIN_VAL_FRACTION,
-    MINI_OVERRIDES,
+    SMOKE_OVERRIDES,
     # Helpers
     dataset_link,
     corpus_tokens,
@@ -70,7 +70,7 @@ __all__ = [
     "CC_CHARS_PER_SEGMENT",
     "SHUFFLE_RAM_BUDGET_GB",
     "PRETRAIN_VAL_FRACTION",
-    "MINI_OVERRIDES",
+    "SMOKE_OVERRIDES",
     "dataset_link",
     "corpus_tokens",
     "consumed_tokens",

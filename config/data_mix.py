@@ -60,7 +60,7 @@ Section layout:
     6. TARGET_CONFIGS           per-size corpus + epochs + CC crawls
     7. Curator constants        CHARS_PER_TOKEN, CC_CHARS_PER_SEGMENT,
                                 SHUFFLE_RAM_BUDGET_GB, PRETRAIN_VAL_FRACTION,
-                                MINI_OVERRIDES
+                                SMOKE_OVERRIDES
     8. Helpers                  dataset_link, corpus_tokens, consumed_tokens,
                                 epochs, validate
 """
@@ -396,11 +396,17 @@ DEDUP_PRIORITY: list[str] = [
 #   the realized post-filter mix should be audited after curation.
 
 TARGET_CONFIGS: dict[str, dict] = {
-    "mini": {
+    "smoke": {
         "corpus_tokens":  1_000_000,
         "epochs":         1,
         "cc_crawls":      ["CC-MAIN-2024-10"],
         "display_corpus": "1M",
+    },
+    "mini": {
+        "corpus_tokens":  1_400_000_000,
+        "epochs":         1,
+        "cc_crawls":      ["CC-MAIN-2024-10"],
+        "display_corpus": "1.4B",
     },
     "125m": {
         "corpus_tokens":  10_000_000_000,
@@ -461,11 +467,11 @@ SHUFFLE_RAM_BUDGET_GB: float = float(os.environ.get("SHUFFLE_RAM_BUDGET_GB", "12
 # (0.02 chat SFT, 0.05 code SFT, 0.05 DPO) — do not conflate with this.
 PRETRAIN_VAL_FRACTION: float = 0.005
 
-# Per-source doc caps used when `--mini` is passed to the curator. Exercises
+# Per-source doc caps used when `--smoke` is passed to the curator. Exercises
 # every source at small scale to validate the pipeline end-to-end before
 # committing to a full run. common_crawl's cap is in WARC segments (not docs)
 # because that's the unit of CC streaming.
-MINI_OVERRIDES: dict[str, int] = {
+SMOKE_OVERRIDES: dict[str, int] = {
     "common_crawl":  2,         # WARC segments
     "fineweb":       10_000,
     "fineweb_edu":   5_000,
@@ -481,9 +487,9 @@ MINI_OVERRIDES: dict[str, int] = {
     "factual_restraint":     1_000,
     "nemotron_specialized":  2_000,
     "stack_v1":      3_000,
-    # Keep every code sub-source bounded in mini validation runs. Without
+    # Keep every code sub-source bounded in smoke validation runs. Without
     # these overrides, supply-bound production sources stream their complete
-    # upstream datasets even though mini only needs enough records to exercise
+    # upstream datasets even though smoke only needs enough records to exercise
     # the loader/filter/dedup/blend path.
     "codesearchnet": 10_000,
     "stack_smol":     1_000,
@@ -563,7 +569,7 @@ def validate() -> None:
       - All CODE_SUBMIX source names are distinct from DATA_MIX source names
       - Curator constants are positive numbers
       - Every TARGET_CONFIGS entry has the required keys
-      - Every MINI_OVERRIDES key is a real source in ALL_SOURCES
+      - Every SMOKE_OVERRIDES key is a real source in ALL_SOURCES
       - DEDUP_PRIORITY contains every concrete source exactly once
       - FILTER_SOURCE_FAMILIES contains every concrete source exactly once
     """
@@ -614,9 +620,9 @@ def validate() -> None:
         assert cfg["epochs"] >= 1
         assert len(cfg["cc_crawls"]) >= 1
 
-    unknown_mini = set(MINI_OVERRIDES) - set(ALL_SOURCES)
-    assert not unknown_mini, (
-        f"MINI_OVERRIDES references sources not in ALL_SOURCES: {unknown_mini}"
+    unknown_smoke = set(SMOKE_OVERRIDES) - set(ALL_SOURCES)
+    assert not unknown_smoke, (
+        f"SMOKE_OVERRIDES references sources not in ALL_SOURCES: {unknown_smoke}"
     )
 
     assert len(DEDUP_PRIORITY) == len(set(DEDUP_PRIORITY)), (

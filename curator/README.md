@@ -196,7 +196,8 @@ accepting access.
 Bounded pipeline validation:
 
 ```bash
-make curate-mini
+make curate-smoke
+make curate-mini WORKERS=62
 ```
 
 Full target:

@@ -88,7 +88,8 @@ make setup-gpu DATA_DIR=/data/slm/data SIZE=125m RUN_ID=125m-20260629-a8f3c9
 ## Curation
 
 ```bash
-make curate-mini
+make curate-smoke
+make curate-mini WORKERS=62
 make curate SIZE=125m WORKERS=62
 ```
 
@@ -207,7 +208,7 @@ make pretrain-mini SIZE=mini GPUS=1
 make pretrain SIZE=125m GPUS=1
 make pretrain-resume-preflight SIZE=125m GPUS=1
 make pretrain-resume SIZE=125m GPUS=1
-make pretrain-smoke SIZE=mini
+make pretrain-smoke SIZE=smoke GPUS=1
 make smoke-gen SIZE=125m
 ```
 

@@ -110,7 +110,7 @@ else
   _MODE_FLAG =
 endif
 
-.PHONY: all check-env curate-all train-all curate curate-mini curate-download curate-filter curate-dedup \
+.PHONY: all check-env curate-all train-all curate curate-smoke curate-mini curate-download curate-filter curate-dedup \
         curate-blend curate-upload validate validate-upload \
         tokenizer tokenizer-test tokenize artifacts-upload artifacts-download \
         config-gen config-gen-pretrain config-gen-sft config-gen-dpo \
@@ -149,7 +149,7 @@ check-env:
 	fi
 
 curate-all: check-env
-	@case "$(SIZE)" in mini|125m|350m|1b) ;; *) echo "SIZE must be mini, 125m, 350m, or 1b"; exit 1;; esac
+	@case "$(SIZE)" in smoke|mini|125m|350m|1b) ;; *) echo "SIZE must be smoke, mini, 125m, 350m, or 1b"; exit 1;; esac
 	@test -n "$(strip $(WORKERS))" || (echo "WORKERS is required. Example: WORKERS=62"; exit 1)
 	@case "$(WORKERS)" in *[!0-9]*|'') echo "WORKERS must be a positive integer"; exit 1;; esac
 	@test "$(WORKERS)" -gt 0 || (echo "WORKERS must be greater than zero"; exit 1)
@@ -211,9 +211,13 @@ curate:
 	@echo "==> Stage 1: Curation (target=$(SIZE))"
 	ulimit -n 65536 && $(PYTHON) curator/scripts/curate.py --target $(SIZE) $(WORKERS_FLAG) $(FORCE_FLAG)
 
+curate-smoke:
+	@echo "==> Stage 1: Smoke curation run (pipeline validation)"
+	ulimit -n 65536 && $(PYTHON) curator/scripts/curate.py --target smoke --smoke $(WORKERS_FLAG) $(FORCE_FLAG)
+
 curate-mini:
-	@echo "==> Stage 1: Mini curation run (pipeline validation)"
-	ulimit -n 65536 && $(PYTHON) curator/scripts/curate.py --target mini --mini $(WORKERS_FLAG) $(FORCE_FLAG)
+	@echo "==> Stage 1: Mini curation run (1.4B-token planning target)"
+	ulimit -n 65536 && $(PYTHON) curator/scripts/curate.py --target mini $(WORKERS_FLAG) $(FORCE_FLAG)
 
 curate-download:
 	$(PYTHON) curator/scripts/curate.py --target $(SIZE) --stage download $(FORCE_FLAG)
@@ -312,8 +316,16 @@ config-gen-dpo:
 		$(_MODE_FLAG) \
 		-o $(DPO_CONFIG)
 
-config-gen: config-gen-pretrain config-gen-sft config-gen-dpo
-	@echo "==> All training configs generated for SIZE=$(SIZE) GPUS=$(GPUS)"
+config-gen:
+	@if [ "$(SIZE)" = "smoke" ] || [ "$(SIZE)" = "mini" ]; then \
+		$(MAKE) config-gen-pretrain SIZE="$(SIZE)" GPUS="$(GPUS)"; \
+		echo "==> $(SIZE) pretraining config generated for GPUS=$(GPUS)"; \
+	else \
+		$(MAKE) config-gen-pretrain SIZE="$(SIZE)" GPUS="$(GPUS)"; \
+		$(MAKE) config-gen-sft SIZE="$(SIZE)" GPUS="$(GPUS)"; \
+		$(MAKE) config-gen-dpo SIZE="$(SIZE)" GPUS="$(GPUS)"; \
+		echo "==> All training configs generated for SIZE=$(SIZE) GPUS=$(GPUS)"; \
+	fi
 
 # ── Accelerate launch config generation ───────────────────────────────────────
 # Generates accelerate_configs/{multi_gpu,fsdp}.yaml from a small generator.
@@ -350,7 +362,6 @@ pretrain:
 	@echo "==> Stage 4b: Pretraining ($(SIZE), $(GPUS) GPU(s), config=$(PRETRAIN_CONFIG))"
 	$(ACCELERATE) pretrain/train.py \
 		--config $(PRETRAIN_CONFIG)
-	@$(MAKE) smoke-gen SIZE=$(SIZE)
 
 pretrain-resume:
 	$(ACCELERATE) pretrain/train.py \
@@ -358,13 +369,12 @@ pretrain-resume:
 		--resume
 
 pretrain-mini:
-	@echo "==> Stage 4b: Mini pretraining run (pipeline validation)"
+	@echo "==> Stage 4b: Mini pretraining run (functional pilot)"
 	$(ACCELERATE) pretrain/train.py \
 		--config pretrain/configs/gpt_mini.yaml
-	@$(MAKE) smoke-gen SIZE=mini
 
 pretrain-smoke:
-	@echo "==> Stage 4b: Tiny pretraining smoke run (DDP/pipeline validation)"
+	@echo "==> Stage 4b: Smoke pretraining run (DDP/pipeline validation)"
 	$(ACCELERATE) pretrain/train.py \
 		--config pretrain/configs/gpt_smoke.yaml
 
@@ -697,7 +707,7 @@ accelerate-config-multi:
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
 test-curator:
-	@echo "==> Validating curate-mini outputs..."
+	@echo "==> Validating curated outputs for SIZE=$(TEST_SIZE)..."
 	PIPELINE_TEST_SIZE=$(TEST_SIZE) .venv/bin/pytest tests/data_pipeline/test_pipeline_curator.py --size=$(TEST_SIZE) -v --tb=short
 
 test-validate:
@@ -886,7 +896,7 @@ help:
 	@echo "SLM Pipeline"
 	@echo "============"
 	@echo ""
-	@echo "Usage: make <target> [SIZE=125m|350m|1b] [GPUS=N] [WORKERS=N] [DATA_DIR=path]"
+	@echo "Usage: make <target> [SIZE=smoke|mini|125m|350m|1b] [GPUS=N] [WORKERS=N] [DATA_DIR=path]"
 	@echo "       make config-gen-* [GPU=h200|b200|...] [MODE=conservative|balanced|aggressive]"
 	@echo ""
 	@echo "For full target documentation see: docs/COMMANDS.md"
@@ -919,7 +929,7 @@ help:
 	@echo "  install-orjson           Install orjson and fasttext-wheel"
 	@echo ""
 	@echo "Tests (CPU — data pipeline):"
-	@echo "  test-curator             Validate curate-mini outputs"
+	@echo "  test-curator             Validate curated outputs for SIZE=<size>"
 	@echo "  test-validate            Validate validate outputs"
 	@echo "  test-tokenizer           Validate tokenizer outputs and tokenized binaries"
 	@echo "  test-data-pipeline       Run all data pipeline tests"
@@ -959,7 +969,8 @@ help:
 	@echo ""
 	@echo "Pipeline:"
 	@echo "  curate             Stage 1  — download, filter, deduplicate, and blend"
-	@echo "  curate-mini        Stage 1  — mini run for pipeline validation"
+	@echo "  curate-smoke       Stage 1  — capped smoke run for pipeline validation"
+	@echo "  curate-mini        Stage 1  — 1.4B-token functional pilot"
 	@echo "  validate           Stage 2  — source-aware validation + KenLM audit"
 	@echo "  validate-upload    Upload validated artifacts through RUN_ID storage"
 	@echo "  tokenizer          Stage 3  — train BPE tokenizer"
@@ -967,10 +978,11 @@ help:
 	@echo "  artifacts-upload   Upload artifacts to S3 using a RUN_ID"
 	@echo "  artifacts-download Download artifacts from S3 using RUN_ID=<run_id>"
 	@echo "  pretrain-preflight Validate a new run without allocating model weights"
-	@echo "  pretrain           Stage 4b — pretrain from scratch (auto-runs smoke-gen)"
+	@echo "  pretrain           Stage 4b — pretrain from scratch"
 	@echo "  pretrain-resume-preflight Validate checkpoint and provenance before resume"
 	@echo "  pretrain-resume    Stage 4b — resume the latest compatible checkpoint"
-	@echo "  pretrain-mini      Stage 4b — mini pretrain run (auto-runs smoke-gen)"
+	@echo "  pretrain-smoke     Stage 4b — bounded smoke pretraining run"
+	@echo "  pretrain-mini      Stage 4b — 69.9M functional mini pilot"
 	@echo "  smoke-gen          Stage 4b — generate from \$$(RESULTS_DIR)/runs/\$$(SIZE)/pretrain/final to spot-check"
 	@echo "  prepare-sft        Stage 5a — download SFT datasets"
 	@echo "  sft-instruct       Stage 5b — instruct supervised fine-tuning"

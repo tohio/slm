@@ -3,11 +3,12 @@ wandb_project: slm-mini
 
 model:
   vocab_size: 32000
-  hidden_size: 384
-  num_hidden_layers: 6
-  num_attention_heads: 6
-  num_key_value_heads: 2
-  max_position_embeddings: 1024
+  hidden_size: 512
+  intermediate_size: 1536
+  num_hidden_layers: 17
+  num_attention_heads: 8
+  num_key_value_heads: 4
+  max_position_embeddings: 2048
   rope_theta: 500000.0           # pre-stretched base (consistent across all sizes)
   rms_norm_eps: 1.0e-5
   initializer_range: 0.02
@@ -17,22 +18,21 @@ data:
   val_fraction: 0.005
 
 training:
-  # ── Batch size ──────────────────────────────────────────────────────────────
-  # Mini run — bounded pipeline validation, not a model-quality benchmark.
-  # 1 GPU: 2 × 4 × 1 × 1024 = 8,192 tokens/step × 1,000 steps = ~8.2M tokens.
-  # This revisits the 1M-token corpus about eight times instead of 38 while
-  # still exercising warmup, cosine decay, evaluation, checkpointing, final
-  # promotion, and smoke generation.
-  max_steps: 1000
-  warmup_steps: 40
-  micro_batch_size: 2
-  gradient_accumulation_steps: 4
+  # Runtime replaces these planning values using the realized tokenized
+  # training corpus and the one-epoch mini contract.
+  schedule_from_realized_tokens: true
+  # Planning basis: 1.4B tokens × 1 epoch, global batch 32, context 2,048.
+  max_steps: 21363
+  warmup_steps: 214
+  micro_batch_size: 4
+  gradient_accumulation_steps: 8
   precision: bf16
   gradient_clip_val: 1.0
   gradient_checkpointing: false
-  eval_steps: 250
+  torch_compile: true
+  eval_steps: 500
   save_steps: 500
-  save_total_limit: 2
+  save_total_limit: 3
   log_steps: 10
   num_workers: 4
   seed: 42

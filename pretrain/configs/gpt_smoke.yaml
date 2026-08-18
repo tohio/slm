@@ -1,6 +1,6 @@
 name: slm-smoke
-size: mini
-wandb_project: slm-mini
+size: smoke
+wandb_project: slm-smoke
 
 model:
   vocab_size: 32000
@@ -19,12 +19,9 @@ data:
 
 training:
   # ── Batch size ──────────────────────────────────────────────────────────────
-  # Mini run — pipeline smoke test. Trains long enough to confirm the model
-  # is learning and produces semi-coherent output before committing to a full run.
-  # 1 GPU:  2 × 4 × 1 × 1024 = ~8k tokens/step × 5000 steps = ~40M tokens
-  # Expected: loss ~10.5 → ~3.5, basic coherence visible in inference/chat.py
+  # Bounded execution check. Output quality is not an acceptance criterion.
   max_steps: 8
-  warmup_steps: 200
+  warmup_steps: 1
   micro_batch_size: 2
   gradient_accumulation_steps: 4
   precision: bf16
@@ -48,5 +45,3 @@ optimizer:
   eps: 1.0e-8
 # Smoke validation controls
 run_baseline_eval: false
-
-output_dir: results/runs/mini/pretrain_smoke
