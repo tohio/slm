@@ -16,6 +16,7 @@
 # See docs/COMMANDS.md for full target documentation.
 
 .DEFAULT_GOAL := help
+MAKEFLAGS += --no-print-directory
 
 SIZE    ?= 125m
 GPUS    ?= 1

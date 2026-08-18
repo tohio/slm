@@ -552,12 +552,12 @@ def main():
     minimum_retention = float(data_cfg.get("min_retention_ratio", 0.90))
     for label, audit in (("train", train_audit), ("validation", val_audit)):
         log.info(
-            "%s preprocessing: retained %,d/%,d (%.2f%%), supervised tokens=%,d",
+            "%s preprocessing: retained %s/%s (%.2f%%), supervised tokens=%s",
             label,
-            audit["retained_examples"],
-            audit["input_examples"],
+            f'{audit["retained_examples"]:,}',
+            f'{audit["input_examples"]:,}',
             100.0 * audit["retention_ratio"],
-            audit["supervised_tokens"],
+            f'{audit["supervised_tokens"]:,}',
         )
         if audit["retention_ratio"] < minimum_retention:
             raise RuntimeError(

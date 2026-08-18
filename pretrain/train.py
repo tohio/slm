@@ -577,7 +577,10 @@ class SLMTrainer(Trainer):
         return_outputs=False,
         num_items_in_batch=None,
     ):
-        outputs = model(**inputs)
+        outputs = model(
+            **inputs,
+            num_items_in_batch=num_items_in_batch,
+        )
         loss = self._extract_loss(outputs, context="training")
         return (loss, outputs) if return_outputs else loss
 
@@ -801,21 +804,21 @@ def main():
 
     if realized_schedule is not None:
         log.info(
-            "Resolved schedule from tokenized train corpus: usable_tokens=%,d, "
-            "epochs=%d, rounding_excess_tokens=%,d",
-            realized_schedule["usable_train_tokens_per_epoch"],
+            "Resolved schedule from tokenized train corpus: usable_tokens=%s, "
+            "epochs=%d, rounding_excess_tokens=%s",
+            f'{realized_schedule["usable_train_tokens_per_epoch"]:,}',
             realized_schedule["epochs"],
-            realized_schedule["rounding_excess_tokens"],
+            f'{realized_schedule["rounding_excess_tokens"]:,}',
         )
 
     log.info(
         "Training plan: strategy=%s, processes=%d, global_batch=%d sequences, "
-        "tokens_per_step=%,d, max_steps=%,d, scheduled_tokens=%.2fB",
+        "tokens_per_step=%s, max_steps=%s, scheduled_tokens=%.2fB",
         distributed_strategy,
         world_size,
         global_batch,
-        tokens_per_step,
-        training_args.max_steps,
+        f"{tokens_per_step:,}",
+        f"{training_args.max_steps:,}",
         scheduled_tokens / 1e9,
     )
 

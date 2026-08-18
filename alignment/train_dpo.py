@@ -642,10 +642,10 @@ def main():
     minimum_retention = float(data_cfg.get("min_retention_ratio", 0.99))
     for label, audit in (("train", train_audit), ("validation", validation_audit)):
         log.info(
-            "%s DPO preprocessing: retained %,d/%,d (%.2f%%)",
+            "%s DPO preprocessing: retained %s/%s (%.2f%%)",
             label,
-            audit["retained_pairs"],
-            audit["input_pairs"],
+            f'{audit["retained_pairs"]:,}',
+            f'{audit["input_pairs"]:,}',
             100.0 * audit["retention_ratio"],
         )
         if audit["retention_ratio"] < minimum_retention:

@@ -516,10 +516,10 @@ def prepare(config: dict[str, Any], size: str, force: bool) -> None:
         encoding="utf-8",
     )
     log.info(
-        "Prepared %s DPO: %,d train, %,d validation",
+        "Prepared %s DPO: %s train, %s validation",
         size,
-        len(train),
-        len(validation),
+        f"{len(train):,}",
+        f"{len(validation):,}",
     )
 
 

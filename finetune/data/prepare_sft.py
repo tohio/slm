@@ -378,11 +378,11 @@ def prepare_stage(config: dict[str, Any], stage: str, size: str, force: bool) ->
         encoding="utf-8",
     )
     log.info(
-        "Prepared %s/%s: %,d train, %,d validation",
+        "Prepared %s/%s: %s train, %s validation",
         size,
         stage,
-        len(train),
-        len(val),
+        f"{len(train):,}",
+        f"{len(val):,}",
     )
 
 
