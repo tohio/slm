@@ -18,19 +18,20 @@ data:
 
 training:
   # ── Batch size ──────────────────────────────────────────────────────────────
-  # Mini run — pipeline smoke test. Trains long enough to confirm the model
-  # is learning and produces semi-coherent output before committing to a full run.
-  # 1 GPU:  2 × 4 × 1 × 1024 = ~8k tokens/step × 5000 steps = ~40M tokens
-  # Expected: loss ~10.5 → ~3.5, basic coherence visible in inference/chat.py
-  max_steps: 5000
-  warmup_steps: 200
+  # Mini run — bounded pipeline validation, not a model-quality benchmark.
+  # 1 GPU: 2 × 4 × 1 × 1024 = 8,192 tokens/step × 1,000 steps = ~8.2M tokens.
+  # This revisits the 1M-token corpus about eight times instead of 38 while
+  # still exercising warmup, cosine decay, evaluation, checkpointing, final
+  # promotion, and smoke generation.
+  max_steps: 1000
+  warmup_steps: 40
   micro_batch_size: 2
   gradient_accumulation_steps: 4
   precision: bf16
   gradient_clip_val: 1.0
   gradient_checkpointing: false
-  eval_steps: 500
-  save_steps: 1000
+  eval_steps: 250
+  save_steps: 500
   save_total_limit: 2
   log_steps: 10
   num_workers: 4

@@ -54,6 +54,11 @@ bounded step counts remain unchanged.
 The train/validation split is created by curation; pretraining does not split
 documents again.
 
+The mini profile runs 1,000 optimizer steps, consuming approximately 8.2M
+tokens. This keeps the GPU rehearsal bounded while exercising warmup, cosine
+decay, evaluation, checkpointing, final promotion, and smoke generation. It
+reuses the existing mini artifacts and is not a model-quality benchmark.
+
 `dataset.py` memory maps the flat token arrays and returns fixed-length causal
 language-model windows without loading the entire corpus into memory.
 
