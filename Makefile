@@ -110,7 +110,7 @@ else
   _MODE_FLAG =
 endif
 
-.PHONY: all check-env curate-all train-all curate curate-smoke curate-mini curate-download curate-filter curate-dedup \
+.PHONY: all check-env check-curation-prereqs curate-all train-all curate curate-smoke curate-mini curate-download curate-filter curate-dedup \
         curate-blend curate-upload validate validate-upload \
         tokenizer tokenizer-test tokenize artifacts-upload artifacts-download \
         config-gen config-gen-pretrain config-gen-sft config-gen-dpo \
@@ -148,16 +148,29 @@ check-env:
 		exit 1; \
 	fi
 
-curate-all: check-env
+check-curation-prereqs: check-env
+	@missing=""; \
+	fasttext="$(DATA_DIR)/models/lid.176.ftz"; \
+	kenlm_arpa="$(DATA_DIR)/models/en.arpa.bin"; \
+	kenlm_sp="$(DATA_DIR)/models/en.sp.model"; \
+	[ -s "$$fasttext" ] || missing="$$missing\n  FastText: $$fasttext"; \
+	[ -s "$$kenlm_arpa" ] || missing="$$missing\n  KenLM:    $$kenlm_arpa"; \
+	[ -s "$$kenlm_sp" ] || missing="$$missing\n  KenLM SP: $$kenlm_sp"; \
+	if [ -n "$$missing" ]; then \
+		printf 'ERROR: curation prerequisites are missing:%b\n\n' "$$missing"; \
+		echo "Install them with:"; \
+		echo "  make download-fasttext-model DATA_DIR=$(DATA_DIR)"; \
+		echo "  make download-kenlm-model    DATA_DIR=$(DATA_DIR)"; \
+		exit 1; \
+	fi
+
+curate-all: check-curation-prereqs
 	@case "$(SIZE)" in smoke|mini|125m|350m|1b) ;; *) echo "SIZE must be smoke, mini, 125m, 350m, or 1b"; exit 1;; esac
 	@test -n "$(strip $(WORKERS))" || (echo "WORKERS is required. Example: WORKERS=62"; exit 1)
 	@case "$(WORKERS)" in *[!0-9]*|'') echo "WORKERS must be a positive integer"; exit 1;; esac
 	@test "$(WORKERS)" -gt 0 || (echo "WORKERS must be greater than zero"; exit 1)
 	@test -n "$(strip $(DATA_DIR))" || (echo "DATA_DIR is required"; exit 1)
 	@echo "==> Complete curation workflow: SIZE=$(SIZE), WORKERS=$(WORKERS), DATA_DIR=$(DATA_DIR)"
-	$(MAKE) setup-data-dir DATA_DIR="$(DATA_DIR)"
-	$(MAKE) download-fasttext-model DATA_DIR="$(DATA_DIR)"
-	$(MAKE) download-kenlm-model DATA_DIR="$(DATA_DIR)"
 	$(PYTHON) infra/verify_environment.py --profile curation
 	$(MAKE) curate SIZE="$(SIZE)" WORKERS="$(WORKERS)"
 	$(MAKE) test-curator SIZE="$(SIZE)"
@@ -207,28 +220,28 @@ train-all: check-env
 
 # ── Stage 1: Data curation ────────────────────────────────────────────────────
 
-curate:
+curate: check-curation-prereqs
 	@echo "==> Stage 1: Curation (target=$(SIZE))"
 	ulimit -n 65536 && $(PYTHON) curator/scripts/curate.py --target $(SIZE) $(WORKERS_FLAG) $(FORCE_FLAG)
 
-curate-smoke:
+curate-smoke: check-curation-prereqs
 	@echo "==> Stage 1: Smoke curation run (pipeline validation)"
 	ulimit -n 65536 && $(PYTHON) curator/scripts/curate.py --target smoke --smoke $(WORKERS_FLAG) $(FORCE_FLAG)
 
-curate-mini:
-	@echo "==> Stage 1: Mini curation run (1.4B-token planning target)"
+curate-mini: check-curation-prereqs
+	@echo "==> Stage 1: Mini curation run (functional mini-scale curation)"
 	ulimit -n 65536 && $(PYTHON) curator/scripts/curate.py --target mini $(WORKERS_FLAG) $(FORCE_FLAG)
 
-curate-download:
+curate-download: check-curation-prereqs
 	$(PYTHON) curator/scripts/curate.py --target $(SIZE) --stage download $(FORCE_FLAG)
 
-curate-filter:
+curate-filter: check-curation-prereqs
 	$(PYTHON) curator/scripts/curate.py --target $(SIZE) --stage filter $(WORKERS_FLAG)
 
-curate-dedup:
+curate-dedup: check-curation-prereqs
 	ulimit -n 65536 && $(PYTHON) curator/scripts/curate.py --target $(SIZE) --stage dedup $(WORKERS_FLAG)
 
-curate-blend:
+curate-blend: check-curation-prereqs
 	$(PYTHON) curator/scripts/curate.py --target $(SIZE) --stage blend $(WORKERS_FLAG)
 
 curate-upload:
@@ -920,7 +933,7 @@ help:
 	@echo "For full target documentation see: docs/COMMANDS.md"
 	@echo ""
 	@echo "New-host workflows:"
-	@echo "  curate-all               Setup, curate, validate, tokenize, test, and upload"
+	@echo "  curate-all               Curate, validate, tokenize, test, and upload after bootstrap"
 	@echo "  train-all                Setup, restore, train all model branches, and test"
 	@echo ""
 	@echo "Config generation (run before pretrain/sft-instruct/dpo-chat/sft-code):"
@@ -935,6 +948,7 @@ help:
 	@echo "  setup                    Bootstrap a fresh CPU curation instance"
 	@echo "  setup-gpu                Bootstrap a GPU training instance"
 	@echo "  setup-data-dir           Bootstrap with custom data dir"
+	@echo "  check-curation-prereqs   Fail fast unless required curation models are present"
 	@echo "  download-fasttext-model  Download fasttext language ID model (~1MB)"
 	@echo "  download-kenlm-model     Download CCNet English model pair (~4GB)"
 	@echo "  accelerate-config        Configure accelerate interactively"
@@ -989,7 +1003,7 @@ help:
 	@echo "Pipeline:"
 	@echo "  curate             Stage 1  — download, filter, deduplicate, and blend"
 	@echo "  curate-smoke       Stage 1  — capped smoke run for pipeline validation"
-	@echo "  curate-mini        Stage 1  — 1.4B-token functional pilot"
+	@echo "  curate-mini        Stage 1  — functional mini-scale curation run"
 	@echo "  validate           Stage 2  — source-aware validation + KenLM audit"
 	@echo "  validate-upload    Upload validated artifacts through RUN_ID storage"
 	@echo "  tokenizer          Stage 3  — train BPE tokenizer"

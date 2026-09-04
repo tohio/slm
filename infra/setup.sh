@@ -277,7 +277,7 @@ if [ -f "${DATA_DIR}/models/lid.176.ftz" ]; then
     echo "  OK: fasttext language model found"
 else
     echo "  WARNING: fasttext model not found — run: make download-fasttext-model DATA_DIR=${DATA_DIR}"
-    echo "           Required before running: make curate-filter"
+    echo "           Required before running any curation target"
 fi
 
 # Check matched CCNet model pair — warn only (downloaded separately)
@@ -285,7 +285,7 @@ if [ -f "${DATA_DIR}/models/en.arpa.bin" ] && [ -f "${DATA_DIR}/models/en.sp.mod
     echo "  OK: CCNet KenLM and SentencePiece models found"
 else
     echo "  WARNING: CCNet model pair incomplete — run: make download-kenlm-model DATA_DIR=${DATA_DIR}"
-    echo "           Required before running: make validate"
+    echo "           Required before running any curation target"
 fi
 
 # Check .env required variables — warnings only, not hard errors.
@@ -320,18 +320,26 @@ if [ "$ERRORS" -eq 0 ]; then
         echo "  3. source ${VENV_DIR}/bin/activate"
         echo "  4. make download-fasttext-model DATA_DIR=${DATA_DIR}"
         echo "  5. make download-kenlm-model    DATA_DIR=${DATA_DIR}"
-        echo "  6. Start curation (pick one):"
+        echo "  6. make check-curation-prereqs  DATA_DIR=${DATA_DIR}"
+        echo "  7. Validate the curation pipeline with smoke:"
     else
         echo "  1. source ~/.bashrc  (or open a new shell)"
         echo "  2. source ${VENV_DIR}/bin/activate"
         echo "  3. make download-fasttext-model DATA_DIR=${DATA_DIR}"
         echo "  4. make download-kenlm-model    DATA_DIR=${DATA_DIR}"
-        echo "  5. Start curation (pick one):"
+        echo "  5. make check-curation-prereqs  DATA_DIR=${DATA_DIR}"
+        echo "  6. Validate the curation pipeline with smoke:"
     fi
-    echo "       make curate-mini                       # validate pipeline (~30 min)"
-    echo "       make curate SIZE=125m                  # full 125M run, 5B tokens  (~4-6 hrs)"
-    echo "       make curate SIZE=350m                  # full 350M run, 15B tokens (~10-14 hrs)"
-    echo "       make curate SIZE=1b                    # full 1B run,   30B tokens (~20-28 hrs)"
+    echo "       make curate-smoke DATA_DIR=${DATA_DIR}"
+    echo "       make validate SIZE=smoke DATA_DIR=${DATA_DIR}"
+    echo ""
+    echo "     If smoke passes, continue with mini or a production size:"
+    echo "       make curate-mini DATA_DIR=${DATA_DIR}                 # functional mini-scale curation"
+    echo "       make curate SIZE=125m WORKERS=<n> DATA_DIR=${DATA_DIR}"
+    echo "       make curate SIZE=350m WORKERS=<n> DATA_DIR=${DATA_DIR}"
+    echo "       make curate SIZE=1b   WORKERS=<n> DATA_DIR=${DATA_DIR}"
+    echo ""
+    echo "     Runtime varies with CPU, network, storage, cache state, and Common Crawl throughput."
     echo ""
 else
     echo "========================================"

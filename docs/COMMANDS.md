@@ -27,7 +27,21 @@ make <target> RUN_ID=125m-20260629-a8f3c9
 
 ## New-host workflows
 
-Run the complete data workflow on a new curation host:
+On a new CPU curation host, bootstrap the curation models and validate smoke
+before starting a larger run:
+
+```bash
+make setup-data-dir DATA_DIR=/data/slm/data
+source .venv/bin/activate
+make download-fasttext-model DATA_DIR=/data/slm/data
+make download-kenlm-model    DATA_DIR=/data/slm/data
+make check-curation-prereqs  DATA_DIR=/data/slm/data
+make curate-smoke            DATA_DIR=/data/slm/data
+make validate SIZE=smoke     DATA_DIR=/data/slm/data
+```
+
+Then use `make curate-mini` for the functional mini-scale run or `curate-all`
+for a complete production-size workflow:
 
 ```bash
 make curate-all \
@@ -74,13 +88,17 @@ model/export/unit tests. `make install-gpu` selects the CUDA build of that same
 training stack. These targets all manage `.venv`; choose the one for the current
 host role rather than layering incompatible Transformers versions together.
 
-Validation prerequisites:
+Curation prerequisites:
 
 ```bash
 make install-kenlm
 make download-fasttext-model DATA_DIR=/data/slm/data
-make download-kenlm-model DATA_DIR=/data/slm/data
+make download-kenlm-model    DATA_DIR=/data/slm/data
+make check-curation-prereqs  DATA_DIR=/data/slm/data
 ```
+
+All curation execution targets use `check-curation-prereqs` and fail before
+source work starts if FastText or either KenLM model file is missing.
 
 GPU restore:
 
@@ -94,11 +112,21 @@ make setup-gpu DATA_DIR=/data/slm/data SIZE=125m RUN_ID=125m-20260629-a8f3c9
 
 ## Curation
 
+Run smoke first on a new host:
+
 ```bash
 make curate-smoke
+make validate SIZE=smoke
+
 make curate-mini WORKERS=62
+make validate SIZE=mini
+
 make curate SIZE=125m WORKERS=62
 ```
+
+`curate-smoke` is the bounded pipeline-validation run. `curate-mini` is the
+functional mini-scale curation run. Runtime depends on host and network
+conditions; fixed duration estimates are intentionally not published.
 
 Stage-specific curation:
 

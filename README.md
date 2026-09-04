@@ -65,50 +65,85 @@ model lineage, and artifact flow.
 
 ## Getting Started
 
-### Prerequisites
+SLM uses separate environments for data curation and model training. Do not
+layer the curation and training dependency stacks into the same `.venv`.
+
+### CPU curation server
+
+Use this path on a CPU/data-processing host. It installs the curation stack,
+downloads the required FastText and KenLM assets, then validates the pipeline
+with `smoke` before running `mini` or a production-size curation.
+
+Prerequisites:
 
 - Ubuntu host with persistent storage for curation.
-- Supported NVIDIA GPU host and CUDA-compatible driver for training.
 - Hugging Face account and token.
-- AWS account, S3 bucket, and credentials.
-- Weights & Biases account and API key.
+- AWS account, S3 bucket, and credentials when uploading artifacts.
+- Weights & Biases credentials if enabled by the active workflow.
 
-The curation guide lists the gated datasets whose terms must be accepted
-before downloading them.
-
-### Installation
+The curation guide lists gated datasets whose terms must be accepted before
+downloading them.
 
 ```bash
 git clone https://github.com/tohio/slm.git
 cd slm
 cp .env.sample .env
 vi .env
+
+make setup-data-dir DATA_DIR=/data/slm/data
+source .venv/bin/activate
+
+make download-fasttext-model DATA_DIR=/data/slm/data
+make download-kenlm-model    DATA_DIR=/data/slm/data
+make check-curation-prereqs  DATA_DIR=/data/slm/data
+
+make curate-smoke DATA_DIR=/data/slm/data
+make validate SIZE=smoke DATA_DIR=/data/slm/data
+
+make curate-mini DATA_DIR=/data/slm/data
+make validate SIZE=mini DATA_DIR=/data/slm/data
 ```
 
-### Configuration
+`curate-smoke` is the first pipeline-validation run. `curate-mini` is the
+functional mini-scale curation run. Curation time depends on CPU count, network
+bandwidth, cache state, storage throughput, and Common Crawl availability, so
+the repository does not publish fixed runtime estimates.
 
-Fill every variable in `.env`. Blank values, commented values, and `...`
-placeholders are not supported by the complete workflows.
+All curation entry points fail before source processing begins when the
+FastText or KenLM model files are missing. Install them explicitly with the two
+download targets above.
 
-Verify the configuration:
+For a production-size run after smoke and mini are healthy:
 
 ```bash
-make check-env
+make curate SIZE=125m WORKERS=62 DATA_DIR=/data/slm/data
+# or SIZE=350m / SIZE=1b
 ```
 
-### Usage
+Use [`docs/CURATION.md`](docs/CURATION.md) for gated-source prerequisites,
+worker sizing, resume behavior, validation, tokenization, and artifact upload.
 
-Run the complete data workflow on a curation host:
+### GPU training server
+
+Use this path on a supported NVIDIA GPU host after the curation host has
+produced and uploaded a run-scoped artifact set. The training stack is pinned
+separately from the curation stack.
 
 ```bash
-make curate-all \
+git clone https://github.com/tohio/slm.git
+cd slm
+cp .env.sample .env
+vi .env
+
+make setup-gpu \
   SIZE=125m \
-  WORKERS=62 \
+  RUN_ID=125m-YYYYMMDD-abcdef \
   DATA_DIR=/data/slm/data
+
+make check-training-env
 ```
 
-Record the `RUN_ID` printed when curation finishes. On a new GPU host, restore
-that run and train the four model variants:
+Then use the stage-specific commands or the complete new-run workflow:
 
 ```bash
 make train-all \
@@ -118,9 +153,8 @@ make train-all \
   DATA_DIR=/data/slm/data
 ```
 
-Use [`docs/CURATION.md`](docs/CURATION.md) and
-[`docs/TRAIN.md`](docs/TRAIN.md) for prerequisites, stage-by-stage commands,
-resume procedures, outputs, evaluation, and export.
+Use [`docs/TRAIN.md`](docs/TRAIN.md) for pretraining, instruct SFT, code SFT,
+DPO, resume procedures, evaluation, and export.
 
 ## Project Structure
 

@@ -43,9 +43,38 @@ cp .env.sample .env
 vi .env
 ```
 
-## Complete workflow
+## Fresh-host workflow
 
-On a fresh Ubuntu curation host:
+Bootstrap a fresh CPU curation host explicitly before starting source work:
+
+```bash
+make setup-data-dir DATA_DIR=/data/slm/data
+source .venv/bin/activate
+
+make download-fasttext-model DATA_DIR=/data/slm/data
+make download-kenlm-model    DATA_DIR=/data/slm/data
+make check-curation-prereqs  DATA_DIR=/data/slm/data
+```
+
+Run smoke first:
+
+```bash
+make curate-smoke DATA_DIR=/data/slm/data
+make validate SIZE=smoke DATA_DIR=/data/slm/data
+```
+
+If smoke passes, run the functional mini-scale curation:
+
+```bash
+make curate-mini DATA_DIR=/data/slm/data
+make validate SIZE=mini DATA_DIR=/data/slm/data
+```
+
+Curation runtime varies with CPU count, network bandwidth, cache state, storage
+throughput, and Common Crawl availability. Fixed wall-clock estimates are not
+part of the operator contract.
+
+For a complete production-size workflow after bootstrap and smoke validation:
 
 ```bash
 make curate-all \
@@ -56,16 +85,15 @@ make curate-all \
 
 `curate-all` performs the following sequence:
 
-1. Validates every `.env` value and the required Make inputs.
-2. Installs the CPU/data-processing environment and prepares persistent paths.
-3. Downloads the FastText language-identification and KenLM perplexity models.
-4. Curates, filters, deduplicates, and blends the configured sources.
-5. Validates the curated train and validation splits.
-6. Trains and validates the size-specific BPE tokenizer.
-7. Tokenizes both splits into memory-mapped binaries.
-8. Runs each artifact gate without rebuilding completed stages.
-9. Uploads `tokenized`, `tokenizer`, and `metadata` artifacts to S3.
-10. Prints the `RUN_ID` required by the training host.
+1. Validates `.env`, required Make inputs, and curation model prerequisites.
+2. Verifies the pinned curation environment.
+3. Curates, filters, deduplicates, and blends the configured sources.
+4. Validates the curated train and validation splits.
+5. Trains and validates the size-specific BPE tokenizer.
+6. Tokenizes both splits into memory-mapped binaries.
+7. Runs each artifact gate without rebuilding completed stages.
+8. Uploads `tokenized`, `tokenizer`, and `metadata` artifacts to S3.
+9. Prints the `RUN_ID` required by the training host.
 
 Choose `WORKERS` below the available CPU count. On a 64-vCPU host,
 `WORKERS=62` is the standard starting point.
@@ -82,8 +110,14 @@ make check-env
 make setup-data-dir DATA_DIR=/data/slm/data
 make download-fasttext-model DATA_DIR=/data/slm/data
 make download-kenlm-model DATA_DIR=/data/slm/data
+make check-curation-prereqs DATA_DIR=/data/slm/data
 .venv/bin/python infra/verify_environment.py --profile curation
 ```
+
+Every curation execution target uses the same prerequisite gate. If FastText or
+either KenLM model file is missing, curation stops before source processing and
+prints the commands required to install the missing assets. The download targets
+remain explicit; curation does not silently fetch models.
 
 ### Corpus construction
 
@@ -92,9 +126,9 @@ make curate SIZE=125m WORKERS=62
 make test-curator SIZE=125m
 ```
 
-Use `make curate-smoke` for the capped 1M-token execution rehearsal. Use
-`make curate-mini` for the uncapped 1.4B-token functional pilot. Both write to
-their own `$DATA_DIR/runs/<size>` namespace.
+Use `make curate-smoke` for the bounded pipeline-validation run. Use
+`make curate-mini` for the functional mini-scale curation run. Both write to
+their own `$DATA_DIR/runs/<size>` namespace. Run smoke first on a new host.
 
 ### Validation
 
