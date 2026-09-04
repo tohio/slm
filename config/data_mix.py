@@ -190,22 +190,13 @@ SUPPLEMENTAL_CHAR_CAPS: dict[str, dict[str, int]] = {}
 
 # The canonical synthetic pretraining dataset is one physical Hugging Face
 # dataset containing multiple signal families in metadata.signal. Mini is an
-# experiment: cap its synthetic contribution at 2,000 rows. Production model
-# sizes intentionally have no row budget yet; choose those only after the mini
-# signal ablation.
+# experiment: cap its synthetic contribution at 2,000 unique rows. The cap is
+# a maximum, not a required cardinality: if the published dataset contains
+# fewer valid rows, consume every available row once and report the realized
+# family counts. Production model sizes intentionally have no row budget yet;
+# choose those only after the mini signal ablation.
 SYNTHETIC_PRETRAIN_DOC_CAPS: dict[str, int] = {
     "mini": 2_000,
-}
-
-# Preserve the family proportions previously represented by five independent
-# DATA_MIX entries. They now control deterministic stratified selection from
-# the single synthetic_pretrain dataset rather than top-level corpus shares.
-SYNTHETIC_PRETRAIN_FAMILY_WEIGHTS: dict[str, float] = {
-    "arithmetic": 0.1475,
-    "task_code": 0.3934,
-    "educational_qa_mcq_math": 0.1475,
-    "educational_qa_mcq_general": 0.2459,
-    "factual_restraint": 0.0657,
 }
 
 
@@ -522,12 +513,6 @@ def validate() -> None:
         f"OVERFLOW_SINK={OVERFLOW_SINK!r} not present in DATA_MIX"
     )
 
-    family_weight_total = sum(SYNTHETIC_PRETRAIN_FAMILY_WEIGHTS.values())
-    assert abs(family_weight_total - 1.0) < 1e-9, (
-        "SYNTHETIC_PRETRAIN_FAMILY_WEIGHTS must sum to 1.0; "
-        f"got {family_weight_total}"
-    )
-    assert all(weight > 0 for weight in SYNTHETIC_PRETRAIN_FAMILY_WEIGHTS.values())
     assert set(SYNTHETIC_PRETRAIN_DOC_CAPS) <= set(TARGET_CONFIGS)
     assert all(cap > 0 for cap in SYNTHETIC_PRETRAIN_DOC_CAPS.values())
 

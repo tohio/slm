@@ -210,38 +210,22 @@ class SyntheticPretrainSource(HFSyntheticSource):
         "factual_restraint",
     })
 
-    def __init__(
-        self,
-        output_dir: Path,
-        max_docs: int | None = None,
-        max_chars: int | None = None,
-        shard_size: int = HFSyntheticSource.DEFAULT_SHARD_SIZE,
-        seed: int = 42,
-        family_quotas: dict[str, int] | None = None,
-    ):
-        super().__init__(
-            output_dir=output_dir,
-            max_docs=max_docs,
-            max_chars=max_chars,
-            shard_size=shard_size,
-            seed=seed,
-        )
-        self.family_quotas = dict(family_quotas) if family_quotas else None
-        if self.family_quotas is not None:
-            unknown = set(self.family_quotas) - self.ALLOWED_SIGNALS
-            if unknown:
-                raise ValueError(f"Unknown synthetic pretrain signals: {sorted(unknown)}")
-            if any(quota <= 0 for quota in self.family_quotas.values()):
-                raise ValueError("Synthetic pretrain family quotas must all be > 0")
-            if max_docs is not None and sum(self.family_quotas.values()) != max_docs:
-                raise ValueError(
-                    "Synthetic pretrain family quotas must sum to max_docs: "
-                    f"quotas={sum(self.family_quotas.values())}, max_docs={max_docs}"
-                )
-
     def download(self) -> list[Path]:
-        if self.family_quotas is None:
+        """Select at most ``max_docs`` unique rows without family quotas.
+
+        The published dataset owns the family distribution. For a dataset no
+        larger than the cap, every valid row is consumed exactly once. For a
+        larger dataset, reservoir sampling avoids bias from Hub row ordering,
+        then minimally repairs the sample so every declared family present in
+        the dataset remains represented.
+        """
+        if self.max_docs is None:
             return super().download()
+        if self.max_chars is not None:
+            raise ValueError(
+                "SyntheticPretrainSource does not support max_chars together "
+                "with capped family-preserving selection"
+            )
 
         existing = sorted(self.output_dir.glob(f"{self.SHARD_PREFIX}_*.jsonl"))
         if existing:
@@ -251,74 +235,109 @@ class SyntheticPretrainSource(HFSyntheticSource):
             )
 
         log.info(
-            "%s: stratified streaming %s split=train quotas=%s output=%s",
+            "%s: streaming %s split=train max_docs=%s output=%s",
             self.SOURCE_TAG,
             self.HF_REPO,
-            self.family_quotas,
+            f"{self.max_docs:,}",
             self.output_dir,
         )
         dataset = load_dataset(self.HF_REPO, split="train", streaming=True)
 
-        reservoirs: dict[str, list[dict[str, Any]]] = {
-            signal: [] for signal in self.family_quotas
-        }
-        seen: dict[str, int] = {signal: 0 for signal in self.family_quotas}
-        rngs = {
-            signal: random.Random(f"{self.seed}:{signal}")
-            for signal in self.family_quotas
-        }
+        selected: list[dict[str, Any]] = []
+        representatives: dict[str, dict[str, Any]] = {}
+        family_seen: dict[str, int] = {signal: 0 for signal in self.ALLOWED_SIGNALS}
+        seen_docs = 0
+        rng = random.Random(self.seed)
 
         for idx, row in enumerate(dataset):
             record = self._normalise_record(row=row, idx=idx)
             if record is None:
                 continue
+
             signal = record["metadata"]["signal"]
-            if signal not in self.family_quotas:
+            family_seen[signal] += 1
+            representatives.setdefault(signal, record)
+            seen_docs += 1
+
+            if len(selected) < self.max_docs:
+                selected.append(record)
                 continue
 
-            seen[signal] += 1
-            quota = self.family_quotas[signal]
-            reservoir = reservoirs[signal]
-            if len(reservoir) < quota:
-                reservoir.append(record)
-                continue
+            replacement = rng.randrange(seen_docs)
+            if replacement < self.max_docs:
+                selected[replacement] = record
 
-            replacement = rngs[signal].randrange(seen[signal])
-            if replacement < quota:
-                reservoir[replacement] = record
-
-        underfilled = {
-            signal: {"required": self.family_quotas[signal], "available": seen[signal]}
-            for signal in self.family_quotas
-            if seen[signal] < self.family_quotas[signal]
-        }
-        if underfilled:
+        present_families = {signal for signal, count in family_seen.items() if count}
+        missing_dataset_families = self.ALLOWED_SIGNALS - present_families
+        if missing_dataset_families:
             raise RuntimeError(
-                "Synthetic pretrain dataset cannot satisfy the configured "
-                f"family quotas: {underfilled}"
+                "Synthetic pretrain dataset is missing declared signal families: "
+                f"{sorted(missing_dataset_families)}; realized={family_seen}"
             )
 
-        selected = [
-            record
-            for signal in self.family_quotas
-            for record in reservoirs[signal]
-        ]
+        if seen_docs > self.max_docs:
+            selected_counts: dict[str, int] = {
+                signal: 0 for signal in self.ALLOWED_SIGNALS
+            }
+            for record in selected:
+                selected_counts[record["metadata"]["signal"]] += 1
+
+            missing_selected = [
+                signal for signal in sorted(present_families)
+                if selected_counts[signal] == 0
+            ]
+            for signal in missing_selected:
+                replacement_idx = next(
+                    (
+                        idx
+                        for idx in range(len(selected) - 1, -1, -1)
+                        if selected_counts[selected[idx]["metadata"]["signal"]] > 1
+                    ),
+                    None,
+                )
+                if replacement_idx is None:
+                    raise RuntimeError(
+                        "Synthetic pretrain cap is too small to preserve all "
+                        f"present families: max_docs={self.max_docs}, "
+                        f"families={sorted(present_families)}"
+                    )
+                replaced_signal = selected[replacement_idx]["metadata"]["signal"]
+                selected[replacement_idx] = representatives[signal]
+                selected_counts[replaced_signal] -= 1
+                selected_counts[signal] += 1
+
         random.Random(self.seed).shuffle(selected)
 
         output_files: list[Path] = []
-        for start in range(0, len(selected), self.shard_size):
+        for offset in range(0, len(selected), self.shard_size):
             output_files.append(
                 self._write_shard(
-                    selected[start : start + self.shard_size],
+                    selected[offset : offset + self.shard_size],
                     len(output_files),
                 )
             )
 
+        selected_family_counts = {signal: 0 for signal in self.ALLOWED_SIGNALS}
+        for record in selected:
+            selected_family_counts[record["metadata"]["signal"]] += 1
+
+        if seen_docs < self.max_docs:
+            log.info(
+                "%s: dataset contains only %s valid rows below the %s-row cap; "
+                "using all available rows once",
+                self.SOURCE_TAG,
+                f"{seen_docs:,}",
+                f"{self.max_docs:,}",
+            )
+
         log.info(
-            "%s complete — docs=%s families=%s shards=%s repo=%s",
+            "%s complete — available_docs=%s selected_docs=%s "
+            "available_families=%s selected_families=%s shards=%s repo=%s",
             self.SOURCE_TAG,
+            f"{seen_docs:,}",
             f"{len(selected):,}",
-            {signal: len(records) for signal, records in reservoirs.items()},
+            family_seen,
+            selected_family_counts,
             len(output_files),
             self.HF_REPO,
         )

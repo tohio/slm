@@ -74,9 +74,11 @@ Synthetic pretraining is one physical source, `tohio/slm-synthetic-pretrain`,
 with the signal family stored in each row's `metadata.signal`. The supported
 signals are `arithmetic`, `task_code`, `educational_qa_mcq_math`,
 `educational_qa_mcq_general`, and `factual_restraint`. The mini experiment
-selects exactly 2,000 rows with deterministic family-stratified sampling.
-Production synthetic row budgets remain intentionally unset until the mini
-ablation establishes how much signal is useful.
+uses up to 2,000 unique rows. If the published dataset is smaller, mini uses
+all available valid rows once; if it is larger, selection is deterministic and
+order-safe while retaining every declared family. Production synthetic row
+budgets remain intentionally unset until the mini ablation establishes how
+much signal is useful.
 
 ## Pipeline Stages
 

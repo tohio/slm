@@ -98,7 +98,6 @@ from config import (
     SMOKE_OVERRIDES,
     SUPPLEMENTAL_CHAR_CAPS,
     SYNTHETIC_PRETRAIN_DOC_CAPS,
-    SYNTHETIC_PRETRAIN_FAMILY_WEIGHTS,
     source_filter_family,
     benchmark_decontamination_contract,
 )
@@ -516,29 +515,6 @@ def flatten_datatrove_record(record: dict) -> dict:
 
 # ── Stage 1: Download ──────────────────────────────────────────────────────────
 
-def _synthetic_pretrain_family_quotas(total_docs: int) -> dict[str, int]:
-    """Allocate an exact row budget across synthetic pretrain families."""
-    raw = {
-        signal: total_docs * weight
-        for signal, weight in SYNTHETIC_PRETRAIN_FAMILY_WEIGHTS.items()
-    }
-    quotas = {signal: int(value) for signal, value in raw.items()}
-    remainder = total_docs - sum(quotas.values())
-    order = sorted(
-        raw,
-        key=lambda signal: (raw[signal] - quotas[signal], signal),
-        reverse=True,
-    )
-    for signal in order[:remainder]:
-        quotas[signal] += 1
-    if sum(quotas.values()) != total_docs:
-        raise RuntimeError(
-            "Synthetic pretrain family quota allocation did not preserve the "
-            f"requested total: total={total_docs}, quotas={quotas}"
-        )
-    return quotas
-
-
 def _build_source(
     name: str,
     smoke: bool,
@@ -673,14 +649,14 @@ def _build_source(
                 f"target={target!r}. Validate the mini experiment first, then "
                 "set SYNTHETIC_PRETRAIN_DOC_CAPS for this production size."
             )
-        quotas = _synthetic_pretrain_family_quotas(configured_cap)
         log.info(
-            "synthetic_pretrain family quotas for %s: %s", target, quotas
+            "synthetic_pretrain cap configured for %s: up to %s unique docs",
+            target,
+            f"{configured_cap:,}",
         )
         return SyntheticPretrainSource(
             output_dir=raw_dir,
             max_docs=configured_cap,
-            family_quotas=quotas,
         )
     if name == "codesearchnet":
         return CodeSearchNetSource(output_dir=raw_dir, max_docs=cap)
