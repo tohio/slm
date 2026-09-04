@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import random
 from pathlib import Path
 from typing import Any, Callable
 
@@ -194,119 +195,173 @@ class HFSyntheticSource:
         return text.strip()
 
 
-class SyntheticArithmeticSource(HFSyntheticSource):
-    SOURCE_TAG = "synthetic_arithmetic"
-    SHARD_PREFIX = "synthetic_arithmetic"
-    HF_REPO = "tohio/slm-synthetic-arithmetic"
+
+class SyntheticPretrainSource(HFSyntheticSource):
+    """Canonical multi-family synthetic pretraining dataset."""
+
+    SOURCE_TAG = "synthetic_pretrain"
+    SHARD_PREFIX = "synthetic_pretrain"
+    HF_REPO = "tohio/slm-synthetic-pretrain"
+    ALLOWED_SIGNALS = frozenset({
+        "arithmetic",
+        "task_code",
+        "educational_qa_mcq_math",
+        "educational_qa_mcq_general",
+        "factual_restraint",
+    })
+
+    def __init__(
+        self,
+        output_dir: Path,
+        max_docs: int | None = None,
+        max_chars: int | None = None,
+        shard_size: int = HFSyntheticSource.DEFAULT_SHARD_SIZE,
+        seed: int = 42,
+        family_quotas: dict[str, int] | None = None,
+    ):
+        super().__init__(
+            output_dir=output_dir,
+            max_docs=max_docs,
+            max_chars=max_chars,
+            shard_size=shard_size,
+            seed=seed,
+        )
+        self.family_quotas = dict(family_quotas) if family_quotas else None
+        if self.family_quotas is not None:
+            unknown = set(self.family_quotas) - self.ALLOWED_SIGNALS
+            if unknown:
+                raise ValueError(f"Unknown synthetic pretrain signals: {sorted(unknown)}")
+            if any(quota <= 0 for quota in self.family_quotas.values()):
+                raise ValueError("Synthetic pretrain family quotas must all be > 0")
+            if max_docs is not None and sum(self.family_quotas.values()) != max_docs:
+                raise ValueError(
+                    "Synthetic pretrain family quotas must sum to max_docs: "
+                    f"quotas={sum(self.family_quotas.values())}, max_docs={max_docs}"
+                )
+
+    def download(self) -> list[Path]:
+        if self.family_quotas is None:
+            return super().download()
+
+        existing = sorted(self.output_dir.glob(f"{self.SHARD_PREFIX}_*.jsonl"))
+        if existing:
+            raise RuntimeError(
+                f"{self.SOURCE_TAG} output directory is not empty. Use the "
+                "canonical curator's manifest-aware restart/replacement flow."
+            )
+
+        log.info(
+            "%s: stratified streaming %s split=train quotas=%s output=%s",
+            self.SOURCE_TAG,
+            self.HF_REPO,
+            self.family_quotas,
+            self.output_dir,
+        )
+        dataset = load_dataset(self.HF_REPO, split="train", streaming=True)
+
+        reservoirs: dict[str, list[dict[str, Any]]] = {
+            signal: [] for signal in self.family_quotas
+        }
+        seen: dict[str, int] = {signal: 0 for signal in self.family_quotas}
+        rngs = {
+            signal: random.Random(f"{self.seed}:{signal}")
+            for signal in self.family_quotas
+        }
+
+        for idx, row in enumerate(dataset):
+            record = self._normalise_record(row=row, idx=idx)
+            if record is None:
+                continue
+            signal = record["metadata"]["signal"]
+            if signal not in self.family_quotas:
+                continue
+
+            seen[signal] += 1
+            quota = self.family_quotas[signal]
+            reservoir = reservoirs[signal]
+            if len(reservoir) < quota:
+                reservoir.append(record)
+                continue
+
+            replacement = rngs[signal].randrange(seen[signal])
+            if replacement < quota:
+                reservoir[replacement] = record
+
+        underfilled = {
+            signal: {"required": self.family_quotas[signal], "available": seen[signal]}
+            for signal in self.family_quotas
+            if seen[signal] < self.family_quotas[signal]
+        }
+        if underfilled:
+            raise RuntimeError(
+                "Synthetic pretrain dataset cannot satisfy the configured "
+                f"family quotas: {underfilled}"
+            )
+
+        selected = [
+            record
+            for signal in self.family_quotas
+            for record in reservoirs[signal]
+        ]
+        random.Random(self.seed).shuffle(selected)
+
+        output_files: list[Path] = []
+        for start in range(0, len(selected), self.shard_size):
+            output_files.append(
+                self._write_shard(
+                    selected[start : start + self.shard_size],
+                    len(output_files),
+                )
+            )
+
+        log.info(
+            "%s complete — docs=%s families=%s shards=%s repo=%s",
+            self.SOURCE_TAG,
+            f"{len(selected):,}",
+            {signal: len(records) for signal, records in reservoirs.items()},
+            len(output_files),
+            self.HF_REPO,
+        )
+        return output_files
+
+    def stats(self, output_files: list[Path] | None = None) -> dict[str, Any]:
+        stats = super().stats(output_files)
+        if output_files is None:
+            output_files = sorted(self.output_dir.glob(f"{self.SHARD_PREFIX}_*.jsonl"))
+        families = {signal: {"docs": 0, "chars": 0} for signal in self.ALLOWED_SIGNALS}
+        for path in output_files:
+            with path.open("rb") as f:
+                for line in f:
+                    try:
+                        row = orjson.loads(line)
+                    except Exception:
+                        continue
+                    metadata = row.get("metadata")
+                    signal = metadata.get("signal") if isinstance(metadata, dict) else None
+                    if signal in families:
+                        families[signal]["docs"] += 1
+                        families[signal]["chars"] += len(row.get("text", ""))
+        stats["families"] = families
+        return stats
+
+    def _normalise_record(self, row: dict[str, Any], idx: int) -> dict[str, Any] | None:
+        record = super()._normalise_record(row=row, idx=idx)
+        if record is None:
+            return None
+        upstream_id = row.get("id")
+        if isinstance(upstream_id, str) and upstream_id.strip():
+            record["id"] = upstream_id.strip()
+        return record
 
     def _format_text(self, row: dict[str, Any]) -> str:
-        question = self._clean_single_line(row.get("question"))
-        answer = self._clean_single_line(row.get("answer"))
-        steps = row.get("steps") if isinstance(row.get("steps"), list) else []
-
-        if not question or not answer:
-            return ""
-
-        parts = [f"Question: {question}"]
-        if steps:
-            parts.append("Steps:")
-            for step in steps:
-                step_text = self._clean_single_line(step)
-                if step_text:
-                    parts.append(f"- {step_text}")
-        parts.append(f"Answer: {answer}")
-        return "\n".join(parts)
-
-
-class SyntheticTaskCodeSource(HFSyntheticSource):
-    SOURCE_TAG = "synthetic_task_code"
-    SHARD_PREFIX = "synthetic_task_code"
-    HF_REPO = "tohio/slm-synthetic-task-code"
-
-    def _format_text(self, row: dict[str, Any]) -> str:
-        task = self._clean_single_line(row.get("task"))
-        plan = row.get("plan") if isinstance(row.get("plan"), list) else []
-        code = self._clean_multiline(row.get("code"))
-
-        if not task or not code:
-            return ""
-
-        parts = [f"Task: {task}"]
-        if plan:
-            parts.append("Plan:")
-            for step in plan:
-                step_text = self._clean_single_line(step)
-                if step_text:
-                    parts.append(f"- {step_text}")
-        parts.extend(["Solution:", code])
-        return "\n".join(parts)
+        return self._clean_multiline(row.get("text"))
 
     def _metadata(self, row: dict[str, Any], idx: int) -> dict[str, Any]:
         metadata = super()._metadata(row=row, idx=idx)
-        metadata.setdefault("language", "python")
+        signal = metadata.get("signal")
+        if signal not in self.ALLOWED_SIGNALS:
+            raise ValueError(
+                "Synthetic pretrain row has missing or unknown metadata.signal: "
+                f"{signal!r}; expected one of {sorted(self.ALLOWED_SIGNALS)}"
+            )
         return metadata
-
-
-class _EducationalQAMCQSource(HFSyntheticSource):
-    """Shared formatter for externally curated multiple-choice sources."""
-
-    INCLUDE_EVIDENCE = False
-
-    def _format_text(self, row: dict[str, Any]) -> str:
-        evidence = self._clean_multiline(row.get("evidence"))
-        question = self._clean_single_line(row.get("question"))
-        choices = row.get("choices") if isinstance(row.get("choices"), list) else []
-        explanation = self._clean_single_line(row.get("explanation"))
-
-        try:
-            correct_index = int(row.get("correct_index"))
-        except Exception:
-            return ""
-
-        if self.INCLUDE_EVIDENCE and not evidence:
-            return ""
-        if not question or len(choices) < 2 or not (0 <= correct_index < len(choices)):
-            return ""
-
-        choice_texts = [self._clean_single_line(choice) for choice in choices]
-        if not all(choice_texts):
-            return ""
-
-        answer = choice_texts[correct_index]
-        parts: list[str] = []
-        if self.INCLUDE_EVIDENCE:
-            parts.extend(["Evidence:", evidence])
-        parts.extend([f"Question: {question}", "Choices:"])
-        for i, choice_text in enumerate(choice_texts):
-            marker = chr(ord("A") + i)
-            parts.append(f"{marker}. {choice_text}")
-        parts.append(f"Answer: {answer}")
-        if explanation:
-            parts.append(f"Explanation: {explanation}")
-        return "\n".join(parts)
-
-
-class EducationalQAMCQMathSource(_EducationalQAMCQSource):
-    SOURCE_TAG = "educational_qa_mcq_math"
-    SHARD_PREFIX = "educational_qa_mcq_math"
-    HF_REPO = "tohio/slm-synthetic-educational-qa-mcq-math"
-
-
-class EducationalQAMCQGeneralSource(_EducationalQAMCQSource):
-    SOURCE_TAG = "educational_qa_mcq_general"
-    SHARD_PREFIX = "educational_qa_mcq_general"
-    HF_REPO = "tohio/slm-synthetic-educational-qa-mcq-general"
-    INCLUDE_EVIDENCE = True
-
-
-class FactualRestraintSource(HFSyntheticSource):
-    SOURCE_TAG = "factual_restraint"
-    SHARD_PREFIX = "factual_restraint"
-    HF_REPO = "tohio/slm-synthetic-factual-restraint"
-
-    def _format_text(self, row: dict[str, Any]) -> str:
-        question = self._clean_single_line(row.get("question"))
-        answer = self._clean_single_line(row.get("safe_answer") or row.get("answer"))
-        if not question or not answer:
-            return ""
-        return f"Question: {question}\nAnswer: {answer}"

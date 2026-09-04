@@ -16,7 +16,7 @@ def _write_records(path: Path) -> None:
     records = [
         {"source": "wikipedia", "text": "A conventional sentence."},
         {"source": "wikipedia", "text": "An unusual technical sentence."},
-        {"source": "synthetic_arithmetic", "text": "2 + 2 = 4"},
+        {"source": "synthetic_pretrain", "text": "2 + 2 = 4"},
     ]
     path.write_text(
         "".join(json.dumps(record) + "\n" for record in records),

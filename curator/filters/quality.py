@@ -266,11 +266,7 @@ class QualityConfig:
         default_factory=lambda: frozenset({
             "conala",
             "jupyter",
-            "synthetic_arithmetic",
-            "synthetic_task_code",
-            "educational_qa_mcq_math",
-            "educational_qa_mcq_general",
-            "factual_restraint",
+            "synthetic_pretrain",
         })
     )
     skip_max_length_sources: frozenset[str] = field(

@@ -178,7 +178,7 @@ def test_filter_rejects_record_source_mismatch():
 
     with pytest.raises(RuntimeError, match="does not match configured source"):
         quality.check(
-            {"text": "short", "source": "synthetic_arithmetic"},
+            {"text": "short", "source": "synthetic_pretrain"},
             expected_source="wikipedia",
         )
     assert quality.stats["total"] == 0

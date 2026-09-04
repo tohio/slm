@@ -70,6 +70,14 @@ StackExchange, curated synthetic signals, and a five-source code sub-mix.
 Exact dataset IDs and revisions belong in the configuration and source
 loaders, not a duplicated README table.
 
+Synthetic pretraining is one physical source, `tohio/slm-synthetic-pretrain`,
+with the signal family stored in each row's `metadata.signal`. The supported
+signals are `arithmetic`, `task_code`, `educational_qa_mcq_math`,
+`educational_qa_mcq_general`, and `factual_restraint`. The mini experiment
+selects exactly 2,000 rows with deterministic family-stratified sampling.
+Production synthetic row budgets remain intentionally unset until the mini
+ablation establishes how much signal is useful.
+
 ## Pipeline Stages
 
 ```text

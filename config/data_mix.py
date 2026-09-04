@@ -123,30 +123,10 @@ DATA_MIX: dict[str, dict] = {
         "display": "StackExchange",
         "hub":     "HuggingFaceH4/stack-exchange-preferences",
     },
-    "synthetic_arithmetic": {
-        "pct":     0.1475,
-        "display": "Synthetic arithmetic",
-        "hub":     "tohio/slm-synthetic-arithmetic",
-    },
-    "synthetic_task_code": {
-        "pct":     0.3934,
-        "display": "Synthetic task code",
-        "hub":     "tohio/slm-synthetic-task-code",
-    },
-    "educational_qa_mcq_math": {
-        "pct":     0.1475,
-        "display": "Educational QA/MCQ (math)",
-        "hub":     "tohio/slm-synthetic-educational-qa-mcq-math",
-    },
-    "educational_qa_mcq_general": {
-        "pct":     0.2459,
-        "display": "Educational QA/MCQ (general)",
-        "hub":     "tohio/slm-synthetic-educational-qa-mcq-general",
-    },
-    "factual_restraint": {
-        "pct":     0.0657,
-        "display": "Factual restraint",
-        "hub":     "tohio/slm-synthetic-factual-restraint",
+    "synthetic_pretrain": {
+        "pct":     1.0,
+        "display": "Synthetic pretraining signals",
+        "hub":     "tohio/slm-synthetic-pretrain",
     },
     "nemotron_specialized": {
         "pct":     12.0,
@@ -205,61 +185,30 @@ CODE_SUBMIX: dict[str, dict] = {
 # useful without silently forcing large overflow when supply or uniqueness runs
 # out. The curator applies min(percentage_target_chars, cap).
 
-SUPPLEMENTAL_CHAR_CAPS: dict[str, dict[str, int]] = {
-    # Caps are character budgets. At CHARS_PER_TOKEN=4.3, the combined
-    # synthetic caps are approximately:
-    #   125m: 100M tokens
-    #   350m: 200M tokens
-    #   1b:   300M tokens
-    # The split follows the validated 300M-token HF inventory profile.
-    "synthetic_task_code": {
-        "125m": 169_000_000,
-        "350m": 338_000_000,
-        "1b":   508_000_000,
-    },
-    "educational_qa_mcq_general": {
-        "125m": 106_000_000,
-        "350m": 211_000_000,
-        "1b":   317_000_000,
-    },
-    "synthetic_arithmetic": {
-        "125m":  63_000_000,
-        "350m": 127_000_000,
-        "1b":   190_000_000,
-    },
-    "educational_qa_mcq_math": {
-        "125m":  63_000_000,
-        "350m": 127_000_000,
-        "1b":   190_000_000,
-    },
-    "factual_restraint": {
-        "125m":  28_000_000,
-        "350m":  56_000_000,
-        "1b":    85_000_000,
-    },
+SUPPLEMENTAL_CHAR_CAPS: dict[str, dict[str, int]] = {}
+
+
+# The canonical synthetic pretraining dataset is one physical Hugging Face
+# dataset containing multiple signal families in metadata.signal. Mini is an
+# experiment: cap its synthetic contribution at 2,000 rows. Production model
+# sizes intentionally have no row budget yet; choose those only after the mini
+# signal ablation.
+SYNTHETIC_PRETRAIN_DOC_CAPS: dict[str, int] = {
+    "mini": 2_000,
+}
+
+# Preserve the family proportions previously represented by five independent
+# DATA_MIX entries. They now control deterministic stratified selection from
+# the single synthetic_pretrain dataset rather than top-level corpus shares.
+SYNTHETIC_PRETRAIN_FAMILY_WEIGHTS: dict[str, float] = {
+    "arithmetic": 0.1475,
+    "task_code": 0.3934,
+    "educational_qa_mcq_math": 0.1475,
+    "educational_qa_mcq_general": 0.2459,
+    "factual_restraint": 0.0657,
 }
 
 
-# Source-specific average record sizes for HF-backed synthetic datasets.
-#
-# Synthetic records are generated and validated in the separate
-# tohio/slm-synthetic-data repo, then consumed here from Hugging Face. These
-# estimates convert character budgets into max_docs caps for streaming reads.
-# max_chars remains the primary stop condition, so the values only need to be
-# conservative enough to avoid under-reading the published datasets.
-SYNTHETIC_AVG_CHARS_PER_DOC: dict[str, int] = {
-    "synthetic_arithmetic": 65,
-    "synthetic_task_code": 190,
-    "educational_qa_mcq_math": 215,
-    "educational_qa_mcq_general": 215,
-    "factual_restraint": 105,
-}
-
-
-# Extra document request headroom for source-level validation, quality
-# filtering, and exact dedup. max_chars remains the primary stop condition,
-# so this does not force extra retained data beyond the target.
-SYNTHETIC_DOC_INFLATION: float = 1.5
 
 
 # ── 4. Overflow sink ───────────────────────────────────────────────────────────
@@ -279,13 +228,7 @@ OVERFLOW_SINK: str = "fineweb"
 NON_CODE_SOURCES: list[str] = [name for name in DATA_MIX if name != "code"]
 CODE_SOURCES: list[str] = list(CODE_SUBMIX.keys())
 ALL_SOURCES: list[str] = NON_CODE_SOURCES + CODE_SOURCES
-SYNTHETIC_SOURCES: frozenset[str] = frozenset({
-    "synthetic_arithmetic",
-    "synthetic_task_code",
-    "educational_qa_mcq_math",
-    "educational_qa_mcq_general",
-    "factual_restraint",
-})
+SYNTHETIC_SOURCES: frozenset[str] = frozenset({"synthetic_pretrain"})
 
 # Exhaustive source-family contract for quality-filter routing. These families
 # describe corpus type; they do not make all families share web-data filters.
@@ -353,11 +296,7 @@ DEDUP_PRIORITY: list[str] = [
     "stack_smol",
     "jupyter",
     "conala",
-    "synthetic_arithmetic",
-    "synthetic_task_code",
-    "educational_qa_mcq_math",
-    "educational_qa_mcq_general",
-    "factual_restraint",
+    "synthetic_pretrain",
     "nemotron_cc_math",
     "nemotron_specialized",
     "stack_v1",
@@ -480,11 +419,7 @@ SMOKE_OVERRIDES: dict[str, int] = {
     "pes2o":         2_000,
     "nemotron_cc_math": 3_000,
     "stackexchange": 2_000,
-    "synthetic_arithmetic": 2_000,
-    "synthetic_task_code":   2_000,
-    "educational_qa_mcq_math":    2_000,
-    "educational_qa_mcq_general": 2_000,
-    "factual_restraint":     1_000,
+    "synthetic_pretrain": 100,
     "nemotron_specialized":  2_000,
     "stack_v1":      3_000,
     # Keep every code sub-source bounded in smoke validation runs. Without
@@ -587,16 +522,14 @@ def validate() -> None:
         f"OVERFLOW_SINK={OVERFLOW_SINK!r} not present in DATA_MIX"
     )
 
-    assert SYNTHETIC_DOC_INFLATION > 0, (
-        f"SYNTHETIC_DOC_INFLATION must be > 0, got {SYNTHETIC_DOC_INFLATION}"
+    family_weight_total = sum(SYNTHETIC_PRETRAIN_FAMILY_WEIGHTS.values())
+    assert abs(family_weight_total - 1.0) < 1e-9, (
+        "SYNTHETIC_PRETRAIN_FAMILY_WEIGHTS must sum to 1.0; "
+        f"got {family_weight_total}"
     )
-    for source_name, avg_chars in SYNTHETIC_AVG_CHARS_PER_DOC.items():
-        assert source_name in DATA_MIX, (
-            f"SYNTHETIC_AVG_CHARS_PER_DOC references unknown source: {source_name}"
-        )
-        assert avg_chars > 0, (
-            f"SYNTHETIC_AVG_CHARS_PER_DOC[{source_name!r}] must be > 0, got {avg_chars}"
-        )
+    assert all(weight > 0 for weight in SYNTHETIC_PRETRAIN_FAMILY_WEIGHTS.values())
+    assert set(SYNTHETIC_PRETRAIN_DOC_CAPS) <= set(TARGET_CONFIGS)
+    assert all(cap > 0 for cap in SYNTHETIC_PRETRAIN_DOC_CAPS.values())
 
     overlap = set(CODE_SUBMIX) & set(DATA_MIX)
     assert not overlap, (

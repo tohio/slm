@@ -86,7 +86,7 @@ def test_source_contract_segments_only_bounded_prose():
     } == set(LONG_DOCUMENT_SEGMENT_SOURCES)
     assert "pg19" not in LONG_DOCUMENT_SEGMENT_SOURCES
     assert "stack_v1" not in LONG_DOCUMENT_SEGMENT_SOURCES
-    assert "synthetic_task_code" not in LONG_DOCUMENT_SEGMENT_SOURCES
+    assert "synthetic_pretrain" not in LONG_DOCUMENT_SEGMENT_SOURCES
 
     record = {"source": "stack_v1", "text": _long_prose()}
     assert segment_long_document(

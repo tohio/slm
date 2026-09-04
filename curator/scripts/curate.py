@@ -97,13 +97,10 @@ from config import (
     PRETRAIN_VAL_FRACTION,
     SMOKE_OVERRIDES,
     SUPPLEMENTAL_CHAR_CAPS,
+    SYNTHETIC_PRETRAIN_DOC_CAPS,
+    SYNTHETIC_PRETRAIN_FAMILY_WEIGHTS,
     source_filter_family,
     benchmark_decontamination_contract,
-)
-
-from config.data_mix import (
-    SYNTHETIC_AVG_CHARS_PER_DOC,
-    SYNTHETIC_DOC_INFLATION,
 )
 
 from config.paths import (
@@ -152,13 +149,7 @@ from curator.sources.wikipedia import WikipediaSource
 from curator.sources.pg19 import PG19Source
 from curator.sources.pes2o import PeS2oSource
 from curator.sources.stackexchange import StackExchangeSource
-from curator.sources.hf_synthetic import (
-    SyntheticArithmeticSource,
-    SyntheticTaskCodeSource,
-    EducationalQAMCQMathSource,
-    EducationalQAMCQGeneralSource,
-    FactualRestraintSource,
-)
+from curator.sources.hf_synthetic import SyntheticPretrainSource
 from curator.sources.code_search_net import CodeSearchNetSource
 from curator.sources.stack_smol import StackSmolSource
 from curator.sources.stack_v1 import StackV1Source
@@ -416,10 +407,9 @@ def _derive_max_docs(name: str, target: str) -> int | None:
     Then in both cases:
         max_docs = (target_chars / avg_chars_per_doc) × inflation
     """
-    if name in SYNTHETIC_SOURCES:
-        avg_chars = SYNTHETIC_AVG_CHARS_PER_DOC[name]
-        inflation = SYNTHETIC_DOC_INFLATION
-    elif name in _AVG_CHARS_PER_DOC:
+    if name == "synthetic_pretrain":
+        return SYNTHETIC_PRETRAIN_DOC_CAPS.get(target)
+    if name in _AVG_CHARS_PER_DOC:
         avg_chars = _AVG_CHARS_PER_DOC[name]
         inflation = _DOWNLOAD_INFLATION[name]
     else:
@@ -448,9 +438,6 @@ def _derive_max_chars(name: str, target: str) -> int | None:
 
     if name == "pg19":
         return int(target_chars * 1.30)
-
-    if name in SYNTHETIC_SOURCES:
-        return int(target_chars * 2.00)
 
     return None
 
@@ -529,6 +516,29 @@ def flatten_datatrove_record(record: dict) -> dict:
 
 # ── Stage 1: Download ──────────────────────────────────────────────────────────
 
+def _synthetic_pretrain_family_quotas(total_docs: int) -> dict[str, int]:
+    """Allocate an exact row budget across synthetic pretrain families."""
+    raw = {
+        signal: total_docs * weight
+        for signal, weight in SYNTHETIC_PRETRAIN_FAMILY_WEIGHTS.items()
+    }
+    quotas = {signal: int(value) for signal, value in raw.items()}
+    remainder = total_docs - sum(quotas.values())
+    order = sorted(
+        raw,
+        key=lambda signal: (raw[signal] - quotas[signal], signal),
+        reverse=True,
+    )
+    for signal in order[:remainder]:
+        quotas[signal] += 1
+    if sum(quotas.values()) != total_docs:
+        raise RuntimeError(
+            "Synthetic pretrain family quota allocation did not preserve the "
+            f"requested total: total={total_docs}, quotas={quotas}"
+        )
+    return quotas
+
+
 def _build_source(
     name: str,
     smoke: bool,
@@ -550,17 +560,20 @@ def _build_source(
         cap = _derive_max_docs(name, target)
         if cap is not None:
             if name in SYNTHETIC_SOURCES:
-                avg_for_log = SYNTHETIC_AVG_CHARS_PER_DOC.get(name, 0)
-                inflation_for_log = SYNTHETIC_DOC_INFLATION
+                log.info(
+                    "%s cap configured for %s: %s docs",
+                    name,
+                    target,
+                    f"{cap:,}",
+                )
             else:
                 avg_for_log = _AVG_CHARS_PER_DOC.get(name, 0)
                 inflation_for_log = _DOWNLOAD_INFLATION.get(name, 0)
-
-            log.info(
-                f"{name} cap derived from {target}: {cap:,} docs "
-                f"(avg {avg_for_log:,} chars/doc, "
-                f"{inflation_for_log}× inflation)"
-            )
+                log.info(
+                    f"{name} cap derived from {target}: {cap:,} docs "
+                    f"(avg {avg_for_log:,} chars/doc, "
+                    f"{inflation_for_log}× inflation)"
+                )
 
     # CC has different 'cap' semantics: max_segments, and needs crawls + workers.
     if name == "common_crawl":
@@ -650,16 +663,25 @@ def _build_source(
 
     if name == "stackexchange":
         return StackExchangeSource(output_dir=raw_dir, max_docs=cap)
-    if name == "synthetic_arithmetic":
-        return SyntheticArithmeticSource(output_dir=raw_dir, max_docs=cap, max_chars=_derive_max_chars(name, target))
-    if name == "synthetic_task_code":
-        return SyntheticTaskCodeSource(output_dir=raw_dir, max_docs=cap, max_chars=_derive_max_chars(name, target))
-    if name == "educational_qa_mcq_math":
-        return EducationalQAMCQMathSource(output_dir=raw_dir, max_docs=cap, max_chars=_derive_max_chars(name, target))
-    if name == "educational_qa_mcq_general":
-        return EducationalQAMCQGeneralSource(output_dir=raw_dir, max_docs=cap, max_chars=_derive_max_chars(name, target))
-    if name == "factual_restraint":
-        return FactualRestraintSource(output_dir=raw_dir, max_docs=cap, max_chars=_derive_max_chars(name, target))
+    if name == "synthetic_pretrain":
+        if smoke:
+            return SyntheticPretrainSource(output_dir=raw_dir, max_docs=cap)
+        configured_cap = SYNTHETIC_PRETRAIN_DOC_CAPS.get(target)
+        if configured_cap is None:
+            raise RuntimeError(
+                "Synthetic pretrain row budget is intentionally unset for "
+                f"target={target!r}. Validate the mini experiment first, then "
+                "set SYNTHETIC_PRETRAIN_DOC_CAPS for this production size."
+            )
+        quotas = _synthetic_pretrain_family_quotas(configured_cap)
+        log.info(
+            "synthetic_pretrain family quotas for %s: %s", target, quotas
+        )
+        return SyntheticPretrainSource(
+            output_dir=raw_dir,
+            max_docs=configured_cap,
+            family_quotas=quotas,
+        )
     if name == "codesearchnet":
         return CodeSearchNetSource(output_dir=raw_dir, max_docs=cap)
     if name == "stack_smol":
@@ -792,6 +814,11 @@ def stage_download(
             stage="download",
             contract=contract,
             input_signature=None,
+            metadata=(
+                source.stats(output_files)
+                if name == "synthetic_pretrain"
+                else None
+            ),
         )
 
         backup_dir = RAW_DIR / f".{name}.previous"
