@@ -39,7 +39,10 @@ def pretrain_artifact(
 
     from model.model import SLMForCausalLM
 
-    model = SLMForCausalLM.from_pretrained(str(pretrain_model_dir)).eval()
+    model = SLMForCausalLM.from_pretrained(
+        str(pretrain_model_dir),
+        weights_only=True,
+    ).eval()
     yield model
     del model
 

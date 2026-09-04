@@ -62,10 +62,17 @@ contracts and stage-by-stage commands.
 make setup
 make setup-data-dir DATA_DIR=/data/slm/data
 make install
+make install-training
 make install-gpu
 make install-uv
 make install-conda
 ```
+
+`make install` selects the pinned curation/tokenizer stack.
+`make install-training` selects the CPU build of the pinned training stack for
+model/export/unit tests. `make install-gpu` selects the CUDA build of that same
+training stack. These targets all manage `.venv`; choose the one for the current
+host role rather than layering incompatible Transformers versions together.
 
 Validation prerequisites:
 
@@ -415,7 +422,7 @@ make test-sft-chat
 make test-dpo
 ```
 
-Unit tests:
+Unit tests (run under `make install-training` or `make install-gpu`):
 
 ```bash
 make test-model

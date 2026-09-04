@@ -51,13 +51,13 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(hidden_size))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Compute RMS in float32 for numerical stability,
-        # then cast back to the input dtype
+        # Match native LlamaRMSNorm exactly: normalize in float32, cast the
+        # normalized activation back, then apply the learned scale.
         input_dtype = x.dtype
-        x = x.to(torch.float32)
-        variance = x.pow(2).mean(dim=-1, keepdim=True)
-        x = x * torch.rsqrt(variance + self.eps)
-        return (self.weight * x).to(input_dtype)
+        hidden_states = x.to(torch.float32)
+        variance = hidden_states.pow(2).mean(dim=-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.eps)
+        return self.weight * hidden_states.to(input_dtype)
 
     def extra_repr(self) -> str:
         return f"hidden_size={self.weight.shape[0]}, eps={self.eps}"

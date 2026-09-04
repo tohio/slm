@@ -35,3 +35,6 @@ Pytest options defined in `conftest.py`:
 
 Use the Make targets documented in [`docs/TESTING.md`](../docs/TESTING.md) for
 normal execution so the correct options and environment variables are applied.
+Model, export, TRL, and training-argument tests require the pinned training
+stack (`make install-training` on CPU or `make install-gpu` on a GPU host), not
+the separate Transformers 4.57.6 curation environment.

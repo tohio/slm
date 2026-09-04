@@ -17,6 +17,10 @@ Format:
     [BOS, doc1_tok1, doc1_tok2, ..., doc1_tokN, EOS,
      BOS, doc2_tok1, doc2_tok2, ..., doc2_tokM, EOS, ...]
 
+    Training slices fixed windows from this continuous stream. It does not
+    reset position IDs or construct a block-diagonal mask at EOS, so a later
+    document may attend to earlier documents that share its training window.
+
     uint16 supports vocab sizes up to 65,535 — sufficient for 32k vocab.
 
 Output:

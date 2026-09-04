@@ -135,6 +135,7 @@ def load_model_and_tokenizer(
         model_path,
         dtype=torch_dtype,
         device_map="auto",
+        weights_only=True,
     )
     model.eval()
 

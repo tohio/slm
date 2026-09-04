@@ -1,9 +1,0 @@
-# Internal TODO
-
-## peS2o replacement
-
-- Select a supported replacement for `allenai/peS2o`.
-- Recalculate the pretraining mix and overflow behavior.
-- Update curation configuration and public data documentation together.
-- Regenerate affected pretraining data; do not silently substitute a source
-  into an existing RUN_ID.

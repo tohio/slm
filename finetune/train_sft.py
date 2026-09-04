@@ -460,7 +460,10 @@ def main():
     AutoConfig.register("slm", SLMConfig)
 
     log.info(f"Loading base model from {base_model_path}...")
-    model    = SLMForCausalLM.from_pretrained(str(base_model_path))
+    model = SLMForCausalLM.from_pretrained(
+        str(base_model_path),
+        weights_only=True,
+    )
     n_params = sum(p.numel() for p in model.parameters())
     log.info(f"Parameters: {n_params:,} ({n_params / 1e6:.1f}M)")
 

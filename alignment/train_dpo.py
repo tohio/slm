@@ -509,7 +509,10 @@ def main():
     from model import SLMConfig, SLMForCausalLM
 
     AutoConfig.register("slm", SLMConfig)
-    model = SLMForCausalLM.from_pretrained(str(base_model_path))
+    model = SLMForCausalLM.from_pretrained(
+        str(base_model_path),
+        weights_only=True,
+    )
     log.info(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     # ── Tokenizer ─────────────────────────────────────────────────────────────
@@ -621,7 +624,10 @@ def main():
 
     ref_model = None
     if not dpo_args.precompute_ref_log_probs:
-        ref_model = SLMForCausalLM.from_pretrained(str(base_model_path))
+        ref_model = SLMForCausalLM.from_pretrained(
+            str(base_model_path),
+            weights_only=True,
+        )
         for parameter in ref_model.parameters():
             parameter.requires_grad = False
 

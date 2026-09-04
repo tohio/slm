@@ -37,6 +37,16 @@ Sequence packing:
 
     Default: stride = seq_len (no overlap, maximum efficiency).
 
+Document-boundary attention:
+    Packing intentionally uses a continuous causal token stream. The dataset
+    emits no block-diagonal attention mask and does not reset position IDs at
+    EOS. When a fixed-length window contains more than one document, tokens in
+    a later document may therefore attend to tokens from earlier documents in
+    that same window. BOS/EOS tokens are the only document-boundary signal.
+
+    This is distinct from SFT example packing, where cross-example attention
+    would leak one independent instruction into another and is disabled.
+
 Labels:
     Labels equal input_ids. The model's forward() performs the next-token
     shift internally — logits[..., :-1, :] predicts labels[..., 1:] — so

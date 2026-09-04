@@ -119,7 +119,7 @@ endif
         prepare-dpo dpo-chat dpo-chat-resume dpo-chat-mini dpo dpo-mini dpo-resume eval eval-base eval-instruct eval-chat eval-code eval-sanity eval-sanity-base eval-sanity-instruct eval-sanity-chat eval-sanity-code eval-mini serve serve-local \
         export export-base export-instruct export-chat export-code \
         export-local export-base-local export-instruct-local export-chat-local export-code-local \
-        setup setup-data-dir setup-gpu install install-gpu test-upgrade-gpu install-uv install-conda install-kenlm install-orjson \
+        setup setup-data-dir setup-gpu install install-training install-gpu check-training-env test-upgrade-gpu install-uv install-conda install-kenlm install-orjson \
         download-kenlm-model download-fasttext-model accelerate-config accelerate-config-single accelerate-config-multi \
         test-curator test-validate test-tokenizer test-data-pipeline \
         test-training test-sft-instruct test-sft-chat test-sft-code test-dpo-chat test-dpo test-gpu-pipeline test-model test-export test-export-acceptance test-vllm-export test-data-unit test-training-args test-config-gen test-accel-gen test-comparison test-misc test-unit test-gpu-gate test-pretrain-ready test-pretrain-resume-ready test-artifacts \
@@ -617,6 +617,13 @@ install:
 	.venv/bin/pip install --upgrade pip
 	.venv/bin/pip install -r requirements.txt
 
+install-training:
+	@echo "==> Installing the pinned CPU training/model-test stack..."
+	python3 -m venv --clear .venv
+	.venv/bin/pip install --upgrade pip
+	.venv/bin/pip install -r requirements-training.txt
+	.venv/bin/python infra/verify_environment.py --profile training
+
 install-uv:
 	@if ! command -v uv >/dev/null 2>&1; then \
 		echo "uv is not installed. Install uv first: https://docs.astral.sh/uv/"; \
@@ -706,6 +713,18 @@ accelerate-config-multi:
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
+check-training-env:
+	@test -x .venv/bin/python || { \
+		echo "Training environment not found at .venv."; \
+		echo "Run 'make install-training' for CPU model tests or 'make install-gpu' on a GPU host."; \
+		exit 1; \
+	}
+	@.venv/bin/python infra/verify_environment.py --profile training || { \
+		echo "Model, export, and training tests require the pinned training stack."; \
+		echo "Run 'make install-training' for CPU tests or 'make install-gpu' on a GPU host."; \
+		exit 1; \
+	}
+
 test-curator:
 	@echo "==> Validating curated outputs for SIZE=$(TEST_SIZE)..."
 	PIPELINE_TEST_SIZE=$(TEST_SIZE) .venv/bin/pytest tests/data_pipeline/test_pipeline_curator.py --size=$(TEST_SIZE) -v --tb=short
@@ -724,22 +743,22 @@ test-data-pipeline: test-curator test-validate test-tokenizer
 # GPU pipeline tests respect TEST_SIZE. By default TEST_SIZE=mini so normal
 # development stays mini-focused. Passing SIZE=125m / 350m / 1b on the make
 # command line also sets TEST_SIZE to that size for full-artifact checks.
-test-training:
+test-training: check-training-env
 	@echo "==> Validating pretrain outputs (TEST_SIZE=$(TEST_SIZE))..."
 	PIPELINE_TEST_SIZE=$(TEST_SIZE) .venv/bin/pytest tests/gpu_pipeline/test_pipeline_training.py --size=$(TEST_SIZE) --require-artifacts -v --tb=short
 
-test-sft-instruct:
+test-sft-instruct: check-training-env
 	@echo "==> Validating instruct SFT outputs (TEST_SIZE=$(TEST_SIZE))..."
 	PIPELINE_TEST_SIZE=$(TEST_SIZE) .venv/bin/pytest tests/gpu_pipeline/test_pipeline_sft.py::TestChatSFTModel tests/gpu_pipeline/test_pipeline_sft.py::TestSFTData --size=$(TEST_SIZE) --require-artifacts -v --tb=short
 
 test-sft-chat: test-sft-instruct
 
 
-test-sft-code:
+test-sft-code: check-training-env
 	@echo "==> Validating code SFT outputs (TEST_SIZE=$(TEST_SIZE))..."
 	PIPELINE_TEST_SIZE=$(TEST_SIZE) .venv/bin/pytest tests/gpu_pipeline/test_pipeline_sft.py::TestCodeSFTModel --size=$(TEST_SIZE) --require-artifacts -v --tb=short
 
-test-dpo-chat:
+test-dpo-chat: check-training-env
 	@echo "==> Validating chat DPO outputs (TEST_SIZE=$(TEST_SIZE))..."
 	PIPELINE_TEST_SIZE=$(TEST_SIZE) .venv/bin/pytest tests/gpu_pipeline/test_pipeline_dpo.py --size=$(TEST_SIZE) --require-artifacts -v --tb=short
 
@@ -749,15 +768,15 @@ test-dpo: test-dpo-chat
 test-gpu-pipeline: test-training test-sft-instruct test-sft-code test-dpo-chat
 	@echo "==> GPU pipeline tests complete"
 
-test-model:
+test-model: check-training-env
 	@echo "==> Running model unit tests..."
 	.venv/bin/pytest tests/model/ -v --tb=short
 
-test-export:
+test-export: check-training-env
 	@echo "==> Running native export unit tests..."
 	.venv/bin/pytest tests/test_export.py -v --tb=short
 
-test-export-acceptance:
+test-export-acceptance: check-training-env
 	@case "$(EXPORT_VARIANT)" in base|instruct|chat|code) ;; \
 		*) echo "EXPORT_VARIANT must be base, instruct, chat, or code"; exit 1;; esac
 	@echo "==> Native export/load acceptance ($(SIZE), $(EXPORT_VARIANT))..."
@@ -775,9 +794,8 @@ test-data-unit:
 	@echo "==> Running data contract/state unit tests..."
 	.venv/bin/pytest tests/test_data_config.py tests/test_curator_state.py -v --tb=short
 
-test-training-args:
+test-training-args: check-training-env
 	@echo "==> Running Transformers/TRL compatibility tests..."
-	.venv/bin/python infra/verify_environment.py
 	.venv/bin/pytest tests/test_environment_contract.py tests/test_training_args.py tests/test_trl_smoke.py -v --tb=short
 
 test-config-gen:
@@ -788,18 +806,18 @@ test-accel-gen:
 	@echo "==> Running accel_gen unit tests..."
 	.venv/bin/pytest tests/test_accel_gen.py -v --tb=short
 
-test-comparison:
+test-comparison: check-training-env
 	@echo "==> Running controlled-comparison harness unit tests..."
 	.venv/bin/pytest tests/test_sft_comparison.py -v --tb=short
 
-test-misc:
+test-misc: check-training-env
 	@echo "==> Running cross-cutting contract tests..."
 	.venv/bin/pytest tests/test_misc_contract.py -v --tb=short
 
 test-unit: test-model test-export test-data-unit test-training-args test-config-gen test-accel-gen test-comparison test-misc
 	@echo "==> Unit tests complete"
 
-test-gpu-gate:
+test-gpu-gate: check-training-env
 	@echo "==> Validating the installed GPU stack without datasets or checkpoints..."
 	.venv/bin/python infra/verify_environment.py --require-cuda
 	.venv/bin/python infra/gpu_smoke.py
@@ -920,7 +938,8 @@ help:
 	@echo "  download-fasttext-model  Download fasttext language ID model (~1MB)"
 	@echo "  download-kenlm-model     Download CCNet English model pair (~4GB)"
 	@echo "  accelerate-config        Configure accelerate interactively"
-	@echo "  install                  Install dependencies (pip)"
+	@echo "  install                  Install pinned CPU curation/tokenizer dependencies"
+	@echo "  install-training         Install pinned CPU training/model-test dependencies"
 	@echo "  install-gpu              Install pinned CUDA 13 training dependencies"
 	@echo "  test-upgrade-gpu         One-shot CUDA/compile/cache acceptance test"
 	@echo "  install-uv               Install dependencies (uv)"
@@ -941,7 +960,7 @@ help:
 	@echo "  test-dpo-chat            Validate chat DPO outputs"
 	@echo "  test-gpu-pipeline        Run all GPU pipeline tests"
 	@echo ""
-	@echo "Tests (unit — no pipeline outputs needed):"
+	@echo "Tests (unit — pinned training stack; no pipeline outputs needed):"
 	@echo "  test-model               Model architecture unit tests"
 	@echo "  test-export              Native Transformers export contract tests"
 	@echo "  test-export-acceptance   Build and clean-load one real native export"

@@ -614,6 +614,7 @@ def load_model(
         trust_remote_code=False,
         dtype=dtype,
         device_map=None,
+        weights_only=True,
     ).to(device)
     return model
 

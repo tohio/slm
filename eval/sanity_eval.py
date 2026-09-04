@@ -117,6 +117,7 @@ def load_model_and_tokenizer(model_id: str, device: str):
         model_id,
         trust_remote_code=False,
         dtype=dtype,
+        weights_only=True,
     )
 
     model = model.to(device)

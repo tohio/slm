@@ -135,6 +135,11 @@ $RESULTS_DIR/runs/<size>/pretrain/final/
 tokenizer fingerprint, tokenized-data identity, process count, and distributed
 strategy. Resume requires an exact match and never falls back to a new run.
 
+Pretraining windows are cut from one continuous BOS/document/EOS token stream.
+Attention and position IDs do not reset at EOS: when a window spans documents,
+a later document can attend to earlier documents in that window. This is the
+intentional base-pretraining objective, not independent-example SFT packing.
+
 The promoted `pretrain/final` checkpoint is consumed directly by post-training;
 no embedding rows are reinitialized between pretraining and SFT.
 

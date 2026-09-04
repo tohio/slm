@@ -15,7 +15,8 @@ Register with HuggingFace AutoModel so the model can be loaded with:
     AutoModelForCausalLM.register(SLMConfig, SLMForCausalLM)
 
     model = AutoModelForCausalLM.from_pretrained(
-        "results/runs/125m/pretrain/final"
+        "results/runs/125m/pretrain/final",
+        weights_only=True,
     )
 
 Published Hub checkpoints use the native LlamaForCausalLM export contract and

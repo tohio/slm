@@ -30,7 +30,10 @@ def load_model_and_tokenizer(model_dir: Path):
     from model.config import SLMConfig
     from model.model import SLMForCausalLM
     AutoConfig.register("slm", SLMConfig)
-    model = SLMForCausalLM.from_pretrained(str(model_dir))
+    model = SLMForCausalLM.from_pretrained(
+        str(model_dir),
+        weights_only=True,
+    )
     tokenizer = PreTrainedTokenizerFast.from_pretrained(str(model_dir / "tokenizer"))
     return model, tokenizer
 

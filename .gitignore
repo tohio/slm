@@ -75,7 +75,7 @@ htmlcov/
 # Temporary files
 *.tmp
 *.bak
-*~.todo
+*~
 #docs/screenshots/*.png
 
 # Local-only legacy DPO source helpers

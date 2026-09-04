@@ -107,7 +107,10 @@ model = AutoModelForCausalLM.from_pretrained(
 
 ## Tests
 
+Model tests require the pinned Transformers 5.14.1 training contract:
+
 ```bash
+make install-training  # omit on a GPU host already prepared with install-gpu
 make test-model
 ```
 

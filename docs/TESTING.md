@@ -18,7 +18,7 @@ data or training stages.
 
 | Gate | Command | Required input |
 |---|---|---|
-| CPU contracts | `make test-unit` | Installed CPU environment |
+| CPU model/training contracts | `make test-unit` | Pinned training stack (`make install-training`) |
 | GPU acceptance | `make test-gpu-gate` | Supported NVIDIA environment |
 | New pretraining readiness | `make test-pretrain-ready SIZE=<size> GPUS=<n>` | GPU environment and restored tokenized artifacts |
 | Resume readiness | `make test-pretrain-resume-ready SIZE=<size> GPUS=<n>` | Compatible pretraining audit and checkpoint |
@@ -34,15 +34,27 @@ data or training stages.
 | Native export acceptance | `make test-export-acceptance SIZE=<size> EXPORT_VARIANT=<variant>` | Completed source checkpoint |
 | vLLM export smoke | `make test-vllm-export SIZE=<size> EXPORT_VARIANT=<variant>` | Native export, CUDA, and vLLM environment |
 
-## CPU contracts
+## CPU model and training contracts
+
+Install the CPU build of the same dependency contract used by training, then
+run the aggregate gate:
 
 ```bash
+make install-training
 make test-unit
 ```
 
-This gate covers architecture, configuration, data contracts, export,
-training arguments, generated configurations, one-step synthetic SFT/DPO, and
-repository consistency. Focused targets are listed in
+`make install-training` installs `requirements-training.txt`, including
+`transformers==5.14.1`, into `.venv` without requiring CUDA. `make install`
+installs the separate curation/tokenizer environment and is not valid for model,
+export, TRL, or training-argument tests. On a GPU host, `make install-gpu`
+already provides the required model/test stack.
+
+The gate covers architecture, native checkpoint loading, configuration, data
+contracts, export, training arguments, generated configurations, one-step
+synthetic SFT/DPO, and repository consistency. Each model-facing Make target
+runs `check-training-env` first and fails before pytest if the pinned training
+versions are not installed. Focused targets are listed in
 [`COMMANDS.md`](COMMANDS.md).
 
 ## GPU acceptance

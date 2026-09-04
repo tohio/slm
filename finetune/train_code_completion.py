@@ -328,6 +328,7 @@ def main() -> None:
     model = SLMForCausalLM.from_pretrained(
         str(resume_dir or base_model),
         dtype=dtype,
+        weights_only=True,
     ).to(device)
     validate_model_tokenizer(model, tokenizer, max_length)
 

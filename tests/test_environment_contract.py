@@ -60,3 +60,37 @@ def test_gpu_requirements_select_the_matching_cuda_build():
     gpu = _exact_pins(ROOT / "requirements-gpu.txt")
 
     assert gpu["torch"] == f"{training['torch']}+cu130"
+
+
+def test_model_facing_make_targets_require_training_environment():
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+
+    for target in (
+        "test-model",
+        "test-export",
+        "test-export-acceptance",
+        "test-training-args",
+        "test-training",
+        "test-sft-instruct",
+        "test-sft-code",
+        "test-dpo-chat",
+        "test-comparison",
+        "test-misc",
+        "test-gpu-gate",
+    ):
+        pattern = rf"(?m)^{re.escape(target)}:[^\n]*\bcheck-training-env\b"
+        assert re.search(pattern, makefile), (
+            f"{target} must fail closed unless the pinned training stack is active"
+        )
+
+
+def test_cpu_training_install_uses_training_requirements():
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    match = re.search(
+        r"(?ms)^install-training:\n(?P<body>(?:\t.*\n|\n)+?)(?=^[A-Za-z0-9_.-]+:)",
+        makefile,
+    )
+    assert match is not None
+    body = match.group("body")
+    assert "requirements-training.txt" in body
+    assert "verify_environment.py --profile training" in body

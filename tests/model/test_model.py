@@ -29,6 +29,65 @@ def _make_tiny_config():
     )
 
 
+def _fill_parameters_with_sentinels(model) -> None:
+    """Make checkpoint tensors unmistakably different from random init."""
+    with torch.no_grad():
+        for index, parameter in enumerate(model.parameters(), start=1):
+            parameter.fill_(index / 100.0)
+
+
+def _assert_state_dicts_equal(expected, actual) -> None:
+    assert list(expected) == list(actual)
+    for name, expected_tensor in expected.items():
+        assert torch.equal(expected_tensor, actual[name]), (
+            f"Checkpoint tensor changed during native loading: {name}"
+        )
+
+
+def _save_pytorch_checkpoint(model, output_dir, *, sharded: bool) -> str:
+    """Write a real legacy PyTorch checkpoint for native-loader coverage."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    model.config.save_pretrained(output_dir)
+    state_dict = {
+        name: tensor.detach().cpu().clone()
+        for name, tensor in model.state_dict().items()
+    }
+
+    if not sharded:
+        artifact = "pytorch_model.bin"
+        torch.save(state_dict, output_dir / artifact)
+        return artifact
+
+    keys = list(state_dict)
+    midpoint = max(1, len(keys) // 2)
+    shard_keys = (keys[:midpoint], keys[midpoint:])
+    shard_names = (
+        "pytorch_model-00001-of-00002.bin",
+        "pytorch_model-00002-of-00002.bin",
+    )
+    weight_map = {}
+    for names, shard_name in zip(shard_keys, shard_names, strict=True):
+        shard = {name: state_dict[name] for name in names}
+        torch.save(shard, output_dir / shard_name)
+        weight_map.update({name: shard_name for name in names})
+
+    index = {
+        "metadata": {
+            "total_size": sum(
+                tensor.numel() * tensor.element_size()
+                for tensor in state_dict.values()
+            )
+        },
+        "weight_map": weight_map,
+    }
+    artifact = "pytorch_model.bin.index.json"
+    (output_dir / artifact).write_text(
+        json.dumps(index, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return artifact
+
+
 # ── RMSNorm ────────────────────────────────────────────────────────────────────
 
 class TestRMSNorm:
@@ -60,6 +119,32 @@ class TestRMSNorm:
         from model.norm import RMSNorm
         norm = RMSNorm(384)
         assert not hasattr(norm, "bias") or norm.bias is None
+
+    def test_matches_native_llama_bfloat16_order(self):
+        from transformers.models.llama.modeling_llama import LlamaRMSNorm
+
+        from model.norm import RMSNorm
+
+        hidden_size = 64
+        eps = 1e-5
+        slm_norm = RMSNorm(hidden_size, eps=eps).to(dtype=torch.bfloat16)
+        llama_norm = LlamaRMSNorm(hidden_size, eps=eps).to(dtype=torch.bfloat16)
+
+        with torch.no_grad():
+            weight = torch.linspace(0.5, 1.5, hidden_size, dtype=torch.bfloat16)
+            slm_norm.weight.copy_(weight)
+            llama_norm.weight.copy_(weight)
+
+        generator = torch.Generator().manual_seed(17)
+        hidden_states = torch.randn(
+            2,
+            7,
+            hidden_size,
+            generator=generator,
+            dtype=torch.float32,
+        ).to(torch.bfloat16)
+
+        assert torch.equal(slm_norm(hidden_states), llama_norm(hidden_states))
 
 
 # ── SwiGLU MLP ─────────────────────────────────────────────────────────────────
@@ -410,32 +495,100 @@ class TestSLMForCausalLM:
         ]
         assert len(bias_params) == 0, f"Found bias parameters: {bias_params}"
 
-    def test_save_and_load(self, tmp_path):
+    @pytest.mark.parametrize(
+        ("checkpoint_format", "sharded"),
+        [
+            ("safetensors", False),
+            ("safetensors", True),
+            ("pytorch", False),
+            ("pytorch", True),
+        ],
+    )
+    def test_native_from_pretrained_preserves_checkpoint_tensors(
+        self,
+        tmp_path,
+        checkpoint_format,
+        sharded,
+    ):
+        """Regression for Transformers 5 reinitializing loaded custom weights."""
+        from transformers import PreTrainedModel
+
         from model.model import SLMForCausalLM
-        config = make_mini_config()
-        model = SLMForCausalLM(config)
-        model.eval()
 
-        input_ids = torch.randint(0, config.vocab_size, (1, 8))
+        assert "from_pretrained" not in SLMForCausalLM.__dict__, (
+            "SLM must use the native PreTrainedModel.from_pretrained implementation"
+        )
+        assert "tie_weights" not in SLMForCausalLM.__dict__, (
+            "SLM must use the native tied-weight mapping during checkpoint loading"
+        )
+
+        config = _make_tiny_config()
+        model = SLMForCausalLM(config).eval()
+        _fill_parameters_with_sentinels(model)
+        expected_state = {
+            name: tensor.detach().cpu().clone()
+            for name, tensor in model.state_dict().items()
+        }
+        input_ids = torch.arange(8, dtype=torch.long).unsqueeze(0)
         with torch.no_grad():
-            logits_before = model(input_ids).logits
+            expected_logits = model(input_ids).logits.detach().cpu()
 
-        model.save_pretrained(str(tmp_path))
+        if checkpoint_format == "safetensors":
+            save_kwargs = {}
+            if sharded:
+                save_kwargs["max_shard_size"] = "10KB"
+            model.save_pretrained(str(tmp_path), **save_kwargs)
+            expected_artifact = (
+                "model.safetensors.index.json"
+                if sharded
+                else "model.safetensors"
+            )
+            use_safetensors = True
+        else:
+            expected_artifact = _save_pytorch_checkpoint(
+                model,
+                tmp_path,
+                sharded=sharded,
+            )
+            use_safetensors = False
+
         saved_config = json.loads(
             (tmp_path / "config.json").read_text(encoding="utf-8")
         )
         assert "auto_map" not in saved_config
         assert not list(tmp_path.glob("*.py"))
+        assert (tmp_path / expected_artifact).is_file()
 
-        loaded = SLMForCausalLM.from_pretrained(str(tmp_path))
-        loaded.eval()
+        # A different seed makes accidental post-load reinitialization obvious.
+        torch.manual_seed(991)
+        loaded, loading_info = PreTrainedModel.from_pretrained.__func__(
+            SLMForCausalLM,
+            str(tmp_path),
+            output_loading_info=True,
+            use_safetensors=use_safetensors,
+            weights_only=True,
+        )
+
+        for key in (
+            "missing_keys",
+            "unexpected_keys",
+            "mismatched_keys",
+            "error_msgs",
+        ):
+            assert not loading_info[key], (
+                f"Native loading reported {key}: {loading_info[key]}"
+            )
+        assert loaded.training is False
+        _assert_state_dicts_equal(expected_state, loaded.state_dict())
+        assert (
+            loaded.lm_head.weight.data_ptr()
+            == loaded.model.embed_tokens.weight.data_ptr()
+        )
 
         with torch.no_grad():
-            logits_after = loaded(input_ids).logits
+            actual_logits = loaded(input_ids).logits.detach().cpu()
+        assert torch.equal(expected_logits, actual_logits)
 
-        assert torch.allclose(logits_before, logits_after, atol=1e-5), (
-            "Logits differ after save/load — weight tying or serialisation issue"
-        )
 
 
 class TestSLMConfigValidation:

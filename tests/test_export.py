@@ -90,6 +90,7 @@ def test_native_package_loads_without_remote_code(tmp_path):
         tmp_path,
         trust_remote_code=False,
         local_files_only=True,
+        weights_only=True,
     )
 
     assert config.model_type == "llama"

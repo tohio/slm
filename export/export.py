@@ -9,7 +9,10 @@ contract, so export converts the configuration and saves the weights as a
 native LlamaForCausalLM package. The published model loads anywhere with:
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
-    model = AutoModelForCausalLM.from_pretrained("<username>/slm-125m")
+    model = AutoModelForCausalLM.from_pretrained(
+        "<username>/slm-125m",
+        weights_only=True,
+    )
 
 Four variants are exported per model size:
 
@@ -442,7 +445,10 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 model_id = "{hf_username}/{hub_name}"
 tokenizer = AutoTokenizer.from_pretrained(model_id)
-model = AutoModelForCausalLM.from_pretrained(model_id)
+model = AutoModelForCausalLM.from_pretrained(
+    model_id,
+    weights_only=True,
+)
 
 prompt = "The capital of France is"
 inputs = tokenizer(prompt, return_tensors="pt")
@@ -461,7 +467,10 @@ print(tokenizer.decode(output[0], skip_special_tokens=True))
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 model_id = "{hf_username}/{hub_name}"
-model = AutoModelForCausalLM.from_pretrained(model_id)
+model = AutoModelForCausalLM.from_pretrained(
+    model_id,
+    weights_only=True,
+)
 tokenizer = AutoTokenizer.from_pretrained(model_id)
 
 messages = [
@@ -927,6 +936,7 @@ def _validate_native_package(
         str(export_dir),
         trust_remote_code=False,
         local_files_only=True,
+        weights_only=True,
     )
     if loaded_model.config.model_type != "llama":
         raise RuntimeError("Clean AutoModel load did not resolve native Llama")
@@ -1110,6 +1120,7 @@ def export(
     model = SLMForCausalLM.from_pretrained(
         str(checkpoint),
         dtype=source_dtype,
+        weights_only=True,
     )
     n_params = sum(p.numel() for p in model.parameters())
     log.info(f"Parameters: {n_params:,} ({n_params / 1e6:.1f}M)")

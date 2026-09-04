@@ -167,9 +167,10 @@ the root README.
 
 ## Testing
 
-Tests are separated into CPU contracts, environment acceptance, and checks
-against existing data or model artifacts. Full curation and training are not
-launched merely to test the repository.
+Tests are separated into CPU model/training contracts, environment
+acceptance, and checks against existing data or model artifacts. Model-facing
+CPU tests use the pinned training stack rather than the separate curation stack.
+Full curation and training are not launched merely to test the repository.
 
 See [`docs/TESTING.md`](docs/TESTING.md) for test order, commands, and artifact
 requirements.

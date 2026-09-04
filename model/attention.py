@@ -88,8 +88,9 @@ def apply_rotary_emb(
     sin: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Apply RoPE rotation. cos/sin arrive as float32 and are cast to
-    the query dtype here so the rotation matches the computation dtype.
+    Apply RoPE rotation. RotaryEmbedding computes the trigonometric values
+    in float32, then returns them in the hidden-state dtype. Normalize them to
+    the query dtype here in case query/key tensors use a different dtype.
     """
     cos = cos.to(dtype=q.dtype).unsqueeze(1)
     sin = sin.to(dtype=q.dtype).unsqueeze(1)
