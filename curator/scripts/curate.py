@@ -60,6 +60,7 @@ Usage:
 import argparse
 import logging
 import math
+import multiprocessing as mp
 import os
 import random
 import shutil
@@ -988,22 +989,43 @@ def stage_filter(workers: int | None = None, sources: list[str] | None = None) -
     # Sort largest-first so stragglers don't tail the run
     all_work.sort(key=lambda p: p[0].stat().st_size, reverse=True)
 
-    log.info(f"Filtering {len(all_work)} shards with {n_workers} workers...")
+    log.info(
+        f"Filtering {len(all_work)} shards with {n_workers} spawned workers..."
+    )
     processed = 0
 
+    # Stage 1 loads several large Hugging Face datasets into the parent
+    # process.  Forking here inherits that address space into every filter
+    # worker and can trigger severe copy-on-write memory pressure on large
+    # mini/full runs.  Spawn clean workers instead.  Submit one shard per
+    # future so large shards are dynamically balanced rather than assigning
+    # fixed multi-shard chunks to workers.
+    spawn_context = mp.get_context("spawn")
     with ProcessPoolExecutor(
         max_workers=n_workers,
         initializer=_init_filter_worker,
+        mp_context=spawn_context,
     ) as executor:
-        for source, shard_name, shard_stats in executor.map(
-            _filter_shard, all_work, chunksize=16
-        ):
+        futures = {
+            executor.submit(_filter_shard, work): work
+            for work in all_work
+        }
+        total_work = len(futures)
+        for future in as_completed(futures):
+            source, shard_name, shard_stats = future.result()
             processed += 1
             _merge_filter_stats(filter_stats[source], shard_stats)
-            log.debug(
-                f"Filtered {source}/{shard_name}: "
-                f"kept={shard_stats['kept']:,}/{shard_stats['total']:,}"
-            )
+            if processed == 1 or processed % 10 == 0 or processed == total_work:
+                log.info(
+                    "Filter progress: %s/%s shards complete "
+                    "(latest=%s/%s kept=%s/%s)",
+                    processed,
+                    total_work,
+                    source,
+                    shard_name,
+                    f"{shard_stats['kept']:,}",
+                    f"{shard_stats['total']:,}",
+                )
 
     for source, (dst_dir, input_signature) in pending_sources.items():
         stats = filter_stats[source]
