@@ -65,8 +65,24 @@ import os
 import random
 import shutil
 import sys
+import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
+
+# PyTorch may probe NVML when CPU-only curation workers import dependencies.
+# This host-level warning is harmless when CUDA is unavailable; keep all other
+# warnings visible. PYTHONWARNINGS propagates the same narrow suppression to
+# spawned/DataTrove child processes.
+os.environ.setdefault(
+    "PYTHONWARNINGS",
+    "ignore:Can't initialize NVML",
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r"Can't initialize NVML",
+    category=UserWarning,
+    module=r"torch\.cuda",
+)
 
 import orjson
 from dotenv import load_dotenv
@@ -170,7 +186,7 @@ log = logging.getLogger(__name__)
 
 def default_workers() -> int:
     cpu = os.cpu_count() or 4
-    return max(1, cpu - 2)
+    return max(1, cpu - 4)
 
 
 # ── Local share lookups ────────────────────────────────────────────────────────
@@ -2215,7 +2231,7 @@ def main():
     )
     parser.add_argument(
         "--workers", type=int, default=None,
-        help="Parallel workers for filter/dedup/blend. Default: cpu_count - 2.",
+        help="Parallel workers for filter/dedup/blend. Default: cpu_count - 4.",
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(

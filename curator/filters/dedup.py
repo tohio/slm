@@ -72,7 +72,7 @@ MINHASH_LSH_CROSSOVER = (
 
 def _default_workers() -> int:
     cpu = os.cpu_count() or 4
-    return max(1, cpu - 2)
+    return max(1, cpu - 4)
 
 
 def _dir_size_gb(path: Path) -> float:
@@ -268,7 +268,7 @@ def run_minhash_dedup(
         input_dir:   Directory of JSONL shards to deduplicate.
         output_dir:  Directory to write deduplicated JSONL shards.
         working_dir: Scratch directory for datatrove intermediate state.
-        workers:     Parallel workers. Defaults to cpu_count - 2.
+        workers:     Parallel workers. Defaults to cpu_count - 4.
         tasks:       Task count. Defaults to number of input shards.
         output_filename: Datatrove output template. Partitioned runs must use
                          distinct templates when sharing an output directory.
@@ -456,7 +456,7 @@ class Deduplicator:
 
     Args:
         working_dir: Scratch directory for datatrove state.
-        workers:     CPU workers. Default: cpu_count - 2.
+        workers:     CPU workers. Default: cpu_count - 4.
         MinHash uses the probabilistic LSH contract described by
         MINHASH_CONFIG; it does not expose a strict Jaccard threshold.
     """
