@@ -1063,6 +1063,183 @@ def stage_filter(workers: int | None = None, sources: list[str] | None = None) -
     log.info(f"Filter complete — processed: {processed}")
 
 
+# ── Persistent exact-hash resume index ─────────────────────────────────────────
+
+_EXACT_INDEX_HASH_WIDTH = 16
+_EXACT_INDEX_SCHEMA_VERSION = 1
+_EXACT_INDEX_DIRNAME = "exact_hash_index"
+
+
+def _build_exact_index_part(args: tuple[str, str]) -> tuple[str, int]:
+    """Hash one filtered JSONL shard into a compact binary checkpoint part."""
+    from curator.filters.dedup import exact_hash
+
+    input_path_raw, output_path_raw = args
+    input_path = Path(input_path_raw)
+    output_path = Path(output_path_raw)
+    tmp_path = output_path.with_name(f".{output_path.name}.{os.getpid()}.tmp")
+    documents = 0
+    parse_errors = 0
+
+    try:
+        with open(input_path, "rb", buffering=8 * 1024 * 1024) as fin, \
+             open(tmp_path, "wb", buffering=8 * 1024 * 1024) as fout:
+            for line in fin:
+                try:
+                    record = orjson.loads(line)
+                except Exception:
+                    parse_errors += 1
+                    continue
+                fout.write(exact_hash(record.get("text", "")))
+                documents += 1
+            fout.flush()
+            os.fsync(fout.fileno())
+
+        if parse_errors:
+            raise RuntimeError(
+                f"{input_path}: {parse_errors:,} invalid JSONL records while "
+                "building the exact-dedup resume index"
+            )
+        tmp_path.replace(output_path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+    return output_path.name, documents
+
+
+def _load_exact_index_part(path: Path, seen_hashes: set[bytes]) -> int:
+    """Load packed 16-byte exact hashes without reparsing source JSONL."""
+    data = path.read_bytes()
+    if len(data) % _EXACT_INDEX_HASH_WIDTH:
+        raise RuntimeError(
+            f"Corrupt exact-dedup resume index part {path}: "
+            f"{len(data):,} bytes is not divisible by {_EXACT_INDEX_HASH_WIDTH}"
+        )
+    for offset in range(0, len(data), _EXACT_INDEX_HASH_WIDTH):
+        seen_hashes.add(data[offset:offset + _EXACT_INDEX_HASH_WIDTH])
+    return len(data) // _EXACT_INDEX_HASH_WIDTH
+
+
+def _index_source_input_cached(
+    input_dir: Path,
+    seen_hashes: set[bytes],
+    *,
+    working_dir: Path,
+    workers: int,
+    source_name: str,
+    input_signature: str,
+) -> int:
+    """Restore or parallel-build exact hashes for one completed source.
+
+    The checkpoint indexes filtered source input, not fuzzy-deduplicated output,
+    preserving the current cross-source exact-dedup semantics on resume.
+    """
+    shards = sorted(Path(input_dir).glob("*.jsonl"))
+    if not shards:
+        raise RuntimeError(
+            f"{source_name}: cannot rebuild exact index; no shards in {input_dir}"
+        )
+
+    index_root = Path(working_dir) / _EXACT_INDEX_DIRNAME
+    checkpoint_dir = index_root / source_name
+    metadata_path = checkpoint_dir / "index.json"
+    expected_metadata = {
+        "schema_version": _EXACT_INDEX_SCHEMA_VERSION,
+        "hash_width": _EXACT_INDEX_HASH_WIDTH,
+        "source": source_name,
+        "input_signature": input_signature,
+        "shards": [shard.name for shard in shards],
+    }
+
+    if metadata_path.exists():
+        try:
+            metadata = orjson.loads(metadata_path.read_bytes())
+            parts = [
+                checkpoint_dir / f"{shard.name}.bin"
+                for shard in shards
+            ]
+            if metadata == expected_metadata and all(part.exists() for part in parts):
+                indexed = sum(
+                    _load_exact_index_part(part, seen_hashes)
+                    for part in parts
+                )
+                log.info(
+                    "  %s: restored exact-hash checkpoint for %s documents",
+                    source_name,
+                    f"{indexed:,}",
+                )
+                return indexed
+        except Exception as exc:
+            log.warning(
+                "  %s: ignoring invalid exact-hash checkpoint: %s",
+                source_name,
+                exc,
+            )
+
+    index_root.mkdir(parents=True, exist_ok=True)
+    build_dir = index_root / f".{source_name}.{os.getpid()}.tmp"
+    if build_dir.exists():
+        shutil.rmtree(build_dir)
+    build_dir.mkdir(parents=True)
+
+    n_workers = max(1, min(int(workers), len(shards)))
+    log.info(
+        "  %s: rebuilding exact-hash resume index from %s shards "
+        "with %s spawned workers...",
+        source_name,
+        len(shards),
+        n_workers,
+    )
+
+    jobs = [
+        (str(shard), str(build_dir / f"{shard.name}.bin"))
+        for shard in shards
+    ]
+    indexed = 0
+    completed = 0
+
+    try:
+        spawn_context = mp.get_context("spawn")
+        with ProcessPoolExecutor(
+            max_workers=n_workers,
+            mp_context=spawn_context,
+        ) as executor:
+            futures = {
+                executor.submit(_build_exact_index_part, job): job
+                for job in jobs
+            }
+            for future in as_completed(futures):
+                part_name, documents = future.result()
+                indexed += documents
+                completed += 1
+                _load_exact_index_part(build_dir / part_name, seen_hashes)
+                if completed == 1 or completed % 10 == 0 or completed == len(shards):
+                    log.info(
+                        "  %s: exact-hash index progress %s/%s shards "
+                        "(%s documents)",
+                        source_name,
+                        completed,
+                        len(shards),
+                        f"{indexed:,}",
+                    )
+
+        (build_dir / "index.json").write_bytes(orjson.dumps(expected_metadata))
+        if checkpoint_dir.exists():
+            shutil.rmtree(checkpoint_dir)
+        build_dir.replace(checkpoint_dir)
+    except Exception:
+        shutil.rmtree(build_dir, ignore_errors=True)
+        raise
+
+    log.info(
+        "  %s: exact-hash checkpoint ready for %s documents",
+        source_name,
+        f"{indexed:,}",
+    )
+    return indexed
+
+
 # ── Stage 3: Deduplicate ───────────────────────────────────────────────────────
 
 def stage_dedup(workers: int | None = None, sources: list[str] | None = None) -> None:
@@ -1119,10 +1296,17 @@ def stage_dedup(workers: int | None = None, sources: list[str] | None = None) ->
             contract=contract,
             input_signature=input_signature,
         ):
-            indexed = dedup.index_source_input(src_dir)
+            indexed = _index_source_input_cached(
+                src_dir,
+                dedup.seen_hashes,
+                working_dir=working_dir,
+                workers=n_workers,
+                source_name=source,
+                input_signature=input_signature,
+            )
             log.info(
                 f"  {source}: verified dedup manifest matches — reusing and "
-                f"indexed {indexed:,} retained documents"
+                f"indexed {indexed:,} source documents"
             )
             prior_dedup_signatures.append(
                 {
