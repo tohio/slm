@@ -33,6 +33,17 @@ vocabulary and merge files, the chat template, special-token metadata, and the
 stage manifest. A matching manifest allows an unchanged tokenizer build to be
 reused; changed input or tokenizer settings produce a new build.
 
+## Language scope
+
+SLM is an English-language-focused model. The pretraining corpus applies
+English-language filtering, so tokenizer efficiency is optimized and evaluated
+primarily on English prose and the code, numeric, URL, and technical text that
+appears in the training mixture.
+
+The tokenizer remains byte-level and must still encode and decode arbitrary
+Unicode safely. Multilingual token efficiency, however, is not an optimization
+target for this model.
+
 ## Tokenizer contract
 
 The tokenizer uses:
@@ -93,7 +104,13 @@ token counts, token pieces, token IDs, roundtrip behavior, and the token-count
 delta. The default reference is `HuggingFaceTB/SmolLM2-135M`.
 
 The comparison is diagnostic only. A lower token count is not an automatic
-quality pass/fail criterion.
+quality pass/fail criterion. For this English-language-focused model, the
+English prose, code, numeric/URL, and technical cases are the relevant
+efficiency comparisons.
+
+The Unicode/multilingual case is retained to verify byte-level robustness and
+lossless roundtrip behavior. Its token efficiency is informational only and is
+not a model-quality target.
 
 Use another Hugging Face reference when needed:
 
