@@ -747,8 +747,8 @@ test-validate:
 	PIPELINE_TEST_SIZE=$(TEST_SIZE) .venv/bin/pytest tests/data_pipeline/test_pipeline_validate.py --size=$(TEST_SIZE) -v --tb=short
 
 test-tokenizer:
-	@echo "==> Validating tokenizer and tokenized binary outputs..."
-	PIPELINE_TEST_SIZE=$(TEST_SIZE) .venv/bin/pytest tests/data_pipeline/test_pipeline_tokenizer.py --size=$(TEST_SIZE) -v --tb=short
+	@echo "==> Validating tokenizer and tokenized binary outputs (SIZE=$(TEST_SIZE))..."
+	PIPELINE_TEST_SIZE=$(TEST_SIZE) .venv/bin/pytest tests/data_pipeline/test_pipeline_tokenizer.py --size=$(TEST_SIZE) -q --tb=short
 
 test-data-pipeline: test-curator test-validate test-tokenizer
 	@echo "==> Data pipeline tests complete"

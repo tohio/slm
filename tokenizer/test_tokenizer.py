@@ -10,6 +10,8 @@ Usage:
 """
 
 import argparse
+import io
+from contextlib import redirect_stdout
 import json
 import logging
 import os
@@ -324,6 +326,11 @@ def main():
         default=None,
         help="Sample data for fertility test",
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Show detailed per-check diagnostics",
+    )
     args = parser.parse_args()
     if args.size is None and (args.tokenizer is None or args.sample_data is None):
         parser.error(
@@ -333,20 +340,13 @@ def main():
     args.tokenizer = args.tokenizer or tokenizer_dir(args.size)
     args.sample_data = args.sample_data or (validated_dir(args.size) / "train.jsonl")
 
-    # Load both tokenizer forms
+    # Load both tokenizer forms.
     tokenizer = load_tokenizer(args.tokenizer)
     hf_tokenizer = load_hf_tokenizer(args.tokenizer)
-    log.info(f"Loaded tokenizer from {args.tokenizer}")
-
-    # Run tests
-    special_ok = test_special_tokens(tokenizer)
-    roundtrip_ok = test_roundtrip(tokenizer)
-    no_auto_bos_eos_ok = test_no_auto_bos_eos(tokenizer)
 
     # Load sample texts for fertility — natural language only. Validated
     # records are tagged with a configured source; filter out code sources so
-    # fertility reflects
-    # English rather than Python/notebooks.
+    # fertility reflects English rather than Python/notebooks.
     sample_texts = []
     if args.sample_data.exists():
         with open(args.sample_data) as f:
@@ -360,24 +360,58 @@ def main():
     else:
         sample_texts = ["The quick brown fox jumps over the lazy dog."] * 100
 
-    fertility = test_fertility(tokenizer, sample_texts)
-    chat_ok = test_chat_template(hf_tokenizer)
-    test_vocab_coverage(tokenizer)
+    # Keep the existing detailed checks, but make their diagnostic output
+    # opt-in. On failure, replay the captured details automatically.
+    detail_buffer = io.StringIO()
+    previous_log_disabled = log.disabled
+    if not args.verbose:
+        log.disabled = True
 
-    # Summary
-    print("\n=== Summary ===")
-    print(f"  Special tokens:     {'✓ PASS' if special_ok else '✗ FAIL'}")
-    print(f"  Roundtrip:          {'✓ PASS' if roundtrip_ok else '✗ FAIL'}")
-    print(f"  No auto BOS/EOS:    {'✓ PASS' if no_auto_bos_eos_ok else '✗ FAIL'}")
-    print(f"  Fertility:          {fertility:.3f} tokens/word {'✓' if fertility < 1.5 else '✗'}")
-    print(f"  Chat template:      {'✓ PASS' if chat_ok else '✗ FAIL'}")
+    output_stream = sys.stdout if args.verbose else detail_buffer
+    with redirect_stdout(output_stream):
+        special_ok = test_special_tokens(tokenizer)
+        roundtrip_ok = test_roundtrip(tokenizer)
+        no_auto_bos_eos_ok = test_no_auto_bos_eos(tokenizer)
+        fertility = test_fertility(tokenizer, sample_texts)
+        chat_ok = test_chat_template(hf_tokenizer)
+        test_vocab_coverage(tokenizer)
 
-    all_passed = special_ok and roundtrip_ok and no_auto_bos_eos_ok and chat_ok
+    log.disabled = previous_log_disabled
+
+    fertility_ok = fertility < 1.5
+    all_passed = (
+        special_ok
+        and roundtrip_ok
+        and no_auto_bos_eos_ok
+        and fertility_ok
+        and chat_ok
+    )
+
+    size_label = args.size or "custom"
+    vocab_size = len(tokenizer.get_vocab())
+
+    print()
+    print(f"Tokenizer validation — {size_label}")
+    print(f"  Tokenizer:    {args.tokenizer}")
+    print(f"  Sample data:  {args.sample_data}")
+    print(f"  Sample docs:  {len(sample_texts):,} natural-language records")
+    print(f"  Vocabulary:   {vocab_size:,} tokens")
+    print(f"  Fertility:    {fertility:.3f} tokens/word (target < 1.500)")
+    print()
+    print("Checks")
+    print(f"  {'PASS' if special_ok else 'FAIL':<4}  Special-token IDs ({len(SPECIAL_TOKENS)}/{len(SPECIAL_TOKENS)} expected)")
+    print(f"  {'PASS' if roundtrip_ok else 'FAIL':<4}  Encode/decode roundtrip")
+    print(f"  {'PASS' if no_auto_bos_eos_ok else 'FAIL':<4}  BOS/EOS explicit-only policy")
+    print(f"  {'PASS' if fertility_ok else 'FAIL':<4}  Tokenizer fertility")
+    print(f"  {'PASS' if chat_ok else 'FAIL':<4}  Chat-template formatting")
+    print()
+    print(f"Result: {'PASS' if all_passed else 'FAIL'}")
+
     if not all_passed:
-        print("\n  ✗ Some tests failed — fix before proceeding to pretraining")
+        if not args.verbose:
+            print("\nFailure details:")
+            print(detail_buffer.getvalue().rstrip())
         sys.exit(1)
-    else:
-        print("\n  ✓ All tests passed")
 
 
 if __name__ == "__main__":
