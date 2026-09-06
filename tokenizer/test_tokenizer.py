@@ -306,7 +306,12 @@ def test_vocab_coverage(tokenizer) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description="Test SLM tokenizer")
-    parser.add_argument("--size", default=os.environ.get("SIZE", "125m"), help="Run size")
+    parser.add_argument(
+        "--size",
+        choices=("smoke", "mini", "125m", "350m", "1b"),
+        default=os.environ.get("SIZE"),
+        help="Run size: smoke, mini, 125m, 350m, or 1b",
+    )
     parser.add_argument(
         "--tokenizer",
         type=Path,
@@ -320,6 +325,11 @@ def main():
         help="Sample data for fertility test",
     )
     args = parser.parse_args()
+    if args.size is None and (args.tokenizer is None or args.sample_data is None):
+        parser.error(
+            "--size is required unless both --tokenizer and --sample-data are provided "
+            "(smoke, mini, 125m, 350m, or 1b)"
+        )
     args.tokenizer = args.tokenizer or tokenizer_dir(args.size)
     args.sample_data = args.sample_data or (validated_dir(args.size) / "train.jsonl")
 
