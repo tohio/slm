@@ -275,6 +275,89 @@ def build_cross_index_removals(
     }
 
 
+def remove_near_overlap_train_records(
+    train_path: Path,
+    removal_dir: Path,
+    *,
+    tasks: int,
+) -> dict:
+    """Remove matched train records using the completed byte-range removal files."""
+    train_path = Path(train_path)
+    removal_dir = Path(removal_dir)
+    file_size = train_path.stat().st_size
+    tmp_path = train_path.with_name(
+        f".{train_path.name}.{os.getpid()}.near-overlap.tmp"
+    )
+    removed_documents = 0
+    removed_characters = 0
+
+    try:
+        with open(tmp_path, "wb", buffering=8 * 1024 * 1024) as fout:
+            for rank in range(tasks):
+                removal_path = removal_dir / f"{rank:06d}.remove"
+                removal_ids: list[int] = []
+                if removal_path.exists():
+                    data = removal_path.read_bytes()
+                    if len(data) % _DOC_ID.size:
+                        raise RuntimeError(f"Corrupt removal file: {removal_path}")
+                    removal_ids = [
+                        value[0]
+                        for value in struct.iter_unpack(_DOC_ID.format, data)
+                    ]
+                    if removal_ids != sorted(set(removal_ids)):
+                        raise RuntimeError(f"Invalid removal ids: {removal_path}")
+
+                start = file_size * rank // tasks
+                end = file_size * (rank + 1) // tasks
+                next_index = 0
+                local_document = 0
+
+                with open(train_path, "rb", buffering=8 * 1024 * 1024) as fin:
+                    if start:
+                        fin.seek(start - 1)
+                        starts_after_newline = fin.read(1) == b"\n"
+                        fin.seek(start)
+                        if not starts_after_newline:
+                            fin.readline()
+                    else:
+                        fin.seek(0)
+
+                    while rank + 1 == tasks or fin.tell() < end:
+                        line = fin.readline()
+                        if not line:
+                            break
+                        remove = (
+                            next_index < len(removal_ids)
+                            and removal_ids[next_index] == local_document
+                        )
+                        if remove:
+                            record = orjson.loads(line)
+                            removed_documents += 1
+                            removed_characters += len(record.get("text", ""))
+                            next_index += 1
+                        else:
+                            fout.write(line)
+                        local_document += 1
+
+                if next_index != len(removal_ids):
+                    raise RuntimeError(
+                        f"Removal ids exceed document range {rank}: {removal_path}"
+                    )
+
+            fout.flush()
+            os.fsync(fout.fileno())
+
+        tmp_path.replace(train_path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+    return {
+        "removed_documents": removed_documents,
+        "removed_characters": removed_characters,
+    }
+
+
 def _aggregate_reports(
     report_dir: Path,
     *,
@@ -399,6 +482,19 @@ def audit_minhash_split_overlap(
         tasks=range_tasks,
         cluster_stats=cluster_stats,
     )
+    removal_stats = {"removed_documents": 0, "removed_characters": 0}
+    if aggregate["matched_documents"]:
+        removal_stats = remove_near_overlap_train_records(
+            train_path,
+            removal_dir,
+            tasks=range_tasks,
+        )
+        if removal_stats["removed_documents"] != aggregate["matched_documents"]:
+            raise RuntimeError(
+                "Near-overlap removal count mismatch: "
+                f"detected={aggregate['matched_documents']}, "
+                f"removed={removal_stats['removed_documents']}"
+            )
 
     return {
         "schema_version": 1,
@@ -409,13 +505,23 @@ def audit_minhash_split_overlap(
             "lsh_probability_50pct": MINHASH_LSH_CROSSOVER,
         },
         "range_tasks": range_tasks,
-        "train_documents": aggregate["documents"],
+        "audited_train_documents": aggregate["documents"],
+        "train_documents": (
+            aggregate["documents"] - removal_stats["removed_documents"]
+        ),
         "matched_train_documents": aggregate["matched_documents"],
+        "removed_train_documents": removal_stats["removed_documents"],
+        "removed_train_characters": removal_stats["removed_characters"],
+        "retained_matched_train_documents": (
+            aggregate["matched_documents"] - removal_stats["removed_documents"]
+        ),
         "matched_train_documents_by_source": aggregate[
             "matched_documents_by_source"
         ],
         "candidate_pairs": cluster_stats["candidate_pairs"],
         "validation_index_pairs": cluster_stats["validation_index_pairs"],
-        "passed": aggregate["matched_documents"] == 0,
+        "passed": (
+            aggregate["matched_documents"] == removal_stats["removed_documents"]
+        ),
         "samples": aggregate["samples"],
     }

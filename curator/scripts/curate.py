@@ -2298,6 +2298,20 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
         near_overlap_working,
         workers=workers,
     )
+    removed_near_overlap = int(
+        near_overlap_report.get("removed_train_documents", 0)
+    )
+    removed_near_overlap_chars = int(
+        near_overlap_report.get("removed_train_characters", 0)
+    )
+    if removed_near_overlap:
+        n_train -= removed_near_overlap
+        total_lines -= removed_near_overlap
+        total_chars -= removed_near_overlap_chars
+        log.warning(
+            f"Removed {removed_near_overlap:,} train documents matched by "
+            "the validation near-overlap audit"
+        )
     near_overlap_report["validation_documents"] = overlap_report[
         "validation_documents"
     ]
