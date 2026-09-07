@@ -1,25 +1,9 @@
-"""
-curator/scripts/upload_s3.py
------------------------------
-S3 upload and download utilities for the SLM data pipeline.
+"""Selected-stage artifacts and generic object transfers for S3 and HF.
 
-Changes from prior version:
-    - Uses boto3's default credential chain (env vars → ~/.aws/credentials
-      → EC2 IAM role). Previously required AWS_ACCESS_KEY_ID/SECRET to be
-      set explicitly, which broke on instances with attached IAM roles.
-    - Adds adaptive retry config — large overnight uploads no longer die
-      on transient S3 throttling.
-    - Adds per-file transfer progress callback for multi-GB uploads.
-    - Uses ListObjectsV2 to build an existing-keys set once instead of
-      HEAD-ing every file — much cheaper when most files already exist.
-
-Env vars:
-    S3_BUCKET           — S3 bucket name (required)
-    S3_PREFIX           — key prefix (default: slm/data)
-    RUN_ID              — optional explicit artifact run id
-    AWS_DEFAULT_REGION  — (default: us-east-1)
-
-    AWS credentials: standard boto3 chain — env vars, profile, IAM role.
+S3 keeps boto3's standard credential chain, adaptive retries, multipart
+transfers and existing skip/overwrite behavior. HF routes curated/validated
+stages to Dataset repos; other stages and generic objects go to Storage Buckets.
+See docs/PRETRAINING_DATA.md for credentials and exact selection semantics.
 """
 
 import argparse
@@ -369,6 +353,7 @@ def upload_directory(
     glob: str = "**/*",
     large_file_bytes: int = 100 * 1024 * 1024,
     mirror: bool = False,
+    *, client=None, transfer_config=None,
 ) -> dict[str, int]:
     """
     Upload a local directory to S3 recursively.
@@ -389,14 +374,15 @@ def upload_directory(
             prefix that are not present locally. Intended for immutable
             RUN_ID/stage prefixes, not generic partial uploads.
     """
-    client = get_s3_client(workers)
-    transfer_config = _transfer_config(workers)
+    client = client if client is not None else get_s3_client(workers)
+    transfer_config = transfer_config or _transfer_config(workers)
     files = [f for f in src.glob(glob) if f.is_file()]
     if not files:
         log.warning(f"No files found in {src} matching '{glob}'")
         return {"uploaded": 0, "skipped": 0, "failed": 0}
 
-    full_prefix = f"{prefix}/{dst_prefix}".rstrip("/") + "/"
+    full_prefix = build_key(prefix, dst_prefix).rstrip("/")
+    full_prefix = full_prefix + "/" if full_prefix else ""
     log.info(f"Uploading {len(files)} files → s3://{bucket}/{full_prefix}")
 
     # Build existing-keys set once rather than HEAD-ing every file.
@@ -409,7 +395,7 @@ def upload_directory(
 
     local_keys = {
         build_key(
-            f"{prefix}/{dst_prefix}",
+            build_key(prefix, dst_prefix),
             str(path.relative_to(src)),
         )
         for path in files
@@ -419,7 +405,7 @@ def upload_directory(
 
     def _upload(f: Path) -> str:
         relative = f.relative_to(src)
-        key = build_key(f"{prefix}/{dst_prefix}", str(relative))
+        key = build_key(build_key(prefix, dst_prefix), str(relative))
         if not overwrite and key in existing:
             return "skipped"
         try:
@@ -483,11 +469,13 @@ def download_prefix(
     workers: int = 16,
     overwrite: bool = False,
     large_file_bytes: int = 100 * 1024 * 1024,
+    *, client=None, transfer_config=None,
 ) -> dict[str, int]:
     """Download all objects under an S3 prefix to a local directory."""
-    client = get_s3_client(workers)
-    transfer_config = _transfer_config(workers)
-    full_prefix = f"{prefix}/{src_prefix}".rstrip("/") + "/"
+    client = client if client is not None else get_s3_client(workers)
+    transfer_config = transfer_config or _transfer_config(workers)
+    full_prefix = build_key(prefix, src_prefix).rstrip("/")
+    full_prefix = full_prefix + "/" if full_prefix else ""
 
     paginator = client.get_paginator("list_objects_v2")
     objects = []
@@ -508,8 +496,11 @@ def download_prefix(
     def _download(obj: dict) -> str:
         key = obj["Key"]
         size = obj.get("Size", 0)
-        relative = key[len(full_prefix):]
+        from curator.artifacts import safe_path
+        relative = safe_path(key[len(full_prefix):])
         local_path = dst / relative
+        if not local_path.resolve().is_relative_to(dst.resolve()):
+            raise RuntimeError(f"Artifact path escapes destination: {relative}")
         local_path.parent.mkdir(parents=True, exist_ok=True)
 
         if not overwrite and local_path.exists():
@@ -557,9 +548,10 @@ def download_prefix(
 
 # ── List ───────────────────────────────────────────────────────────────────────
 
-def list_prefix(prefix_path: str, bucket: str, prefix: str) -> list[dict]:
-    client = get_s3_client()
-    full_prefix = f"{prefix}/{prefix_path}".rstrip("/") + "/"
+def list_prefix(prefix_path: str, bucket: str, prefix: str, *, client=None) -> list[dict]:
+    client = client if client is not None else get_s3_client()
+    full_prefix = build_key(prefix, prefix_path).rstrip("/")
+    full_prefix = full_prefix + "/" if full_prefix else ""
 
     paginator = client.get_paginator("list_objects_v2")
     objects = []
@@ -668,31 +660,97 @@ def _normalize_stages(stages: str | None) -> list[str]:
     return normalized
 
 
+def _object_transport(backend: str, bucket: str, workers: int):
+    if backend == "s3":
+        return bucket, {}
+    if backend == "hf":
+        from curator.artifact_hf import bucket_transport
+        return bucket_transport(bucket, workers)
+    raise ValueError("Artifact backend must be s3 or hf")
+
+
 def upload_artifacts(size: str, run_id: str, stages: str | None, bucket: str,
                      prefix: str, workers: int = 16, overwrite: bool = False,
-                     glob: str = "**/*", *, backend: str = "s3", profile: str = "full",
-                     include_results: bool = False, model_size: str | None = None) -> dict[str, int]:
-    """Keep one artifact contract; select exactly one transfer backend."""
-    if glob != "**/*":
-        raise ValueError("Run-scoped artifacts cannot use partial globs; select stages/retention instead")
-    from curator.artifacts import upload
-    return upload(sys.modules[__name__], size, run_id, stages, bucket, prefix,
-                  workers, backend, profile, include_results, model_size)
+                     glob: str = "**/*", *, backend: str = "s3") -> dict[str, int]:
+    """Upload exactly the selected stages; never omit train files or add profiles."""
+    from curator.artifacts import verify_restored
+    validate_run_id(size, run_id)
+    chosen = _normalize_stages(stages)
+    _prepare_metadata(size, run_id)
+    verify_restored(sys.modules[__name__], DATA_DIR / "runs" / size, size, run_id, chosen)
+    totals = {"uploaded": 0, "skipped": 0, "failed": 0}
+    transport = None
+    # As before, metadata is the mutable run index. Publish it after data.
+    for stage in sorted(chosen, key=lambda value: value == "metadata"):
+        src, remote, pattern = _artifact_upload_paths(size, run_id, stage)
+        pattern = pattern if stage == "metadata" else glob
+        if backend == "hf" and stage in {"curated", "validated"}:
+            from curator.artifact_hf import upload_dataset_stage
+            counts = upload_dataset_stage(src, build_key(prefix, remote),
+                size=size, run_id=run_id, stage=stage, overwrite=overwrite, pattern=pattern)
+        else:
+            if transport is None:
+                transport = _object_transport(backend, bucket, workers)
+            remote_bucket, options = transport
+            counts = upload_directory(src, remote, remote_bucket, prefix, workers=workers,
+                overwrite=overwrite or stage == "metadata", glob=pattern,
+                mirror=overwrite or stage == "metadata", **options)
+        for key in totals:
+            totals[key] += counts.get(key, 0)
+        if counts.get("failed"):
+            raise RuntimeError(f"Artifact stage upload failed: {stage}; later metadata was not published")
+    return totals
 
 
 def download_artifacts(size: str, run_id: str, stages: str | None, bucket: str,
                        prefix: str, workers: int = 16, overwrite: bool = False,
-                       *, backend: str = "s3", profile: str = "full",
-                       restore_results: bool = False, model_size: str | None = None) -> dict[str, int]:
-    from curator.artifacts import download
-    return download(sys.modules[__name__], size, run_id, stages, bucket, prefix,
-                    workers, backend, profile, overwrite, restore_results, model_size)
+                       *, backend: str = "s3") -> dict[str, int]:
+    """Restore selected stages using the existing skip/overwrite interface."""
+    from curator.artifacts import verify_restored
+    from curator.state import atomic_write_json
+    validate_run_id(size, run_id)
+    chosen = _normalize_stages(stages)
+    root = DATA_DIR / "runs" / size
+    old_id = _read_run_id_record(root / RUN_ID_FILENAME)
+    if old_id and old_id["run_id"] != run_id and not overwrite:
+        raise RuntimeError("Restore would mix dataset RUN_IDs; choose a new DATA_DIR or explicitly use --overwrite")
+    root.mkdir(parents=True, exist_ok=True)
+    marker = root / "_RESTORE_PENDING.json"
+    if marker.exists():
+        pending = json.loads(marker.read_text())
+        if pending.get("run_id") != run_id or pending.get("stages") != chosen:
+            raise RuntimeError("Finish the interrupted restore with its original RUN_ID/stages before switching datasets")
+    atomic_write_json(marker, {"run_id": run_id, "stages": chosen})
+    totals = {"downloaded": 0, "skipped": 0, "failed": 0}
+    transport, revision = None, None
+    for stage in chosen:
+        dst, remote = _artifact_paths(size, run_id, stage)
+        dst.mkdir(parents=True, exist_ok=True)
+        if backend == "hf" and stage in {"curated", "validated"}:
+            from curator.artifact_hf import download_dataset_stage, dataset_revision
+            revision = revision or dataset_revision()
+            counts = download_dataset_stage(build_key(prefix, remote), dst,
+                revision=revision, workers=workers, overwrite=overwrite)
+        else:
+            if transport is None:
+                transport = _object_transport(backend, bucket, workers)
+            remote_bucket, options = transport
+            counts = download_prefix(remote, dst, remote_bucket, prefix,
+                workers=workers, overwrite=overwrite, **options)
+        for key in totals:
+            totals[key] += counts.get(key, 0)
+        if counts.get("failed"):
+            raise RuntimeError(f"Artifact stage download failed: {stage}")
+    verify_restored(sys.modules[__name__], root, size, run_id, chosen)
+    _write_run_id_record(size, run_id)
+    marker.unlink()
+    return totals
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="SLM S3 data utilities")
+    parser = argparse.ArgumentParser(description="SLM S3/HF artifact and object transfers")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     index = subparsers.add_parser("artifacts-index", help="Prepare and verify local RUN_ID metadata without cloud access")
@@ -739,12 +797,8 @@ def main():
     dl_artifacts.add_argument("--workers", type=int, default=16)
     dl_artifacts.add_argument("--overwrite", action="store_true")
 
-    for command in (up_artifacts, dl_artifacts):
+    for command in (up, dl, ls, up_artifacts, dl_artifacts):
         command.add_argument("--backend", choices=["s3", "hf"], default=os.environ.get("ARTIFACT_BACKEND", "s3"))
-        command.add_argument("--retention", choices=["full", "training-ready"], default="full")
-        command.add_argument("--model-size", choices=["smoke", "mini", "125m", "350m", "1b"])
-    up_artifacts.add_argument("--include-results", action="store_true")
-    dl_artifacts.add_argument("--restore-results", action="store_true")
     args = parser.parse_args()
     if args.command == "artifacts-index":
         run_id = resolve_upload_run_id(args.size, args.run_id)
@@ -754,13 +808,14 @@ def main():
                         args.size, run_id, ["validated", "tokenized", "tokenizer", "metadata"])
         print(run_id)
         return
-    if getattr(args, "backend", "s3") == "hf":
+    if args.backend == "hf":
         bucket = os.environ.get("HF_ARTIFACT_BUCKET", "")
-        if not bucket or "/" not in bucket:
-            parser.error("HF_ARTIFACT_BUCKET must be namespace/bucket (a Storage Bucket, not a Dataset repo)")
         prefix = os.environ.get("HF_ARTIFACT_PREFIX", "slm/data").strip("/")
     else:
         bucket, prefix = get_bucket_and_prefix()
+    options = {}
+    if args.command in {"upload", "download", "list"}:
+        bucket, options = _object_transport(args.backend, bucket, getattr(args, "workers", 16))
 
     if args.command == "upload":
         counts = upload_directory(
@@ -771,6 +826,7 @@ def main():
             workers=args.workers,
             overwrite=args.overwrite,
             glob=args.glob,
+            **options,
         )
         if counts["failed"]:
             raise SystemExit(1)
@@ -782,11 +838,12 @@ def main():
             prefix=prefix,
             workers=args.workers,
             overwrite=args.overwrite,
+            **options,
         )
         if counts["failed"]:
             raise SystemExit(1)
     elif args.command == "list":
-        objects = list_prefix(args.prefix, bucket, prefix)
+        objects = list_prefix(args.prefix, bucket, prefix, **({"client": options["client"]} if options else {}))
         total_size = sum(o["Size"] for o in objects)
         print(f"\n{'Key':<80} {'Size':>10}")
         print("-" * 92)
@@ -806,8 +863,7 @@ def main():
             workers=args.workers,
             overwrite=args.overwrite,
             glob=args.glob,
-            backend=args.backend, profile=args.retention,
-            include_results=args.include_results, model_size=args.model_size,
+            backend=args.backend,
         )
     elif args.command == "artifacts-download":
         run_id = require_run_id(args.size, args.run_id)
@@ -820,8 +876,7 @@ def main():
             prefix=prefix,
             workers=args.workers,
             overwrite=args.overwrite,
-            backend=args.backend, profile=args.retention,
-            restore_results=args.restore_results, model_size=args.model_size,
+            backend=args.backend,
         )
 
 if __name__ == "__main__":

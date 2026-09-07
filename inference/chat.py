@@ -40,7 +40,7 @@ COMMANDS = {
 }
 
 
-def _prepare_chat_input_ids(model, tokenizer, messages, max_new_tokens: int):
+def _prepare_chat_input_ids(model, tokenizer, messages, max_new_tokens: int, tools=None):
     """Format chat while reserving context space for the generated response."""
     max_context = int(
         getattr(model.config, "max_position_embeddings", 2048)
@@ -54,6 +54,22 @@ def _prepare_chat_input_ids(model, tokenizer, messages, max_new_tokens: int):
         )
 
     max_input_tokens = max_context - max_new_tokens
+    if tools is not None:
+        # Never truncate away the tool policy or split a call/result interaction.
+        # Drop only complete older turns; reject an overlong current turn.
+        working = list(messages)
+        while True:
+            ids = tokenizer.apply_chat_template(
+                working, tools=tools, tokenize=True, add_generation_prompt=True,
+                return_tensors="pt", truncation=False,
+            )
+            if ids.shape[-1] <= max_input_tokens:
+                return ids.to(model.device)
+            starts = [i for i, msg in enumerate(working) if msg["role"] == "user"]
+            if len(starts) < 2:
+                raise ValueError("Current tool interaction exceeds context budget; shorten the request or response budget")
+            del working[starts[0]:starts[1]]
+
     original_truncation_side = tokenizer.truncation_side
     try:
         # Preserve the latest turns and generation prompt when a conversation
@@ -82,6 +98,7 @@ def generate_response(
     temperature: float = 0.7,
     top_p: float = 0.9,
     repetition_penalty: float = 1.1,
+    tools=None,
 ) -> str:
     """
     Generate a single assistant response.
@@ -100,6 +117,7 @@ def generate_response(
         tokenizer,
         messages,
         max_new_tokens,
+        tools=tools,
     )
 
     attention_mask = torch.ones_like(input_ids)
@@ -124,7 +142,7 @@ def generate_response(
         if stop_id in new_tokens:
             new_tokens = new_tokens[: new_tokens.index(stop_id)]
 
-    return tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+    return tokenizer.decode(new_tokens, skip_special_tokens=tools is None).strip()
 
 
 def print_help():
@@ -134,7 +152,7 @@ def print_help():
     print()
 
 
-def _context_usage(tokenizer, messages: list[dict], model) -> tuple[int, int]:
+def _context_usage(tokenizer, messages: list[dict], model, tools=None) -> tuple[int, int]:
     """
     Return (current_tokens, max_context_tokens) for the given conversation.
     Used for the "conversation getting long" warning, measured against actual
@@ -142,6 +160,7 @@ def _context_usage(tokenizer, messages: list[dict], model) -> tuple[int, int]:
     """
     token_ids = tokenizer.apply_chat_template(
         messages, tokenize=True, add_generation_prompt=False,
+        **({"tools": tools} if tools is not None else {}),
     )
     current = len(token_ids)
     max_ctx = getattr(model.config, "max_position_embeddings", 2048)
@@ -151,6 +170,12 @@ def _context_usage(tokenizer, messages: list[dict], model) -> tuple[int, int]:
 def chat_loop(model, tokenizer, special_ids, system_prompt: str, args):
     """Main interactive chat loop."""
     messages = [{"role": "system", "content": system_prompt}]
+    search = None
+    if args.web_search:
+        from config.chat import WEB_SEARCH_TOOL, enable_tool_template
+        from inference.tools import run_tool_turn, search_from_environment
+        enable_tool_template(tokenizer)
+        search = search_from_environment()
 
     print(f"\n{'='*55}")
     print("  SLM Chat")
@@ -204,12 +229,16 @@ def chat_loop(model, tokenizer, special_ids, system_prompt: str, args):
 
         try:
             print("Assistant: ", end="", flush=True)
-            response = generate_response(
-                model, tokenizer, special_ids, messages,
-                max_new_tokens=args.max_new_tokens,
-                temperature=args.temperature,
-                top_p=args.top_p,
-            )
+            def generate(history):
+                return generate_response(
+                    model, tokenizer, special_ids, history,
+                    max_new_tokens=args.max_new_tokens,
+                    temperature=args.temperature, top_p=args.top_p,
+                    tools=[WEB_SEARCH_TOOL] if search is not None else None,
+                )
+            additions = (run_tool_turn(generate, messages, search) if search is not None
+                         else [{"role": "assistant", "content": generate(messages)}])
+            response = additions[-1]["content"]
             print(response)
             print()
         except Exception as e:
@@ -217,10 +246,10 @@ def chat_loop(model, tokenizer, special_ids, system_prompt: str, args):
             messages.pop()
             continue
 
-        messages.append({"role": "assistant", "content": response})
+        messages.extend(additions)
 
         # Warn at 75% of context window, measured in actual tokens.
-        current, max_ctx = _context_usage(tokenizer, messages, model)
+        current, max_ctx = _context_usage(tokenizer, messages, model, tools=[WEB_SEARCH_TOOL] if search is not None else None)
         if current > 0.75 * max_ctx:
             print(
                 f"[Note: conversation uses {current}/{max_ctx} tokens "
@@ -242,6 +271,8 @@ def main():
         choices=["bfloat16", "float16", "float32"],
         help="Model precision (default: bfloat16)",
     )
+    parser.add_argument("--web-search", action="store_true",
+                        help="Enable one read-only search call per turn using WEB_SEARCH_PROVIDER")
     args = parser.parse_args()
 
     model, tokenizer, special_ids = load_model_and_tokenizer(args.model, dtype=args.dtype)

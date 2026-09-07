@@ -477,11 +477,11 @@ class TestBlendStats:
         assert not deficits, f"Unresolved source deficits in blend_stats: {deficits}"
 
 
-def test_frozen_curated_contract_preserves_validation_and_all_pair_gates():
+def test_curated_contract_preserves_validation_and_all_pair_gates():
     from config.holdout import verify_jsonl_contract
-    frozen = verify_jsonl_contract(pipeline_path("curated"), stage="curated")["contract"]
-    assert frozen["splits"]["val"] == frozen["origin"]["splits"]["val"]
-    assert set(frozen["pair_audits"]) == {"train_val", "train_test", "test_val"}
-    for report in frozen["pair_audits"].values():
+    holdout = verify_jsonl_contract(pipeline_path("curated"), stage="curated")["contract"]
+    assert holdout["splits"]["val"] == holdout["origin"]["splits"]["val"]
+    assert set(holdout["pair_audits"]) == {"train_val", "train_test", "test_val"}
+    for report in holdout["pair_audits"].values():
         assert report["near"]["passed"]
         assert report["final_exact"]["passed"]

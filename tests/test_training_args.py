@@ -255,7 +255,7 @@ def test_pretrain_model_tokenizer_contract_rejects_special_token_mismatch(
 
 
 def test_tokenized_data_identity_captures_manifest_and_splits(tmp_path: Path):
-    from tests.frozen_helpers import make_bundle
+    from tests.dataset_helpers import make_bundle
     root = make_bundle(tmp_path) / "tokenized"
     completion = json.loads((root / "_SUCCESS.json").read_text())
     identity = tokenized_data_identity(root)
@@ -315,7 +315,6 @@ def test_pretrain_resume_requires_provenance_audit(tmp_path: Path):
         (None, 1, "single"),
         (None, 4, "ddp"),
         ("ddp", 2, "ddp"),
-        ("fsdp", 8, "fsdp"),
     ],
 )
 def test_distributed_strategy_resolution(
@@ -325,7 +324,6 @@ def test_distributed_strategy_resolution(
     expected: str,
 ):
     monkeypatch.delenv("SLM_DISTRIBUTED_STRATEGY", raising=False)
-    monkeypatch.delenv("ACCELERATE_USE_FSDP", raising=False)
     assert resolve_distributed_strategy(requested, world_size) == expected
 
 

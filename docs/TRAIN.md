@@ -15,7 +15,8 @@ base, instruct, code, and chat model variants.
 | `.env` | AWS, Hugging Face, W&B, cache, results, and export configuration |
 
 Populate the common environment settings and the selected backend's settings.
-S3 can use SDK/instance-role credentials; HF uses an HF Storage Bucket/token.
+S3 can use SDK/instance-role credentials; HF uses Dataset credentials for text
+and separate HF S3 credentials for Bucket objects.
 The GPU host
 must use an NVIDIA driver compatible with the repository's pinned CUDA 13
 training stack.
@@ -50,8 +51,8 @@ make train-all \
 
 1. Validates common/selected-backend environment settings and required Make inputs.
 2. Installs the GPU environment and pinned CUDA training dependencies.
-3. Restores validated holdouts, all tokenized splits, tokenizer, and metadata
-   identified by `DATASET_SIZE` and `DATASET_RUN_ID` (or `RUN_ID`).
+3. Restores the selected source-run artifacts (all tokenized splits, tokenizer,
+   and metadata by default) identified by `DATASET_SIZE` and `DATASET_RUN_ID`.
 4. Runs the dataset-free CUDA, BF16, compile, and generation acceptance gate.
 5. Generates hardware-specific pretraining, SFT, and DPO configurations.
 6. Pretrains the base model.
@@ -73,7 +74,7 @@ training.
 
 ```bash
 make check-env
-make setup-gpu \
+make setup-train \
   DATA_DIR=/data/slm/data \
   SIZE=125m \
   RUN_ID=125m-YYYYMMDD-abcdef
@@ -81,7 +82,9 @@ make setup-gpu \
 make test-gpu-gate
 ```
 
-`setup-gpu` restores `validated`, `tokenized`, `tokenizer`, and `metadata`.
+`setup-train` restores `tokenized`, `tokenizer`, and `metadata` by default.
+Include `validated` in `ARTIFACT_STAGES` for final test-document completions.
+Without a selected source RUN_ID, setup installs the environment only.
 Pretraining uses the dataset-scoped tokenizer directly; no global copy is made.
 
 ### Generate training configurations
@@ -105,6 +108,7 @@ make config-gen \
 Inspect the generated pretraining, SFT, and DPO YAML files before starting a
 paid run.
 
+`config-gen` also generates the DDP launch file internally when needed.
 `GPUS` is passed directly to Accelerate as `--num_processes`. `GPUS=1` uses
 one process; `GPUS>1` keeps the existing one-process-per-GPU DDP launch:
 
@@ -262,14 +266,13 @@ see [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md).
 - [SFT component guide](../finetune/README.md)
 - [DPO component guide](../alignment/README.md)
 
-## Frozen-test migration and cross-size training
+## Test evaluation and cross-size inputs
 
-Read [Frozen pretraining and reuse](FROZEN_PRETRAINING.md) before upgrading the
-existing Mini corpus. It explains the final-only test contract, required old
-checkpoint/tokenizer backups, source RUN_ID indexing, `DATASET_SIZE=350m`
-consumption by Mini/125M, model-specific budgets, and S3/HF retention.
+[Pretraining data and reuse](PRETRAINING_DATA.md) documents final-only test,
+`SIZE` versus `DATASET_SIZE`, matched tokenizer/binary/metadata restoration, and
+model-specific budgets. Generic probes remain lightweight, separate, and
+non-gating. All sizes use the same explicit `GPUS=N` configuration flow except
+for the separate Smoke path.
 
-In generic multi-GPU examples use `GPUS=N`, replacing `N` with the number of
-GPUs you choose. Generate the matching configuration before launching training.
-Mini uses that existing flow; Smoke stays separate. The patch does not change a
-running job or automatically adopt a benchmark candidate.
+[Tool calling](TOOL_CALLING.md) describes the optional reviewed SFT input and
+single-call chat runtime. It uses the existing trainer and tool vocabulary.

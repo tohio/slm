@@ -7,8 +7,7 @@ These are separate configuration layers:
 
 - `config_gen.py` writes model/trainer YAML: batch size, accumulation,
   checkpointing, steps, warmup, and stage recipe fields.
-- `accel_gen.py` writes process topology: DDP or FSDP, process count, precision,
-  and sharding settings.
+- `accel_gen.py` writes the internal DDP launch configuration when multiple GPUs are selected.
 
 ## Training recipes
 
@@ -18,9 +17,9 @@ Generate every recipe for a size:
 make config-gen SIZE=125m GPUS=1
 ```
 
-`SIZE=smoke` and `SIZE=mini` generate their pretraining recipes only. Mini SFT
-and DPO retain the existing bounded checked-in recipes; scaling those stages is
-a separate change.
+Mini uses the same generator flow as 125M/350M/1B, including instruct SFT, code
+SFT, and DPO. Its bounded post-training sample/step budgets are preserved while
+micro-batch and accumulation adapt to hardware. Smoke remains pretraining-only.
 
 Generate one stage:
 
@@ -66,54 +65,24 @@ planning model, not a measured guarantee.
 
 ## Accelerate topology
 
-Generate a DDP or FSDP configuration:
-
-```bash
-make accel-gen-ddp GPUS=N
-make accel-gen-fsdp GPUS=N
-```
-
-Outputs:
-
-```text
-accelerate_configs/multi_gpu.yaml
-accelerate_configs/fsdp.yaml
-```
-
-The standard stage Make targets launch Accelerate with explicit process and
-precision flags; they do not select a generated FSDP file. To use a generated
-topology, pass it explicitly:
-
-```bash
-.venv/bin/accelerate launch \
-  --config_file accelerate_configs/fsdp.yaml \
-  pretrain/train.py \
-  --config pretrain/configs/gpt_1b.yaml
-```
-
-Use DDP when each GPU can hold a full model/optimizer replica. Use FSDP only
-after validating sharded checkpoint save/resume and export on the target
-cluster.
+`config-gen` and the stage-specific generators invoke DDP config generation
+internally when `GPUS > 1`. Training explicitly selects
+`accelerate_configs/multi_gpu.yaml`; single-GPU launches use `single_gpu.yaml`.
+No interactive/global Accelerate configuration or second sharded-training path
+is needed. Use the same `GPUS` value for configuration and launch. Each DDP GPU
+must hold a full model/optimizer replica.
 
 ## Direct usage
 
 ```bash
 python -m config_gen.config_gen \
-  --stage pretrain \
-  --gpu h200 \
-  --size 125m \
-  --gpus 1 \
-  --mode balanced \
+  --stage pretrain --gpu h200 --size 125m --gpus 1 --mode balanced \
   --output pretrain/configs/gpt_125m.yaml
-
-python -m config_gen.accel_gen \
-  --strategy fsdp \
-  --gpus 8 \
-  --sharding-strategy FULL_SHARD
 ```
 
-Use `--help` on either module for all supported GPU identifiers and output
-options.
+Direct model-YAML generation does not generate the launch config; use the Make
+flow for the normal complete configuration. Run the module's `--help` for GPU
+identifiers and output options.
 
 ## Validation
 
@@ -123,4 +92,4 @@ make test-accel-gen
 ```
 
 In generic examples, replace `N` with the GPU count you choose to use. Mini
-uses the existing pretraining config-generation flow; Smoke stays separate.
+uses the existing training config-generation flow; Smoke stays separate.

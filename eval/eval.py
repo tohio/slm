@@ -456,7 +456,7 @@ def main():
     parser.add_argument("--tokenizer-dir", type=Path, help="Matched tokenizer for saved-checkpoint pretraining probes")
     parser.add_argument("--expected-validation-loss", type=float)
     parser.add_argument("--validation-loss-tolerance", type=float, default=0.01)
-    parser.add_argument("--corpus-qa", type=Path, help="Optional evidence-checked frozen-corpus QA JSONL")
+    parser.add_argument("--corpus-qa", type=Path, help="Optional evidence-checked corpus-supported QA JSONL")
     args = parser.parse_args()
     if args.mode != "benchmarks":
         from pretrain.diagnostics import standalone

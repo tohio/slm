@@ -12,8 +12,8 @@ uploaded, training-ready corpus.
 | `DATA_DIR` | Persistent storage root for datasets and artifacts |
 | `.env` | AWS, Hugging Face, W&B, cache, results, and export configuration |
 
-Every variable in `.env.sample` must have a real value in `.env`; blank values
-and `...` placeholders are rejected.
+Fill the required common environment settings and the credentials for the
+selected artifact backend. Optional HF/search fields can remain blank when unused.
 
 Before running curation, use the Hugging Face account associated with
 `HF_TOKEN` to accept the terms for the gated sources in the active data mix:
@@ -48,12 +48,11 @@ vi .env
 Bootstrap a fresh CPU curation host explicitly before starting source work:
 
 ```bash
-make setup-data-dir DATA_DIR=/data/slm/data
+make setup-curate DATA_DIR=/data/slm/data
 source .venv/bin/activate
 
 make download-fasttext-model DATA_DIR=/data/slm/data
 make download-kenlm-model    DATA_DIR=/data/slm/data
-make check-curation-prereqs  DATA_DIR=/data/slm/data
 ```
 
 Run smoke first:
@@ -88,13 +87,13 @@ make curate-all \
 1. Validates `.env`, required Make inputs, and curation model prerequisites.
 2. Verifies the pinned curation environment.
 3. Curates, filters, deduplicates, and blends the configured sources.
-4. Freezes test from training without changing validation, audits all three
-   overlap relationships, and validates all three splits.
+4. Establishes test from training during blending without changing validation,
+   audits all three overlap relationships, and validates all three splits.
 5. Trains and validates the size-specific BPE tokenizer.
 6. Tokenizes and integrity-checks train, validation, and test binaries.
 7. Runs each artifact gate without rebuilding completed stages.
-8. Uploads the training-ready `validated`, `tokenized`, `tokenizer`, and
-   `metadata` artifact set to the selected S3 or HF backend.
+8. Uploads only the stages selected by `ARTIFACT_STAGES` to the chosen backend;
+   no retention profile or implicit train-file omission is applied.
 9. Prints the `RUN_ID` required by the training host.
 
 Choose `WORKERS` below the available CPU count. On a 64-vCPU host,
@@ -109,10 +108,9 @@ interruption.
 
 ```bash
 make check-env
-make setup-data-dir DATA_DIR=/data/slm/data
+make setup-curate DATA_DIR=/data/slm/data
 make download-fasttext-model DATA_DIR=/data/slm/data
 make download-kenlm-model DATA_DIR=/data/slm/data
-make check-curation-prereqs DATA_DIR=/data/slm/data
 .venv/bin/python infra/verify_environment.py --profile curation
 ```
 
@@ -200,13 +198,10 @@ failures, see [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md).
 - [Command reference](COMMANDS.md)
 - [Curation component guide](../curator/README.md)
 
-## Existing corpus upgrade and retained holdouts
+## Split and transfer contracts
 
-The CPU setup installs `requirements-curation.txt`; `requirements.txt` contains
-shared utilities only. Do not install the training stack into this environment.
-Run `make freeze-test SIZE=<size>` before the curated artifact tests for an
-existing blend; `validate` and `curate-all` wire this step into the normal flow.
-`make regenerate-mini-frozen` rebuilds only invalidated Mini data stages, then
-requires review before uploading. Read [Frozen pretraining](FROZEN_PRETRAINING.md)
-for immutable membership, the 1.4B-token floor, selective retention, optional HF
-transfer isolation, and the old-checkpoint/new-test contamination caveat.
+Normal blending produces train/val/test; validation and tokenization process all
+three. There is no special regeneration command. The setup command selects the
+curation requirements automatically. See [pretraining data](PRETRAINING_DATA.md)
+for deterministic membership, the Mini token floor, HF Dataset/Bucket routing,
+and matched artifact restoration. Upload selection remains yours.

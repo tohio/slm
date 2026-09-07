@@ -18,7 +18,7 @@ data or training stages.
 
 | Gate | Command | Required input |
 |---|---|---|
-| CPU model/training contracts | `make test-unit` | Pinned training stack (`make install-training`) |
+| CPU model/training contracts | `make test-unit` | Pinned training stack (`make setup-train`) |
 | GPU acceptance | `make test-gpu-gate` | Supported NVIDIA environment |
 | New pretraining readiness | `make test-pretrain-ready SIZE=<size> GPUS=<n>` | GPU environment and restored tokenized artifacts |
 | Resume readiness | `make test-pretrain-resume-ready SIZE=<size> GPUS=<n>` | Compatible pretraining audit and checkpoint |
@@ -40,15 +40,14 @@ Install the CPU build of the same dependency contract used by training, then
 run the aggregate gate:
 
 ```bash
-make install-training
+make setup-train
 make test-unit
 ```
 
-`make install-training` installs `requirements-training.txt`, including
-`transformers==5.14.1`, into `.venv` without requiring CUDA. `make install`
-installs the separate curation/tokenizer environment and is not valid for model,
-export, TRL, or training-argument tests. On a GPU host, `make install-gpu`
-already provides the required model/test stack.
+`make setup-train` installs the full pinned GPU training/evaluation stack into
+`.venv`; model-facing unit tests can use its CPU device without a separate CPU
+installer. `make setup-curate` installs the curation/tokenizer role and is not a
+substitute for the training stack. Do not layer the two roles together.
 
 The gate covers architecture, native checkpoint loading, configuration, data
 contracts, export, training arguments, generated configurations, one-step
@@ -194,14 +193,12 @@ records each tokenizer's sequence and supervised-token totals.
 - [Troubleshooting](TROUBLESHOOTING.md)
 - [`tests/` component guide](../tests/README.md)
 
-## Consolidated frozen pretraining workflow
+## Focused regression coverage
 
-See [Frozen pretraining and dataset reuse](FROZEN_PRETRAINING.md) for the train/val/test roles,
-existing-Mini migration, matched `DATASET_SIZE` artifacts and model budgets,
-S3/HF backend selection, retention/restore, environment separation, fixed probes,
-size-aware final evaluation, and hardware experiments. New Make targets include
-`freeze-test`, `regenerate-mini-frozen`, `artifacts-index`, `test-frozen-contract`,
-`pretrain-probes`, `eval-pretrain-final`, and `pretrain-benchmark`.
-
-`GPUS=N` means the user-selected GPU count, not a fixed requirement. Generate
-the matching Mini/production config before launch; Smoke remains separate.
+Existing pipeline tests cover train/val/test outputs and integrity. Keep additions
+small and in the relevant existing suite. `tests/model/test_rope_loading.py`
+checks native checkpoint reload without caller-side repair; it requires the
+training stack and does not establish the real Mini checkpoint's loss baseline.
+No separate retention, test-contract, split-integration, or diagnostics suites
+are required. Tool-call parsing/SFT contract checks live in the existing relevant
+contract tests; full model and live-provider behavior require the actual runtime.

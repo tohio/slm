@@ -50,3 +50,20 @@ def test_invalid_validation_fraction_is_rejected():
     records, _ = prepare_records([row(0), row(1)], SOURCE, QUALITY)
     with pytest.raises(ValueError, match="validation_fraction"):
         grouped_split(records, validation_fraction=0.0, seed=42)
+
+
+def test_tool_examples_follow_the_existing_grouped_sft_contract():
+    import json
+    from pathlib import Path
+    from config.chat import validate_tool_conversation
+
+    path = Path(__file__).resolve().parents[1] / "finetune/examples/tool_conversations.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    records, _ = prepare_records(rows, SOURCE, QUALITY)
+    assert len(records) == 6
+    for record in records:
+        validate_tool_conversation(record["conversations"])
+    train, val = grouped_split(records, validation_fraction=0.2, seed=42)
+    assert {first_user_prompt(r["conversations"]) for r in train}.isdisjoint(
+        first_user_prompt(r["conversations"]) for r in val
+    )

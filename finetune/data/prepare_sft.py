@@ -36,6 +36,8 @@ load_dotenv()
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from config.paths import sft_code_data_dir, sft_instruct_data_dir
+from config.chat import (WEB_SEARCH_TOOL, TOOL_OPEN, TOOL_CLOSE, parse_tool_call,
+                         safe_json, validate_tool_conversation)
 
 log = logging.getLogger(__name__)
 logging.basicConfig(
@@ -92,7 +94,7 @@ def normalize_messages(raw: Any, system_prompt: str) -> list[dict[str, str]] | N
         role = item.get("role") or item.get("from")
         content = item.get("content") or item.get("value")
         role = {"human": "user", "gpt": "assistant"}.get(role, role)
-        if role not in {"system", "user", "assistant"} or not isinstance(content, str):
+        if role not in {"system", "user", "assistant", "tool"} or not isinstance(content, str):
             return None
         content = content.strip()
         if not content:
@@ -103,6 +105,23 @@ def normalize_messages(raw: Any, system_prompt: str) -> list[dict[str, str]] | N
         return None
     if messages[0]["role"] != "system":
         messages.insert(0, {"role": "system", "content": system_prompt})
+
+    uses_tools = any(m["role"] == "tool" or (
+        m["role"] == "assistant" and (TOOL_OPEN in m["content"] or TOOL_CLOSE in m["content"])
+    ) for m in messages)
+    if uses_tools:
+        try:
+            validate_tool_conversation(messages)
+            for message in messages:
+                if message["role"] == "tool":
+                    message["content"] = safe_json(json.loads(message["content"]))
+                elif message["role"] == "assistant":
+                    call = parse_tool_call(message["content"])
+                    if call is not None:
+                        message["content"] = TOOL_OPEN + safe_json(call) + TOOL_CLOSE
+        except (ValueError, TypeError):
+            return None
+        return messages
 
     conversational = [m for m in messages if m["role"] != "system"]
     if len(conversational) < 2 or conversational[0]["role"] != "user":
@@ -145,8 +164,14 @@ def normalize_record(row: dict[str, Any], source: dict[str, Any]) -> dict[str, A
 
     if messages is None:
         return None
+    tools = row.get("tools") or []
+    if tools and tools != [WEB_SEARCH_TOOL]:
+        return None
+    if any(m["role"] == "tool" for m in messages):
+        tools = [WEB_SEARCH_TOOL]
     return {
         "conversations": messages,
+        "tools": tools,
         "source": source["source"],
         "sft_type": sft_type,
     }
@@ -295,8 +320,13 @@ def source_contract(config: dict[str, Any], stage: str, size: str) -> dict[str, 
     }
 
 
-def prepare_stage(config: dict[str, Any], stage: str, size: str, force: bool) -> None:
+def prepare_stage(config: dict[str, Any], stage: str, size: str, force: bool, tool_data: Path | None = None) -> None:
     contract = source_contract(config, stage, size)
+    if tool_data is not None:
+        if stage != "instruct":
+            raise ValueError("--tool-data applies only to instruct SFT")
+        tool_data = tool_data.resolve(strict=True)
+        contract["tool_data"] = {"path": str(tool_data), "sha256": sha256_file(tool_data)}
     contract_hash = sha256_json(contract)
     destination = output_dir(stage, size)
     manifest_path = destination / "manifest.json"
@@ -337,6 +367,15 @@ def prepare_stage(config: dict[str, Any], stage: str, size: str, force: bool) ->
         seed=contract["seed"],
     )
     records, quality_stats = prepare_records(dataset, source, contract["quality"])
+    if tool_data is not None:
+        rows = [json.loads(line) for line in tool_data.read_text(encoding="utf-8").splitlines() if line.strip()]
+        tools_source = {"format": "conversational", "source": "local_tool_data"}
+        extra, extra_stats = prepare_records(rows, tools_source, contract["quality"])
+        records = list({sha256_json(row["conversations"]): row for row in records + extra}.values())
+        # Also expose the tool to no-tool examples so the model learns when NOT to search.
+        for record in records:
+            record["tools"] = [WEB_SEARCH_TOOL]
+        quality_stats["tool_data"] = extra_stats
     train, val = grouped_split(
         records,
         validation_fraction=contract["validation_fraction"],
@@ -409,12 +448,16 @@ def main() -> None:
         action="store_true",
         help="Replace existing prepared data after its source contract changes",
     )
+    parser.add_argument("--tool-data", type=Path, default=None,
+                        help="Optional reviewed local tool/no-tool JSONL, merged before instruct split")
     args = parser.parse_args()
 
+    if args.tool_data is not None and args.stage == "code":
+        parser.error("--tool-data requires --stage instruct or both")
     config = load_config(args.source_config)
     stages = VALID_STAGES if args.stage == "both" else (args.stage,)
     for stage in stages:
-        prepare_stage(config, stage, args.size, args.force)
+        prepare_stage(config, stage, args.size, args.force, args.tool_data if stage == "instruct" else None)
 
 
 if __name__ == "__main__":

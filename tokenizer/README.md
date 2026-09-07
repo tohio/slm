@@ -159,6 +159,7 @@ make artifacts-upload \
 - Review SFT, DPO, inference, export, and serving whenever the chat template or
   special-token set changes.
 
-See [Frozen pretraining](../docs/FROZEN_PRETRAINING.md) before replacing the
-old Mini tokenizer: the rebuilt frozen training input may change its fingerprint,
-and old learned embeddings must remain paired with their original tokenizer.
+Keep old learned checkpoints paired with their original tokenizer. Recurating or
+training a new tokenizer does not authorize changing existing model embeddings.
+Tool-aware SFT/inference changes only the rendering template using existing tool
+tokens; see [tool calling](../docs/TOOL_CALLING.md).

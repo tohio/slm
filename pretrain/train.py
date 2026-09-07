@@ -291,20 +291,18 @@ def resolve_distributed_strategy(
     if not strategy:
         if world_size == 1:
             strategy = "single"
-        elif os.environ.get("ACCELERATE_USE_FSDP", "").lower() == "true":
-            strategy = "fsdp"
         else:
             strategy = "ddp"
 
-    if strategy not in {"single", "ddp", "fsdp"}:
+    if strategy not in {"single", "ddp"}:
         raise ValueError(
-            f"distributed strategy must be single, ddp, or fsdp; got {strategy!r}"
+            f"distributed strategy must be single or ddp; got {strategy!r}"
         )
     if strategy == "single" and world_size != 1:
         raise RuntimeError(
             f"single-process topology cannot use world_size={world_size}"
         )
-    if strategy in {"ddp", "fsdp"} and world_size < 2:
+    if strategy == "ddp" and world_size < 2:
         raise RuntimeError(
             f"{strategy} topology requires at least two processes"
         )
@@ -370,7 +368,7 @@ def tokenized_data_identity(tokenized_dir: Path) -> dict:
             "implementation_sha256",
             "binary_sha256",
             "tokenizer_file_sha256",
-            "frozen_split_sha256",
+            "test_split_sha256",
             "vocab_size",
         )
         missing_metadata = [
@@ -399,7 +397,7 @@ def tokenized_data_identity(tokenized_dir: Path) -> dict:
             "implementation_sha256": metadata["implementation_sha256"],
             "binary_sha256": metadata["binary_sha256"],
             "tokenizer_file_sha256": metadata["tokenizer_file_sha256"],
-            "frozen_split_sha256": metadata["frozen_split_sha256"],
+            "test_split_sha256": metadata["test_split_sha256"],
             "vocab_size": metadata["vocab_size"],
         }
         if metadata["dtype"] != "uint16" or binary_path.stat().st_size != metadata["n_tokens"] * 2:
@@ -408,13 +406,13 @@ def tokenized_data_identity(tokenized_dir: Path) -> dict:
         if sha256_file(binary_path) != metadata["binary_sha256"]:
             raise RuntimeError(f"Binary fingerprint mismatch: {binary_path}")
 
-    frozen = load_contract(tokenized_dir, stage="validated")
+    holdout = load_contract(tokenized_dir, stage="validated")
     for split, meta in split_metadata.items():
-        expected = frozen["contract"]["splits"][split]
-        if (meta["frozen_split_sha256"] != frozen["sha256"]
+        expected = holdout["contract"]["splits"][split]
+        if (meta["test_split_sha256"] != holdout["sha256"]
                 or meta["input_sha256"] != expected["sha256"]
                 or meta["n_docs"] != expected["documents"]):
-            raise RuntimeError(f"Tokenized {split} does not match the frozen holdout contract")
+            raise RuntimeError(f"Tokenized {split} does not match the holdout contract")
         for field in ("tokenizer_sha256", "bos_id", "eos_id", "vocab_size", "format_version"):
             if meta[field] != split_metadata["train"][field]:
                 raise RuntimeError(f"Mixed tokenized artifact set: {split}.{field}")
@@ -442,7 +440,7 @@ def tokenized_data_identity(tokenized_dir: Path) -> dict:
             for field in required_manifest_fields
         },
         "splits": splits,
-        "frozen_split_sha256": frozen["sha256"],
+        "test_split_sha256": holdout["sha256"],
         "realized_mixture": {
             "report_sha256": stable_digest(mixture),
             "contract_sha256": mixture["contract_sha256"],
@@ -792,7 +790,7 @@ def main():
     )
     parser.add_argument(
         "--distributed-strategy",
-        choices=["single", "ddp", "fsdp"],
+        choices=["single", "ddp"],
         default=None,
         help="Optional topology identity; otherwise inferred from the launched world",
     )
@@ -800,14 +798,7 @@ def main():
     parser.add_argument("--dataset-run-id", default=os.environ.get("DATASET_RUN_ID"))
     parser.add_argument("--data-dir", type=Path, default=DATA_DIR)
     parser.add_argument("--results-dir", type=Path, default=RESULTS_DIR)
-    parser.add_argument("--benchmark-steps", type=int, default=0)
-    parser.add_argument("--benchmark-warmup", type=int, default=10)
-    parser.add_argument("--benchmark-output", type=Path)
     args = parser.parse_args()
-    if args.benchmark_steps and (args.resume or args.preflight_only or not args.benchmark_output):
-        parser.error("Benchmark requires --benchmark-output and cannot resume or run preflight-only")
-    if args.benchmark_steps < 0 or args.benchmark_warmup < 1:
-        parser.error("Benchmark steps must be nonnegative and warmup positive")
 
     cfg        = load_config(args.config)
     model_name = cfg["name"]
@@ -828,10 +819,6 @@ def main():
     else:
         output_dir = args.results_dir / "runs" / _size_from_model_name(model_name) / "pretrain"
 
-    if args.benchmark_steps:
-        output_dir = args.benchmark_output.parent / "runtime"
-        if output_dir.exists():
-            raise RuntimeError("Benchmark output must be fresh; production output directories are never reused")
     log.info(f"=== SLM Pretraining ===")
     log.info(f"Config:     {args.config}")
     log.info(f"Model:      {model_name}")
@@ -959,7 +946,7 @@ def main():
         log.info("Pretraining preflight passed; no model weights were allocated.")
         return
 
-    if _is_rank_zero() and not args.benchmark_steps:
+    if _is_rank_zero():
         validate_or_write_pretrain_audit(
             output_dir,
             run_contract,
@@ -967,18 +954,6 @@ def main():
             write=True,
         )
 
-    if args.benchmark_steps:
-        from transformers import set_seed
-        from transformers.trainer_utils import IntervalStrategy, SaveStrategy
-        # Keep the original scheduler/max_steps/optimizer. The callback stops
-        # early, rather than shortening the learning-rate schedule.
-        if training_args.max_steps < args.benchmark_steps + args.benchmark_warmup:
-            raise RuntimeError("Benchmark is longer than the configured training run")
-        training_args.save_strategy = SaveStrategy.NO
-        training_args.eval_strategy = IntervalStrategy.NO
-        training_args.logging_strategy = IntervalStrategy.NO
-        training_args.report_to = []
-        set_seed(training_args.seed)
     log.info("Initializing model from scratch...")
     model = SLMForCausalLM(model_config)
     n_params = sum(p.numel() for p in model.parameters())
@@ -1012,11 +987,7 @@ def main():
     from pretrain.diagnostics import make_probe_callback
     probe_cfg = cfg.get("generation_probes", {})
     callbacks = [VRAMProbe()]
-    if args.benchmark_steps:
-        from pretrain.benchmark import make_measurement_callback
-        measurement = make_measurement_callback(args.benchmark_warmup, args.benchmark_steps)
-        callbacks = [measurement]
-    elif probe_cfg.get("enabled", True):
+    if probe_cfg.get("enabled", True):
         callbacks.append(make_probe_callback(tokenizer_dir, output_dir, probe_cfg))
     trainer = SLMTrainer(
         model=model,
@@ -1030,7 +1001,7 @@ def main():
         "run_baseline_eval",
         cfg.get("training", {}).get("run_baseline_eval", True),
     )
-    if not args.resume and run_baseline_eval and not args.benchmark_steps:
+    if not args.resume and run_baseline_eval:
         log.info("Running baseline eval before training (step 0)...")
         baseline = trainer.evaluate()
         log.info(f"Baseline eval: {baseline}")
@@ -1041,13 +1012,6 @@ def main():
         torch.cuda.reset_peak_memory_stats()
     log.info("Starting training...")
     train_result = trainer.train(resume_from_checkpoint=resume_checkpoint if args.resume else None)
-    if args.benchmark_steps:
-        from pretrain.benchmark import finish_measurement
-        finish_measurement(trainer, measurement, cfg, run_contract, args.benchmark_output, seq_len)
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            torch.distributed.barrier()
-            torch.distributed.destroy_process_group()
-        return
     trainer.save_metrics("train", train_result.metrics)
     trainer.save_state()
     final_dir = output_dir / "final"

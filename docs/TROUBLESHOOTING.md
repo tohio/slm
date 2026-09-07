@@ -5,17 +5,18 @@ and artifact-transfer failures.
 
 ## Environment configuration
 
-Confirm that `.env` contains no blank values or placeholders:
+Check required common/selected-backend settings rather than requiring every
+optional field in `.env.sample` to be populated:
 
 ```bash
-grep -nE '=\.\.\.|^[A-Z][A-Z0-9_]*=[[:space:]]*(#.*)?$' .env
-```
-
-No output means the check passed. Verify the installed package contract:
-
-```bash
+make check-env
 .venv/bin/python infra/verify_environment.py --profile curation
 ```
+
+These are diagnostic commands; normal setup/entry points invoke the relevant
+checks internally. On a training host select `--profile training` instead.
+`INSTALLER=uv` or `conda` requires that installer to be available. Do not mix a
+conda prefix and a pip/uv venv at `.venv`, or install both role stacks together.
 
 ## Hugging Face dataset access
 
@@ -129,6 +130,18 @@ make artifacts-upload \
   RUN_ID=125m-YYYYMMDD-abcdef \
   ARTIFACT_STAGES="validated,tokenized,tokenizer,metadata"
 ```
+
+## HF artifact failures
+
+Dataset transfers use `HF_DATASET_REPO` and `HF_TOKEN`. Bucket objects use
+`HF_ARTIFACT_BUCKET=namespace/bucket` with **HF-generated** S3 keys, not AWS keys
+or the Hub token. Only credentials for the selected stages are needed. Confirm
+Bucket creation/permissions and that Dataset access uses the intended account.
+See [HF routing](PRETRAINING_DATA.md#s3-and-hugging-face-routing).
+
+A failed restore leaves `_RESTORE_PENDING.json` so training cannot consume a
+partial dataset. Repeat the same run/stages; use `ARTIFACT_OVERWRITE=1` for
+corrupt same-size local files. Do not delete the marker to bypass verification.
 
 ## GPU environment failures
 

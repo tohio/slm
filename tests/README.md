@@ -36,17 +36,8 @@ Pytest options defined in `conftest.py`:
 Use the Make targets documented in [`docs/TESTING.md`](../docs/TESTING.md) for
 normal execution so the correct options and environment variables are applied.
 Model, export, TRL, and training-argument tests require the pinned training
-stack (`make install-training` on CPU or `make install-gpu` on a GPU host), not
+stack installed by `make setup-train`, not
 the separate Transformers 4.57.6 curation environment.
 
-## Consolidated frozen pretraining workflow
-
-See [Frozen pretraining and dataset reuse](../docs/FROZEN_PRETRAINING.md) for the train/val/test roles,
-existing-Mini migration, matched `DATASET_SIZE` artifacts and model budgets,
-S3/HF backend selection, retention/restore, environment separation, fixed probes,
-size-aware final evaluation, and hardware experiments. New Make targets include
-`freeze-test`, `regenerate-mini-frozen`, `artifacts-index`, `test-frozen-contract`,
-`pretrain-probes`, `eval-pretrain-final`, and `pretrain-benchmark`.
-
-`GPUS=N` means the user-selected GPU count, not a fixed requirement. Generate
-the matching Mini/production config before launch; Smoke remains separate.
+RoPE reload coverage remains in `model/test_rope_loading.py`. Extend the existing
+pipeline/contract tests only where needed; no parallel test framework is used.

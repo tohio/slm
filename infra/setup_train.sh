@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# infra/setup_gpu_instance.sh
+# infra/setup_train.sh
 # Setup script for a GPU training instance.
 #
 # Safe to re-run after a preemptible VM restart — idempotent throughout.
@@ -8,13 +8,13 @@
 # so DATA_DIR is consistent across all tools and make targets.
 #
 # Usage:
-#   bash infra/setup_gpu_instance.sh
-#   bash infra/setup_gpu_instance.sh --data-dir /mnt/persistent
-#   bash infra/setup_gpu_instance.sh --data-dir /mnt/persistent --skip-data
-#   bash infra/setup_gpu_instance.sh --data-dir /mnt/persistent --size 125m --run-id 125m-20260412-a8f3c9
+#   bash infra/setup_train.sh
+#   bash infra/setup_train.sh --data-dir /mnt/persistent
+#   bash infra/setup_train.sh --data-dir /mnt/persistent --skip-data
+#   bash infra/setup_train.sh --data-dir /mnt/persistent --size 125m --run-id 125m-20260412-a8f3c9
 #
 # Or via make:
-#   make setup-gpu DATA_DIR=/mnt/persistent SIZE=125m RUN_ID=125m-20260412-a8f3c9
+#   make setup-train DATA_DIR=/mnt/persistent SIZE=125m RUN_ID=125m-20260412-a8f3c9
 # ─────────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -32,15 +32,20 @@ fi
 DATA_DIR="${DATA_DIR:-$REPO_DIR/data}"
 RESULTS_DIR="${RESULTS_DIR:-$REPO_DIR/results}"
 SKIP_DATA=false
+INSTALLER="${INSTALLER:-pip}"
+VENV_DIR="$REPO_DIR/.venv"
 SKIP_PYTHON=false
 RUN_ID="${RUN_ID:-}"
 SIZE="${SIZE:-125m}"
 DATASET_SIZE="${DATASET_SIZE:-}"
 ARTIFACT_BACKEND="${ARTIFACT_BACKEND:-s3}"
+RESTORE_STAGES="${ARTIFACT_STAGES:-tokenized,tokenizer,metadata}"
 
 # ── Arg parsing ───────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --installer) INSTALLER="${2:?--installer requires a value}"; shift 2 ;;
+        --help|-h) echo "make setup-train [INSTALLER=pip|uv|conda] [DATA_DIR=path] [DATASET_SIZE=size DATASET_RUN_ID=id]"; exit 0 ;;
         --skip-data)    SKIP_DATA=true;          shift ;;
         --skip-python)  SKIP_PYTHON=true;        shift ;;
         --data-dir)     DATA_DIR="$2";           shift 2 ;;
@@ -49,12 +54,17 @@ while [[ $# -gt 0 ]]; do
         --run-id=*)     RUN_ID="${1#*=}";        shift ;;
         --dataset-size) DATASET_SIZE="$2"; shift 2 ;;
         --backend)      ARTIFACT_BACKEND="$2"; shift 2 ;;
+        --stages)       RESTORE_STAGES="${2:?--stages requires a value}"; shift 2 ;;
         --size)         SIZE="$2";               shift 2 ;;
         --size=*)       SIZE="${1#*=}";          shift ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
 
+source "$REPO_DIR/infra/setup_environment.sh"
+check_installer
+cd "$REPO_DIR"
+DATA_DIR="$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$DATA_DIR")"
 HF_CACHE_DIR="$(dirname "$DATA_DIR")/hf_cache"
 DATASET_SIZE="${DATASET_SIZE:-$SIZE}"
 RUN_DATA_DIR="$DATA_DIR/runs/$DATASET_SIZE"
@@ -139,17 +149,8 @@ else
     log "Setting up Python environment..."
     cd "$REPO_DIR"
 
-    if [[ ! -d ".venv" ]]; then
-        python3.12 -m venv .venv
-        log "  ✓ Virtual environment created"
-    fi
-
-    .venv/bin/pip install --upgrade pip --quiet
-
-    log "  Installing validated PyTorch/Hugging Face stack with CUDA 13.0..."
-    .venv/bin/pip install --upgrade -r requirements-gpu.txt --quiet
-
-    .venv/bin/python infra/verify_environment.py --require-cuda
+    install_environment "$REPO_DIR/requirements-training.txt"
+    run_environment "$VENV_DIR/bin/python" infra/verify_environment.py --require-cuda
 
     log "  ✓ Python dependencies installed"
 fi
@@ -181,12 +182,12 @@ log "Configuring ~/.bashrc..."
 
 BASHRC_MARKER="# SLM GPU environment"
 BASHRC_BLOCK="
-${BASHRC_MARKER} (managed by infra/setup_gpu_instance.sh)
+${BASHRC_MARKER} (managed by infra/setup_train.sh)
 export DATA_DIR=${DATA_DIR}
 export HF_HOME=${HF_CACHE_DIR}
 export HF_DATASETS_CACHE=${HF_CACHE_DIR}
 export RESULTS_DIR=${RESULTS_DIR}
-source ${REPO_DIR}/.venv/bin/activate
+$(activation_command)
 "
 
 if grep -q "$BASHRC_MARKER" ~/.bashrc; then
@@ -203,31 +204,22 @@ export HF_HOME="$HF_CACHE_DIR"
 export HF_DATASETS_CACHE="$HF_CACHE_DIR"
 export RESULTS_DIR="$RESULTS_DIR"
 
-# ── Configure accelerate ──────────────────────────────────────────────────────
-log "Configuring accelerate (single GPU — run make accelerate-config-multi for full training)..."
-mkdir -p ~/.cache/huggingface/accelerate
-cp "$REPO_DIR/accelerate_configs/single_gpu.yaml" \
-   ~/.cache/huggingface/accelerate/default_config.yaml
-log "  ✓ accelerate configured for single GPU"
-
-# ── Pull run-scoped artifacts from S3 ─────────────────────────────────────────
+# ── Pull selected run-scoped artifacts ─────────────────────────────────────────
 if [[ "$SKIP_DATA" == "true" ]]; then
-    log "[SKIP] S3 artifact pull (--skip-data)"
+    log "[SKIP] Artifact pull (--skip-data)"
 elif [[ "$ARTIFACT_BACKEND" == "s3" && -z "${S3_BUCKET:-}" ]]; then
     log "WARNING: S3_BUCKET not set in .env — skipping artifact pull"
-    log "  Run manually: make artifacts-download SIZE=$SIZE DATASET_SIZE=$DATASET_SIZE DATASET_RUN_ID=<run_id> ARTIFACT_STAGES=validated,tokenized,tokenizer,metadata"
+    log "  Run manually: make artifacts-download SIZE=$SIZE DATASET_SIZE=$DATASET_SIZE DATASET_RUN_ID=<run_id> ARTIFACT_STAGES=tokenized,tokenizer,metadata"
 elif [[ -z "$RUN_ID" ]]; then
-    log "ERROR: RUN_ID is required for GPU artifact restore"
-    log "  Example: make setup-gpu DATA_DIR=$DATA_DIR SIZE=$SIZE DATASET_SIZE=$DATASET_SIZE DATASET_RUN_ID=${DATASET_SIZE}-YYYYMMDD-a8f3c9"
-    exit 1
+    log "No dataset RUN_ID selected; environment setup only. Restore artifacts explicitly when ready."
 else
     cd "$REPO_DIR"
 
     log "Restoring $ARTIFACT_BACKEND artifacts (model=$SIZE, dataset=$DATASET_SIZE, run_id=$RUN_ID)..."
-    .venv/bin/python curator/scripts/upload_s3.py artifacts-download \
+    run_environment "$VENV_DIR/bin/python" curator/scripts/upload_s3.py artifacts-download \
         --size "$DATASET_SIZE" \
-        --run-id "$RUN_ID" --backend "$ARTIFACT_BACKEND" --retention training-ready \
-        --stages "validated,tokenized,tokenizer,metadata"
+        --run-id "$RUN_ID" --backend "$ARTIFACT_BACKEND" \
+        --stages "$RESTORE_STAGES"
 
     TRAIN_BIN="$RUN_DATA_DIR/tokenized/train.bin"
     if [[ -f "$TRAIN_BIN" ]]; then
@@ -264,9 +256,7 @@ log ""
 log "Next steps (N is the number of GPUs you choose; no GPU family/count is required):"
 log "  source ~/.bashrc"
 log "  vi .env                                    # verify credentials: S3_BUCKET, AWS keys, WANDB_API_KEY, HF_TOKEN"
-log "  make pretrain-mini GPUS=1                  # validate training loop"
-log "  make accelerate-config-multi GPUS=N        # configure for full run"
-log "  make config-gen-pretrain SIZE=$SIZE GPUS=N"
+log "  make config-gen SIZE=$SIZE GPUS=N"
 log "  make pretrain SIZE=$SIZE DATASET_SIZE=$DATASET_SIZE DATASET_RUN_ID=$RUN_ID GPUS=N            # full pretraining"
 log ""
 log "GPU monitoring:"

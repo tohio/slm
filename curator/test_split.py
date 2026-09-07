@@ -1,12 +1,11 @@
-"""Freeze a test split from an existing blend without reshuffling validation.
+"""Establish a test split during curation without reshuffling validation.
 
-This is an upgrade of the existing curated stage, not a new artifact stage.
+This belongs to the existing curated stage, not a separate artifact stage.
 All work happens beside the original directory and is promoted only after all
 three existing exact/MinHash pair policies and physical counts pass.
 """
 from __future__ import annotations
 
-import argparse
 import heapq
 import hashlib
 import json
@@ -19,7 +18,6 @@ from config.holdout import (
     CONTRACT_NAME, SCHEMA_VERSION, SPLITS, jsonl_identity,
     verify_jsonl_contract, write_contract,
 )
-from config.paths import curated_dir
 from curator.state import load_manifest, manifest_outputs_match, stable_digest, write_manifest
 
 log = logging.getLogger(__name__)
@@ -73,7 +71,7 @@ def _near_pair(candidate: Path, reference: Path, scratch: Path, workers: int | N
     return report
 
 
-def freeze_test_split(directory: Path, *, size: str, seed: int = 42,
+def establish_test_split(directory: Path, *, size: str, seed: int = 42,
                       test_fraction: float = 0.005, workers: int | None = None) -> dict:
     from curator.filters.dedup import exact_hash, MINHASH_CONTRACT
     from curator.filters.overlap import audit_exact_split_overlap
@@ -86,21 +84,21 @@ def freeze_test_split(directory: Path, *, size: str, seed: int = 42,
         policy = existing["contract"]["selection"]
         if (policy["seed"] != seed or policy["target_total_fraction"] != test_fraction
                 or existing["contract"]["size"] != size):
-            raise RuntimeError("Frozen test selection cannot change; use a new dataset run")
+            raise RuntimeError("Test selection cannot change; use a new dataset run")
         if not manifest_outputs_match(directory, output_pattern="*.json*"):
-            raise RuntimeError("Frozen curated stage is not manifest-complete; restore it")
-        log.info("Reusing verified frozen train/val/test membership: %s", directory)
+            raise RuntimeError("Test curated stage is not manifest-complete; restore it")
+        log.info("Reusing verified holdout train/val/test membership: %s", directory)
         return existing
 
-    stage = directory.with_name(f".{directory.name}.freeze-pending")
-    backup = directory.with_name(f".{directory.name}.before-freeze")
+    stage = directory.with_name(f".{directory.name}.split-pending")
+    backup = directory.with_name(f".{directory.name}.before-split")
     if stage.exists() or backup.exists():
         raise RuntimeError(
-            f"Interrupted freeze transaction: {stage} / {backup}. "
+            f"Interrupted test split transaction: {stage} / {backup}. "
             "Recover the complete directory before retrying; do not reselect test."
         )
     if (directory / "test.jsonl").exists():
-        raise RuntimeError("test.jsonl exists without its frozen contract; restore its metadata")
+        raise RuntimeError("test.jsonl exists without its holdout contract; restore its metadata")
     if not manifest_outputs_match(directory, output_pattern="*.json*"):
         raise RuntimeError(f"Curated inputs are not manifest-complete: {directory}")
     manifest = load_manifest(directory)
@@ -109,7 +107,7 @@ def freeze_test_split(directory: Path, *, size: str, seed: int = 42,
         raise RuntimeError("Both original train and validation must be non-empty")
     count = max(1, round(sum(x["documents"] for x in origin.values()) * test_fraction))
     if count >= origin["train"]["documents"]:
-        raise RuntimeError("Not enough training documents to create a non-empty frozen test")
+        raise RuntimeError("Not enough training documents to create a non-empty holdout test")
 
     # Bottom-k stable hash groups: memory is proportional to the small holdout,
     # not to the training corpus. Normalized duplicates stay on the same side.
@@ -160,10 +158,10 @@ def freeze_test_split(directory: Path, *, size: str, seed: int = 42,
             reports[f"{candidate}_{reference}"]["final_exact"] = report
         identities = {split: jsonl_identity(stage / f"{split}.jsonl") for split in SPLITS}
         if identities["val"] != origin["val"]:
-            raise RuntimeError("Validation changed during test freeze; refusing promotion")
+            raise RuntimeError("Validation changed during test split; refusing promotion")
         removed = sum(r["exact_removals"]["removed_documents"] + r["near"]["removed_train_documents"] for r in reports.values())
         if sum(x["documents"] for x in origin.values()) != sum(x["documents"] for x in identities.values()) + removed:
-            raise RuntimeError("Frozen split total/removal accounting mismatch")
+            raise RuntimeError("Test split total/removal accounting mismatch")
         membership = hashlib.sha256()
         membership_path = stage / "test_membership.jsonl"
         with membership_path.open("wb") as handle:
@@ -173,8 +171,8 @@ def freeze_test_split(directory: Path, *, size: str, seed: int = 42,
                 line = (json.dumps(row, sort_keys=True) + "\n").encode("utf-8")
                 membership.update(line)
                 handle.write(line)
-        frozen = write_contract(stage, {
-            "schema_version": SCHEMA_VERSION, "status": "frozen", "stage": "curated",
+        holdout = write_contract(stage, {
+            "schema_version": SCHEMA_VERSION, "status": "established", "stage": "curated",
             "size": size, "selection": {"algorithm": "bottom_k_sha256_seed_normalized_exact_hash",
                 "seed": seed, "target_total_fraction": test_fraction, "candidate_groups": len(selected)},
             "origin": {"splits": origin, "blend_manifest_sha256": stable_digest(manifest),
@@ -182,24 +180,24 @@ def freeze_test_split(directory: Path, *, size: str, seed: int = 42,
             "splits": identities, "test_membership_sha256": membership.hexdigest(),
             "minhash": MINHASH_CONTRACT, "pair_audits": reports,
             "training_contract": {"train": "gradient_updates", "val": "training_time_selection",
-                                  "test": "frozen_final_only"},
+                                  "test": "final_only"},
         })
         stats_path = stage / "blend_stats.json"
         if stats_path.is_file():
             stats = json.loads(stats_path.read_text())
-            stats["before_test_freeze"] = {k: stats.get(k) for k in ("total_documents", "train_documents", "val_documents", "source_mix")}
+            stats["before_test_split"] = {k: stats.get(k) for k in ("total_documents", "train_documents", "val_documents", "source_mix")}
             stats.update({"total_documents": sum(x["documents"] for x in identities.values()),
                           **{f"{split}_documents": identities[split]["documents"] for split in SPLITS},
-                          "test_freeze_removed_documents": removed,
-                          "frozen_split_sha256": frozen["sha256"]})
-            # The pre-freeze mix remains auditable; report final physical source
+                          "test_split_removed_documents": removed,
+                          "test_split_sha256": holdout["sha256"]})
+            # The pre-split mix remains auditable; report final physical source
             # counts separately instead of pretending removals never happened.
             stats["final_split_source_counts"] = {split: identities[split]["sources"] for split in SPLITS}
             from curator.state import atomic_write_json
             atomic_write_json(stats_path, stats)
         write_manifest(stage, stage=manifest["stage"], contract=manifest["contract"],
                        input_signature=manifest["input_signature"], output_pattern="*.json*",
-                       metadata={**manifest.get("metadata", {}), "frozen_split_sha256": frozen["sha256"]})
+                       metadata={**manifest.get("metadata", {}), "test_split_sha256": holdout["sha256"]})
         directory.rename(backup)
         try:
             stage.rename(directory)
@@ -208,24 +206,8 @@ def freeze_test_split(directory: Path, *, size: str, seed: int = 42,
             raise
         promoted = True
         shutil.rmtree(backup)
-        log.info("Frozen test established: %s", {s: x["documents"] for s, x in identities.items()})
-        return frozen
+        log.info("Test established: %s", {s: x["documents"] for s, x in identities.items()})
+        return holdout
     finally:
         if not promoted and stage.exists() and directory.exists():
             shutil.rmtree(stage)
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--size", choices=["smoke", "mini", "125m", "350m", "1b"], required=True)
-    parser.add_argument("--workers", type=int)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--test-fraction", type=float, default=0.005)
-    args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO)
-    freeze_test_split(curated_dir(args.size), size=args.size, workers=args.workers,
-                      seed=args.seed, test_fraction=args.test_fraction)
-
-
-if __name__ == "__main__":
-    main()

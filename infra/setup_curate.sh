@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# infra/setup.sh
+# infra/setup_curate.sh
 # ---------------
 # Bootstrap script for a fresh Ubuntu 22.04 instance.
 # Run once after cloning the repo to set up the environment.
 #
 # Usage:
-#   bash infra/setup.sh [--data-dir /data/slm/data]
+#   bash infra/setup_curate.sh [--data-dir /data/slm/data]
 #
 # The script:
 #   1. Installs system dependencies (Python 3.12, gcc, build tools)
@@ -28,16 +28,22 @@ set -euo pipefail
 # ── Config ────────────────────────────────────────────────────────────────────
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DEFAULT_DATA_DIR="${REPO_DIR}/data"
-DATA_DIR="${1:-$DEFAULT_DATA_DIR}"
-
-# Parse --data-dir flag
-for arg in "$@"; do
-    case $arg in
-        --data-dir=*) DATA_DIR="${arg#*=}" ;;
-        --data-dir)   shift; DATA_DIR="$1" ;;
+DATA_DIR="${DATA_DIR:-${REPO_DIR}/data}"
+INSTALLER="${INSTALLER:-pip}"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --installer) INSTALLER="${2:?--installer requires a value}"; shift 2 ;;
+        --data-dir) DATA_DIR="${2:?--data-dir requires a value}"; shift 2 ;;
+        --data-dir=*) DATA_DIR="${1#*=}"; shift ;;
+        --help|-h) echo "make setup-curate [INSTALLER=pip|uv|conda] [DATA_DIR=path]"; exit 0 ;;
+        *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
 done
+source "$REPO_DIR/infra/setup_environment.sh"
+check_installer
+cd "$REPO_DIR"
+# Store an absolute data path so setup and later invocations agree.
+DATA_DIR="$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$DATA_DIR")"
 
 HF_CACHE_DIR="$(dirname "$DATA_DIR")/hf_cache"
 VENV_DIR="${REPO_DIR}/.venv"
@@ -87,16 +93,8 @@ echo "  GCC:    $(gcc --version | head -1)"
 # ── 2. Virtual environment ────────────────────────────────────────────────────
 
 echo ""
-echo "==> Creating virtual environment at $VENV_DIR..."
-python3.12 -m venv "$VENV_DIR"
-source "$VENV_DIR/bin/activate"
-pip install --upgrade pip --quiet
-
-# ── 3. Python dependencies ────────────────────────────────────────────────────
-
-echo ""
-echo "==> Installing Python dependencies..."
-pip install -r "${REPO_DIR}/requirements-curation.txt"
+echo "==> Installing curation environment ($INSTALLER) at $VENV_DIR..."
+install_environment "${REPO_DIR}/requirements-curation.txt"
 
 # ── 4. KenLM Python bindings ──────────────────────────────────────────────────
 # KenLM is not on PyPI — must be built from source.
@@ -104,14 +102,14 @@ pip install -r "${REPO_DIR}/requirements-curation.txt"
 
 echo ""
 echo "==> Installing KenLM Python bindings..."
-pip install https://github.com/kpu/kenlm/archive/master.zip
+install_packages https://github.com/kpu/kenlm/archive/master.zip
 echo "  KenLM installed"
 
 # ── 5. spaCy English model ────────────────────────────────────────────────────
 
 echo ""
 echo "==> Downloading spaCy English model..."
-python -m spacy download en_core_web_sm
+run_environment "$VENV_DIR/bin/python" -m spacy download en_core_web_sm
 
 # ── 6. Data directory structure ───────────────────────────────────────────────
 # Curation artifacts are run-scoped under data/runs/<size>/. Source classes
@@ -129,7 +127,7 @@ python -m spacy download en_core_web_sm
 echo ""
 echo "==> Creating data directory structure at $DATA_DIR..."
 
-CURATION_SIZES=("mini" "125m" "350m" "1b")
+CURATION_SIZES=("smoke" "mini" "125m" "350m" "1b")
 
 mkdir -p \
     "${DATA_DIR}/raw" \
@@ -199,18 +197,17 @@ echo ""
 echo "==> Adding environment variables to ~/.bashrc..."
 
 BASHRC_BLOCK="
-# SLM environment (added by infra/setup.sh)
+# SLM environment (added by infra/setup_curate.sh)
 export HF_HOME=${HF_CACHE_DIR}
 export HF_DATASETS_CACHE=${HF_CACHE_DIR}
 export DATA_DIR=${DATA_DIR}
 "
 
-if ! grep -q "SLM environment" ~/.bashrc; then
-    echo "$BASHRC_BLOCK" >> ~/.bashrc
-    echo "  Added to ~/.bashrc"
-else
-    echo "  Already present in ~/.bashrc — skipping"
+if grep -q "^# SLM environment" ~/.bashrc; then
+    sed -i "/^# SLM environment/,/^$/d" ~/.bashrc
 fi
+echo "$BASHRC_BLOCK" >> ~/.bashrc
+echo "  Updated ~/.bashrc"
 
 # Export for current session
 export HF_HOME="${HF_CACHE_DIR}"
@@ -225,20 +222,20 @@ echo "==> Validating environment..."
 ERRORS=0
 
 # Verify the curation stack. The GPU training stack is installed and checked
-# separately by setup_gpu_instance.sh.
-python "${REPO_DIR}/infra/verify_environment.py" --profile curation \
+# separately by setup_train.sh.
+run_environment "$VENV_DIR/bin/python" "${REPO_DIR}/infra/verify_environment.py" --profile curation \
     || ERRORS=$((ERRORS + 1))
 
 # Check unpinned curation packages that are outside the version contract.
-python -c "
+run_environment "$VENV_DIR/bin/python" -c "
 import boto3, datatrove, dotenv, fasttext, kenlm, orjson, requests, spacy
 import trafilatura, tqdm, warcio
 print('  Curation packages importable')
 " || ERRORS=$((ERRORS + 1))
 
 # Check spaCy model
-python -c "import spacy; spacy.load('en_core_web_sm'); print('  spaCy en_core_web_sm OK')" \
-    || { echo "  MISSING spaCy model — run: python -m spacy download en_core_web_sm"; ERRORS=$((ERRORS + 1)); }
+run_environment "$VENV_DIR/bin/python" -c "import spacy; spacy.load('en_core_web_sm'); print('  spaCy en_core_web_sm OK')" \
+    || { echo "  MISSING spaCy model — rerun make setup-curate INSTALLER=$INSTALLER"; ERRORS=$((ERRORS + 1)); }
 
 ## Check data directories
 for dir in "${DATA_DIR}/raw" "${DATA_DIR}/filtered" "${DATA_DIR}/curated" \
@@ -293,12 +290,9 @@ fi
 # not required for setup itself to succeed.
 echo ""
 echo "==> Checking .env variables..."
+# Storage settings depend on the later selected stages/destination. A
+# Dataset-only HF push must not require a Bucket (or any model repository).
 REQUIRED_VARS=("HF_TOKEN")
-if [[ "${ARTIFACT_BACKEND:-s3}" == "s3" ]]; then
-    REQUIRED_VARS+=("S3_BUCKET")  # SDK default chain supports IAM roles.
-else
-    REQUIRED_VARS+=("HF_ARTIFACT_BUCKET")
-fi
 MISSING_CREDS=0
 for var in "${REQUIRED_VARS[@]}"; do
     value=$(grep "^${var}=" "$ENV_FILE" | cut -d'=' -f2 || true)
@@ -319,22 +313,12 @@ if [ "$ERRORS" -eq 0 ]; then
     echo "========================================"
     echo ""
     echo "Next steps:"
-    if [ "$MISSING_CREDS" -gt 0 ]; then
-        echo "  1. Fill in missing credentials in ${ENV_FILE}"
-        echo "  2. source ~/.bashrc  (or open a new shell)"
-        echo "  3. source ${VENV_DIR}/bin/activate"
-        echo "  4. make download-fasttext-model DATA_DIR=${DATA_DIR}"
-        echo "  5. make download-kenlm-model    DATA_DIR=${DATA_DIR}"
-        echo "  6. make check-curation-prereqs  DATA_DIR=${DATA_DIR}"
-        echo "  7. Validate the curation pipeline with smoke:"
-    else
-        echo "  1. source ~/.bashrc  (or open a new shell)"
-        echo "  2. source ${VENV_DIR}/bin/activate"
-        echo "  3. make download-fasttext-model DATA_DIR=${DATA_DIR}"
-        echo "  4. make download-kenlm-model    DATA_DIR=${DATA_DIR}"
-        echo "  5. make check-curation-prereqs  DATA_DIR=${DATA_DIR}"
-        echo "  6. Validate the curation pipeline with smoke:"
-    fi
+    echo "  1. Review ${ENV_FILE}; configure only the storage destination you will use"
+    echo "  2. source ~/.bashrc  (or open a new shell)"
+    echo "  3. $(activation_command)"
+    echo "  4. make download-fasttext-model DATA_DIR=${DATA_DIR}"
+    echo "  5. make download-kenlm-model    DATA_DIR=${DATA_DIR}"
+    echo "  6. Validate the curation pipeline with smoke (prerequisite checks run internally):"
     echo "       make curate-smoke DATA_DIR=${DATA_DIR}"
     echo "       make validate SIZE=smoke DATA_DIR=${DATA_DIR}"
     echo ""

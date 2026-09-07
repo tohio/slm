@@ -44,34 +44,23 @@ See [Disk setup](DISK_SETUP.md) for mounting a secondary disk at `/data`.
 | `mini` | 1× 24 GB+ GPU | functional pilot |
 | `125m` | 1× A100 80GB / H100 / H200, or better | practical full run |
 | `350m` | 1–4× A100 80GB / H100 / H200, or better | use multi-GPU when available |
-| `1b` | 4–8× A100 80GB / H100 / H200, or better | prefer FSDP/multi-GPU |
+| `1b` | User-selected high-memory NVIDIA GPUs | DDP needs a full replica per GPU |
 
 ---
 
 ## Config generation
 
-Generate configs for the actual GPU count before training:
+Generate configs for the selected GPU count before training:
 
 ```bash
-make accelerate-config-single
-make config-gen SIZE=125m GPUS=1
+make config-gen SIZE=mini GPUS=1
+make config-gen SIZE=350m GPUS=N
 ```
 
-For multi-GPU:
-
-```bash
-make accelerate-config-multi GPUS=4
-make config-gen SIZE=125m GPUS=4
-```
-
-For larger runs with FSDP:
-
-```bash
-make accel-gen-fsdp GPUS=N
-make config-gen SIZE=1b GPUS=N
-```
-
-Use the same `GPUS` value for Accelerate setup, config generation, and training.
+Replace `N` with your chosen GPU count. The regular generator includes the DDP
+launch configuration when needed; no separate Accelerate setup step is required.
+Use the same count when launching. GPU-memory profiles are planning estimates,
+not measured throughput results or fixed requirements for a GPU family/count.
 
 ---
 

@@ -7,13 +7,13 @@ Default variables:
 ```bash
 SIZE=125m
 GPUS=1
+INSTALLER=pip
 DATA_DIR=data
 RESULTS_DIR=results
 EXPORTS_DIR=results/exports
 RUN_ID=
 ARTIFACT_BACKEND=s3
-ARTIFACT_RETENTION=training-ready
-ARTIFACT_STAGES=validated,tokenized,tokenizer,metadata
+ARTIFACT_STAGES=raw,tokenized,tokenizer,metadata
 DATASET_SIZE=$(SIZE)
 DATASET_RUN_ID=$(RUN_ID)
 ```
@@ -35,11 +35,10 @@ On a new CPU curation host, bootstrap the curation models and validate smoke
 before starting a larger run:
 
 ```bash
-make setup-data-dir DATA_DIR=/data/slm/data
+make setup-curate DATA_DIR=/data/slm/data
 source .venv/bin/activate
 make download-fasttext-model DATA_DIR=/data/slm/data
 make download-kenlm-model    DATA_DIR=/data/slm/data
-make check-curation-prereqs  DATA_DIR=/data/slm/data
 make curate-smoke            DATA_DIR=/data/slm/data
 make validate SIZE=smoke     DATA_DIR=/data/slm/data
 ```
@@ -64,8 +63,8 @@ make train-all \
   DATA_DIR=/data/slm/data
 ```
 
-Both commands require every value in `.env`. `curate-all` creates and uploads
-the training-ready artifacts. `train-all` restores that artifact run and
+Both commands check common and selected-backend environment settings.
+`curate-all` creates the corpus and uploads the stages selected by `ARTIFACT_STAGES`. `train-all` restores that artifact run and
 trains the base, instruct, code, and chat variants. It is restricted to new
 training runs; use the stage-specific resume targets after an interruption.
 
@@ -76,41 +75,43 @@ contracts and stage-by-stage commands.
 
 ## Setup
 
+Two host roles, each with pip/venv (default), uv, or conda:
+
 ```bash
-make setup
-make setup-data-dir DATA_DIR=/data/slm/data
-make install
-make install-training
-make install-gpu
-make install-uv
-make install-conda
+make setup-curate DATA_DIR=/data/slm/data
+make setup-curate INSTALLER=uv DATA_DIR=/data/slm/data
+make setup-curate INSTALLER=conda DATA_DIR=/data/slm/data
+
+make setup-train DATA_DIR=/data/slm/data
+make setup-train INSTALLER=uv DATA_DIR=/data/slm/data
+make setup-train INSTALLER=conda DATA_DIR=/data/slm/data
 ```
 
-`make install` selects the pinned curation/tokenizer stack.
-`make install-training` selects the CPU build of the pinned training stack for
-model/export/unit tests. `make install-gpu` selects the CUDA build of that same
-training stack. These targets all manage `.venv`; choose the one for the current
-host role rather than layering incompatible Transformers versions together.
+Choose one installer per host; these are alternatives, not a sequence to run in
+one checkout. `setup-curate` installs `requirements-curation.txt` and owns KenLM,
+FastText/orjson, and curation verification. `setup-train` installs the complete
+GPU/evaluation stack from `requirements-training.txt`. Both include shared
+`requirements.txt`. All installers use `.venv`. See [setup details](../infra/README.md).
 
-Curation prerequisites:
+Download required curation model assets before curation:
 
 ```bash
-make install-kenlm
 make download-fasttext-model DATA_DIR=/data/slm/data
-make download-kenlm-model    DATA_DIR=/data/slm/data
-make check-curation-prereqs  DATA_DIR=/data/slm/data
+make download-kenlm-model DATA_DIR=/data/slm/data
 ```
 
-All curation execution targets use `check-curation-prereqs` and fail before
-source work starts if FastText or either KenLM model file is missing.
+The curation prerequisite and training environment checks are internal workflow
+safeguards, not additional setup steps to remember.
 
-GPU restore:
+To set up training and restore a source dataset in the same command:
 
 ```bash
-make setup-gpu DATA_DIR=/data/slm/data SIZE=125m RUN_ID=125m-20260629-a8f3c9
+make setup-train SIZE=mini DATASET_SIZE=350m DATASET_RUN_ID=350m-YYYYMMDD-abcdef
 ```
 
-`setup-gpu` requires `RUN_ID` when restoring tokenized artifacts from S3.
+No run ID means setup only. Setup restoration defaults to
+`tokenized,tokenizer,metadata`; override `ARTIFACT_STAGES` to include validated
+text for test-document completions. Source artifacts remain under `DATASET_SIZE`.
 
 ---
 
@@ -199,6 +200,13 @@ make artifacts-download SIZE=125m RUN_ID=125m-20260629-a8f3c9
 make artifacts-download SIZE=125m RUN_ID=125m-20260629-a8f3c9 ARTIFACT_STAGES="validated,tokenized,tokenizer,metadata"
 ```
 
+Set `ARTIFACT_BACKEND=hf` to route `curated`/`validated` stages to an HF Dataset
+repository and the remaining stages to an HF Storage Bucket. S3 remains the
+default; no simultaneous upload occurs. Stage selection and explicit overwrite
+remain user-controlled, with no retention profiles. See
+[artifact routing and restoration](PRETRAINING_DATA.md#user-selected-artifact-transfer)
+for credentials, generic Bucket objects, and integrity behavior.
+
 Valid stages:
 
 ```text
@@ -225,17 +233,9 @@ make config-gen SIZE=125m GPUS=4 GPU=h200
 make config-gen SIZE=1b GPUS=N GPU=b200 MODE=aggressive
 ```
 
-Accelerate configs:
-
-```bash
-make accelerate-config-single
-make accelerate-config-multi GPUS=4
-make accel-gen-ddp GPUS=N
-make accel-gen-fsdp GPUS=N
-```
-
-Use the same `GPUS` value for Accelerate setup, config generation, and training.
-Training continues to pass `GPUS` directly to Accelerate as the process count.
+The same configuration flow generates the DDP launch file internally for
+`GPUS > 1`. Replace `N` with the GPU count you choose and use that count for
+configuration and training. Mini uses this flow; Smoke remains separate.
 
 ---
 
@@ -268,7 +268,8 @@ make test-pretrain-resume-ready SIZE=125m GPUS=1
 
 ## SFT
 
-Prepare data:
+Prepare data (optionally add `SFT_TOOL_DATA=/path/to/reviewed-tools.jsonl` to
+merge reviewed tool/no-tool conversations into instruct preparation):
 
 ```bash
 make prepare-sft SIZE=125m
@@ -359,7 +360,16 @@ results/runs/<size>/dpo_chat/final
 
 ## Evaluation
 
-Benchmark evaluation is optional.
+Benchmark evaluation is optional. All normal `eval-*` targets use `SIZE` and
+`runs/<size>/` for Mini, 125M, 350M, and 1B; Smoke remains separate.
+
+```bash
+make eval-pretrain-final SIZE=mini
+make pretrain-probes SIZE=mini
+```
+
+Final pretraining evaluation uses the matched test data/provenance. Generic
+probes and corpus-supported QA are separate from test loss/perplexity.
 
 ```bash
 make eval-base SIZE=125m
@@ -367,7 +377,7 @@ make eval-instruct SIZE=125m
 make eval-chat SIZE=125m
 make eval-code SIZE=125m
 make eval SIZE=125m
-make eval-mini SIZE=mini
+make eval-base SIZE=mini
 ```
 
 Sanity evaluation:
@@ -454,7 +464,7 @@ make test-sft-chat
 make test-dpo
 ```
 
-Unit tests (run under `make install-training` or `make install-gpu`):
+Unit tests (use the pinned training stack installed by `make setup-train`):
 
 ```bash
 make test-model
@@ -504,15 +514,3 @@ make clean-results
 make clean-logs
 make clean
 ```
-
-## Consolidated frozen pretraining workflow
-
-See [Frozen pretraining and dataset reuse](FROZEN_PRETRAINING.md) for the train/val/test roles,
-existing-Mini migration, matched `DATASET_SIZE` artifacts and model budgets,
-S3/HF backend selection, retention/restore, environment separation, fixed probes,
-size-aware final evaluation, and hardware experiments. New Make targets include
-`freeze-test`, `regenerate-mini-frozen`, `artifacts-index`, `test-frozen-contract`,
-`pretrain-probes`, `eval-pretrain-final`, and `pretrain-benchmark`.
-
-`GPUS=N` means the user-selected GPU count, not a fixed requirement. Generate
-the matching Mini/production config before launch; Smoke remains separate.

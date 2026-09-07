@@ -1,125 +1,107 @@
 # Infrastructure
 
-This directory bootstraps supported Ubuntu hosts and validates the pinned CPU
-or NVIDIA training environment.
+Bootstrap the existing Ubuntu curation/training host roles and verify their
+separate dependency stacks. Setup installs system packages, updates `.env` and
+shell configuration, and requires appropriate privileges; inspect scripts before
+running on an existing multi-purpose host.
 
 ## Contents
 
 | File | Purpose |
 |---|---|
-| `setup.sh` | Install a data-processing/development host and create persistent paths |
-| `setup_gpu_instance.sh` | Install the GPU stack, restore one run, and activate its tokenizer |
-| `verify_environment.py` | Check pinned package versions and optional CUDA requirements |
-| `gpu_smoke.py` | Dataset-free eager/compiled training and generation acceptance test |
+| `setup_curate.sh` | Curation bootstrap, KenLM build, spaCy model, paths, and verification |
+| `setup_train.sh` | GPU bootstrap, training stack, optional source-run restoration |
+| `setup_environment.sh` | Internal pip/uv/conda installer shared by both roles |
+| `verify_environment.py` | Pinned role versions and optional CUDA checks |
+| `gpu_smoke.py` | Dataset-free eager/compiled training and generation acceptance |
 
-The setup scripts install packages, create a virtual environment, update
-`.env`, and modify shell configuration. Read them before running on an
-existing multi-purpose host.
+## Setup by role
 
-## Data-processing host
-
-On a fresh Ubuntu 22.04 host:
+Prepare `.env` from `.env.sample`, selecting the data/results/export paths and
+credentials required by the chosen workflow. Use separate checkouts/environments
+for the two host roles; curation and training require different Transformers/Hub
+versions.
 
 ```bash
-cp .env.sample .env
-vi .env
-make setup-data-dir DATA_DIR=/data/slm/data
-source ~/.bashrc
-source .venv/bin/activate
+make setup-curate DATA_DIR=/data/slm/data
+make setup-train DATA_DIR=/data/slm/data
 ```
 
-Complete every variable in `.env` before running the setup target. Do not leave
-blank values or placeholders.
+`setup-curate` installs `requirements-curation.txt`, including KenLM build and
+orjson/FastText handling; `setup-train` installs the complete GPU and evaluation
+stack from `requirements-training.txt`. Both include the common
+`requirements.txt`. No separate GPU, evaluation, or HF-transfer requirements
+file is needed.
 
-Download the models used by language identification and perplexity validation:
+### Installer selection
+
+Both commands accept `INSTALLER=pip|uv|conda`; pip/venv is the default. Install
+uv or conda first when selecting it. All three place the environment in the
+checkout's `.venv`, so existing pipeline commands use the same Python path.
+Conda creates a Python 3.12 prefix and installs the role requirements with pip;
+it does not select a separate conda CUDA build. uv uses the same pinned CUDA
+wheel/index as pip.
+
+```bash
+make setup-curate INSTALLER=uv DATA_DIR=/data/slm/data
+make setup-train INSTALLER=conda DATA_DIR=/data/slm/data
+```
+
+These illustrate alternative hosts, not two roles to layer into one `.venv`.
+Activate a pip/uv environment with `source .venv/bin/activate`; for conda use
+`conda activate "$PWD/.venv"`. Switching between conda and venv requires moving
+an existing environment aside explicitly; setup does not silently delete it.
+
+## Curation assets
+
+Setup installs Python dependencies and verifies the curation package contract.
+The language-ID and perplexity model **assets** remain explicit downloads:
 
 ```bash
 make download-fasttext-model DATA_DIR=/data/slm/data
 make download-kenlm-model DATA_DIR=/data/slm/data
 ```
 
-`setup.sh` installs the full development/curation dependency set, KenLM
-bindings, and the spaCy English model. It creates run-scoped directories but
-does not accept dataset terms or supply credentials.
+Curation's internal prerequisite gate checks those three model files, `.env`,
+and pinned curation versions before source processing. Missing assets produce
+instructions and stop curation. Dataset access terms and credentials remain the
+operator's responsibility.
 
-## GPU training host
+## Training and optional restoration
 
-Complete every variable in `.env`, then restore one curation/tokenizer run:
+Training setup checks the existing NVIDIA/CUDA/BF16 contract and installs the
+pinned GPU stack. With no source run selected it performs setup only. With a
+source run selected it also restores the requested artifacts:
 
 ```bash
-make setup-gpu \
-  DATA_DIR=/data/slm/data \
-  SIZE=125m \
-  RUN_ID=125m-YYYYMMDD-abcdef
-
-source .venv/bin/activate
+make setup-train SIZE=mini DATASET_SIZE=350m DATASET_RUN_ID=350m-YYYYMMDD-abcdef \
+  DATA_DIR=/data/slm/data ARTIFACT_BACKEND=hf
 ```
 
-The GPU setup:
+The setup restore default is `tokenized,tokenizer,metadata`. Select additional
+stages explicitly, for example `ARTIFACT_STAGES=validated,tokenized,tokenizer,metadata`
+for final test-document completions. The source tokenizer stays under
+`runs/<dataset-size>/tokenizer`; model outputs remain under the model size.
 
-1. requires an NVIDIA driver new enough for the pinned CUDA 13.0 runtime;
-2. installs `requirements-gpu.txt`;
-3. verifies package versions, CUDA, native SM support, and BF16;
-4. restores `tokenized`, `tokenizer`, and `metadata` artifacts for the exact
-   run ID; and
-5. synchronizes that tokenizer into the runtime tokenizer directory.
-
-It does not restore curated/validated JSONL by default because pretraining
-reads the tokenized arrays.
-
-## Environment verification
-
-Check pinned Python packages on any installed host:
+The pinned stack requires CUDA runtime 13.0, driver 580.65.06 or newer, native
+GPU architecture support in the installed PyTorch wheel, and BF16 support.
+Internal training checks run again at relevant entry points. For diagnosis:
 
 ```bash
-.venv/bin/python infra/verify_environment.py
-```
-
-Require the complete NVIDIA contract:
-
-```bash
-.venv/bin/python infra/verify_environment.py --require-cuda
-```
-
-The CUDA check requires runtime 13.0, driver `580.65.06` or newer, a PyTorch
-wheel containing the detected compute capability, and BF16 support.
-
-## Dataset-free GPU acceptance
-
-Run after every GPU-image or dependency upgrade:
-
-```bash
+.venv/bin/python infra/verify_environment.py --profile training --require-cuda
 make test-gpu-gate
 ```
 
-The smoke test creates a tiny SLM model and verifies eager BF16 optimization,
-compiled optimization, finite gradients/losses, peak-memory reporting, and
-cached/uncached greedy-generation parity. It does not download data or load a
-trained checkpoint.
+The GPU gate uses a tiny model, not a production corpus or checkpoint. Passing it
+is not proof of model convergence or production throughput.
 
-Passing this gate establishes environment compatibility, not throughput or
-full-run convergence. Generate recipes for the actual GPU next:
+## Configure before launching
 
 ```bash
-make config-gen SIZE=125m GPUS=1
+make config-gen SIZE=mini GPUS=1
 ```
 
-## Operational notes
-
-- Use persistent storage for `$DATA_DIR`, `$RESULTS_DIR`, and `$EXPORTS_DIR`.
-- Keep a curation `RUN_ID` with the artifacts restored to a training host.
-- Re-run environment and GPU acceptance after changing any pinned framework,
-  CUDA wheel, driver, or GPU type.
-- vLLM uses its own runtime/image contract; validate serving separately.
-
-## Consolidated frozen pretraining workflow
-
-See [Frozen pretraining and dataset reuse](../docs/FROZEN_PRETRAINING.md) for the train/val/test roles,
-existing-Mini migration, matched `DATASET_SIZE` artifacts and model budgets,
-S3/HF backend selection, retention/restore, environment separation, fixed probes,
-size-aware final evaluation, and hardware experiments. New Make targets include
-`freeze-test`, `regenerate-mini-frozen`, `artifacts-index`, `test-frozen-contract`,
-`pretrain-probes`, `eval-pretrain-final`, and `pretrain-benchmark`.
-
-`GPUS=N` means the user-selected GPU count, not a fixed requirement. Generate
-the matching Mini/production config before launch; Smoke remains separate.
+For multiple GPUs substitute the chosen count in `GPUS=N`. Configuration includes
+the required DDP launch file; no interactive/global Accelerate setup is needed.
+See [config generation](../config_gen/README.md), [artifact routing](../docs/PRETRAINING_DATA.md),
+and [training](../docs/TRAIN.md). Serving retains its separate vLLM runtime contract.

@@ -1,4 +1,0 @@
-# Optional public-benchmark evaluator on a training/model host.
--r requirements-training.txt
-evaluate>=0.4.0
-lm-eval==0.4.9

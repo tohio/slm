@@ -19,7 +19,7 @@ truth for production runs.
 Install the development environment and register its kernel:
 
 ```bash
-make install
+make setup-curate
 source .venv/bin/activate
 python -m ipykernel install --user --name slm --display-name "SLM"
 jupyter lab

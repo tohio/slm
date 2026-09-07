@@ -55,7 +55,7 @@ Functional and production recipes resolve `max_steps` from the verified tokenize
 count and the configured epoch contract at preflight/training time. The static
 YAML step and warmup values remain planning fallbacks; runtime preserves their
 warmup ratio. The smoke recipe remains fixed at eight optimizer steps.
-Curation establishes frozen train/val/test membership; pretraining does not
+Curation establishes train/val/test membership; pretraining does not
 split documents again. Validation is training-time; test is final-only.
 
 The smoke profile uses the 21.7M-parameter architecture and capped 1M-token
@@ -117,7 +117,7 @@ python pretrain/data/tokenize_data.py \
 Training resolves the tokenizer and all binaries/metadata directly from
 `DATASET_SIZE` (default `SIZE`). No global-tokenizer activation/copy is needed.
 For migration and cross-size budgets, read
-[`FROZEN_PRETRAINING.md`](../docs/FROZEN_PRETRAINING.md) before replacing an old
+[`PRETRAINING_DATA.md`](../docs/PRETRAINING_DATA.md) before replacing an old
 Mini tokenizer or resuming an old checkpoint.
 
 Start or resume pretraining:
@@ -206,11 +206,11 @@ make test-training SIZE=125m
 The artifact test expects an existing checkpoint; it is not a substitute for
 pretraining and does not launch another full run.
 
-## Frozen final evaluation and throughput
+## Final evaluation and generation probes
 
-`generation_probes` configures the shared fixed raw prompts, sparse cadence,
-and deterministic decoding. Final reports separate test-prefix completions,
-generic prompts, and supplied corpus-supported QA. Use `make pretrain-probes`
-for saved checkpoints, `make eval-pretrain-final` for audit-version-2 final
-checkpoints, and `make pretrain-benchmark` for isolated global-batch-preserving
-micro-batch experiments. See the linked guide for commands and interpretation.
+`generation_probes` configures fixed pretraining prompts, sparse cadence, and
+deterministic decoding. Final reports separate test-prefix completions, generic
+prompts, and supplied corpus-supported QA. Use `make pretrain-probes` for saved
+checkpoints and `make eval-pretrain-final` for completed models with matching test
+provenance. These are not training pass/fail gates. See
+[pretraining data and evaluation](../docs/PRETRAINING_DATA.md).

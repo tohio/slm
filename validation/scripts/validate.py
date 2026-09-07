@@ -416,7 +416,7 @@ def main():
         action="store_true",
         help="Skip KenLM measurement and filtering",
     )
-    parser.add_argument("--test", type=Path, default=None, help="Frozen test JSONL input")
+    parser.add_argument("--test", type=Path, default=None, help="Test JSONL input")
     parser.add_argument("--test-output", type=Path, default=None)
     args = parser.parse_args()
 
@@ -443,10 +443,10 @@ def main():
         parser.error("train/val/test must belong to one matched curated artifact set")
     if len({path.parent for path in outputs.values()}) != 1:
         parser.error("train/val/test outputs must share one validated artifact directory")
-    source_frozen = verify_jsonl_contract(args.train.parent, stage="curated")
+    source_contract = verify_jsonl_contract(args.train.parent, stage="curated")
     for split, path in inputs.items():
-        if jsonl_identity(path) != source_frozen["contract"]["splits"][split]:
-            raise RuntimeError(f"{split} input does not match the frozen curated contract")
+        if jsonl_identity(path) != source_contract["contract"]["splits"][split]:
+            raise RuntimeError(f"{split} input does not match the holdout curated contract")
 
 
     kenlm_path = None if args.no_perplexity else args.kenlm_model
@@ -496,7 +496,7 @@ def main():
             "train": file_snapshot([args.train], root=args.train.parent),
             "val": file_snapshot([args.val], root=args.val.parent),
             "test": file_snapshot([args.test], root=args.test.parent),
-            "frozen_split_sha256": source_frozen["sha256"],
+            "test_split_sha256": source_contract["sha256"],
         }
     )
     validation_contract = {
@@ -534,15 +534,15 @@ def main():
     common_output_dir = args.train_output.parent
     if (common_output_dir / CONTRACT_NAME).exists():
         previous = verify_jsonl_contract(common_output_dir, stage="validated")
-        if (previous["contract"].get("curated_contract_sha256") != source_frozen["sha256"]
+        if (previous["contract"].get("curated_contract_sha256") != source_contract["sha256"]
                 or stable_digest(previous["contract"].get("validation_contract")) != stable_digest(validation_contract)):
             raise RuntimeError(
-                "Validation would change a frozen holdout contract. Restore the matched "
+                "Validation would change a holdout contract. Restore the matched "
                 "artifacts or start a new dataset run; do not regenerate test membership."
             )
     if manifest_matches(common_output_dir, stage="validate", contract=validation_contract,
                         input_signature=input_signature, output_pattern="*.json*"):
-        log.info("Verified frozen train/val/test validation manifest — reusing")
+        log.info("Verified holdout train/val/test validation manifest — reusing")
         return
 
     stats = {}
@@ -559,17 +559,17 @@ def main():
     for split in SPLITS:
         rejected = sum(stats[split][k] for k in (
             "rejected_terminal_punct", "rejected_repeated_lines", "rejected_perplexity"))
-        if (stats[split]["total"] != source_frozen["contract"]["splits"][split]["documents"]
+        if (stats[split]["total"] != source_contract["contract"]["splits"][split]["documents"]
                 or stats[split]["kept"] != identities[split]["documents"]
                 or stats[split]["total"] != stats[split]["kept"] + rejected):
             raise RuntimeError(f"Validation physical/rejection accounting mismatch: {split}")
     # Validation drops records; it never rewrites their text. Thus the three
     # completed exact/MinHash separation policies remain valid after filtering.
-    frozen = write_contract(common_output_dir, {
-        "schema_version": SCHEMA_VERSION, "status": "frozen", "stage": "validated",
+    holdout = write_contract(common_output_dir, {
+        "schema_version": SCHEMA_VERSION, "status": "established", "stage": "validated",
         "size": args.size, "splits": identities,
-        "curated_contract_sha256": source_frozen["sha256"],
-        "curated_contract": source_frozen["contract"],
+        "curated_contract_sha256": source_contract["sha256"],
+        "curated_contract": source_contract["contract"],
         "validation_contract": validation_contract,
     })
     numeric_fields = ("total", "kept", "rejected_terminal_punct", "rejected_repeated_lines",
@@ -577,12 +577,12 @@ def main():
     combined = {key: sum(row.get(key, 0) for row in stats.values()) for key in numeric_fields}
     combined.update({"perplexity_threshold": perplexity_threshold,
                      "perplexity_policy": validation_contract["perplexity_policy"],
-                     "splits": stats, "frozen_split_sha256": frozen["sha256"]})
+                     "splits": stats, "test_split_sha256": holdout["sha256"]})
     atomic_write_json(common_output_dir / "validation_stats.json", combined)
     write_manifest(common_output_dir, stage="validate", contract=validation_contract,
                    input_signature=input_signature, output_pattern="*.json*",
-                   metadata={"frozen_split_sha256": frozen["sha256"]})
-    log.info("Validation complete: train / val / frozen test.")
+                   metadata={"test_split_sha256": holdout["sha256"]})
+    log.info("Validation complete: train / val / holdout test.")
 
 
 if __name__ == "__main__":

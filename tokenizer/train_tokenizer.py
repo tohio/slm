@@ -190,22 +190,8 @@ for _i, _tok in enumerate(SPECIAL_TOKENS):
 # answer-only loss masking in SFTTrainer — trl uses them to identify
 # which tokens to compute loss on.
 
-CHAT_TEMPLATE = (
-    "{{ bos_token }}"
-    "{% for message in messages %}"
-        "{% if message['role'] == 'system' %}"
-            "<|system|>{{ message['content'] }}<|endofturn|>"
-        "{% elif message['role'] == 'user' %}"
-            "<|user|>{{ message['content'] }}<|endofturn|>"
-        "{% elif message['role'] == 'assistant' %}"
-            "<|assistant|>"
-            "{% generation %}"
-            "{{ message['content'] }}{{ eos_token }}<|endofturn|>"
-            "{% endgeneration %}"
-        "{% endif %}"
-    "{% endfor %}"
-    "{% if add_generation_prompt %}<|assistant|>{% endif %}"
-)
+from config.chat import CHAT_TEMPLATE
+
 
 
 # ── Text iterator ──────────────────────────────────────────────────────────────

@@ -22,23 +22,16 @@ SIZE    ?= 125m
 DATASET_SIZE ?= $(SIZE)
 DATASET_RUN_ID ?= $(RUN_ID)
 GPUS    ?= 1
+INSTALLER ?= pip
+SFT_TOOL_DATA ?=
 WORKERS ?=
 FORCE   ?=
 RUN_ID  ?=
-ARTIFACT_RETENTION ?= training-ready
-_FULL_ARTIFACT_STAGES := raw,curated,validated,tokenized,tokenizer,metadata
-_READY_ARTIFACT_STAGES := validated,tokenized,tokenizer,metadata
-ARTIFACT_STAGES ?= $(if $(filter training-ready,$(ARTIFACT_RETENTION)),$(_READY_ARTIFACT_STAGES),$(_FULL_ARTIFACT_STAGES))
-ARTIFACT_INCLUDE_RESULTS ?=
-ARTIFACT_RESTORE_RESULTS ?=
+ARTIFACT_STAGES ?= raw,tokenized,tokenizer,metadata
 ARTIFACT_OVERWRITE ?=
 PROBE_MODEL ?= $(RESULTS_DIR)/runs/$(SIZE)/pretrain/final
 PROBE_TOKENIZER ?=
 CORPUS_QA ?=
-BENCH_MICRO_BATCHES ?=
-BENCH_STEPS ?= 30
-BENCH_WARMUP ?= 10
-BENCH_OUTPUT ?= $(RESULTS_DIR)/benchmarks/$(SIZE)
 COMPARE_SMOL_MODEL ?= HuggingFaceTB/SmolLM2-135M
 COMPARE_TOHIO_MODEL ?= $(EXPORTS_DIR)/125m/base
 COMPARE_OUTPUT_DIR ?= $(RESULTS_DIR)/diagnostics/sft-comparison
@@ -75,7 +68,8 @@ ARTIFACT_BACKEND ?= $(or $(call _env_value,ARTIFACT_BACKEND),s3)
 ifeq ($(ARTIFACT_BACKEND),s3)
   REQUIRED_ENV_VARS += S3_BUCKET S3_PREFIX AWS_DEFAULT_REGION
 else ifeq ($(ARTIFACT_BACKEND),hf)
-  REQUIRED_ENV_VARS += HF_ARTIFACT_BUCKET
+  # HF credentials/destinations are validated only by the selected transfer.
+  # Curation/setup does not require a model or a bucket to exist.
 else
   $(error ARTIFACT_BACKEND must be s3 or hf)
 endif
@@ -89,13 +83,12 @@ SFT_INSTRUCT_CONFIG ?= finetune/configs/sft_instruct_$(SIZE).yaml
 SFT_CODE_CONFIG ?= finetune/configs/sft_code_$(SIZE).yaml
 DPO_CHAT_CONFIG ?= alignment/configs/dpo_chat_$(SIZE).yaml
 DPO_CONFIG      ?= $(DPO_CHAT_CONFIG)
-ARTIFACT_HF_PYTHON ?= $(if $(wildcard .venv-artifacts/bin/python),.venv-artifacts/bin/python,$(PYTHON))
-export ARTIFACT_HF_PYTHON
 _DATASET_FLAGS = --dataset-size "$(DATASET_SIZE)" $(if $(DATASET_RUN_ID),--dataset-run-id "$(DATASET_RUN_ID)",)
-_ARTIFACT_FLAGS = --backend "$(ARTIFACT_BACKEND)" --retention "$(ARTIFACT_RETENTION)"
+_ARTIFACT_FLAGS = --backend "$(ARTIFACT_BACKEND)"
 
 
-ACCELERATE = $(_ACCELERATE) launch --num_processes $(GPUS) --num_machines 1 --mixed_precision bf16 --dynamo_backend no
+ACCELERATE_CONFIG ?= accelerate_configs/$(if $(filter 1,$(GPUS)),single_gpu,multi_gpu).yaml
+ACCELERATE = $(_ACCELERATE) launch --config_file "$(ACCELERATE_CONFIG)" --num_processes $(GPUS) --num_machines 1 --mixed_precision bf16 --dynamo_backend no
 
 ifdef WORKERS
   WORKERS_FLAG = --workers $(WORKERS)
@@ -137,17 +130,16 @@ else
   _MODE_FLAG =
 endif
 
-.PHONY: all check-env check-curation-prereqs curate-all train-all curate curate-smoke curate-mini curate-download curate-filter curate-dedup \
+.PHONY: setup-curate setup-train _config-gen-launch all check-env check-curation-prereqs curate-all train-all curate curate-smoke curate-mini curate-download curate-filter curate-dedup \
         curate-blend curate-upload validate validate-upload \
         tokenizer tokenizer-test tokenize artifacts-upload artifacts-download \
         config-gen config-gen-pretrain config-gen-sft config-gen-dpo \
-        accel-gen-ddp accel-gen-fsdp \
         pretrain pretrain-preflight pretrain-mini pretrain-smoke pretrain-resume pretrain-resume-preflight smoke-gen prepare-sft sft sft-instruct sft-mini sft-instruct-mini sft-resume sft-instruct-resume sft-code sft-code-mini sft-code-resume \
-        prepare-dpo dpo-chat dpo-chat-resume dpo-chat-mini dpo dpo-mini dpo-resume eval eval-base eval-instruct eval-chat eval-code eval-sanity eval-sanity-base eval-sanity-instruct eval-sanity-chat eval-sanity-code eval-mini serve serve-local \
+        prepare-dpo dpo-chat dpo-chat-resume dpo-chat-mini dpo dpo-mini dpo-resume eval eval-base eval-instruct eval-chat eval-code eval-sanity eval-sanity-base eval-sanity-instruct eval-sanity-chat eval-sanity-code serve serve-local \
         export export-base export-instruct export-chat export-code \
         export-local export-base-local export-instruct-local export-chat-local export-code-local \
-        setup setup-data-dir setup-gpu install install-training install-gpu check-training-env test-upgrade-gpu install-uv install-conda install-kenlm install-orjson \
-        download-kenlm-model download-fasttext-model accelerate-config accelerate-config-single accelerate-config-multi \
+        check-training-env test-upgrade-gpu \
+        download-kenlm-model download-fasttext-model \
         test-curator test-validate test-tokenizer test-data-pipeline \
         test-training test-sft-instruct test-sft-chat test-sft-code test-dpo-chat test-dpo test-gpu-pipeline test-model test-export test-export-acceptance test-vllm-export test-data-unit test-training-args test-config-gen test-accel-gen test-comparison test-misc test-unit test-gpu-gate test-pretrain-ready test-pretrain-resume-ready test-artifacts \
         compare-sft-preflight compare-sft \
@@ -176,6 +168,7 @@ check-env:
 	fi
 
 check-curation-prereqs: check-env
+	@$(PYTHON) infra/verify_environment.py --profile curation
 	@missing=""; \
 	fasttext="$(DATA_DIR)/models/lid.176.ftz"; \
 	kenlm_arpa="$(DATA_DIR)/models/en.arpa.bin"; \
@@ -200,7 +193,6 @@ curate-all: check-curation-prereqs
 	@echo "==> Complete curation workflow: SIZE=$(SIZE), WORKERS=$(WORKERS), DATA_DIR=$(DATA_DIR)"
 	$(PYTHON) infra/verify_environment.py --profile curation
 	$(MAKE) curate SIZE="$(SIZE)" WORKERS="$(WORKERS)"
-	$(MAKE) freeze-test SIZE="$(SIZE)" WORKERS="$(WORKERS)"
 	$(MAKE) test-curator SIZE="$(SIZE)"
 	$(MAKE) validate SIZE="$(SIZE)"
 	$(MAKE) test-validate SIZE="$(SIZE)"
@@ -211,7 +203,7 @@ curate-all: check-curation-prereqs
 	$(MAKE) artifacts-upload \
 		SIZE="$(SIZE)" \
 		WORKERS="$(WORKERS)" \
-		ARTIFACT_STAGES="validated,tokenized,tokenizer,metadata" ARTIFACT_RETENTION="training-ready"
+		ARTIFACT_STAGES="$(ARTIFACT_STAGES)"
 	@echo "==> Curation workflow complete. Record this RUN_ID:"
 	@cat "$(DATA_DIR)/runs/$(SIZE)/RUN_ID"
 
@@ -226,7 +218,7 @@ train-all: check-env
 		(echo "train-all starts new runs only, but pretraining output already exists."; \
 		 echo "Use the stage-specific resume command in docs/TRAIN.md."; exit 1)
 	@echo "==> Complete training workflow: SIZE=$(SIZE), GPUS=$(GPUS), DATASET_SIZE=$(DATASET_SIZE), DATASET_RUN_ID=$(DATASET_RUN_ID)"
-	$(MAKE) setup-gpu \
+	$(MAKE) setup-train \
 		DATA_DIR="$(DATA_DIR)" \
 		SIZE="$(SIZE)" \
 		DATASET_SIZE="$(DATASET_SIZE)" DATASET_RUN_ID="$(DATASET_RUN_ID)"
@@ -274,17 +266,17 @@ curate-blend: check-curation-prereqs
 
 curate-upload:
 	@echo "==> Uploading curated artifacts by RUN_ID (target=$(SIZE))"
-	$(MAKE) artifacts-upload ARTIFACT_RETENTION=full ARTIFACT_STAGES=curated,metadata
+	$(MAKE) artifacts-upload ARTIFACT_STAGES=curated,metadata
 
 # ── Stage 2: Validation ───────────────────────────────────────────────────────
 
-validate: freeze-test
-	@echo "==> Stage 2: Validation (train + val + frozen test splits)"
+validate:
+	@echo "==> Stage 2: Validation (train + val + test splits)"
 	$(PYTHON) validation/scripts/validate.py --size $(SIZE)
 
 validate-upload:
 	@echo "==> Uploading validated artifacts by RUN_ID (target=$(SIZE))"
-	$(MAKE) artifacts-upload ARTIFACT_RETENTION=full ARTIFACT_STAGES=validated,metadata
+	$(MAKE) artifacts-upload ARTIFACT_STAGES=validated,metadata
 
 # ── Stage 3: Tokenizer ────────────────────────────────────────────────────────
 
@@ -298,7 +290,7 @@ tokenizer-test:
 # ── Stage 4: Pretrain ─────────────────────────────────────────────────────────
 
 tokenize:
-	@echo "==> Stage 4a: Tokenize dataset (train + val + frozen test splits)"
+	@echo "==> Stage 4a: Tokenize dataset (train + val + test splits)"
 	$(PYTHON) pretrain/data/tokenize_data.py --size $(SIZE) --chunk-size 256 --verify
 
 .PHONY: artifacts-index
@@ -306,11 +298,11 @@ artifacts-index:
 	$(PYTHON) curator/scripts/upload_s3.py artifacts-index --size "$(DATASET_SIZE)" $(if $(DATASET_RUN_ID),--run-id "$(DATASET_RUN_ID)",)
 
 artifacts-upload:
-	@echo "==> Uploading $(ARTIFACT_BACKEND) artifacts: dataset=$(DATASET_SIZE), retention=$(ARTIFACT_RETENTION)"
+	@echo "==> Uploading $(ARTIFACT_BACKEND) artifacts: dataset=$(DATASET_SIZE), stages=$(ARTIFACT_STAGES)"
 	$(PYTHON) curator/scripts/upload_s3.py artifacts-upload \
 		--size "$(DATASET_SIZE)" $(if $(DATASET_RUN_ID),--run-id "$(DATASET_RUN_ID)",) \
 		--stages "$(ARTIFACT_STAGES)" $(WORKERS_FLAG) $(_ARTIFACT_FLAGS) \
-		$(if $(filter 1 true yes,$(ARTIFACT_INCLUDE_RESULTS)),--include-results --model-size "$(SIZE)",)
+		$(if $(filter 1 true yes,$(ARTIFACT_OVERWRITE)),--overwrite,)
 
 artifacts-download:
 	@test -n "$(DATASET_RUN_ID)" || (echo "DATASET_RUN_ID or RUN_ID is required for artifacts-download"; exit 1)
@@ -318,48 +310,17 @@ artifacts-download:
 	$(PYTHON) curator/scripts/upload_s3.py artifacts-download \
 		--size "$(DATASET_SIZE)" --run-id "$(DATASET_RUN_ID)" \
 		--stages "$(ARTIFACT_STAGES)" $(WORKERS_FLAG) $(_ARTIFACT_FLAGS) \
-		$(if $(filter 1 true yes,$(ARTIFACT_OVERWRITE)),--overwrite,) \
-		$(if $(filter 1 true yes,$(ARTIFACT_RESTORE_RESULTS)),--restore-results --model-size "$(SIZE)",)
+		$(if $(filter 1 true yes,$(ARTIFACT_OVERWRITE)),--overwrite,)
 
-.PHONY: freeze-test regenerate-mini-frozen pretrain-benchmark eval-pretrain-final pretrain-probes install-artifacts-hf install-evaluation test-frozen-contract
-freeze-test:
-	@echo "==> Freeze test from existing training pool; preserve validation (SIZE=$(SIZE))"
-	$(PYTHON) -m curator.frozen_split --size "$(SIZE)" $(WORKERS_FLAG)
-
-regenerate-mini-frozen:
-	@echo "==> Rebuild only invalidated Mini holdout/validation/tokenizer/tokenized stages; no recuration or training"
-	$(MAKE) freeze-test SIZE=mini
-	$(MAKE) validate SIZE=mini
-	$(MAKE) tokenizer SIZE=mini
-	$(MAKE) tokenize SIZE=mini
-	$(MAKE) test-data-pipeline SIZE=mini
-	@echo "Review counts and retention, then explicitly upload. Existing model checkpoints are not modified."
-
+.PHONY: eval-pretrain-final pretrain-probes
 pretrain-probes:
 	$(PYTHON) eval/eval.py --mode pretrain-probes --model "$(PROBE_MODEL)" \
 		--size "$(SIZE)" $(_DATASET_FLAGS) $(if $(PROBE_TOKENIZER),--tokenizer-dir "$(PROBE_TOKENIZER)",)
 
 eval-pretrain-final:
-	@echo "==> Final frozen pretraining evaluation: model=$(SIZE), dataset=$(DATASET_SIZE)"
+	@echo "==> Final pretraining evaluation: model=$(SIZE), dataset=$(DATASET_SIZE)"
 	$(PYTHON) eval/eval.py --mode pretraining-final --model "$(PROBE_MODEL)" \
 		--size "$(SIZE)" $(_DATASET_FLAGS) $(if $(CORPUS_QA),--corpus-qa "$(CORPUS_QA)",)
-
-pretrain-benchmark:
-	@test -n "$(BENCH_MICRO_BATCHES)" || (echo "Set BENCH_MICRO_BATCHES to global-batch-preserving candidates"; exit 1)
-	$(PYTHON) pretrain/benchmark.py --config "$(PRETRAIN_CONFIG)" \
-		--micro-batches "$(BENCH_MICRO_BATCHES)" --gpus "$(GPUS)" --accelerate "$(_ACCELERATE)" \
-		--steps "$(BENCH_STEPS)" --warmup-steps "$(BENCH_WARMUP)" \
-		--output-dir "$(BENCH_OUTPUT)" --data-dir "$(DATA_DIR)" $(_DATASET_FLAGS)
-
-install-artifacts-hf:
-	python3 -m venv .venv-artifacts
-	.venv-artifacts/bin/pip install -r requirements-artifacts-hf.txt
-
-install-evaluation:
-	$(PYTHON) -m pip install -r requirements-evaluation.txt
-
-test-frozen-contract:
-	$(PYTHON) -m pytest tests/test_frozen_contract.py tests/test_artifact_retention.py tests/test_pretrain_diagnostics.py -v
 
 # ── Config generation ─────────────────────────────────────────────────────────
 # Auto-generates training configs tuned for the current GPU and GPU count.
@@ -370,7 +331,7 @@ test-frozen-contract:
 #   make config-gen-dpo      SIZE=1b   GPUS=N GPU=b200 MODE=aggressive
 #   make config-gen          SIZE=125m GPUS=1                  # generates all three
 
-config-gen-pretrain:
+config-gen-pretrain: _config-gen-launch
 	@echo "==> Generating pretrain config for SIZE=$(SIZE) GPUS=$(GPUS)"
 	$(PYTHON) -m config_gen.config_gen \
 		--stage pretrain \
@@ -380,7 +341,7 @@ config-gen-pretrain:
 		$(_MODE_FLAG) \
 		-o $(PRETRAIN_CONFIG)
 
-config-gen-sft:
+config-gen-sft: _config-gen-launch
 	@echo "==> Generating SFT instruct + code configs for SIZE=$(SIZE) GPUS=$(GPUS)"
 	$(PYTHON) -m config_gen.config_gen \
 		--stage sft \
@@ -391,7 +352,7 @@ config-gen-sft:
 		-o $(SFT_INSTRUCT_CONFIG) \
 		--output-code $(SFT_CODE_CONFIG)
 
-config-gen-dpo:
+config-gen-dpo: _config-gen-launch
 	@echo "==> Generating DPO config for SIZE=$(SIZE) GPUS=$(GPUS)"
 	$(PYTHON) -m config_gen.config_gen \
 		--stage dpo \
@@ -402,7 +363,7 @@ config-gen-dpo:
 		-o $(DPO_CONFIG)
 
 config-gen:
-	@if [ "$(SIZE)" = "smoke" ] || [ "$(SIZE)" = "mini" ]; then \
+	@set -e; if [ "$(SIZE)" = "smoke" ]; then \
 		$(MAKE) config-gen-pretrain SIZE="$(SIZE)" GPUS="$(GPUS)"; \
 		echo "==> $(SIZE) pretraining config generated for GPUS=$(GPUS)"; \
 	else \
@@ -412,20 +373,11 @@ config-gen:
 		echo "==> All training configs generated for SIZE=$(SIZE) GPUS=$(GPUS)"; \
 	fi
 
-# ── Accelerate launch config generation ───────────────────────────────────────
-# Generates accelerate_configs/{multi_gpu,fsdp}.yaml from a small generator.
-# Replaces the old sed-based accelerate-config-multi flow.
-#
-#   make accel-gen-ddp  GPUS=N                  # plain DDP
-#   make accel-gen-fsdp GPUS=N                  # FullyShardedDataParallel for 1b runs
-
-accel-gen-ddp:
-	@echo "==> Generating accelerate DDP config for GPUS=$(GPUS)"
-	$(PYTHON) -m config_gen.accel_gen --strategy ddp --gpus $(GPUS)
-
-accel-gen-fsdp:
-	@echo "==> Generating accelerate FSDP config for GPUS=$(GPUS)"
-	$(PYTHON) -m config_gen.accel_gen --strategy fsdp --gpus $(GPUS)
+# Internal: used by every stage-specific generator, never writes global HF config.
+_config-gen-launch:
+	@if [ "$(GPUS)" -gt 1 ]; then \
+		$(PYTHON) -m config_gen.accel_gen --gpus "$(GPUS)" -o "$(ACCELERATE_CONFIG)"; \
+	fi
 
 # Pretrain
 pretrain-preflight:
@@ -486,7 +438,7 @@ smoke-gen:
 
 prepare-sft:
 	@echo "==> Stage 5a: Prepare SFT data ($(SIZE))"
-	$(PYTHON) finetune/data/prepare_sft.py --stage both --size $(SIZE)
+	$(PYTHON) finetune/data/prepare_sft.py --stage both --size $(SIZE) $(if $(SFT_TOOL_DATA),--tool-data "$(SFT_TOOL_DATA)",)
 
 sft-instruct:
 	@echo "==> Stage 5b: Instruct SFT ($(SIZE), $(GPUS) GPU(s), config=$(SFT_INSTRUCT_CONFIG))"
@@ -625,10 +577,6 @@ eval-sanity-code:
 		--model "$(RESULTS_DIR)/runs/$(SIZE)/sft_code/final" \
 		--json-out "$(RESULTS_DIR)/runs/$(SIZE)/eval/sanity/code.json"
 
-eval-mini:
-	@echo "==> Stage 7: Mini evaluation (pipeline validation)"
-	$(PYTHON) eval/eval.py --model "$(RESULTS_DIR)/runs/mini/dpo_chat/final" --tasks hellaswag --limit 50 --batch-size 4
-
 # ── Stage 8: Export ───────────────────────────────────────────────────────────
 
 export: export-base export-instruct export-chat export-code
@@ -683,63 +631,18 @@ serve-local:
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
 
-setup:
-	@echo "==> Running instance setup..."
-	bash infra/setup.sh
+setup-curate:
+	@echo "==> Curation setup ($(INSTALLER))"
+	bash infra/setup_curate.sh --installer "$(INSTALLER)" --data-dir "$(DATA_DIR)"
 
-setup-data-dir:
-	@echo "==> Running instance setup with custom data dir..."
-	bash infra/setup.sh --data-dir $(DATA_DIR)
+setup-train train-all: ARTIFACT_STAGES = tokenized,tokenizer,metadata
 
-setup-gpu:
-	@test -n "$(DATASET_RUN_ID)" || (echo "DATASET_RUN_ID or RUN_ID is required for setup-gpu"; exit 1)
-	@echo "==> GPU setup: model=$(SIZE), dataset=$(DATASET_SIZE), run=$(DATASET_RUN_ID)"
-	bash infra/setup_gpu_instance.sh --data-dir "$(DATA_DIR)" --size "$(SIZE)" \
-		--dataset-size "$(DATASET_SIZE)" --run-id "$(DATASET_RUN_ID)" --backend "$(ARTIFACT_BACKEND)"
-install:
-	python3 -m venv .venv
-	.venv/bin/pip install --upgrade pip
-	.venv/bin/pip install -r requirements-curation.txt
-
-install-training:
-	@echo "==> Installing the pinned CPU training/model-test stack..."
-	python3 -m venv --clear .venv
-	.venv/bin/pip install --upgrade pip
-	.venv/bin/pip install -r requirements-training.txt
-	.venv/bin/python infra/verify_environment.py --profile training
-
-install-uv:
-	@if ! command -v uv >/dev/null 2>&1; then \
-		echo "uv is not installed. Install uv first: https://docs.astral.sh/uv/"; \
-		exit 1; \
-	fi
-	uv venv --python 3.12
-	uv pip install --upgrade pip
-	uv pip install -r requirements-curation.txt
-
-
-install-conda:
-	@if ! command -v conda >/dev/null 2>&1; then \
-		echo "conda is not installed."; \
-		exit 1; \
-	fi
-	conda create -n slm python=3.12 -y
-	conda run -n slm python -m pip install --upgrade pip
-	conda run -n slm pip install -r requirements-curation.txt
-
-
-install-kenlm:
-	.venv/bin/pip install https://github.com/kpu/kenlm/archive/master.zip
-
-install-orjson:
-	.venv/bin/pip install orjson fasttext-wheel
-
-install-gpu:
-	@echo "==> Installing validated CUDA 13.0 training stack..."
-	python3 -m venv .venv
-	.venv/bin/pip install --upgrade pip
-	.venv/bin/pip install -r requirements-gpu.txt
-	.venv/bin/python infra/verify_environment.py --require-cuda
+setup-train:
+	@echo "==> Training setup ($(INSTALLER)): model=$(SIZE), dataset=$(DATASET_SIZE)"
+	bash infra/setup_train.sh --installer "$(INSTALLER)" --data-dir "$(DATA_DIR)" \
+		--size "$(SIZE)" --dataset-size "$(DATASET_SIZE)" --backend "$(ARTIFACT_BACKEND)" \
+		--stages "$(ARTIFACT_STAGES)" \
+		$(if $(DATASET_RUN_ID),--run-id "$(DATASET_RUN_ID)",--skip-data)
 
 test-upgrade-gpu: test-gpu-gate
 
@@ -780,32 +683,17 @@ download-fasttext-model:
 		-O $(DATA_DIR)/models/lid.176.ftz
 	@echo "  Saved to $(DATA_DIR)/models/lid.176.ftz"
 
-accelerate-config:
-	accelerate config
-
-accelerate-config-single:
-	@echo "==> Configuring accelerate for single GPU..."
-	mkdir -p ~/.cache/huggingface/accelerate
-	cp accelerate_configs/single_gpu.yaml ~/.cache/huggingface/accelerate/default_config.yaml
-	@echo "  Single GPU config active"
-
-accelerate-config-multi:
-	@echo "==> Configuring accelerate for multi-GPU ($(GPUS) GPUs)..."
-	mkdir -p ~/.cache/huggingface/accelerate
-	cat accelerate_configs/multi_gpu.yaml | sed 's/num_processes: 8/num_processes: $(GPUS)/' > ~/.cache/huggingface/accelerate/default_config.yaml
-	@echo "  Multi-GPU config active ($(GPUS) processes)"
-
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
 check-training-env:
 	@test -x .venv/bin/python || { \
 		echo "Training environment not found at .venv."; \
-		echo "Run 'make install-training' for CPU model tests or 'make install-gpu' on a GPU host."; \
+		echo "Run 'make setup-train' on the training host."; \
 		exit 1; \
 	}
 	@.venv/bin/python infra/verify_environment.py --profile training || { \
 		echo "Model, export, and training tests require the pinned training stack."; \
-		echo "Run 'make install-training' for CPU tests or 'make install-gpu' on a GPU host."; \
+		echo "Run 'make setup-train' on the training host."; \
 		exit 1; \
 	}
 
@@ -974,9 +862,6 @@ endif
 # ── Clean ─────────────────────────────────────────────────────────────────────
 
 clean-data:
-	@if [ -f "$(DATA_DIR)/runs/$(SIZE)/curated/test_contract.json" ] || [ -f "$(DATA_DIR)/runs/$(SIZE)/tokenized/test_contract.json" ]; then \
-		test "$(ALLOW_FROZEN_DELETE)" = "1" || (echo "Frozen holdouts exist. Verify their retained copy before explicitly setting ALLOW_FROZEN_DELETE=1."; exit 1); \
-	fi
 	rm -rf "$(DATA_DIR)/runs/$(SIZE)" "$(DATA_DIR)/dedup_scratch"
 
 clean-results:
@@ -1014,26 +899,14 @@ help:
 	@echo "  config-gen-pretrain  Auto-generate pretrain/configs/gpt_$(SIZE).yaml"
 	@echo "  config-gen-sft       Auto-generate sft_instruct_$(SIZE).yaml + sft_code_$(SIZE).yaml"
 	@echo "  config-gen-dpo       Auto-generate alignment/configs/dpo_chat_$(SIZE).yaml"
-	@echo "  config-gen           Convenience: runs all three above"
-	@echo "  accel-gen-ddp        Auto-generate accelerate_configs/multi_gpu.yaml"
-	@echo "  accel-gen-fsdp       Auto-generate accelerate_configs/fsdp.yaml (for 1b runs)"
+	@echo "  config-gen           Generates all stages (Smoke: pretrain only)"
 	@echo ""
-	@echo "One-time setup:"
-	@echo "  setup                    Bootstrap a fresh CPU curation instance"
-	@echo "  setup-gpu                Bootstrap a GPU training instance"
-	@echo "  setup-data-dir           Bootstrap with custom data dir"
-	@echo "  check-curation-prereqs   Fail fast unless required curation models are present"
+	@echo "One-time setup (INSTALLER=pip|uv|conda; default pip):"
+	@echo "  setup-curate             Curation environment; accepts DATA_DIR=..."
+	@echo "  setup-train              GPU training environment; optional dataset RUN_ID restore"
 	@echo "  download-fasttext-model  Download fasttext language ID model (~1MB)"
 	@echo "  download-kenlm-model     Download CCNet English model pair (~4GB)"
-	@echo "  accelerate-config        Configure accelerate interactively"
-	@echo "  install                  Install pinned CPU curation/tokenizer dependencies"
-	@echo "  install-training         Install pinned CPU training/model-test dependencies"
-	@echo "  install-gpu              Install pinned CUDA 13 training dependencies"
 	@echo "  test-upgrade-gpu         One-shot CUDA/compile/cache acceptance test"
-	@echo "  install-uv               Install dependencies (uv)"
-	@echo "  install-conda            Install dependencies (conda)"
-	@echo "  install-kenlm            Install KenLM Python bindings from source"
-	@echo "  install-orjson           Install orjson and fasttext-wheel"
 	@echo ""
 	@echo "Tests (CPU — data pipeline):"
 	@echo "  test-curator             Validate curated outputs for SIZE=<size>"
@@ -1081,12 +954,9 @@ help:
 	@echo "  validate           Stage 2  — source-aware validation + KenLM audit"
 	@echo "  validate-upload    Upload validated artifacts through RUN_ID storage"
 	@echo "  tokenizer          Stage 3  — train BPE tokenizer"
-	@echo "  tokenize           Stage 4a — tokenize train + val + frozen test to binaries"
-	@echo "  freeze-test        Deterministically freeze test without reshuffling validation"
-	@echo "  regenerate-mini-frozen Rebuild only invalidated Mini data stages"
-	@echo "  eval-pretrain-final Frozen final-only loss/PPL and diagnostic categories"
+	@echo "  tokenize           Stage 4a — tokenize train + val + test to binaries"
+	@echo "  eval-pretrain-final Final-only loss/PPL and diagnostic categories"
 	@echo "  pretrain-probes    Fixed non-gating prompts on a saved checkpoint"
-	@echo "  pretrain-benchmark Compare micro-batches without changing production configs"
 	@echo "  artifacts-upload   Upload selected S3/HF artifacts using a dataset RUN_ID"
 	@echo "  artifacts-download Restore matched S3/HF dataset artifacts using RUN_ID=<run_id>"
 	@echo "  pretrain-preflight Validate a new run without allocating model weights"
@@ -1115,7 +985,6 @@ help:
 	@echo "  eval-sanity-instruct   Stage 7  — behavior sanity eval for instruct variant"
 	@echo "  eval-sanity-chat       Stage 7  — behavior sanity eval for chat variant"
 	@echo "  eval-sanity            Stage 7  — alias for eval-sanity-chat"
-	@echo "  eval-mini              Stage 7  — mini eval (pipeline validation)"
 	@echo "  export             Stage 8  — build, validate, and push all native Hub variants"
 	@echo "  export-local       Stage 8  — build and validate all native variants without pushing"
 	@echo "  serve              Stage 10 — launch vLLM server"
@@ -1124,7 +993,7 @@ help:
 .PHONY: restore-size-tokenizer
 restore-size-tokenizer:
 	@echo "==> Restoring size-specific tokenizer ($(SIZE)) into active tokenizer path..."
-	@test -d "$(DATA_DIR)/runs/$(SIZE)/tokenizer" || (echo "Missing $(DATA_DIR)/runs/$(SIZE)/tokenizer — run setup-gpu or artifacts-download first" && exit 1)
+	@test -d "$(DATA_DIR)/runs/$(SIZE)/tokenizer" || (echo "Missing $(DATA_DIR)/runs/$(SIZE)/tokenizer — run setup-train or artifacts-download first" && exit 1)
 	mkdir -p "$(DATA_DIR)/tokenizer"
 	cp -a "$(DATA_DIR)/runs/$(SIZE)/tokenizer/." "$(DATA_DIR)/tokenizer/"
 	@echo "  Active tokenizer restored from $(DATA_DIR)/runs/$(SIZE)/tokenizer"

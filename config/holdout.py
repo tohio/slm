@@ -1,4 +1,4 @@
-"""Portable frozen-holdout identities, shared by curation and training.
+"""Portable dataset holdout identities, shared by curation and training.
 
 No curation/ML imports: GPU hosts must not need DataTrove, KenLM or FastText
 in order to verify or restore an already curated dataset.
@@ -60,19 +60,19 @@ def write_contract(directory: Path, contract: dict) -> dict:
 def load_contract(directory: Path, *, stage: str | None = None) -> dict:
     path = Path(directory) / CONTRACT_NAME
     if not path.is_file():
-        raise RuntimeError(f"Missing frozen holdout contract: {path}. Restore it; do not re-split test.")
+        raise RuntimeError(f"Missing holdout contract: {path}. Restore it; do not re-split test.")
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict) or not isinstance(payload.get("contract"), dict):
-        raise RuntimeError(f"Malformed frozen holdout contract: {path}")
+        raise RuntimeError(f"Malformed holdout contract: {path}")
     contract = payload["contract"]
     if payload.get("sha256") != stable_digest(contract):
-        raise RuntimeError(f"Frozen holdout contract checksum mismatch: {path}")
-    if contract.get("schema_version") != SCHEMA_VERSION or contract.get("status") != "frozen":
-        raise RuntimeError(f"Unsupported or unfinished frozen holdout contract: {path}")
+        raise RuntimeError(f"Test holdout contract checksum mismatch: {path}")
+    if contract.get("schema_version") != SCHEMA_VERSION or contract.get("status") != "established":
+        raise RuntimeError(f"Unsupported or unfinished holdout contract: {path}")
     if set(contract.get("splits", {})) != set(SPLITS):
-        raise RuntimeError(f"Frozen contract must contain train, val and test: {path}")
+        raise RuntimeError(f"Test contract must contain train, val and test: {path}")
     if stage is not None and contract.get("stage") != stage:
-        raise RuntimeError(f"Expected {stage} frozen holdout contract: {path}")
+        raise RuntimeError(f"Expected {stage} holdout contract: {path}")
     for split, identity in contract["splits"].items():
         if (not isinstance(identity, dict)
                 or not isinstance(identity.get("bytes"), int) or identity["bytes"] <= 0
@@ -92,10 +92,10 @@ def verify_jsonl_contract(directory: Path, *, include_train: bool = True,
         path = Path(directory) / f"{split}.jsonl"
         expected = payload["contract"]["splits"][split]
         if not path.is_file() or path.stat().st_size != expected["bytes"] or sha256_file(path) != expected["sha256"]:
-            raise RuntimeError(f"Frozen {split} identity changed: {path}. Restore the original artifacts.")
+            raise RuntimeError(f"Test {split} identity changed: {path}. Restore the original artifacts.")
     membership_sha = payload["contract"].get("test_membership_sha256")
     if membership_sha:
         path = Path(directory) / "test_membership.jsonl"
         if not path.is_file() or sha256_file(path) != membership_sha:
-            raise RuntimeError("Frozen test membership index changed; restore the original metadata")
+            raise RuntimeError("Test membership index changed; restore the original metadata")
     return payload

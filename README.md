@@ -62,21 +62,25 @@ model lineage, and artifact flow.
   compatibility gates.
 - Native Transformers Llama export, local generation, Hub publication, and
   vLLM serving.
+- Opt-in, single-call web search in chat with the existing tool tokens and SFT
+  path; see [tool calling](docs/TOOL_CALLING.md).
 
-## Frozen pretraining and dataset reuse
+## Pretraining data and dataset reuse
 
-The pipeline now carries a frozen final-only test split alongside training and
-validation, supports `DATASET_SIZE` independently of model `SIZE`, and restores
-matched artifacts from one selected S3 or HF Storage Buckets backend. See
-[`docs/FROZEN_PRETRAINING.md`](docs/FROZEN_PRETRAINING.md) for the existing-Mini
-migration, retention, dependency stacks, diagnostics, and verification commands.
-An old checkpoint must not be evaluated as unseen on test carved later from its
-own training pool.
+Train, validation, and final-only test use one matched artifact contract.
+`DATASET_SIZE` can differ from model `SIZE` while model-specific budgets still
+control training. Artifact stages remain user-selected. With HF selected,
+curated/validated text goes to Dataset repositories and operational objects go
+to Storage Buckets; models are published separately after training.
+See [pretraining data and reuse](docs/PRETRAINING_DATA.md).
 
 ## Getting Started
 
-SLM uses separate environments for data curation and model training. Do not
-layer the curation and training dependency stacks into the same `.venv`.
+SLM uses separate curation and training environments. The public setup commands
+are `make setup-curate` and `make setup-train`; both accept
+`INSTALLER=pip|uv|conda` (pip/venv by default). Each includes shared
+`requirements.txt` through its role-specific requirements file. Do not layer the
+two roles into the same `.venv`. See [installer details](infra/README.md).
 
 ### CPU curation server
 
@@ -88,7 +92,7 @@ Prerequisites:
 
 - Ubuntu host with persistent storage for curation.
 - Hugging Face account and token.
-- An S3 bucket/SDK credentials or an HF Storage Bucket/token when uploading artifacts.
+- S3 credentials or the HF Dataset/Bucket credentials required by selected artifact stages.
 - Weights & Biases credentials if enabled by the active workflow.
 
 The curation guide lists gated datasets whose terms must be accepted before
@@ -100,12 +104,11 @@ cd slm
 cp .env.sample .env
 vi .env
 
-make setup-data-dir DATA_DIR=/data/slm/data
+make setup-curate DATA_DIR=/data/slm/data
 source .venv/bin/activate
 
 make download-fasttext-model DATA_DIR=/data/slm/data
 make download-kenlm-model    DATA_DIR=/data/slm/data
-make check-curation-prereqs  DATA_DIR=/data/slm/data
 
 make curate-smoke DATA_DIR=/data/slm/data
 make validate SIZE=smoke DATA_DIR=/data/slm/data
@@ -135,8 +138,8 @@ worker sizing, resume behavior, validation, tokenization, and artifact upload.
 
 ### GPU training server
 
-Use this path on a supported NVIDIA GPU host after the curation host has
-produced and uploaded a run-scoped artifact set. The training stack is pinned
+Use this path on a supported NVIDIA GPU host. Selecting a source run also
+restores its uploaded artifact set; omit RUN_ID for environment setup only. The training stack is pinned
 separately from the curation stack.
 
 ```bash
@@ -145,12 +148,10 @@ cd slm
 cp .env.sample .env
 vi .env
 
-make setup-gpu \
+make setup-train \
   SIZE=125m \
   RUN_ID=125m-YYYYMMDD-abcdef \
   DATA_DIR=/data/slm/data
-
-make check-training-env
 ```
 
 Then use the stage-specific commands or the complete new-run workflow:

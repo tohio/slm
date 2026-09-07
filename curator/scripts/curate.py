@@ -1866,12 +1866,12 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
     log.info(f"=== Stage 4: Blend (target={target}) ===")
     from config.holdout import CONTRACT_NAME, verify_jsonl_contract
     if (CURATED_DIR / CONTRACT_NAME).exists():
-        frozen = verify_jsonl_contract(CURATED_DIR, stage="curated")
+        holdout = verify_jsonl_contract(CURATED_DIR, stage="curated")
         if not manifest_outputs_match(CURATED_DIR, output_pattern="*.json*"):
-            raise RuntimeError("Frozen curated stage is incomplete; restore the complete original artifacts")
-        if frozen["contract"]["size"] != target:
-            raise RuntimeError("Frozen dataset size does not match the requested blend")
-        log.info("Frozen blend retained; use a new DATA_DIR for a different corpus")
+            raise RuntimeError("Test curated stage is incomplete; restore the complete original artifacts")
+        if holdout["contract"]["size"] != target:
+            raise RuntimeError("Test dataset size does not match the requested blend")
+        log.info("Test blend retained; use a new DATA_DIR for a different corpus")
         return
     cfg = TARGET_CONFIGS[target]
     total_tokens = cfg["corpus_tokens"]
@@ -2500,6 +2500,8 @@ def main():
     else:
         if args.stage in ("blend", "all"):
             stage_blend(args.target, seed=args.seed, workers=n_workers)
+            from curator.test_split import establish_test_split
+            establish_test_split(CURATED_DIR, size=args.target, seed=args.seed, workers=n_workers)
 
     log.info("Pipeline complete.")
 

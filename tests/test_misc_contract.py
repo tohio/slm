@@ -64,7 +64,31 @@ def test_training_launcher_preserves_requested_multi_gpu_process_count():
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
 
     assert (
-        "ACCELERATE = $(_ACCELERATE) launch --num_processes $(GPUS) "
+        "ACCELERATE = $(_ACCELERATE) launch --config_file \"$(ACCELERATE_CONFIG)\" --num_processes $(GPUS) "
         "--num_machines 1 --mixed_precision bf16 --dynamo_backend no"
         in makefile
     )
+
+
+def test_tool_turn_is_bounded_and_preserves_no_tool_chat():
+    import pytest
+    from config.chat import TOOL_OPEN, TOOL_CLOSE, safe_json
+    from inference.tools import run_tool_turn
+
+    history = [{"role": "user", "content": "Search for an example"}]
+    call = TOOL_OPEN + safe_json({"name": "web_search", "arguments": {"query": "example"}}) + TOOL_CLOSE
+    generated = iter([call, "The search had no results."])
+    queries = []
+    def search(query):
+        queries.append(query)
+        return []
+    messages = run_tool_turn(lambda _: next(generated), history, search)
+    assert [m["role"] for m in messages] == ["assistant", "tool", "assistant"]
+    assert queries == ["example"] and len(history) == 1
+    assert run_tool_turn(lambda _: "hello", history, search) == [{"role": "assistant", "content": "hello"}]
+    assert queries == ["example"]
+    with pytest.raises(ValueError, match="budget"):
+        run_tool_turn(lambda _: call, history, search)
+    bad = TOOL_OPEN + safe_json({"name": "execute", "arguments": {"query": "x"}}) + TOOL_CLOSE
+    with pytest.raises(ValueError, match="Only web_search"):
+        run_tool_turn(lambda _: bad, history, search)

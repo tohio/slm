@@ -5,7 +5,7 @@ instance. Follow this before cloning the repo if you are using a separate disk
 volume for your data directory.
 
 If you are using the boot disk only, skip this — `/data` will be created
-automatically by `setup.sh`.
+automatically by `setup_curate.sh`.
 
 ---
 

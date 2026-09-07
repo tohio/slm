@@ -186,3 +186,12 @@ Validate completed stage artifacts:
 make test-sft-instruct SIZE=125m
 make test-sft-code SIZE=125m
 ```
+
+## Optional tool-use conversations
+
+`prepare-sft` accepts `SFT_TOOL_DATA=/path/to/reviewed-tools.jsonl` and merges those
+instruct examples before the existing grouped prompt split. The same SFT trainer
+handles assistant requests, tool results, final responses, and no-tool examples.
+Only the rendering template is updated; the vocabulary and embeddings are not
+resized. See [tool data and runtime](../docs/TOOL_CALLING.md) for format, illustrative
+examples, provenance, and limitations.

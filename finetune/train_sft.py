@@ -108,6 +108,17 @@ def load_dataset_from_jsonl(path: Path):
             records.append(record)
     if not records:
         raise ValueError(f"SFT dataset is empty: {path}")
+    from config.chat import WEB_SEARCH_TOOL, TOOL_OPEN, validate_tool_conversation
+    has_tools = any(record.get("tools") or any(
+        m.get("role") == "tool" or (m.get("role") == "assistant" and TOOL_OPEN in m.get("content", ""))
+        for m in record.get("messages", record.get("conversations", []))
+    ) for record in records)
+    if has_tools:
+        for record in records:
+            if record.get("tools") and record["tools"] != [WEB_SEARCH_TOOL]:
+                raise ValueError("Only the web_search tool schema is supported")
+            validate_tool_conversation(record.get("messages", record.get("conversations", [])))
+            record["tools"] = [WEB_SEARCH_TOOL]
     return Dataset.from_list(records)
 
 
@@ -502,6 +513,10 @@ def main():
     log.info(f"Loading dataset from {train_path}...")
     train_dataset = load_dataset_from_jsonl(train_path)
     val_dataset   = load_dataset_from_jsonl(val_path)
+    if any("tools" in dataset.column_names and any(dataset["tools"])
+           for dataset in (train_dataset, val_dataset)):
+        from config.chat import enable_tool_template
+        enable_tool_template(tokenizer)
     validate_conversational_dataset(train_dataset, "train")
     validate_conversational_dataset(val_dataset, "validation")
 
@@ -601,6 +616,8 @@ def main():
 
     if tokenizer_path.exists() and any(tokenizer_path.iterdir()):
         shutil.copytree(tokenizer_path, final_dir / "tokenizer", dirs_exist_ok=True)
+        # Persist the active rendering template, not only the pre-SFT source copy.
+        tokenizer.save_pretrained(str(final_dir / "tokenizer"))
         log.info("Tokenizer copied alongside model")
     else:
         log.warning(f"Tokenizer empty or missing at {tokenizer_path} — skipping copy")

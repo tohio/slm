@@ -21,7 +21,7 @@ def make_bundle(data_root: Path, size: str = "350m") -> Path:
         path.write_text("".join(json.dumps({"text": f"{split} document for {source}",
             "source": source}) + "\n" for source in ALL_SOURCES))
         identities[split] = jsonl_identity(path)
-    payload = write_contract(root / "validated", {"schema_version": 1, "status": "frozen",
+    payload = write_contract(root / "validated", {"schema_version": 1, "status": "established",
         "stage": "validated", "size": size, "splits": identities,
         "curated_contract_sha256": "c" * 64})
     shutil.copy2(root / "validated" / "test_contract.json", root / "tokenized" / "test_contract.json")
@@ -40,7 +40,7 @@ def make_bundle(data_root: Path, size: str = "350m") -> Path:
             "binary_sha256": sha256_file(binary), "format_version": "test",
             "tokenizer_sha256": sha256_file(tokenizer_path),
             "tokenizer_file_sha256": sha256_file(tokenizer_path),
-            "implementation_sha256": "a" * 64, "frozen_split_sha256": payload["sha256"],
+            "implementation_sha256": "a" * 64, "test_split_sha256": payload["sha256"],
             "source_counts": {source: {"documents": 1, "tokens": 4} for source in ALL_SOURCES}}
         atomic_write_json(binary.with_suffix(".json"), meta)
         metadata[split] = meta

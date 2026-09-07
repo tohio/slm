@@ -128,11 +128,11 @@ def validate_final_binding(checkpoint: Path, tokenized_dir: Path, tokenizer_dir:
     """An old checkpoint already saw a test set carved later from its train pool."""
     audit_path = checkpoint / "pretrain_run_audit.json"
     if not audit_path.is_file():
-        raise RuntimeError("Final test evaluation requires the checkpoint's frozen-split training audit")
+        raise RuntimeError("Final test evaluation requires the checkpoint's holdout-split training audit")
     audit = json.loads(audit_path.read_text())
     contract = audit.get("contract", {})
     if audit.get("contract_sha256") != stable_digest(contract) or contract.get("contract_version") != 2:
-        raise RuntimeError("Checkpoint lacks a valid frozen-split training audit; do not retrofit test provenance")
+        raise RuntimeError("Checkpoint lacks a valid holdout-split training audit; do not retrofit test provenance")
     from pretrain.train import tokenized_data_identity, tokenizer_fingerprint
     if contract.get("tokenized_data") != tokenized_data_identity(tokenized_dir):
         raise RuntimeError("Final evaluation data differs from this checkpoint's recorded training/holdout contract")
@@ -156,7 +156,7 @@ def final_loss_metrics(trainer, tokenized_dir: Path, seq_len: int) -> dict:
             raise RuntimeError(f"Non-finite {category} loss: {loss}")
         result[f"{category}_perplexity"] = math.exp(loss) if loss < 709 else None
     result["test_token_accounting"] = test.token_budget()
-    result["test_role"] = "frozen_final_only"
+    result["test_role"] = "final_only"
     return result
 
 
@@ -165,9 +165,9 @@ def final_cases(validated_dir: Path, tokenized_dir: Path, tokenizer, *, prefix_c
     import hashlib
     if prefix_count < 0 or prefix_tokens < 1:
         raise ValueError("Invalid held-out prefix settings")
-    frozen = verify_jsonl_contract(validated_dir, include_train=False, stage="validated")
-    if frozen["sha256"] != load_contract(tokenized_dir, stage="validated")["sha256"]:
-        raise RuntimeError("Validated text does not match the tokenized frozen holdouts")
+    holdout = verify_jsonl_contract(validated_dir, include_train=False, stage="validated")
+    if holdout["sha256"] != load_contract(tokenized_dir, stage="validated")["sha256"]:
+        raise RuntimeError("Validated text does not match the tokenized holdouts")
     cases, qa = [], []
     if qa_path:
         for line in qa_path.read_text().splitlines():
@@ -186,7 +186,7 @@ def final_cases(validated_dir: Path, tokenized_dir: Path, tokenizer, *, prefix_c
             text = row["text"]
             text_sha = hashlib.sha256(text.encode()).hexdigest()
             provenance = {"split": "test", "line": line_no, "source": row["source"],
-                          "document_sha256": text_sha, "frozen_split_sha256": frozen["sha256"]}
+                          "document_sha256": text_sha, "test_split_sha256": holdout["sha256"]}
             if len(cases) < prefix_count:
                 # A character cap bounds even book-length individual documents.
                 ids = tokenizer.encode(text[:32768], add_special_tokens=False)
@@ -204,7 +204,7 @@ def final_cases(validated_dir: Path, tokenized_dir: Path, tokenizer, *, prefix_c
             if len(cases) >= prefix_count and len(matched) == len(qa):
                 break
     if len(matched) != len(qa):
-        raise RuntimeError("Corpus QA references are missing from the frozen test corpus")
+        raise RuntimeError("Corpus QA references are missing from the holdout test corpus")
     cases.extend({**row, "category": "corpus_supported_qa"} for row in qa)
     return cases
 

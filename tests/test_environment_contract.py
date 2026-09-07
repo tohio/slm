@@ -55,11 +55,9 @@ def test_curation_requirements_do_not_import_training_stack():
     assert "-r requirements-training.txt" not in requirements
 
 
-def test_gpu_requirements_select_the_matching_cuda_build():
+def test_training_requirements_select_the_cuda_build():
     training = _exact_pins(ROOT / "requirements-training.txt")
-    gpu = _exact_pins(ROOT / "requirements-gpu.txt")
-
-    assert gpu["torch"] == f"{training['torch']}+cu130"
+    assert training["torch"] == f"{EXPECTED['torch']}+cu130"
 
 
 def test_model_facing_make_targets_require_training_environment():
@@ -84,13 +82,8 @@ def test_model_facing_make_targets_require_training_environment():
         )
 
 
-def test_cpu_training_install_uses_training_requirements():
-    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
-    match = re.search(
-        r"(?ms)^install-training:\n(?P<body>(?:\t.*\n|\n)+?)(?=^[A-Za-z0-9_.-]+:)",
-        makefile,
-    )
-    assert match is not None
-    body = match.group("body")
-    assert "requirements-training.txt" in body
-    assert "verify_environment.py --profile training" in body
+def test_role_setup_uses_the_matching_requirements():
+    for role, filename in (("curate", "curation"), ("train", "training")):
+        script = (ROOT / "infra" / f"setup_{role}.sh").read_text()
+        assert f"requirements-{filename}.txt" in script
+        assert "install_environment" in script

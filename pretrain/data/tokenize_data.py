@@ -547,7 +547,7 @@ def main():
         action="store_true",
         help="Verify output after tokenization",
     )
-    parser.add_argument("--test", type=Path, default=None, help="Frozen validated test JSONL")
+    parser.add_argument("--test", type=Path, default=None, help="Test validated test JSONL")
     args = parser.parse_args()
     if args.workers < 1 or args.chunk_size < 1:
         parser.error("workers and chunk-size must be positive")
@@ -564,7 +564,7 @@ def main():
         parser.error("train/val/test must belong to the same validated artifact set")
     if not manifest_outputs_match(args.train.parent, output_pattern="*.json*"):
         raise RuntimeError(f"Validated inputs are not manifest-complete: {args.train.parent}")
-    frozen = verify_jsonl_contract(args.train.parent, stage="validated")
+    holdout = verify_jsonl_contract(args.train.parent, stage="validated")
     if not args.tokenizer.is_file():
         raise FileNotFoundError(f"Missing matched tokenizer: {args.tokenizer}")
     vocab_size, bos_id, eos_id = _validate_tokenizer(args.tokenizer)
@@ -577,10 +577,10 @@ def main():
         for split, path in inputs.items():
             meta = _tokenize_split(path, args.output, split, pool, bos_id, eos_id,
                                    args.tokenizer, args.chunk_size)
-            expected = frozen["contract"]["splits"][split]
+            expected = holdout["contract"]["splits"][split]
             if meta["input_sha256"] != expected["sha256"] or meta["n_docs"] != expected["documents"]:
-                raise RuntimeError(f"Tokenized {split} does not match frozen validated membership")
-            meta.update({"vocab_size": vocab_size, "frozen_split_sha256": frozen["sha256"],
+                raise RuntimeError(f"Tokenized {split} does not match holdout validated membership")
+            meta.update({"vocab_size": vocab_size, "test_split_sha256": holdout["sha256"],
                          "tokenizer_file_sha256": sha256_file(args.tokenizer)})
             atomic_write_json(args.output / f"{split}.json", meta)
             # Always gate completion on integrity; --verify remains accepted.
@@ -599,12 +599,12 @@ def main():
         "format_version": TOKENIZED_FORMAT_VERSION, "dtype": "uint16",
         "tokenizer_sha256": metadata["train"]["tokenizer_sha256"],
         "inputs": {split: meta["input_sha256"] for split, meta in metadata.items()},
-        "frozen_split_sha256": frozen["sha256"],
+        "test_split_sha256": holdout["sha256"],
         "mixture_contract_sha256": mixture["contract_sha256"],
     }
     write_manifest(args.output, stage="tokenize", contract=contract,
                    input_signature=stable_digest(contract["inputs"]), output_pattern="[tv]*")
-    log.info("Tokenization complete. Frozen train/val/test counts: %s",
+    log.info("Tokenization complete. Test train/val/test counts: %s",
              {split: meta["n_tokens"] for split, meta in metadata.items()})
 
 

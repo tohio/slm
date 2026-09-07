@@ -393,14 +393,14 @@ class TestFertilityBaseline:
 
 
 @pytest.mark.parametrize("split", ["train", "val", "test"])
-def test_all_tokenized_splits_have_complete_frozen_integrity(split):
+def test_all_tokenized_splits_have_complete_split_integrity(split):
     from config.holdout import load_contract
     from pretrain.data.tokenize_data import verify_dataset
     root = pipeline_path("tokenized")
-    frozen = load_contract(root, stage="validated")
+    holdout = load_contract(root, stage="validated")
     metadata = json.loads((root / f"{split}.json").read_text())
-    assert metadata["frozen_split_sha256"] == frozen["sha256"]
-    assert metadata["input_sha256"] == frozen["contract"]["splits"][split]["sha256"]
-    assert metadata["n_docs"] == frozen["contract"]["splits"][split]["documents"]
+    assert metadata["test_split_sha256"] == holdout["sha256"]
+    assert metadata["input_sha256"] == holdout["contract"]["splits"][split]["sha256"]
+    assert metadata["n_docs"] == holdout["contract"]["splits"][split]["documents"]
     assert metadata["binary_sha256"]
     verify_dataset(root / f"{split}.bin", root / f"{split}.json")

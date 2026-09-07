@@ -9,6 +9,7 @@ training checkpoints, local exports, and published SLM models.
 |---|---|
 | `chat.py` | Stateful terminal chat with reset, system-prompt, and history controls |
 | `generate.py` | Raw or chat-formatted generation from standard input or a text file |
+| `tools.py` | Allowlisted single-call web_search dispatch and bounded provider adapters |
 | `utils.py` | Model/tokenizer loading and runtime special-token resolution |
 
 For a local training checkpoint, the loader prefers its `tokenizer/`
@@ -114,3 +115,12 @@ Generation options include `--max-new-tokens`, `--temperature`, `--top-p`,
   chat, and code-instruction variants.
 
 For multi-user HTTP serving, use the vLLM assets in `serve/`.
+
+## Optional web search
+
+Use `chat.py --web-search` with an explicitly configured search provider to allow
+one read-only search per user turn. Without that flag, ordinary chat never
+contacts a search provider. The runtime preserves tool markers, validates the
+request, appends bounded untrusted results, and requires one final answer.
+No arbitrary code or multi-step browsing is supported. See
+[tool calling](../docs/TOOL_CALLING.md) for configuration and SFT data requirements.

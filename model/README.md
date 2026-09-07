@@ -110,7 +110,7 @@ model = AutoModelForCausalLM.from_pretrained(
 Model tests require the pinned Transformers 5.14.1 training contract:
 
 ```bash
-make install-training  # omit on a GPU host already prepared with install-gpu
+make setup-train  # omit when the training environment is already prepared
 make test-model
 ```
 
@@ -131,5 +131,5 @@ the loaded model; learned embeddings and other learned tensors are unchanged.
 
 Run `tests/model/test_rope_loading.py` on the pinned training stack and reproduce
 the real Mini validation baseline with the matching original tokenizer/data.
-See [the migration guide](../docs/FROZEN_PRETRAINING.md) for the distinction
-between that validation check and an unseen frozen-test evaluation.
+See [the migration guide](../docs/PRETRAINING_DATA.md) for the distinction
+between that validation check and an unseen test evaluation.

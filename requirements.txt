@@ -1,7 +1,7 @@
 # Shared utilities only. Select requirements-curation.txt or
 # requirements-training.txt for a runnable role-specific environment.
-boto3>=1.34.0
-botocore>=1.34.0
+boto3>=1.36.0
+botocore>=1.36.0
 numpy>=1.26.0
 tqdm>=4.66.0
 pyyaml>=6.0.1

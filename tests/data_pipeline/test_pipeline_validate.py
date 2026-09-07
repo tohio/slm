@@ -210,10 +210,10 @@ class TestValidationStats:
             )
 
 
-def test_frozen_validation_contract_and_all_split_counts():
+def test_validation_contract_and_all_split_counts():
     from config.holdout import verify_jsonl_contract
-    frozen = verify_jsonl_contract(pipeline_path("validated"), stage="validated")["contract"]
+    holdout = verify_jsonl_contract(pipeline_path("validated"), stage="validated")["contract"]
     stats = json.loads(pipeline_path("validated", "validation_stats.json").read_text())
     assert set(stats["splits"]) == {"train", "val", "test"}
     for split in ("train", "val", "test"):
-        assert stats["splits"][split]["kept"] == frozen["splits"][split]["documents"] > 0
+        assert stats["splits"][split]["kept"] == holdout["splits"][split]["documents"] > 0

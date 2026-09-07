@@ -1,44 +1,25 @@
-# Accelerate Configurations
+# Accelerate configurations
 
-This directory stores process-launch configuration for Hugging Face
-Accelerate.
-
-## Checked-in files
+Repository-local process-launch configuration used by the training Make targets.
+Model/trainer hyperparameters belong in the stage YAML files, not here.
 
 | File | Purpose |
 |---|---|
 | `single_gpu.yaml` | One-process, one-GPU BF16 launch |
-| `multi_gpu.yaml` | Multi-process DDP launch |
+| `multi_gpu.yaml` | DDP, regenerated internally for the requested process count |
 
-`config_gen/accel_gen.py` can regenerate `multi_gpu.yaml` and create
-`fsdp.yaml`:
-
-```bash
-make accel-gen-ddp GPUS=N
-make accel-gen-fsdp GPUS=N
-```
-
-The normal training Make targets pass process count and precision directly to
-`accelerate launch`. A generated topology file affects a run only when it is
-selected explicitly:
+Run the regular config generator before launching training:
 
 ```bash
-.venv/bin/accelerate launch \
-  --config_file accelerate_configs/multi_gpu.yaml \
-  pretrain/train.py \
-  --config pretrain/configs/gpt_350m.yaml
+make config-gen SIZE=mini GPUS=1
 ```
 
-For interactive Accelerate defaults, copy a checked-in configuration with:
+For multiple GPUs use `GPUS=N`, replacing `N` with the number you choose. The
+stage-specific config generators also generate the DDP file when `GPUS > 1`.
+Training explicitly selects the appropriate repository config and passes the
+same process count. No global Accelerate config, interactive setup, sed-based
+configuration, or sharded training path is used.
 
-```bash
-make accelerate-config-single
-make accelerate-config-multi GPUS=N
-```
-
-Before using FSDP for an expensive run, verify checkpoint save, resume,
-promotion, and export with the same topology. Training hyperparameters remain
-in the stage YAML files; these files control process orchestration only.
-
-In generic examples, replace `N` with the GPU count you choose to use. Mini
-uses the existing pretraining config-generation flow; Smoke stays separate.
+Each DDP process holds a complete model/optimizer replica. See
+[configuration generation](../config_gen/README.md) for hardware planning and
+[training](../docs/TRAIN.md) for the launch workflow. Smoke remains separate.

@@ -183,7 +183,7 @@ Set `DATA_DIR` to persistent storage and complete every variable in `.env`
 before starting the pipeline.
 
 ```bash
-make setup-data-dir DATA_DIR=/data/slm/data
+make setup-curate DATA_DIR=/data/slm/data
 source .venv/bin/activate
 make download-fasttext-model DATA_DIR=/data/slm/data
 ```

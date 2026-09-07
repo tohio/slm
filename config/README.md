@@ -9,6 +9,8 @@ contracts. Stage code should import these values instead of duplicating them.
 |---|---|
 | `data_mix.py` | Pretraining source mix, code sub-mix, curation limits, split policy, and per-size token targets |
 | `paths.py` | Run-scoped data, result, evaluation, and export path builders |
+| `holdout.py` | Split identity and train/val/test integrity |
+| `chat.py` | Shared no-tool/tool-aware templates and the web_search data contract |
 | `runtime.py` | Safe CUDA matmul and SDPA dispatcher configuration |
 | `__init__.py` | Public configuration exports |
 

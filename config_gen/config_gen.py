@@ -187,6 +187,8 @@ class SFTProfile:
     # Groups similar-length examples into the same batch to reduce padding waste.
     # Safe with normal causal attention because it does not concatenate samples.
     group_by_length: bool = True
+    max_samples: int | None = None
+    step_sample_budget: int | None = None
 
     # torch_compile is disabled by default for SFT until profiled.
     torch_compile: bool = False
@@ -217,6 +219,7 @@ class DPOProfile:
 
     # torch_compile is disabled by default for DPO until profiled.
     torch_compile: bool = False
+    step_sample_budget: int | None = None
 
 # consumed_tokens (= corpus_tokens × epochs) is sourced from
 # config/data_mix.py — that's the single source of truth for both corpus size
@@ -253,6 +256,9 @@ SIZE_PROFILES: dict[str, PretrainProfile] = {
 }
 
 
+# Mini recipes retain their checked-in LR, sequence length, sample cap and
+# update-example budget. Its memory estimates conservatively reuse 125m values;
+# they are analytical, not claimed measurements.
 # SFT instruct profiles.
 #   125m: calibrated against a real OOM event at micro=64 (see commit history).
 #         state_gb bumped from pretrain (~2.0) to capture TRL's overhead from
@@ -262,6 +268,12 @@ SIZE_PROFILES: dict[str, PretrainProfile] = {
 #              capture the same TRL tax 125m exhibited. NOT measured —
 #              re-measure on first real run for each size.
 SFT_INSTRUCT_PROFILES: dict[str, SFTProfile] = {
+    "mini": SFTProfile(
+        state_gb=2.0, act_per_seq_gb_no_ckpt=3.9, act_per_seq_gb_ckpt=1.3,
+        max_seq_length=1024, ref_global_batch=4, lr=1.0e-5, epochs=1,
+        warmup_ratio=0.03, eval_steps=25, save_steps=25,
+        max_samples=500, step_sample_budget=500,
+    ),
     "125m": SFTProfile(
         state_gb=2.0, act_per_seq_gb_no_ckpt=3.9, act_per_seq_gb_ckpt=1.3,
         max_seq_length=2048, ref_global_batch=64, lr=1.0e-5, epochs=2,
@@ -282,6 +294,12 @@ SFT_INSTRUCT_PROFILES: dict[str, SFTProfile] = {
 # SFT code — same architecture and memory profile as chat.
 # Recipe differs: lower LR to reduce catastrophic forgetting of chat.
 SFT_CODE_PROFILES: dict[str, SFTProfile] = {
+    "mini": SFTProfile(
+        state_gb=2.0, act_per_seq_gb_no_ckpt=3.9, act_per_seq_gb_ckpt=1.3,
+        max_seq_length=1024, ref_global_batch=4, lr=5.0e-6, epochs=1,
+        warmup_ratio=0.03, eval_steps=25, save_steps=25,
+        max_samples=500, step_sample_budget=200,
+    ),
     "125m": SFTProfile(
         state_gb=2.0, act_per_seq_gb_no_ckpt=3.9, act_per_seq_gb_ckpt=1.3,
         max_seq_length=2048, ref_global_batch=64, lr=5.0e-6,
@@ -311,6 +329,12 @@ SFT_CODE_PROFILES: dict[str, SFTProfile] = {
 # analytical until a real run supplies measured peaks; the checked configs use
 # a conservative global batch of 16 pairs.
 DPO_PROFILES: dict[str, DPOProfile] = {
+    "mini": DPOProfile(
+        state_gb=2.3, act_per_seq_gb_no_ckpt=7.6, act_per_seq_gb_ckpt=2.6,
+        max_seq_length=1024, ref_global_batch=2, lr=5.0e-7, epochs=1,
+        warmup_ratio=0.05, dpo_beta=0.1, eval_steps=25, save_steps=25,
+        step_sample_budget=100,
+    ),
     "125m": DPOProfile(
         state_gb=2.3, act_per_seq_gb_no_ckpt=7.6, act_per_seq_gb_ckpt=2.6,
         max_seq_length=2048, ref_global_batch=16,
@@ -438,7 +462,7 @@ def _decide_batch_and_ckpt(
                 f"Does not fit on {spec['display']} even at micro_batch=1 "
                 f"with gradient checkpointing. State alone needs "
                 f"{state_gb:.1f} GB; budget is {budget_gb:.1f} GB. "
-                f"Use a larger GPU or shard with FSDP."
+                f"Use a GPU with sufficient memory for a full replica."
             )
     
     # Aggressive mode can produce values like 63 when the recipe target is 64
@@ -549,12 +573,6 @@ def compute_pretrain_config(
             f"max_steps={max_steps:,} × tokens/step={tokens_per_step:,} = "
             f"{actual_consumed/1e9:.2f}B vs target {target_consumed/1e9:.2f}B. "
             f"Consider adjusting target_global_batch."
-        )
-    if size == "1b" and num_gpus >= 4:
-        warns.append(
-            "1B model on 4+ GPUs benefits from FSDP (saves ~10 GB/GPU on "
-            "optimizer state). Consider `make accel-gen-fsdp GPUS=N` instead "
-            "of plain DDP."
         )
 
     return GeneratedConfig(
@@ -887,6 +905,15 @@ optimizer:
 """
 
 
+def _posttrain_duration(cfg: GeneratedConfig, profile) -> str:
+    if profile.step_sample_budget is not None:
+        # Round up to whole optimizer steps when a chosen GPU count cannot
+        # represent the exact existing sample budget. The header reports batch.
+        steps = max(1, math.ceil(profile.step_sample_budget / cfg.actual_global_batch))
+        return f"max_steps: {steps}"
+    return f"epochs: {profile.epochs}"
+
+
 def _render_sft_yaml(cfg: GeneratedConfig, profile: SFTProfile,
                      base_model_path: str, train_path: str, val_path: str,
                      out_name: str) -> str:
@@ -908,7 +935,7 @@ data:
   packing: {str(profile.packing).lower()}
   loss_type: chunked_nll
   min_retention_ratio: 0.90
-
+{f"  max_samples: {profile.max_samples}" if profile.max_samples is not None else ""}
 training:
   # micro × accum × gpus = {cfg.micro_batch_size} × {cfg.gradient_accumulation_steps} × {cfg.num_gpus} = {cfg.actual_global_batch} sequences/step
   #
@@ -917,7 +944,7 @@ training:
   # TrainingArguments as warmup_steps. The separate recipe key prevents the
   # trainer library from interpreting it directly.
   warmup_ratio_recipe: {profile.warmup_ratio}
-  epochs: {profile.epochs}
+  {_posttrain_duration(cfg, profile)}
   micro_batch_size: {cfg.micro_batch_size}
   eval_micro_batch_size: {eval_micro}
   gradient_accumulation_steps: {cfg.gradient_accumulation_steps}
@@ -998,7 +1025,7 @@ training:
   # runtime by train_dpo.py from the resolved total_steps and passed to
   # DPOConfig as warmup_steps.
   warmup_ratio_recipe: {profile.warmup_ratio}
-  epochs: {profile.epochs}
+  {_posttrain_duration(cfg, profile)}
   micro_batch_size: {cfg.micro_batch_size}
   eval_micro_batch_size: {eval_micro}
   gradient_accumulation_steps: {cfg.gradient_accumulation_steps}

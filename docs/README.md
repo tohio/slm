@@ -2,9 +2,9 @@
 
 Project-level references:
 
-- [Frozen pretraining and reuse](FROZEN_PRETRAINING.md) — frozen train/val/test,
-  existing-Mini migration, `SIZE`/`DATASET_SIZE`, S3/HF retention and restore,
-  fixed probes, RoPE loading, and controlled throughput experiments.
+- [Pretraining data and reuse](PRETRAINING_DATA.md) — train/val/test roles,
+  matched artifacts, `SIZE`/`DATASET_SIZE`, S3/HF routing, and final evaluation.
+- [Tool calling](TOOL_CALLING.md) — single-call web search, SFT format, and runtime limits.
 
 - [Architecture](ARCHITECTURE.md) — component ownership, model lineage, and
   artifact flow.
