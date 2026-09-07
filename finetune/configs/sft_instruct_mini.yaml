@@ -11,7 +11,7 @@ data:
   min_retention_ratio: 0.90
   max_samples: 500
 training:
-  max_steps: 50
+  max_steps: 125
   warmup_ratio_recipe: 0.03
   micro_batch_size: 2
   gradient_accumulation_steps: 2

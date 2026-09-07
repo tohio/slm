@@ -63,6 +63,16 @@ model lineage, and artifact flow.
 - Native Transformers Llama export, local generation, Hub publication, and
   vLLM serving.
 
+## Frozen pretraining and dataset reuse
+
+The pipeline now carries a frozen final-only test split alongside training and
+validation, supports `DATASET_SIZE` independently of model `SIZE`, and restores
+matched artifacts from one selected S3 or HF Storage Buckets backend. See
+[`docs/FROZEN_PRETRAINING.md`](docs/FROZEN_PRETRAINING.md) for the existing-Mini
+migration, retention, dependency stacks, diagnostics, and verification commands.
+An old checkpoint must not be evaluated as unseen on test carved later from its
+own training pool.
+
 ## Getting Started
 
 SLM uses separate environments for data curation and model training. Do not
@@ -78,7 +88,7 @@ Prerequisites:
 
 - Ubuntu host with persistent storage for curation.
 - Hugging Face account and token.
-- AWS account, S3 bucket, and credentials when uploading artifacts.
+- An S3 bucket/SDK credentials or an HF Storage Bucket/token when uploading artifacts.
 - Weights & Biases credentials if enabled by the active workflow.
 
 The curation guide lists gated datasets whose terms must be accepted before

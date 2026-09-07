@@ -88,11 +88,13 @@ make curate-all \
 1. Validates `.env`, required Make inputs, and curation model prerequisites.
 2. Verifies the pinned curation environment.
 3. Curates, filters, deduplicates, and blends the configured sources.
-4. Validates the curated train and validation splits.
+4. Freezes test from training without changing validation, audits all three
+   overlap relationships, and validates all three splits.
 5. Trains and validates the size-specific BPE tokenizer.
-6. Tokenizes both splits into memory-mapped binaries.
+6. Tokenizes and integrity-checks train, validation, and test binaries.
 7. Runs each artifact gate without rebuilding completed stages.
-8. Uploads `tokenized`, `tokenizer`, and `metadata` artifacts to S3.
+8. Uploads the training-ready `validated`, `tokenized`, `tokenizer`, and
+   `metadata` artifact set to the selected S3 or HF backend.
 9. Prints the `RUN_ID` required by the training host.
 
 Choose `WORKERS` below the available CPU count. On a 64-vCPU host,
@@ -152,13 +154,13 @@ make test-data-pipeline SIZE=125m
 make artifacts-upload \
   SIZE=125m \
   WORKERS=62 \
-  ARTIFACT_STAGES="tokenized,tokenizer,metadata"
+  ARTIFACT_STAGES="validated,tokenized,tokenizer,metadata"
 
 cat "$DATA_DIR/runs/125m/RUN_ID"
 ```
 
 Record the printed `RUN_ID`. The GPU host uses it to restore the exact
-tokenized corpus, tokenizer, and metadata.
+validated holdouts, all tokenized splits, tokenizer, and metadata.
 
 ## Resume behavior
 
@@ -197,3 +199,14 @@ failures, see [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md).
 - [Testing](TESTING.md)
 - [Command reference](COMMANDS.md)
 - [Curation component guide](../curator/README.md)
+
+## Existing corpus upgrade and retained holdouts
+
+The CPU setup installs `requirements-curation.txt`; `requirements.txt` contains
+shared utilities only. Do not install the training stack into this environment.
+Run `make freeze-test SIZE=<size>` before the curated artifact tests for an
+existing blend; `validate` and `curate-all` wire this step into the normal flow.
+`make regenerate-mini-frozen` rebuilds only invalidated Mini data stages, then
+requires review before uploading. Read [Frozen pretraining](FROZEN_PRETRAINING.md)
+for immutable membership, the 1.4B-token floor, selective retention, optional HF
+transfer isolation, and the old-checkpoint/new-test contamination caveat.

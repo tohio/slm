@@ -17,6 +17,8 @@ data:
   val_fraction: 0.005
 
 training:
+  # Same-size uses its realized corpus. Cross-size uses this model's bounded prefix.
+  cross_size_max_train_tokens: 10000001024
   # Runtime replaces the planning max/warmup steps below using verified
   # tokenized train tokens while preserving the configured warmup ratio.
   schedule_from_realized_tokens: true
@@ -50,6 +52,17 @@ training:
   lr_scheduler: cosine
   report_to:
     - wandb
+
+generation_probes:
+  enabled: true
+  every_steps: 5000
+  steps: []
+  at_final: true
+  do_sample: false
+  max_new_tokens: 64
+
+final_evaluation:
+  prefix_count: 5
 
 optimizer:
   lr: 3.0e-4

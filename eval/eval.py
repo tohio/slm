@@ -447,7 +447,21 @@ def main():
         action="store_true",
         help="Log per-example inputs/outputs/scores (for debugging)",
     )
+    parser.add_argument("--mode", choices=["benchmarks", "pretraining-final", "pretraining-validation", "pretrain-probes"], default="benchmarks")
+    parser.add_argument("--size", choices=["smoke", "mini", "125m", "350m", "1b"])
+    parser.add_argument("--dataset-size", choices=["smoke", "mini", "125m", "350m", "1b"])
+    parser.add_argument("--dataset-run-id")
+    parser.add_argument("--data-dir", type=Path, default=Path(os.environ.get("DATA_DIR", "data")))
+    parser.add_argument("--json-out", type=Path)
+    parser.add_argument("--tokenizer-dir", type=Path, help="Matched tokenizer for saved-checkpoint pretraining probes")
+    parser.add_argument("--expected-validation-loss", type=float)
+    parser.add_argument("--validation-loss-tolerance", type=float, default=0.01)
+    parser.add_argument("--corpus-qa", type=Path, help="Optional evidence-checked frozen-corpus QA JSONL")
     args = parser.parse_args()
+    if args.mode != "benchmarks":
+        from pretrain.diagnostics import standalone
+        standalone(args)
+        return
 
     if not args.model.exists():
         log.error(f"Model not found: {args.model}")

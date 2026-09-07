@@ -117,7 +117,7 @@ Resume the upload with the same stage set:
 ```bash
 make artifacts-upload \
   SIZE=125m \
-  ARTIFACT_STAGES="tokenized,tokenizer,metadata"
+  ARTIFACT_STAGES="validated,tokenized,tokenizer,metadata"
 ```
 
 The upload reuses the current day's local `RUN_ID`. For a later upload to the
@@ -127,7 +127,7 @@ same artifact run, pass the recorded value explicitly:
 make artifacts-upload \
   SIZE=125m \
   RUN_ID=125m-YYYYMMDD-abcdef \
-  ARTIFACT_STAGES="tokenized,tokenizer,metadata"
+  ARTIFACT_STAGES="validated,tokenized,tokenizer,metadata"
 ```
 
 ## GPU environment failures

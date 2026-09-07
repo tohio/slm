@@ -69,8 +69,8 @@ planning model, not a measured guarantee.
 Generate a DDP or FSDP configuration:
 
 ```bash
-make accel-gen-ddp GPUS=8
-make accel-gen-fsdp GPUS=8
+make accel-gen-ddp GPUS=N
+make accel-gen-fsdp GPUS=N
 ```
 
 Outputs:
@@ -121,3 +121,6 @@ options.
 make test-config-gen
 make test-accel-gen
 ```
+
+In generic examples, replace `N` with the GPU count you choose to use. Mini
+uses the existing pretraining config-generation flow; Smoke stays separate.

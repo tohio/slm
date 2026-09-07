@@ -6,20 +6,20 @@ Canonical source-aware data validation pipeline.
 Applies additional source-aware checks on top of the curator's filters and
 records KenLM perplexity measurements for eligible prose.
 
-Pipeline (run independently for each split):
-    1. Load curated JSONL from data/runs/<size>/curated/{train,val}.jsonl
+Pipeline (run independently for each of train / val / test):
+    1. Load curated JSONL from data/runs/<size>/curated/{train,val,test}.jsonl
     2. Apply source-aware C4/Gopher-style checks
     3. Measure perplexity with a KenLM 5-gram model
-    4. Write validated JSONL to data/runs/<size>/validated/{train,val}.jsonl
+    4. Write validated JSONL to data/runs/<size>/validated/{train,val,test}.jsonl
     5. Write per-split rejection stats
 
-Why validate both splits? The curator produces train.jsonl and val.jsonl
+Why validate all three splits? The curator produces train.jsonl and val.jsonl
 as uniform random samples of the same shuffled distribution. If only train
 were KenLM-filtered, val would end up with a *different* quality distribution
 than train, defeating the point of having them come from the same blend.
-Running validation over both splits preserves the "same distribution"
+Running validation over all three splits preserves the "same distribution"
 guarantee. Downstream eval loss is a meaningful comparison to training loss
-only when both splits passed the same filters.
+only when all three splits passed the same filters.
 
 Perplexity policy:
     KenLM is report-only by default. It records deterministic, bounded
@@ -65,6 +65,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from config import PROSE_HEURISTIC_SKIP_SOURCES
 from config.paths import curated_dir, validated_dir, BASE_DATA_DIR
+from config.holdout import (
+    CONTRACT_NAME, SCHEMA_VERSION, SPLITS, jsonl_identity, load_contract,
+    verify_jsonl_contract, write_contract,
+)
 from curator.state import (
     atomic_write_json,
     code_fingerprint,
@@ -177,7 +181,7 @@ def validate_manual_split(
     perplexity_sample_size: int = 10_000,
 ) -> dict:
     """
-    Manual validation for a single split (train or val).
+    Manual validation for a single split (train, val, or test).
 
     Applies:
         - Terminal punctuation check (C4-style) — prose sources only
@@ -196,7 +200,7 @@ def validate_manual_split(
         output_path: Output JSONL file.
         kenlm_model: Loaded KenLM model, or None to skip KenLM measurement.
         perplexity_threshold: Explicit maximum perplexity, or None to report only.
-        split: "train" or "val" — used for log labels only.
+        split: "train", "val", or "test" — used for log labels only.
         perplexity_sample_size: Per-source bounded sample used for quantiles.
 
     Returns:
@@ -412,6 +416,8 @@ def main():
         action="store_true",
         help="Skip KenLM measurement and filtering",
     )
+    parser.add_argument("--test", type=Path, default=None, help="Frozen test JSONL input")
+    parser.add_argument("--test-output", type=Path, default=None)
     args = parser.parse_args()
 
     if args.perplexity_threshold is not None and args.perplexity_threshold <= 0:
@@ -429,6 +435,19 @@ def main():
     args.val = args.val or (run_curated_dir / "val.jsonl")
     args.train_output = args.train_output or (run_validated_dir / "train.jsonl")
     args.val_output = args.val_output or (run_validated_dir / "val.jsonl")
+    args.test = args.test or (run_curated_dir / "test.jsonl")
+    args.test_output = args.test_output or (run_validated_dir / "test.jsonl")
+    inputs = {split: getattr(args, split) for split in SPLITS}
+    outputs = {split: getattr(args, f"{split}_output") for split in SPLITS}
+    if len({path.parent for path in inputs.values()}) != 1:
+        parser.error("train/val/test must belong to one matched curated artifact set")
+    if len({path.parent for path in outputs.values()}) != 1:
+        parser.error("train/val/test outputs must share one validated artifact directory")
+    source_frozen = verify_jsonl_contract(args.train.parent, stage="curated")
+    for split, path in inputs.items():
+        if jsonl_identity(path) != source_frozen["contract"]["splits"][split]:
+            raise RuntimeError(f"{split} input does not match the frozen curated contract")
+
 
     kenlm_path = None if args.no_perplexity else args.kenlm_model
     sentencepiece_path = (
@@ -447,8 +466,8 @@ def main():
         raise FileNotFoundError(f"Train input not found: {args.train}")
     if not args.val.exists():
         raise FileNotFoundError(
-            f"Val input not found: {args.val}. Validation requires both splits "
-            f"so train and val retain the same filtering contract."
+            f"Val input not found: {args.val}. Validation requires all three splits "
+            f"so train, val, and test retain the same filtering contract."
         )
     val_available = True
     if (
@@ -476,6 +495,8 @@ def main():
         {
             "train": file_snapshot([args.train], root=args.train.parent),
             "val": file_snapshot([args.val], root=args.val.parent),
+            "test": file_snapshot([args.test], root=args.test.parent),
+            "frozen_split_sha256": source_frozen["sha256"],
         }
     )
     validation_contract = {
@@ -510,98 +531,58 @@ def main():
             else None
         ),
     }
-    common_output_dir = (
-        args.train_output.parent
-        if args.train_output.parent == args.val_output.parent
-        else None
-    )
-    if common_output_dir is not None and manifest_matches(
-        common_output_dir,
-        stage="validate",
-        contract=validation_contract,
-        input_signature=input_signature,
-        output_pattern="*.json*",
-    ):
-        log.info("Verified validation manifest matches inputs/configuration — reusing")
+    common_output_dir = args.train_output.parent
+    if (common_output_dir / CONTRACT_NAME).exists():
+        previous = verify_jsonl_contract(common_output_dir, stage="validated")
+        if (previous["contract"].get("curated_contract_sha256") != source_frozen["sha256"]
+                or stable_digest(previous["contract"].get("validation_contract")) != stable_digest(validation_contract)):
+            raise RuntimeError(
+                "Validation would change a frozen holdout contract. Restore the matched "
+                "artifacts or start a new dataset run; do not regenerate test membership."
+            )
+    if manifest_matches(common_output_dir, stage="validate", contract=validation_contract,
+                        input_signature=input_signature, output_pattern="*.json*"):
+        log.info("Verified frozen train/val/test validation manifest — reusing")
         return
 
-    # Train split
-    train_stats = validate_manual_split(
-        input_path=args.train,
-        output_path=args.train_output,
-        kenlm_model=kenlm_model,
-        perplexity_threshold=perplexity_threshold,
-        split="train",
-        perplexity_sample_size=args.perplexity_sample_size,
-    )
-    _log_split_report("train", train_stats)
-
-    # Val split
-    val_stats: dict | None = None
-    if val_available:
-        val_stats = validate_manual_split(
-            input_path=args.val,
-            output_path=args.val_output,
-            kenlm_model=kenlm_model,
-            perplexity_threshold=perplexity_threshold,
-            split="val",
+    stats = {}
+    for split in SPLITS:
+        stats[split] = validate_manual_split(
+            input_path=inputs[split], output_path=outputs[split], kenlm_model=kenlm_model,
+            perplexity_threshold=perplexity_threshold, split=split,
             perplexity_sample_size=args.perplexity_sample_size,
         )
-        _log_split_report("val", val_stats)
-
-    # Aggregated stats — kept in the top-level fields for backwards compat
-    # with existing tests + callers that expect `total` / `kept`. Per-split
-    # breakdown is nested under splits.
-    combined = {
-        "total": train_stats["total"] + (val_stats["total"] if val_stats else 0),
-        "kept": train_stats["kept"] + (val_stats["kept"] if val_stats else 0),
-        "rejected_terminal_punct": (
-            train_stats["rejected_terminal_punct"]
-            + (val_stats["rejected_terminal_punct"] if val_stats else 0)
-        ),
-        "rejected_repeated_lines": (
-            train_stats["rejected_repeated_lines"]
-            + (val_stats["rejected_repeated_lines"] if val_stats else 0)
-        ),
-        "rejected_perplexity": (
-            train_stats["rejected_perplexity"]
-            + (val_stats["rejected_perplexity"] if val_stats else 0)
-        ),
-        "skipped_prose_heuristics": (
-            train_stats.get("skipped_prose_heuristics", 0)
-            + (val_stats.get("skipped_prose_heuristics", 0) if val_stats else 0)
-        ),
-        "perplexity_threshold": perplexity_threshold,
-        "perplexity_policy": (
-            "disabled"
-            if kenlm_model is None
-            else (
-                "explicit_threshold"
-                if perplexity_threshold is not None
-                else "report_only"
-            )
-        ),
-        "splits": {
-            "train": train_stats,
-            **({"val": val_stats} if val_stats else {}),
-        },
-    }
-
-    stats_dir = common_output_dir or args.train_output.parent
-    stats_path = stats_dir / "validation_stats.json"
-    stats_dir.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(stats_path, combined)
-    if common_output_dir is not None:
-        write_manifest(
-            common_output_dir,
-            stage="validate",
-            contract=validation_contract,
-            input_signature=input_signature,
-            output_pattern="*.json*",
-        )
-    log.info(f"Stats written to {stats_path}")
-
-    log.info("Validation complete.")
+        _log_split_report(split, stats[split])
+        if stats[split]["kept"] <= 0:
+            raise RuntimeError(f"Validation left {split} empty; refusing a complete manifest")
+    identities = {split: jsonl_identity(path) for split, path in outputs.items()}
+    for split in SPLITS:
+        rejected = sum(stats[split][k] for k in (
+            "rejected_terminal_punct", "rejected_repeated_lines", "rejected_perplexity"))
+        if (stats[split]["total"] != source_frozen["contract"]["splits"][split]["documents"]
+                or stats[split]["kept"] != identities[split]["documents"]
+                or stats[split]["total"] != stats[split]["kept"] + rejected):
+            raise RuntimeError(f"Validation physical/rejection accounting mismatch: {split}")
+    # Validation drops records; it never rewrites their text. Thus the three
+    # completed exact/MinHash separation policies remain valid after filtering.
+    frozen = write_contract(common_output_dir, {
+        "schema_version": SCHEMA_VERSION, "status": "frozen", "stage": "validated",
+        "size": args.size, "splits": identities,
+        "curated_contract_sha256": source_frozen["sha256"],
+        "curated_contract": source_frozen["contract"],
+        "validation_contract": validation_contract,
+    })
+    numeric_fields = ("total", "kept", "rejected_terminal_punct", "rejected_repeated_lines",
+                      "rejected_perplexity", "skipped_prose_heuristics")
+    combined = {key: sum(row.get(key, 0) for row in stats.values()) for key in numeric_fields}
+    combined.update({"perplexity_threshold": perplexity_threshold,
+                     "perplexity_policy": validation_contract["perplexity_policy"],
+                     "splits": stats, "frozen_split_sha256": frozen["sha256"]})
+    atomic_write_json(common_output_dir / "validation_stats.json", combined)
+    write_manifest(common_output_dir, stage="validate", contract=validation_contract,
+                   input_signature=input_signature, output_pattern="*.json*",
+                   metadata={"frozen_split_sha256": frozen["sha256"]})
+    log.info("Validation complete: train / val / frozen test.")
 
 
 if __name__ == "__main__":

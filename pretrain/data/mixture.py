@@ -86,8 +86,11 @@ def _validated_split_counts(split: str, metadata: dict) -> dict[str, dict[str, i
     }
 
 
-def _build_realized_mixture_report(train_metadata: dict, val_metadata: dict) -> dict:
+def _build_realized_mixture_report(train_metadata: dict, val_metadata: dict,
+                                   test_metadata: dict | None = None) -> dict:
     split_metadata = {"train": train_metadata, "val": val_metadata}
+    if test_metadata is not None:
+        split_metadata["test"] = test_metadata
     validated = {
         split: _validated_split_counts(split, metadata)
         for split, metadata in split_metadata.items()
@@ -114,7 +117,7 @@ def _build_realized_mixture_report(train_metadata: dict, val_metadata: dict) -> 
             "documents": documents,
             "splits": {
                 split: dict(validated[split][source])
-                for split in ("train", "val")
+                for split in split_metadata
             },
         }
 
@@ -162,10 +165,11 @@ def _build_realized_mixture_report(train_metadata: dict, val_metadata: dict) -> 
     }
 
 
-def build_realized_mixture_report(train_metadata: dict, val_metadata: dict) -> dict:
+def build_realized_mixture_report(train_metadata: dict, val_metadata: dict,
+                                  test_metadata: dict | None = None) -> dict:
     """Compare configured shares with authoritative tokenizer token counts."""
-    report = _build_realized_mixture_report(train_metadata, val_metadata)
-    validate_realized_mixture_report(report, train_metadata, val_metadata)
+    report = _build_realized_mixture_report(train_metadata, val_metadata, test_metadata)
+    validate_realized_mixture_report(report, train_metadata, val_metadata, test_metadata)
     return report
 
 
@@ -173,9 +177,10 @@ def validate_realized_mixture_report(
     report: dict,
     train_metadata: dict,
     val_metadata: dict,
+    test_metadata: dict | None = None,
 ) -> None:
     """Reject a missing, stale, or structurally incomplete mixture report."""
-    expected = _build_realized_mixture_report(train_metadata, val_metadata)
+    expected = _build_realized_mixture_report(train_metadata, val_metadata, test_metadata)
     if report.get("schema_version") != REALIZED_MIXTURE_SCHEMA_VERSION:
         raise RuntimeError("Realized-mixture report has an unsupported schema")
     contract = report.get("contract")
@@ -187,12 +192,15 @@ def validate_realized_mixture_report(
         "train": stable_digest(train_metadata),
         "val": stable_digest(val_metadata),
     }
+    if test_metadata is not None:
+        expected_metadata["test"] = stable_digest(test_metadata)
     if report.get("split_metadata_sha256") != expected_metadata:
         raise RuntimeError("Realized-mixture report is stale for tokenized metadata")
     if set(report.get("sources", {})) != set(ALL_SOURCES):
         raise RuntimeError("Realized-mixture report has an incomplete source set")
     if report.get("total_tokens") != (
         train_metadata.get("n_tokens", 0) + val_metadata.get("n_tokens", 0)
+        + (test_metadata or {}).get("n_tokens", 0)
     ):
         raise RuntimeError("Realized-mixture report total token count mismatch")
     if report != expected:

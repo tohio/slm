@@ -34,7 +34,9 @@ RESULTS_DIR="${RESULTS_DIR:-$REPO_DIR/results}"
 SKIP_DATA=false
 SKIP_PYTHON=false
 RUN_ID="${RUN_ID:-}"
-SIZE="125m"
+SIZE="${SIZE:-125m}"
+DATASET_SIZE="${DATASET_SIZE:-}"
+ARTIFACT_BACKEND="${ARTIFACT_BACKEND:-s3}"
 
 # ── Arg parsing ───────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -45,6 +47,8 @@ while [[ $# -gt 0 ]]; do
         --data-dir=*)   DATA_DIR="${1#*=}";      shift ;;
         --run-id)       RUN_ID="$2";             shift 2 ;;
         --run-id=*)     RUN_ID="${1#*=}";        shift ;;
+        --dataset-size) DATASET_SIZE="$2"; shift 2 ;;
+        --backend)      ARTIFACT_BACKEND="$2"; shift 2 ;;
         --size)         SIZE="$2";               shift 2 ;;
         --size=*)       SIZE="${1#*=}";          shift ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
@@ -52,7 +56,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 HF_CACHE_DIR="$(dirname "$DATA_DIR")/hf_cache"
-RUN_DATA_DIR="$DATA_DIR/runs/$SIZE"
+DATASET_SIZE="${DATASET_SIZE:-$SIZE}"
+RUN_DATA_DIR="$DATA_DIR/runs/$DATASET_SIZE"
+MODEL_DATA_DIR="$DATA_DIR/runs/$SIZE"
+case "$ARTIFACT_BACKEND" in s3|hf) ;; *) echo "Backend must be s3 or hf"; exit 1;; esac
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
@@ -91,10 +98,10 @@ fi
 
 mkdir -p \
     "$RUN_DATA_DIR/tokenized" \
-    "$RUN_DATA_DIR/sft_instruct" \
-    "$RUN_DATA_DIR/sft_code" \
-    "$RUN_DATA_DIR/dpo_chat" \
-    "$DATA_DIR/tokenizer" \
+    "$MODEL_DATA_DIR/sft_instruct" \
+    "$MODEL_DATA_DIR/sft_code" \
+    "$MODEL_DATA_DIR/dpo_chat" \
+    "$RUN_DATA_DIR/tokenizer" \
     "$DATA_DIR/models" \
     "$RESULTS_DIR" \
     "$HF_CACHE_DIR" \
@@ -116,14 +123,14 @@ sudo apt-get install -y -qq \
 log "  ✓ System dependencies installed"
 
 # ── AWS CLI ───────────────────────────────────────────────────────────────────
-if ! command -v aws &>/dev/null || [[ $(aws --version 2>&1) == *"aws-cli/1"* ]]; then
+if [[ "$ARTIFACT_BACKEND" == "s3" ]] && { ! command -v aws &>/dev/null || [[ $(aws --version 2>&1) == *"aws-cli/1"* ]]; }; then
     log "Installing AWS CLI v2..."
     curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
     unzip -q /tmp/awscliv2.zip -d /tmp
     sudo /tmp/aws/install --update
     rm -rf /tmp/awscliv2.zip /tmp/aws
 fi
-log "  ✓ AWS CLI: $(aws --version 2>&1 | head -1)"
+if [[ "$ARTIFACT_BACKEND" == "s3" ]]; then log "  ✓ AWS CLI: $(aws --version 2>&1 | head -1)"; fi
 
 # ── Python environment ────────────────────────────────────────────────────────
 if [[ "$SKIP_PYTHON" == "true" ]]; then
@@ -206,21 +213,21 @@ log "  ✓ accelerate configured for single GPU"
 # ── Pull run-scoped artifacts from S3 ─────────────────────────────────────────
 if [[ "$SKIP_DATA" == "true" ]]; then
     log "[SKIP] S3 artifact pull (--skip-data)"
-elif [[ -z "${S3_BUCKET:-}" ]]; then
+elif [[ "$ARTIFACT_BACKEND" == "s3" && -z "${S3_BUCKET:-}" ]]; then
     log "WARNING: S3_BUCKET not set in .env — skipping artifact pull"
-    log "  Run manually: make artifacts-download SIZE=$SIZE RUN_ID=<run_id> ARTIFACT_STAGES=tokenized,tokenizer,metadata"
+    log "  Run manually: make artifacts-download SIZE=$SIZE DATASET_SIZE=$DATASET_SIZE DATASET_RUN_ID=<run_id> ARTIFACT_STAGES=validated,tokenized,tokenizer,metadata"
 elif [[ -z "$RUN_ID" ]]; then
     log "ERROR: RUN_ID is required for GPU artifact restore"
-    log "  Example: make setup-gpu DATA_DIR=$DATA_DIR SIZE=$SIZE RUN_ID=${SIZE}-YYYYMMDD-a8f3c9"
+    log "  Example: make setup-gpu DATA_DIR=$DATA_DIR SIZE=$SIZE DATASET_SIZE=$DATASET_SIZE DATASET_RUN_ID=${DATASET_SIZE}-YYYYMMDD-a8f3c9"
     exit 1
 else
     cd "$REPO_DIR"
 
-    log "Restoring run-scoped artifacts from S3 (size=$SIZE, run_id=$RUN_ID)..."
+    log "Restoring $ARTIFACT_BACKEND artifacts (model=$SIZE, dataset=$DATASET_SIZE, run_id=$RUN_ID)..."
     .venv/bin/python curator/scripts/upload_s3.py artifacts-download \
-        --size "$SIZE" \
-        --run-id "$RUN_ID" \
-        --stages "tokenized,tokenizer,metadata"
+        --size "$DATASET_SIZE" \
+        --run-id "$RUN_ID" --backend "$ARTIFACT_BACKEND" --retention training-ready \
+        --stages "validated,tokenized,tokenizer,metadata"
 
     TRAIN_BIN="$RUN_DATA_DIR/tokenized/train.bin"
     if [[ -f "$TRAIN_BIN" ]]; then
@@ -231,11 +238,8 @@ else
         exit 1
     fi
 
-    mkdir -p "$DATA_DIR/tokenizer"
-    cp -a "$RUN_DATA_DIR/tokenizer/." "$DATA_DIR/tokenizer/"
-
-    TOKENIZER_FILE="$DATA_DIR/tokenizer/tokenizer.json"
-    TOKENIZER_CONFIG="$DATA_DIR/tokenizer/tokenizer_config.json"
+    TOKENIZER_FILE="$RUN_DATA_DIR/tokenizer/tokenizer.json"
+    TOKENIZER_CONFIG="$RUN_DATA_DIR/tokenizer/tokenizer_config.json"
 
     if [[ -f "$TOKENIZER_FILE" ]]; then
         log "  ✓ tokenizer.json present"
@@ -257,12 +261,13 @@ fi
 log ""
 log "=== Setup complete ==="
 log ""
-log "Next steps:"
+log "Next steps (N is the number of GPUs you choose; no GPU family/count is required):"
 log "  source ~/.bashrc"
 log "  vi .env                                    # verify credentials: S3_BUCKET, AWS keys, WANDB_API_KEY, HF_TOKEN"
 log "  make pretrain-mini GPUS=1                  # validate training loop"
-log "  make accelerate-config-multi GPUS=8        # configure for full run"
-log "  make pretrain SIZE=$SIZE GPUS=8            # full pretraining"
+log "  make accelerate-config-multi GPUS=N        # configure for full run"
+log "  make config-gen-pretrain SIZE=$SIZE GPUS=N"
+log "  make pretrain SIZE=$SIZE DATASET_SIZE=$DATASET_SIZE DATASET_RUN_ID=$RUN_ID GPUS=N            # full pretraining"
 log ""
 log "GPU monitoring:"
 log "  watch -n 2 nvidia-smi"

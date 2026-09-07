@@ -3,7 +3,7 @@
 ## Purpose
 
 `validation/` applies post-curation document checks to the blended pretraining
-train and validation splits. It removes structurally broken prose and
+train, validation, and frozen test splits. It removes structurally broken prose and
 excessive line repetition while preserving code, math, and other non-prose
 sources for which English-prose heuristics are inappropriate. KenLM measures
 eligible prose by default and filters only when an explicit threshold is set.
@@ -28,6 +28,8 @@ Input:
 ```text
 $DATA_DIR/runs/<size>/curated/train.jsonl
 $DATA_DIR/runs/<size>/curated/val.jsonl
+$DATA_DIR/runs/<size>/curated/test.jsonl
+$DATA_DIR/runs/<size>/curated/test_contract.json
 ```
 
 Output:
@@ -35,12 +37,16 @@ Output:
 ```text
 $DATA_DIR/runs/<size>/validated/train.jsonl
 $DATA_DIR/runs/<size>/validated/val.jsonl
+$DATA_DIR/runs/<size>/validated/test.jsonl
+$DATA_DIR/runs/<size>/validated/test_contract.json
 $DATA_DIR/runs/<size>/validated/validation_stats.json
 $DATA_DIR/runs/<size>/validated/_SUCCESS.json
 ```
 
 Tokenizer training consumes the validated training split. Binary tokenization
-consumes both validated splits.
+consumes all three validated splits. `make validate` freezes test membership
+from the existing curated training pool first; an established frozen contract
+is verified and reused, not reshuffled.
 
 ## Validation Rules
 
@@ -58,7 +64,7 @@ When no explicit perplexity threshold is supplied, the validator:
 
 1. scores eligible prose without changing corpus membership;
 2. records counts, mean, minimum, maximum, and bounded deterministic
-   per-source percentile samples for both splits;
+   per-source percentile samples for all three splits;
 3. writes the distributions under `perplexity_audit` in
    `validation_stats.json`.
 
@@ -169,3 +175,15 @@ when they are absent.
 - `validation_stats.json` contains the KenLM policy, per-source distributions,
   measured rejection counts, and any explicit threshold; inspect it before
   tokenizer training.
+
+## Consolidated frozen pretraining workflow
+
+See [Frozen pretraining and dataset reuse](../docs/FROZEN_PRETRAINING.md) for the train/val/test roles,
+existing-Mini migration, matched `DATASET_SIZE` artifacts and model budgets,
+S3/HF backend selection, retention/restore, environment separation, fixed probes,
+size-aware final evaluation, and hardware experiments. New Make targets include
+`freeze-test`, `regenerate-mini-frozen`, `artifacts-index`, `test-frozen-contract`,
+`pretrain-probes`, `eval-pretrain-final`, and `pretrain-benchmark`.
+
+`GPUS=N` means the user-selected GPU count, not a fixed requirement. Generate
+the matching Mini/production config before launch; Smoke remains separate.

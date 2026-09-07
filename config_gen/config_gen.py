@@ -840,6 +840,7 @@ data:
   val_fraction: 0.005
 
 training:
+  cross_size_max_train_tokens: {math.ceil(data_mix.corpus_tokens(cfg.size) / profile.ctx) * profile.ctx}
   # Runtime resolves max/warmup steps from verified tokenized train tokens.
   schedule_from_realized_tokens: {str(profile.schedule_from_realized_tokens).lower()}
   # micro × accum × gpus = {cfg.micro_batch_size} × {cfg.gradient_accumulation_steps} × {cfg.num_gpus} = {cfg.actual_global_batch} sequences/step
@@ -865,6 +866,17 @@ training:
   lr_scheduler: cosine
   report_to:
     - wandb
+
+generation_probes:
+  enabled: true
+  every_steps: 5000
+  steps: []
+  at_final: true
+  do_sample: false
+  max_new_tokens: 64
+
+final_evaluation:
+  prefix_count: 5
 
 optimizer:
   lr: {profile.lr:.1e}

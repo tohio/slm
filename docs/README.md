@@ -2,6 +2,10 @@
 
 Project-level references:
 
+- [Frozen pretraining and reuse](FROZEN_PRETRAINING.md) — frozen train/val/test,
+  existing-Mini migration, `SIZE`/`DATASET_SIZE`, S3/HF retention and restore,
+  fixed probes, RoPE loading, and controlled throughput experiments.
+
 - [Architecture](ARCHITECTURE.md) — component ownership, model lineage, and
   artifact flow.
 - [System diagram](architecture.svg) — pipeline and model-family overview.

@@ -47,19 +47,38 @@ class RotaryEmbedding(nn.Module):
         self.max_position_embeddings = config.max_position_embeddings
         self.base = config.rope_theta
 
-        # Stored only for device tracking — recomputed from config on load
+        self.reset_parameters()
+
+    @torch.no_grad()
+    def reset_parameters(self, device=None) -> None:
+        """Rebuild parameter-free state; never initialize a learned tensor.
+
+        HF's low-memory loader may materialize non-persistent buffers with
+        empty storage. They have no checkpoint entry to restore them from.
+        This method is also used after dtype/device conversion so BF16 cannot
+        permanently round the frequencies that must be computed in FP32.
+        """
+        if device is None and hasattr(self, "inv_freq"):
+            device = self.inv_freq.device
         inv_freq = 1.0 / (
             self.base ** (
-                torch.arange(0, self.head_dim, 2, dtype=torch.float32) / self.head_dim
+                torch.arange(0, self.head_dim, 2, dtype=torch.float32, device=device)
+                / self.head_dim
             )
         )
         self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+    def _apply(self, fn, recurse=True):
+        super()._apply(fn, recurse=recurse)
+        self.reset_parameters()
+        return self
 
     def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
         # Drop saved RoPE buffers — always recompute from config.
         for key in ["inv_freq", "cos_cached", "sin_cached"]:
             state_dict.pop(prefix + key, None)
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+        self.reset_parameters()
 
     @torch.no_grad()
     def forward(

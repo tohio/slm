@@ -11,7 +11,11 @@ DATA_DIR=data
 RESULTS_DIR=results
 EXPORTS_DIR=results/exports
 RUN_ID=
-ARTIFACT_STAGES=raw,curated,validated,tokenized,tokenizer,metadata
+ARTIFACT_BACKEND=s3
+ARTIFACT_RETENTION=training-ready
+ARTIFACT_STAGES=validated,tokenized,tokenizer,metadata
+DATASET_SIZE=$(SIZE)
+DATASET_RUN_ID=$(RUN_ID)
 ```
 
 Common overrides:
@@ -185,14 +189,14 @@ Upload:
 ```bash
 make artifacts-upload SIZE=125m
 make artifacts-upload SIZE=125m RUN_ID=125m-20260629-a8f3c9
-make artifacts-upload SIZE=125m ARTIFACT_STAGES="tokenized,tokenizer,metadata"
+make artifacts-upload SIZE=125m ARTIFACT_STAGES="validated,tokenized,tokenizer,metadata"
 ```
 
 Download:
 
 ```bash
 make artifacts-download SIZE=125m RUN_ID=125m-20260629-a8f3c9
-make artifacts-download SIZE=125m RUN_ID=125m-20260629-a8f3c9 ARTIFACT_STAGES="tokenized,tokenizer,metadata"
+make artifacts-download SIZE=125m RUN_ID=125m-20260629-a8f3c9 ARTIFACT_STAGES="validated,tokenized,tokenizer,metadata"
 ```
 
 Valid stages:
@@ -218,7 +222,7 @@ Hardware override:
 
 ```bash
 make config-gen SIZE=125m GPUS=4 GPU=h200
-make config-gen SIZE=1b GPUS=8 GPU=b200 MODE=aggressive
+make config-gen SIZE=1b GPUS=N GPU=b200 MODE=aggressive
 ```
 
 Accelerate configs:
@@ -226,8 +230,8 @@ Accelerate configs:
 ```bash
 make accelerate-config-single
 make accelerate-config-multi GPUS=4
-make accel-gen-ddp GPUS=8
-make accel-gen-fsdp GPUS=8
+make accel-gen-ddp GPUS=N
+make accel-gen-fsdp GPUS=N
 ```
 
 Use the same `GPUS` value for Accelerate setup, config generation, and training.
@@ -500,3 +504,15 @@ make clean-results
 make clean-logs
 make clean
 ```
+
+## Consolidated frozen pretraining workflow
+
+See [Frozen pretraining and dataset reuse](FROZEN_PRETRAINING.md) for the train/val/test roles,
+existing-Mini migration, matched `DATASET_SIZE` artifacts and model budgets,
+S3/HF backend selection, retention/restore, environment separation, fixed probes,
+size-aware final evaluation, and hardware experiments. New Make targets include
+`freeze-test`, `regenerate-mini-frozen`, `artifacts-index`, `test-frozen-contract`,
+`pretrain-probes`, `eval-pretrain-final`, and `pretrain-benchmark`.
+
+`GPUS=N` means the user-selected GPU count, not a fixed requirement. Generate
+the matching Mini/production config before launch; Smoke remains separate.

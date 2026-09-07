@@ -37,7 +37,7 @@ def test_runtime_verifier_matches_training_requirements():
 
 
 def test_runtime_verifier_matches_curation_requirements():
-    pins = _exact_pins(ROOT / "requirements.txt")
+    pins = _exact_pins(ROOT / "requirements-curation.txt")
 
     missing = sorted(set(CURATION_EXPECTED) - set(pins))
     assert not missing, f"Curation verifier packages are not pinned: {missing}"
@@ -51,7 +51,7 @@ def test_runtime_verifier_matches_curation_requirements():
 
 
 def test_curation_requirements_do_not_import_training_stack():
-    requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+    requirements = (ROOT / "requirements-curation.txt").read_text(encoding="utf-8")
     assert "-r requirements-training.txt" not in requirements
 
 

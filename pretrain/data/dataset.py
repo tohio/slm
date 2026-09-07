@@ -109,6 +109,7 @@ class PretrainingDataset(Dataset):
         seq_len: int = 2048,
         stride: int | None = None,
         split: str = "train",
+        max_tokens: int | None = None,
     ):
         self.bin_path = Path(bin_path)
         self.seq_len = seq_len
@@ -165,6 +166,15 @@ class PretrainingDataset(Dataset):
                 f"but memmap sees {self.n_tokens:,}. Binary was truncated "
                 f"or replaced without updating metadata."
             )
+
+        self.available_tokens = self.n_tokens
+        if max_tokens is not None:
+            if not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens <= 0:
+                raise ValueError("max_tokens must be a positive integer")
+            if split != "train":
+                raise ValueError("Only training may use a token budget; holdouts are never sliced by it")
+            self.n_tokens = min(self.n_tokens, max_tokens)
+            self.data = self.data[:self.n_tokens]
 
         # ── Example count ─────────────────────────────────────────────────────
         # Need seq_len tokens per example. Labels equal input_ids; the model
@@ -224,6 +234,9 @@ class PretrainingDataset(Dataset):
         """Return token budget statistics."""
         return {
             "n_tokens": self.n_tokens,
+            "available_corpus_tokens": self.available_tokens,
+            "selected_unique_tokens": min(self.n_examples * self.seq_len,
+                (self.n_examples - 1) * self.stride + self.seq_len),
             "n_examples": self.n_examples,
             "seq_len": self.seq_len,
             "stride": self.stride,
@@ -237,13 +250,14 @@ def load_train_val(
     tokenized_dir: Path,
     seq_len: int = 2048,
     stride: int | None = None,
+    max_train_tokens: int | None = None,
 ) -> tuple[PretrainingDataset, PretrainingDataset]:
     """
     Load the train + val datasets from the tokenized directory.
 
-    Expects the curator to have produced train.jsonl and val.jsonl, and
-    tokenize_data.py to have turned them into train.bin + val.bin with
-    matching .json metadata sidecars.
+    The complete artifact stage includes train/val/test, but this loader opens
+    only train.bin and val.bin. Test is exclusively loaded by final evaluation.
+    max_train_tokens limits the training prefix without slicing either holdout.
 
     Args:
         tokenized_dir: directory containing train.bin, val.bin, and their
@@ -280,6 +294,13 @@ def load_train_val(
             f"make curate && make tokenize"
         )
 
-    train = PretrainingDataset(train_bin, seq_len=seq_len, stride=stride, split="train")
+    train = PretrainingDataset(train_bin, seq_len=seq_len, stride=stride, split="train", max_tokens=max_train_tokens)
     val = PretrainingDataset(val_bin, seq_len=seq_len, stride=stride, split="val")
     return train, val
+
+
+def load_test(tokenized_dir: Path, seq_len: int = 2048) -> PretrainingDataset:
+    """Final-only loader. Never call from a training-time evaluation callback."""
+    if not manifest_outputs_match(tokenized_dir, output_pattern="[tv]*"):
+        raise RuntimeError(f"Tokenized dataset is not manifest-complete: {tokenized_dir}")
+    return PretrainingDataset(Path(tokenized_dir) / "test.bin", seq_len=seq_len, split="test")

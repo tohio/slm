@@ -37,15 +37,16 @@ def _is_rank_zero() -> bool:
 
 
 DATA_DIR    = Path(os.environ.get("DATA_DIR", "data"))
-from config.paths import pretrain_dir, tokenized_dir as run_tokenized_dir, BASE_RESULTS_DIR
+from config.paths import pretrain_dir, resolve_dataset_paths, BASE_RESULTS_DIR
+from config.holdout import CONTRACT_NAME, SPLITS, load_contract
 from config.runtime import configure_torch_runtime
 from curator.state import atomic_write_json, stable_digest
 from pretrain.data.mixture import validate_realized_mixture_report
-from pretrain.schedule import resolve_realized_token_schedule
+from pretrain.schedule import resolve_realized_token_schedule, resolve_train_token_limit
 
 RESULTS_DIR = BASE_RESULTS_DIR
 PRETRAIN_AUDIT_FILENAME = "pretrain_run_audit.json"
-PRETRAIN_AUDIT_VERSION = 1
+PRETRAIN_AUDIT_VERSION = 2
 
 
 _NUMERIC_CONFIG_KEYS = {
@@ -112,7 +113,12 @@ def validate_active_tokenizer_matches_tokenized_data(tokenized_dir: Path, tokeni
             "Refusing to train. Restore the size-specific tokenizer that produced train.bin."
         )
 
-    log.info("Tokenizer fingerprint matches tokenized training metadata: %s", actual)
+    for split in ("val", "test"):
+        path = tokenized_dir / f"{split}.json"
+        metadata = _read_required_json(path, f"{split} tokenized metadata")
+        if metadata.get("tokenizer_sha256") != actual:
+            raise RuntimeError(f"Tokenizer/{split} artifact mismatch: {path}")
+    log.info("Tokenizer fingerprint matches all three tokenized splits: %s", actual)
 
 
 def validate_tokenizer(tokenizer_dir: Path, tokenized_dir: Path) -> None:
@@ -320,6 +326,9 @@ def _read_required_json(path: Path, label: str) -> dict:
 
 def tokenized_data_identity(tokenized_dir: Path) -> dict:
     """Return a portable identity for the manifest-complete tokenized corpus."""
+    from curator.state import manifest_outputs_match
+    if not manifest_outputs_match(tokenized_dir, output_pattern="[tv]*"):
+        raise RuntimeError(f"Incomplete or changed tokenized artifacts: {tokenized_dir}")
     completion = _read_required_json(
         tokenized_dir / "_SUCCESS.json",
         "tokenized completion manifest",
@@ -342,7 +351,7 @@ def tokenized_data_identity(tokenized_dir: Path) -> dict:
 
     splits = {}
     split_metadata = {}
-    for split in ("train", "val"):
+    for split in SPLITS:
         metadata_path = tokenized_dir / f"{split}.json"
         binary_path = tokenized_dir / f"{split}.bin"
         metadata = _read_required_json(
@@ -359,6 +368,10 @@ def tokenized_data_identity(tokenized_dir: Path) -> dict:
             "input_sha256",
             "tokenizer_sha256",
             "implementation_sha256",
+            "binary_sha256",
+            "tokenizer_file_sha256",
+            "frozen_split_sha256",
+            "vocab_size",
         )
         missing_metadata = [
             field for field in required_metadata_fields
@@ -384,14 +397,34 @@ def tokenized_data_identity(tokenized_dir: Path) -> dict:
             "input_sha256": metadata["input_sha256"],
             "tokenizer_sha256": metadata["tokenizer_sha256"],
             "implementation_sha256": metadata["implementation_sha256"],
+            "binary_sha256": metadata["binary_sha256"],
+            "tokenizer_file_sha256": metadata["tokenizer_file_sha256"],
+            "frozen_split_sha256": metadata["frozen_split_sha256"],
+            "vocab_size": metadata["vocab_size"],
         }
+        if metadata["dtype"] != "uint16" or binary_path.stat().st_size != metadata["n_tokens"] * 2:
+            raise RuntimeError(f"Binary size/dtype mismatch: {binary_path}")
+        from config.holdout import sha256_file
+        if sha256_file(binary_path) != metadata["binary_sha256"]:
+            raise RuntimeError(f"Binary fingerprint mismatch: {binary_path}")
+
+    frozen = load_contract(tokenized_dir, stage="validated")
+    for split, meta in split_metadata.items():
+        expected = frozen["contract"]["splits"][split]
+        if (meta["frozen_split_sha256"] != frozen["sha256"]
+                or meta["input_sha256"] != expected["sha256"]
+                or meta["n_docs"] != expected["documents"]):
+            raise RuntimeError(f"Tokenized {split} does not match the frozen holdout contract")
+        for field in ("tokenizer_sha256", "bos_id", "eos_id", "vocab_size", "format_version"):
+            if meta[field] != split_metadata["train"][field]:
+                raise RuntimeError(f"Mixed tokenized artifact set: {split}.{field}")
 
     if (
         splits["train"]["tokenizer_sha256"]
         != splits["val"]["tokenizer_sha256"]
     ):
         raise RuntimeError(
-            "Train and validation binaries were created with different tokenizers"
+            "Train, validation and test binaries were created with different tokenizers"
         )
 
     mixture_path = tokenized_dir / "token_mixture.json"
@@ -400,6 +433,7 @@ def tokenized_data_identity(tokenized_dir: Path) -> dict:
         mixture,
         split_metadata["train"],
         split_metadata["val"],
+        split_metadata["test"],
     )
 
     return {
@@ -408,6 +442,7 @@ def tokenized_data_identity(tokenized_dir: Path) -> dict:
             for field in required_manifest_fields
         },
         "splits": splits,
+        "frozen_split_sha256": frozen["sha256"],
         "realized_mixture": {
             "report_sha256": stable_digest(mixture),
             "contract_sha256": mixture["contract_sha256"],
@@ -424,11 +459,17 @@ def build_pretrain_run_contract(
     tokenized_dir: Path,
     world_size: int,
     distributed_strategy: str,
+    dataset_size: str | None = None,
+    dataset_run_id: str | None = None,
+    selected_training_tokens: dict | None = None,
 ) -> dict:
     """Build the immutable inputs required to resume a pretraining run."""
     return {
         "contract_version": PRETRAIN_AUDIT_VERSION,
         "run_size": run_size,
+        "dataset_size": dataset_size or run_size,
+        "dataset_run_id": dataset_run_id,
+        "selected_training_tokens": selected_training_tokens,
         "resolved_config": cfg,
         "resolved_config_sha256": stable_digest(cfg),
         "tokenizer": {
@@ -639,7 +680,7 @@ def build_training_args(cfg: dict, output_dir: Path, resume: bool):
         max_steps=train_cfg["max_steps"],
         warmup_steps=train_cfg.get("warmup_steps", 2000),
         per_device_train_batch_size=train_cfg["micro_batch_size"],
-        per_device_eval_batch_size=train_cfg["micro_batch_size"],
+        per_device_eval_batch_size=train_cfg.get("eval_micro_batch_size", train_cfg["micro_batch_size"]),
         gradient_accumulation_steps=train_cfg.get("gradient_accumulation_steps", 1),
 
         learning_rate=float(optim_cfg["lr"]),
@@ -681,6 +722,54 @@ def build_training_args(cfg: dict, output_dir: Path, resume: bool):
     )
 
 
+def resolve_dataset_run_id(paths: dict, expected: str | None = None, *, required: bool = False) -> str | None:
+    """Bind an explicitly requested source RUN_ID to restored metadata."""
+    import re
+    records = []
+    run_path = paths["run_id"]
+    if run_path.is_file():
+        raw = run_path.read_text().strip()
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            payload = {"run_id": raw}
+        if isinstance(payload, str):
+            payload = {"run_id": payload}
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"Invalid dataset RUN_ID record: {run_path}")
+        records.append(payload)
+    pipeline_path = paths["metadata"] / "pipeline_manifest.json"
+    if pipeline_path.is_file():
+        pipeline = _read_required_json(pipeline_path, "dataset pipeline manifest")
+        records.append(pipeline)
+        from config.holdout import sha256_file
+        required_files = [f"tokenized/{split}.json" for split in SPLITS] + [
+            "tokenized/_SUCCESS.json", "tokenized/test_contract.json", "tokenizer/slm_tokenizer.json"]
+        for name in required_files:
+            expected_sha = pipeline.get("file_sha256", {}).get(name)
+            path = paths["root"] / name
+            if not expected_sha or not path.is_file() or sha256_file(path) != expected_sha:
+                raise RuntimeError(f"Consumed dataset metadata fingerprint mismatch: {name}")
+    elif required or expected:
+        raise RuntimeError("Explicit/cross-size dataset consumption requires pipeline metadata; run artifacts-index or restore the matched bundle")
+    ids = {row.get("run_id") for row in records if row.get("run_id")}
+    if expected:
+        ids.add(expected)
+    if len(ids) > 1:
+        raise RuntimeError("Requested/active dataset RUN_ID mismatch; restore the complete source artifact set")
+    if (required or expected) and not records:
+        raise RuntimeError("Cross-size/explicit RUN_ID consumption requires restored dataset provenance")
+    for row in records:
+        if row.get("size", paths["dataset_size"]) != paths["dataset_size"]:
+            raise RuntimeError("Dataset provenance SIZE does not match DATASET_SIZE")
+    run_id = next(iter(ids), None)
+    if run_id is not None and not re.fullmatch(re.escape(paths["dataset_size"]) + r"-\d{8}-[A-Za-z0-9._-]+", run_id):
+        raise RuntimeError(f"Invalid source dataset RUN_ID: {run_id!r}")
+    if required and run_id is None:
+        raise RuntimeError("Cross-size training requires a source dataset RUN_ID")
+    return run_id
+
+
 def _size_from_model_name(model_name: str) -> str:
     name = model_name.removeprefix("slm-")
     return name.split("-")[0]
@@ -707,9 +796,18 @@ def main():
         default=None,
         help="Optional topology identity; otherwise inferred from the launched world",
     )
+    parser.add_argument("--dataset-size", default=os.environ.get("DATASET_SIZE"))
+    parser.add_argument("--dataset-run-id", default=os.environ.get("DATASET_RUN_ID"))
     parser.add_argument("--data-dir", type=Path, default=DATA_DIR)
     parser.add_argument("--results-dir", type=Path, default=RESULTS_DIR)
+    parser.add_argument("--benchmark-steps", type=int, default=0)
+    parser.add_argument("--benchmark-warmup", type=int, default=10)
+    parser.add_argument("--benchmark-output", type=Path)
     args = parser.parse_args()
+    if args.benchmark_steps and (args.resume or args.preflight_only or not args.benchmark_output):
+        parser.error("Benchmark requires --benchmark-output and cannot resume or run preflight-only")
+    if args.benchmark_steps < 0 or args.benchmark_warmup < 1:
+        parser.error("Benchmark steps must be nonnegative and warmup positive")
 
     cfg        = load_config(args.config)
     model_name = cfg["name"]
@@ -718,7 +816,11 @@ def main():
         or cfg.get("data", {}).get("size")
         or model_name.removeprefix("slm-")
     )
-    resolved_tokenized_dir = run_tokenized_dir(run_size)
+    dataset_size = args.dataset_size or cfg.get("data", {}).get("dataset_size") or run_size
+    artifact_paths = resolve_dataset_paths(run_size, dataset_size, data_root=args.data_dir)
+    resolved_tokenized_dir = artifact_paths["tokenized"]
+    dataset_run_id = resolve_dataset_run_id(artifact_paths, args.dataset_run_id,
+                                          required=dataset_size != run_size)
     if cfg.get("output_dir"):
         output_dir = Path(cfg["output_dir"])
         if not output_dir.is_absolute():
@@ -726,6 +828,10 @@ def main():
     else:
         output_dir = args.results_dir / "runs" / _size_from_model_name(model_name) / "pretrain"
 
+    if args.benchmark_steps:
+        output_dir = args.benchmark_output.parent / "runtime"
+        if output_dir.exists():
+            raise RuntimeError("Benchmark output must be fresh; production output directories are never reused")
     log.info(f"=== SLM Pretraining ===")
     log.info(f"Config:     {args.config}")
     log.info(f"Model:      {model_name}")
@@ -743,7 +849,8 @@ def main():
     if resume_checkpoint is not None:
         log.info(f"Resuming from checkpoint: {resume_checkpoint}")
 
-    tokenizer_dir = args.data_dir / "tokenizer"
+    tokenizer_dir = artifact_paths["tokenizer"]
+    log.info("Dataset: SIZE=%s DATASET_SIZE=%s RUN_ID=%s", run_size, dataset_size, dataset_run_id)
     validate_tokenizer(tokenizer_dir, resolved_tokenized_dir)
 
     from model import SLMConfig, SLMForCausalLM
@@ -769,7 +876,11 @@ def main():
     seq_len = model_cfg_dict["max_position_embeddings"]
 
     log.info(f"Loading datasets from {resolved_tokenized_dir}")
-    train_ds, val_ds = load_train_val(tokenized_dir=resolved_tokenized_dir, seq_len=seq_len)
+    train_token_limit = resolve_train_token_limit(cfg, run_size=run_size, dataset_size=dataset_size)
+    train_ds, val_ds = load_train_val(tokenized_dir=resolved_tokenized_dir, seq_len=seq_len,
+                                    max_train_tokens=train_token_limit)
+    if run_size == "mini" and train_ds.token_budget()["selected_unique_tokens"] < 1_400_000_000:
+        raise RuntimeError("Mini requires at least 1.4B usable unique training tokens after budget selection")
 
     log.info(f"Train examples: {len(train_ds):,}")
     log.info(f"Val examples:   {len(val_ds):,}")
@@ -829,6 +940,9 @@ def main():
         tokenized_dir=resolved_tokenized_dir,
         world_size=world_size,
         distributed_strategy=distributed_strategy,
+        dataset_size=dataset_size,
+        dataset_run_id=dataset_run_id,
+        selected_training_tokens=budget,
     )
 
     if args.preflight_only:
@@ -845,7 +959,7 @@ def main():
         log.info("Pretraining preflight passed; no model weights were allocated.")
         return
 
-    if _is_rank_zero():
+    if _is_rank_zero() and not args.benchmark_steps:
         validate_or_write_pretrain_audit(
             output_dir,
             run_contract,
@@ -853,6 +967,18 @@ def main():
             write=True,
         )
 
+    if args.benchmark_steps:
+        from transformers import set_seed
+        from transformers.trainer_utils import IntervalStrategy, SaveStrategy
+        # Keep the original scheduler/max_steps/optimizer. The callback stops
+        # early, rather than shortening the learning-rate schedule.
+        if training_args.max_steps < args.benchmark_steps + args.benchmark_warmup:
+            raise RuntimeError("Benchmark is longer than the configured training run")
+        training_args.save_strategy = SaveStrategy.NO
+        training_args.eval_strategy = IntervalStrategy.NO
+        training_args.logging_strategy = IntervalStrategy.NO
+        training_args.report_to = []
+        set_seed(training_args.seed)
     log.info("Initializing model from scratch...")
     model = SLMForCausalLM(model_config)
     n_params = sum(p.numel() for p in model.parameters())
@@ -883,19 +1009,28 @@ def main():
             },
         )
 
+    from pretrain.diagnostics import make_probe_callback
+    probe_cfg = cfg.get("generation_probes", {})
+    callbacks = [VRAMProbe()]
+    if args.benchmark_steps:
+        from pretrain.benchmark import make_measurement_callback
+        measurement = make_measurement_callback(args.benchmark_warmup, args.benchmark_steps)
+        callbacks = [measurement]
+    elif probe_cfg.get("enabled", True):
+        callbacks.append(make_probe_callback(tokenizer_dir, output_dir, probe_cfg))
     trainer = SLMTrainer(
         model=model,
         args=training_args,
         train_dataset=train_ds,
         eval_dataset=val_ds,
-        callbacks=[VRAMProbe()],
+        callbacks=callbacks,
     )
 
     run_baseline_eval = cfg.get(
         "run_baseline_eval",
         cfg.get("training", {}).get("run_baseline_eval", True),
     )
-    if not args.resume and run_baseline_eval:
+    if not args.resume and run_baseline_eval and not args.benchmark_steps:
         log.info("Running baseline eval before training (step 0)...")
         baseline = trainer.evaluate()
         log.info(f"Baseline eval: {baseline}")
@@ -905,8 +1040,16 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
     log.info("Starting training...")
-    trainer.train(resume_from_checkpoint=resume_checkpoint if args.resume else None)
-
+    train_result = trainer.train(resume_from_checkpoint=resume_checkpoint if args.resume else None)
+    if args.benchmark_steps:
+        from pretrain.benchmark import finish_measurement
+        finish_measurement(trainer, measurement, cfg, run_contract, args.benchmark_output, seq_len)
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.barrier()
+            torch.distributed.destroy_process_group()
+        return
+    trainer.save_metrics("train", train_result.metrics)
+    trainer.save_state()
     final_dir = output_dir / "final"
     if _is_rank_zero():
         log.info("Saving final model...")
@@ -925,6 +1068,37 @@ def main():
         )
 
         log.info(f"Model saved to {final_dir}")
+
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.barrier()
+
+    # Optimization and checkpoint selection have ended. Test is opened only here.
+    from pretrain.diagnostics import final_loss_metrics
+    final_metrics = final_loss_metrics(trainer, resolved_tokenized_dir, seq_len)
+    if _is_rank_zero():
+        from pretrain.diagnostics import final_cases, generate_rows, generic_cases, probe_settings
+        from transformers import AutoTokenizer
+        try:
+            hf_tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_dir), local_files_only=True)
+            cases = final_cases(artifact_paths["validated"], resolved_tokenized_dir, hf_tokenizer,
+                                prefix_count=int(cfg.get("final_evaluation", {}).get("prefix_count", 5)))
+            rows = generate_rows(trainer.accelerator.unwrap_model(trainer.model), hf_tokenizer,
+                                 cases + generic_cases(), step=trainer.state.global_step,
+                                 settings=probe_settings(probe_cfg))
+            diagnostic_error = None
+        except Exception as exc:
+            log.exception("Final qualitative generation failed; preserving loss metrics and checkpoint")
+            rows, diagnostic_error = [], str(exc)
+        atomic_write_json(output_dir / "final_pretraining_eval.json", {
+            "training_contract_sha256": stable_digest(run_contract),
+            "training_metrics": train_result.metrics, "metrics": final_metrics,
+            "selected_training_tokens": budget, "parameters": n_params,
+            "unique_training_tokens_per_parameter": budget["selected_unique_tokens"] / n_params,
+            "corpus_supported_qa_status": "not_provided", "qualitative_results": rows,
+            "qualitative_error": diagnostic_error})
+
+    if _is_rank_zero():
+        shutil.copy2(output_dir / "final_pretraining_eval.json", final_dir / "final_pretraining_eval.json")
 
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         torch.distributed.barrier()

@@ -67,8 +67,8 @@ make config-gen SIZE=125m GPUS=4
 For larger runs with FSDP:
 
 ```bash
-make accel-gen-fsdp GPUS=8
-make config-gen SIZE=1b GPUS=8
+make accel-gen-fsdp GPUS=N
+make config-gen SIZE=1b GPUS=N
 ```
 
 Use the same `GPUS` value for Accelerate setup, config generation, and training.

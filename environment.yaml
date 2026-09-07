@@ -10,4 +10,4 @@ dependencies:
     # Keep conda and venv installs on the same dependency source of truth.
     # NVIDIA GPU instances should use infra/setup_gpu_instance.sh instead;
     # that script installs requirements-gpu.txt and verifies CUDA/driver/SM.
-    - -r requirements.txt
+    - -r requirements-curation.txt

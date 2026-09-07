@@ -103,3 +103,22 @@ def resolve_realized_token_schedule(
     training["warmup_steps"] = warmup_steps
     resolved["realized_token_schedule"] = schedule
     return resolved, schedule
+
+
+def resolve_train_token_limit(cfg: dict, *, run_size: str, dataset_size: str) -> int | None:
+    """Keep same-size realized-corpus behavior; cross-size has a model budget.
+
+    A prefix of the already shuffled corpus is selected *before* Trainer's
+    sampling. The resolved unique and repeated/consumed budgets are recorded
+    separately in the run audit. No holdout is ever sliced by this limit.
+    """
+    training = cfg["training"]
+    limit = training.get("max_train_tokens")
+    if limit is None and run_size != dataset_size:
+        limit = training.get("cross_size_max_train_tokens")
+        if limit is None:
+            raise ValueError("Cross-size training requires training.cross_size_max_train_tokens "
+                             "or training.max_train_tokens in the model config")
+    if limit is not None and (not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0):
+        raise ValueError("Training token limit must be a positive integer")
+    return limit

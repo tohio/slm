@@ -21,6 +21,8 @@ Tokenization reads:
 ```text
 $DATA_DIR/runs/<size>/validated/train.jsonl
 $DATA_DIR/runs/<size>/validated/val.jsonl
+$DATA_DIR/runs/<size>/validated/test.jsonl
+$DATA_DIR/runs/<size>/validated/test_contract.json
 $DATA_DIR/runs/<size>/tokenizer/slm_tokenizer.json
 ```
 
@@ -31,11 +33,14 @@ $DATA_DIR/runs/<size>/tokenized/train.bin
 $DATA_DIR/runs/<size>/tokenized/train.json
 $DATA_DIR/runs/<size>/tokenized/val.bin
 $DATA_DIR/runs/<size>/tokenized/val.json
+$DATA_DIR/runs/<size>/tokenized/test.bin
+$DATA_DIR/runs/<size>/tokenized/test.json
+$DATA_DIR/runs/<size>/tokenized/test_contract.json
 $DATA_DIR/runs/<size>/tokenized/token_mixture.json
 ```
 
 `token_mixture.json` expands the configured code bucket into concrete sources
-and compares those intended shares with the combined train/validation token
+and compares those intended shares with the combined train/validation/test token
 counts measured by the tokenizer. It records percentage-point deviations but
 does not impose an uncalibrated deviation threshold. Tokenization fails on
 unknown or corpus-wide missing sources and inconsistent counts; pretraining
@@ -50,8 +55,8 @@ Functional and production recipes resolve `max_steps` from the verified tokenize
 count and the configured epoch contract at preflight/training time. The static
 YAML step and warmup values remain planning fallbacks; runtime preserves their
 warmup ratio. The smoke recipe remains fixed at eight optimizer steps.
-The train/validation split is created by curation; pretraining does not split
-documents again.
+Curation establishes frozen train/val/test membership; pretraining does not
+split documents again. Validation is training-time; test is final-only.
 
 The smoke profile uses the 21.7M-parameter architecture and capped 1M-token
 corpus only to exercise execution and artifact contracts. The mini profile is
@@ -109,12 +114,11 @@ python pretrain/data/tokenize_data.py \
   --verify
 ```
 
-Before training, activate the tokenizer associated with this size and data
-run:
-
-```bash
-make restore-size-tokenizer SIZE=125m
-```
+Training resolves the tokenizer and all binaries/metadata directly from
+`DATASET_SIZE` (default `SIZE`). No global-tokenizer activation/copy is needed.
+For migration and cross-size budgets, read
+[`FROZEN_PRETRAINING.md`](../docs/FROZEN_PRETRAINING.md) before replacing an old
+Mini tokenizer or resuming an old checkpoint.
 
 Start or resume pretraining:
 
@@ -143,7 +147,7 @@ Run the bounded execution rehearsal:
 make pretrain-smoke SIZE=smoke GPUS=1
 ```
 
-Run the functional mini pilot:
+Run the Mini plumbing pilot (this regenerates its hardware config for `GPUS`):
 
 ```bash
 make pretrain-mini SIZE=mini GPUS=1
@@ -201,3 +205,12 @@ make test-training SIZE=125m
 
 The artifact test expects an existing checkpoint; it is not a substitute for
 pretraining and does not launch another full run.
+
+## Frozen final evaluation and throughput
+
+`generation_probes` configures the shared fixed raw prompts, sparse cadence,
+and deterministic decoding. Final reports separate test-prefix completions,
+generic prompts, and supplied corpus-supported QA. Use `make pretrain-probes`
+for saved checkpoints, `make eval-pretrain-final` for audit-version-2 final
+checkpoints, and `make pretrain-benchmark` for isolated global-batch-preserving
+micro-batch experiments. See the linked guide for commands and interpretation.

@@ -145,15 +145,20 @@ together with tokenized data and metadata:
 ```bash
 make artifacts-upload \
   SIZE=125m \
-  ARTIFACT_STAGES="tokenized,tokenizer,metadata"
+  ARTIFACT_STAGES="validated,tokenized,tokenizer,metadata"
 ```
 
 ## Compatibility rules
 
-- Do not substitute a tokenizer from another size or data run.
+- Use the tokenizer from the selected dataset run, including cross-size
+  consumption through `DATASET_SIZE`; never mix it with another run's binaries.
 - Keep the tokenizer fingerprint recorded by corpus tokenization with the
   corresponding `.bin` files.
-- Synchronize the selected size's tokenizer into the repository runtime path
-  with `make restore-size-tokenizer SIZE=<size>` before model training.
+- Restore the tokenizer as part of the matched `DATASET_SIZE` artifact set.
+  No global-tokenizer copy is needed before model training.
 - Review SFT, DPO, inference, export, and serving whenever the chat template or
   special-token set changes.
+
+See [Frozen pretraining](../docs/FROZEN_PRETRAINING.md) before replacing the
+old Mini tokenizer: the rebuilt frozen training input may change its fingerprint,
+and old learned embeddings must remain paired with their original tokenizer.

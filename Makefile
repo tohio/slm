@@ -19,11 +19,26 @@
 MAKEFLAGS += --no-print-directory
 
 SIZE    ?= 125m
+DATASET_SIZE ?= $(SIZE)
+DATASET_RUN_ID ?= $(RUN_ID)
 GPUS    ?= 1
 WORKERS ?=
 FORCE   ?=
 RUN_ID  ?=
-ARTIFACT_STAGES ?= raw,curated,validated,tokenized,tokenizer,metadata
+ARTIFACT_RETENTION ?= training-ready
+_FULL_ARTIFACT_STAGES := raw,curated,validated,tokenized,tokenizer,metadata
+_READY_ARTIFACT_STAGES := validated,tokenized,tokenizer,metadata
+ARTIFACT_STAGES ?= $(if $(filter training-ready,$(ARTIFACT_RETENTION)),$(_READY_ARTIFACT_STAGES),$(_FULL_ARTIFACT_STAGES))
+ARTIFACT_INCLUDE_RESULTS ?=
+ARTIFACT_RESTORE_RESULTS ?=
+ARTIFACT_OVERWRITE ?=
+PROBE_MODEL ?= $(RESULTS_DIR)/runs/$(SIZE)/pretrain/final
+PROBE_TOKENIZER ?=
+CORPUS_QA ?=
+BENCH_MICRO_BATCHES ?=
+BENCH_STEPS ?= 30
+BENCH_WARMUP ?= 10
+BENCH_OUTPUT ?= $(RESULTS_DIR)/benchmarks/$(SIZE)
 COMPARE_SMOL_MODEL ?= HuggingFaceTB/SmolLM2-135M
 COMPARE_TOHIO_MODEL ?= $(EXPORTS_DIR)/125m/base
 COMPARE_OUTPUT_DIR ?= $(RESULTS_DIR)/diagnostics/sft-comparison
@@ -39,8 +54,7 @@ CCNET_EN_ARPA_MD5 := 3f5f659c62cf72d1446fdd36d6e04a57
 CCNET_EN_SP_MD5   := e55b10980b6bdbd8599a3fd3a54eb9ed
 
 REQUIRED_ENV_VARS := \
-	S3_BUCKET S3_PREFIX AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY \
-	AWS_DEFAULT_REGION DATA_DIR RESULTS_DIR EXPORTS_DIR HF_HOME \
+	DATA_DIR RESULTS_DIR EXPORTS_DIR HF_HOME \
 	HF_DATASETS_CACHE HF_XET_HIGH_PERFORMANCE WANDB_API_KEY WANDB_PROJECT \
 	HF_TOKEN HF_USERNAME
 
@@ -57,7 +71,15 @@ endif
 ifeq ($(origin EXPORTS_DIR),undefined)
   EXPORTS_DIR := $(or $(call _env_value,EXPORTS_DIR),$(RESULTS_DIR)/exports)
 endif
-export DATA_DIR RESULTS_DIR EXPORTS_DIR
+ARTIFACT_BACKEND ?= $(or $(call _env_value,ARTIFACT_BACKEND),s3)
+ifeq ($(ARTIFACT_BACKEND),s3)
+  REQUIRED_ENV_VARS += S3_BUCKET S3_PREFIX AWS_DEFAULT_REGION
+else ifeq ($(ARTIFACT_BACKEND),hf)
+  REQUIRED_ENV_VARS += HF_ARTIFACT_BUCKET
+else
+  $(error ARTIFACT_BACKEND must be s3 or hf)
+endif
+export DATA_DIR RESULTS_DIR EXPORTS_DIR ARTIFACT_BACKEND
 PYTHON     ?= .venv/bin/python
 _ACCELERATE = .venv/bin/accelerate
 
@@ -67,6 +89,11 @@ SFT_INSTRUCT_CONFIG ?= finetune/configs/sft_instruct_$(SIZE).yaml
 SFT_CODE_CONFIG ?= finetune/configs/sft_code_$(SIZE).yaml
 DPO_CHAT_CONFIG ?= alignment/configs/dpo_chat_$(SIZE).yaml
 DPO_CONFIG      ?= $(DPO_CHAT_CONFIG)
+ARTIFACT_HF_PYTHON ?= $(if $(wildcard .venv-artifacts/bin/python),.venv-artifacts/bin/python,$(PYTHON))
+export ARTIFACT_HF_PYTHON
+_DATASET_FLAGS = --dataset-size "$(DATASET_SIZE)" $(if $(DATASET_RUN_ID),--dataset-run-id "$(DATASET_RUN_ID)",)
+_ARTIFACT_FLAGS = --backend "$(ARTIFACT_BACKEND)" --retention "$(ARTIFACT_RETENTION)"
+
 
 ACCELERATE = $(_ACCELERATE) launch --num_processes $(GPUS) --num_machines 1 --mixed_precision bf16 --dynamo_backend no
 
@@ -173,6 +200,7 @@ curate-all: check-curation-prereqs
 	@echo "==> Complete curation workflow: SIZE=$(SIZE), WORKERS=$(WORKERS), DATA_DIR=$(DATA_DIR)"
 	$(PYTHON) infra/verify_environment.py --profile curation
 	$(MAKE) curate SIZE="$(SIZE)" WORKERS="$(WORKERS)"
+	$(MAKE) freeze-test SIZE="$(SIZE)" WORKERS="$(WORKERS)"
 	$(MAKE) test-curator SIZE="$(SIZE)"
 	$(MAKE) validate SIZE="$(SIZE)"
 	$(MAKE) test-validate SIZE="$(SIZE)"
@@ -183,13 +211,13 @@ curate-all: check-curation-prereqs
 	$(MAKE) artifacts-upload \
 		SIZE="$(SIZE)" \
 		WORKERS="$(WORKERS)" \
-		ARTIFACT_STAGES="tokenized,tokenizer,metadata"
+		ARTIFACT_STAGES="validated,tokenized,tokenizer,metadata" ARTIFACT_RETENTION="training-ready"
 	@echo "==> Curation workflow complete. Record this RUN_ID:"
 	@cat "$(DATA_DIR)/runs/$(SIZE)/RUN_ID"
 
 train-all: check-env
 	@case "$(SIZE)" in mini|125m|350m|1b) ;; *) echo "SIZE must be mini, 125m, 350m, or 1b"; exit 1;; esac
-	@test -n "$(strip $(RUN_ID))" || (echo "RUN_ID is required. Use the ID produced by curate-all."; exit 1)
+	@test -n "$(strip $(DATASET_RUN_ID))" || (echo "DATASET_RUN_ID (or RUN_ID) is required. Use the source dataset run ID."; exit 1)
 	@case "$(GPUS)" in *[!0-9]*|'') echo "GPUS must be a positive integer"; exit 1;; esac
 	@test "$(GPUS)" -gt 0 || (echo "GPUS must be greater than zero"; exit 1)
 	@test -n "$(strip $(DATA_DIR))" || (echo "DATA_DIR is required"; exit 1)
@@ -197,11 +225,11 @@ train-all: check-env
 	@test ! -e "$(RESULTS_DIR)/runs/$(SIZE)/pretrain" || \
 		(echo "train-all starts new runs only, but pretraining output already exists."; \
 		 echo "Use the stage-specific resume command in docs/TRAIN.md."; exit 1)
-	@echo "==> Complete training workflow: SIZE=$(SIZE), GPUS=$(GPUS), RUN_ID=$(RUN_ID)"
+	@echo "==> Complete training workflow: SIZE=$(SIZE), GPUS=$(GPUS), DATASET_SIZE=$(DATASET_SIZE), DATASET_RUN_ID=$(DATASET_RUN_ID)"
 	$(MAKE) setup-gpu \
 		DATA_DIR="$(DATA_DIR)" \
 		SIZE="$(SIZE)" \
-		RUN_ID="$(RUN_ID)"
+		DATASET_SIZE="$(DATASET_SIZE)" DATASET_RUN_ID="$(DATASET_RUN_ID)"
 	$(MAKE) test-gpu-gate
 	$(MAKE) config-gen SIZE="$(SIZE)" GPUS="$(GPUS)"
 	$(MAKE) pretrain-preflight SIZE="$(SIZE)" GPUS="$(GPUS)"
@@ -246,17 +274,17 @@ curate-blend: check-curation-prereqs
 
 curate-upload:
 	@echo "==> Uploading curated artifacts by RUN_ID (target=$(SIZE))"
-	$(PYTHON) curator/scripts/upload_s3.py artifacts-upload --size $(SIZE) $(if $(RUN_ID),--run-id $(RUN_ID),) --stages curated,metadata
+	$(MAKE) artifacts-upload ARTIFACT_RETENTION=full ARTIFACT_STAGES=curated,metadata
 
 # ── Stage 2: Validation ───────────────────────────────────────────────────────
 
-validate:
-	@echo "==> Stage 2: Validation (train + val splits)"
+validate: freeze-test
+	@echo "==> Stage 2: Validation (train + val + frozen test splits)"
 	$(PYTHON) validation/scripts/validate.py --size $(SIZE)
 
 validate-upload:
 	@echo "==> Uploading validated artifacts by RUN_ID (target=$(SIZE))"
-	$(PYTHON) curator/scripts/upload_s3.py artifacts-upload --size $(SIZE) $(if $(RUN_ID),--run-id $(RUN_ID),) --stages validated,metadata
+	$(MAKE) artifacts-upload ARTIFACT_RETENTION=full ARTIFACT_STAGES=validated,metadata
 
 # ── Stage 3: Tokenizer ────────────────────────────────────────────────────────
 
@@ -270,24 +298,68 @@ tokenizer-test:
 # ── Stage 4: Pretrain ─────────────────────────────────────────────────────────
 
 tokenize:
-	@echo "==> Stage 4a: Tokenize dataset (train + val splits)"
+	@echo "==> Stage 4a: Tokenize dataset (train + val + frozen test splits)"
 	$(PYTHON) pretrain/data/tokenize_data.py --size $(SIZE) --chunk-size 256 --verify
 
+.PHONY: artifacts-index
+artifacts-index:
+	$(PYTHON) curator/scripts/upload_s3.py artifacts-index --size "$(DATASET_SIZE)" $(if $(DATASET_RUN_ID),--run-id "$(DATASET_RUN_ID)",)
+
 artifacts-upload:
-	@echo "==> Uploading artifacts to S3 (target=$(SIZE), run_id=$(if $(RUN_ID),$(RUN_ID),auto), stages=$(ARTIFACT_STAGES))"
+	@echo "==> Uploading $(ARTIFACT_BACKEND) artifacts: dataset=$(DATASET_SIZE), retention=$(ARTIFACT_RETENTION)"
 	$(PYTHON) curator/scripts/upload_s3.py artifacts-upload \
-		--size $(SIZE) \
-		$(if $(RUN_ID),--run-id $(RUN_ID),) \
-		--stages "$(ARTIFACT_STAGES)" $(WORKERS_FLAG) \
-		--overwrite
+		--size "$(DATASET_SIZE)" $(if $(DATASET_RUN_ID),--run-id "$(DATASET_RUN_ID)",) \
+		--stages "$(ARTIFACT_STAGES)" $(WORKERS_FLAG) $(_ARTIFACT_FLAGS) \
+		$(if $(filter 1 true yes,$(ARTIFACT_INCLUDE_RESULTS)),--include-results --model-size "$(SIZE)",)
 
 artifacts-download:
-	@test -n "$(RUN_ID)" || (echo "RUN_ID is required for artifacts-download"; exit 1)
-	@echo "==> Downloading artifacts from S3 (target=$(SIZE), run_id=$(RUN_ID), stages=$(ARTIFACT_STAGES))"
+	@test -n "$(DATASET_RUN_ID)" || (echo "DATASET_RUN_ID or RUN_ID is required for artifacts-download"; exit 1)
+	@echo "==> Restoring $(ARTIFACT_BACKEND) artifacts: model=$(SIZE), dataset=$(DATASET_SIZE), run=$(DATASET_RUN_ID)"
 	$(PYTHON) curator/scripts/upload_s3.py artifacts-download \
-		--size $(SIZE) \
-		--run-id $(RUN_ID) \
-		--stages "$(ARTIFACT_STAGES)" $(WORKERS_FLAG)
+		--size "$(DATASET_SIZE)" --run-id "$(DATASET_RUN_ID)" \
+		--stages "$(ARTIFACT_STAGES)" $(WORKERS_FLAG) $(_ARTIFACT_FLAGS) \
+		$(if $(filter 1 true yes,$(ARTIFACT_OVERWRITE)),--overwrite,) \
+		$(if $(filter 1 true yes,$(ARTIFACT_RESTORE_RESULTS)),--restore-results --model-size "$(SIZE)",)
+
+.PHONY: freeze-test regenerate-mini-frozen pretrain-benchmark eval-pretrain-final pretrain-probes install-artifacts-hf install-evaluation test-frozen-contract
+freeze-test:
+	@echo "==> Freeze test from existing training pool; preserve validation (SIZE=$(SIZE))"
+	$(PYTHON) -m curator.frozen_split --size "$(SIZE)" $(WORKERS_FLAG)
+
+regenerate-mini-frozen:
+	@echo "==> Rebuild only invalidated Mini holdout/validation/tokenizer/tokenized stages; no recuration or training"
+	$(MAKE) freeze-test SIZE=mini
+	$(MAKE) validate SIZE=mini
+	$(MAKE) tokenizer SIZE=mini
+	$(MAKE) tokenize SIZE=mini
+	$(MAKE) test-data-pipeline SIZE=mini
+	@echo "Review counts and retention, then explicitly upload. Existing model checkpoints are not modified."
+
+pretrain-probes:
+	$(PYTHON) eval/eval.py --mode pretrain-probes --model "$(PROBE_MODEL)" \
+		--size "$(SIZE)" $(_DATASET_FLAGS) $(if $(PROBE_TOKENIZER),--tokenizer-dir "$(PROBE_TOKENIZER)",)
+
+eval-pretrain-final:
+	@echo "==> Final frozen pretraining evaluation: model=$(SIZE), dataset=$(DATASET_SIZE)"
+	$(PYTHON) eval/eval.py --mode pretraining-final --model "$(PROBE_MODEL)" \
+		--size "$(SIZE)" $(_DATASET_FLAGS) $(if $(CORPUS_QA),--corpus-qa "$(CORPUS_QA)",)
+
+pretrain-benchmark:
+	@test -n "$(BENCH_MICRO_BATCHES)" || (echo "Set BENCH_MICRO_BATCHES to global-batch-preserving candidates"; exit 1)
+	$(PYTHON) pretrain/benchmark.py --config "$(PRETRAIN_CONFIG)" \
+		--micro-batches "$(BENCH_MICRO_BATCHES)" --gpus "$(GPUS)" --accelerate "$(_ACCELERATE)" \
+		--steps "$(BENCH_STEPS)" --warmup-steps "$(BENCH_WARMUP)" \
+		--output-dir "$(BENCH_OUTPUT)" --data-dir "$(DATA_DIR)" $(_DATASET_FLAGS)
+
+install-artifacts-hf:
+	python3 -m venv .venv-artifacts
+	.venv-artifacts/bin/pip install -r requirements-artifacts-hf.txt
+
+install-evaluation:
+	$(PYTHON) -m pip install -r requirements-evaluation.txt
+
+test-frozen-contract:
+	$(PYTHON) -m pytest tests/test_frozen_contract.py tests/test_artifact_retention.py tests/test_pretrain_diagnostics.py -v
 
 # ── Config generation ─────────────────────────────────────────────────────────
 # Auto-generates training configs tuned for the current GPU and GPU count.
@@ -295,7 +367,7 @@ artifacts-download:
 #
 #   make config-gen-pretrain SIZE=125m GPUS=1                  # auto-detect GPU
 #   make config-gen-sft      SIZE=350m GPUS=4 GPU=h200         # explicit GPU
-#   make config-gen-dpo      SIZE=1b   GPUS=8 GPU=b200 MODE=aggressive
+#   make config-gen-dpo      SIZE=1b   GPUS=N GPU=b200 MODE=aggressive
 #   make config-gen          SIZE=125m GPUS=1                  # generates all three
 
 config-gen-pretrain:
@@ -344,8 +416,8 @@ config-gen:
 # Generates accelerate_configs/{multi_gpu,fsdp}.yaml from a small generator.
 # Replaces the old sed-based accelerate-config-multi flow.
 #
-#   make accel-gen-ddp  GPUS=8                  # plain DDP
-#   make accel-gen-fsdp GPUS=8                  # FullyShardedDataParallel for 1b runs
+#   make accel-gen-ddp  GPUS=N                  # plain DDP
+#   make accel-gen-fsdp GPUS=N                  # FullyShardedDataParallel for 1b runs
 
 accel-gen-ddp:
 	@echo "==> Generating accelerate DDP config for GPUS=$(GPUS)"
@@ -359,14 +431,14 @@ accel-gen-fsdp:
 pretrain-preflight:
 	@echo "==> Pretraining preflight ($(SIZE), $(GPUS) GPU(s), config=$(PRETRAIN_CONFIG))"
 	$(PYTHON) pretrain/train.py \
-		--config "$(PRETRAIN_CONFIG)" \
+		--config "$(PRETRAIN_CONFIG)" $(_DATASET_FLAGS) \
 		--preflight-only \
 		--expected-gpus "$(GPUS)"
 
 pretrain-resume-preflight:
 	@echo "==> Pretraining resume preflight ($(SIZE), $(GPUS) GPU(s), config=$(PRETRAIN_CONFIG))"
 	$(PYTHON) pretrain/train.py \
-		--config "$(PRETRAIN_CONFIG)" \
+		--config "$(PRETRAIN_CONFIG)" $(_DATASET_FLAGS) \
 		--resume \
 		--preflight-only \
 		--expected-gpus "$(GPUS)"
@@ -374,22 +446,21 @@ pretrain-resume-preflight:
 pretrain:
 	@echo "==> Stage 4b: Pretraining ($(SIZE), $(GPUS) GPU(s), config=$(PRETRAIN_CONFIG))"
 	$(ACCELERATE) pretrain/train.py \
-		--config $(PRETRAIN_CONFIG)
+		--config "$(PRETRAIN_CONFIG)" $(_DATASET_FLAGS)
 
 pretrain-resume:
 	$(ACCELERATE) pretrain/train.py \
-		--config $(PRETRAIN_CONFIG) \
+		--config "$(PRETRAIN_CONFIG)" $(_DATASET_FLAGS) \
 		--resume
 
 pretrain-mini:
-	@echo "==> Stage 4b: Mini pretraining run (functional pilot)"
-	$(ACCELERATE) pretrain/train.py \
-		--config pretrain/configs/gpt_mini.yaml
+	@echo "==> Generate the Mini config for the selected GPUS=$(GPUS), then use the standard pretraining path"
+	$(MAKE) config-gen-pretrain SIZE=mini GPUS="$(GPUS)"
+	$(MAKE) pretrain SIZE=mini GPUS="$(GPUS)"
 
 pretrain-smoke:
-	@echo "==> Stage 4b: Smoke pretraining run (DDP/pipeline validation)"
-	$(ACCELERATE) pretrain/train.py \
-		--config pretrain/configs/gpt_smoke.yaml
+	@echo "==> Smoke remains the separate bounded configuration"
+	$(MAKE) pretrain SIZE=smoke GPUS="$(GPUS)"
 
 smoke-gen:
 	@echo "==> Smoke generation test for slm-$(SIZE)"
@@ -556,7 +627,7 @@ eval-sanity-code:
 
 eval-mini:
 	@echo "==> Stage 7: Mini evaluation (pipeline validation)"
-	$(PYTHON) eval/eval.py --model "$(RESULTS_DIR)/runs/$(SIZE)/dpo_chat/final" --tasks hellaswag --limit 50 --batch-size 4
+	$(PYTHON) eval/eval.py --model "$(RESULTS_DIR)/runs/mini/dpo_chat/final" --tasks hellaswag --limit 50 --batch-size 4
 
 # ── Stage 8: Export ───────────────────────────────────────────────────────────
 
@@ -621,14 +692,14 @@ setup-data-dir:
 	bash infra/setup.sh --data-dir $(DATA_DIR)
 
 setup-gpu:
-	@test -n "$(RUN_ID)" || (echo "RUN_ID is required for setup-gpu"; exit 1)
-	@echo "==> Running GPU instance setup (DATA_DIR=$(DATA_DIR), RUN_ID=$(RUN_ID))..."
-	bash infra/setup_gpu_instance.sh --data-dir $(DATA_DIR) --size $(SIZE) --run-id $(RUN_ID)
-	$(MAKE) restore-size-tokenizer SIZE=$(SIZE) DATA_DIR=$(DATA_DIR)
+	@test -n "$(DATASET_RUN_ID)" || (echo "DATASET_RUN_ID or RUN_ID is required for setup-gpu"; exit 1)
+	@echo "==> GPU setup: model=$(SIZE), dataset=$(DATASET_SIZE), run=$(DATASET_RUN_ID)"
+	bash infra/setup_gpu_instance.sh --data-dir "$(DATA_DIR)" --size "$(SIZE)" \
+		--dataset-size "$(DATASET_SIZE)" --run-id "$(DATASET_RUN_ID)" --backend "$(ARTIFACT_BACKEND)"
 install:
 	python3 -m venv .venv
 	.venv/bin/pip install --upgrade pip
-	.venv/bin/pip install -r requirements.txt
+	.venv/bin/pip install -r requirements-curation.txt
 
 install-training:
 	@echo "==> Installing the pinned CPU training/model-test stack..."
@@ -644,7 +715,7 @@ install-uv:
 	fi
 	uv venv --python 3.12
 	uv pip install --upgrade pip
-	uv pip install -r requirements.txt
+	uv pip install -r requirements-curation.txt
 
 
 install-conda:
@@ -654,7 +725,7 @@ install-conda:
 	fi
 	conda create -n slm python=3.12 -y
 	conda run -n slm python -m pip install --upgrade pip
-	conda run -n slm pip install -r requirements.txt
+	conda run -n slm pip install -r requirements-curation.txt
 
 
 install-kenlm:
@@ -903,6 +974,9 @@ endif
 # ── Clean ─────────────────────────────────────────────────────────────────────
 
 clean-data:
+	@if [ -f "$(DATA_DIR)/runs/$(SIZE)/curated/test_contract.json" ] || [ -f "$(DATA_DIR)/runs/$(SIZE)/tokenized/test_contract.json" ]; then \
+		test "$(ALLOW_FROZEN_DELETE)" = "1" || (echo "Frozen holdouts exist. Verify their retained copy before explicitly setting ALLOW_FROZEN_DELETE=1."; exit 1); \
+	fi
 	rm -rf "$(DATA_DIR)/runs/$(SIZE)" "$(DATA_DIR)/dedup_scratch"
 
 clean-results:
@@ -1007,9 +1081,14 @@ help:
 	@echo "  validate           Stage 2  — source-aware validation + KenLM audit"
 	@echo "  validate-upload    Upload validated artifacts through RUN_ID storage"
 	@echo "  tokenizer          Stage 3  — train BPE tokenizer"
-	@echo "  tokenize           Stage 4a — tokenize train + val to binaries"
-	@echo "  artifacts-upload   Upload artifacts to S3 using a RUN_ID"
-	@echo "  artifacts-download Download artifacts from S3 using RUN_ID=<run_id>"
+	@echo "  tokenize           Stage 4a — tokenize train + val + frozen test to binaries"
+	@echo "  freeze-test        Deterministically freeze test without reshuffling validation"
+	@echo "  regenerate-mini-frozen Rebuild only invalidated Mini data stages"
+	@echo "  eval-pretrain-final Frozen final-only loss/PPL and diagnostic categories"
+	@echo "  pretrain-probes    Fixed non-gating prompts on a saved checkpoint"
+	@echo "  pretrain-benchmark Compare micro-batches without changing production configs"
+	@echo "  artifacts-upload   Upload selected S3/HF artifacts using a dataset RUN_ID"
+	@echo "  artifacts-download Restore matched S3/HF dataset artifacts using RUN_ID=<run_id>"
 	@echo "  pretrain-preflight Validate a new run without allocating model weights"
 	@echo "  pretrain           Stage 4b — pretrain from scratch"
 	@echo "  pretrain-resume-preflight Validate checkpoint and provenance before resume"

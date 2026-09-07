@@ -9,11 +9,14 @@ base, instruct, code, and chat model variants.
 |---|---|
 | `SIZE` | Model profile: `mini`, `125m`, `350m`, or `1b` |
 | `GPUS` | Number of visible GPUs used by configuration and training |
-| `RUN_ID` | Artifact run produced by the curation workflow |
+| `DATASET_SIZE` | Source dataset profile; defaults to `SIZE` |
+| `DATASET_RUN_ID` / `RUN_ID` | Explicit source dataset artifact run |
 | `DATA_DIR` | Persistent data and cache root on the GPU host |
 | `.env` | AWS, Hugging Face, W&B, cache, results, and export configuration |
 
-Every variable in `.env.sample` must have a real value in `.env`. The GPU host
+Populate the common environment settings and the selected backend's settings.
+S3 can use SDK/instance-role credentials; HF uses an HF Storage Bucket/token.
+The GPU host
 must use an NVIDIA driver compatible with the repository's pinned CUDA 13
 training stack.
 
@@ -45,10 +48,10 @@ make train-all \
 
 `train-all` performs the following sequence:
 
-1. Validates every `.env` value and the required Make inputs.
+1. Validates common/selected-backend environment settings and required Make inputs.
 2. Installs the GPU environment and pinned CUDA training dependencies.
-3. Restores the tokenized corpus, tokenizer, and metadata identified by
-   `RUN_ID`.
+3. Restores validated holdouts, all tokenized splits, tokenizer, and metadata
+   identified by `DATASET_SIZE` and `DATASET_RUN_ID` (or `RUN_ID`).
 4. Runs the dataset-free CUDA, BF16, compile, and generation acceptance gate.
 5. Generates hardware-specific pretraining, SFT, and DPO configurations.
 6. Pretrains the base model.
@@ -78,8 +81,8 @@ make setup-gpu \
 make test-gpu-gate
 ```
 
-`setup-gpu` restores `tokenized`, `tokenizer`, and `metadata` artifacts and
-activates the restored size-specific tokenizer.
+`setup-gpu` restores `validated`, `tokenized`, `tokenizer`, and `metadata`.
+Pretraining uses the dataset-scoped tokenizer directly; no global copy is made.
 
 ### Generate training configurations
 
@@ -258,3 +261,15 @@ see [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md).
 - [Pretraining component guide](../pretrain/README.md)
 - [SFT component guide](../finetune/README.md)
 - [DPO component guide](../alignment/README.md)
+
+## Frozen-test migration and cross-size training
+
+Read [Frozen pretraining and reuse](FROZEN_PRETRAINING.md) before upgrading the
+existing Mini corpus. It explains the final-only test contract, required old
+checkpoint/tokenizer backups, source RUN_ID indexing, `DATASET_SIZE=350m`
+consumption by Mini/125M, model-specific budgets, and S3/HF retention.
+
+In generic multi-GPU examples use `GPUS=N`, replacing `N` with the number of
+GPUs you choose. Generate the matching configuration before launching training.
+Mini uses that existing flow; Smoke stays separate. The patch does not change a
+running job or automatically adopt a benchmark candidate.

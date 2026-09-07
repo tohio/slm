@@ -237,6 +237,22 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.post_init()
 
+    @classmethod
+    def from_pretrained(cls, *args, **kwargs):
+        # Keep native HF loading (including tied weights and loading_info).
+        # Only derived RoPE state is repaired after materialization. In
+        # particular, do not call model.init_weights() here.
+        result = super().from_pretrained(*args, **kwargs)
+        model = result[0] if isinstance(result, tuple) else result
+        rope = model.model.rotary_emb
+        device = rope.inv_freq.device
+        if device.type == "meta":
+            device = model.model.embed_tokens.weight.device
+        if device.type == "meta":
+            raise RuntimeError("RoPE must be materialized on a real device after loading")
+        rope.reset_parameters(device=device)
+        return result
+
     def _init_weights(self, module: nn.Module) -> None:
         """
         Initialize weights with config.initializer_range.
@@ -251,7 +267,10 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         """
         std = self.config.initializer_range
 
-        if isinstance(module, nn.Linear):
+        if isinstance(module, RotaryEmbedding):
+            module.reset_parameters()
+
+        elif isinstance(module, nn.Linear):
             init.normal_(module.weight, mean=0.0, std=std)
             if module.bias is not None:
                 init.zeros_(module.bias)

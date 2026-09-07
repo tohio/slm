@@ -146,7 +146,7 @@ make validate SIZE=smoke
 make tokenizer SIZE=smoke
 make tokenizer-test SIZE=smoke
 make tokenize SIZE=smoke
-make restore-size-tokenizer SIZE=smoke
+# Tokenizer is resolved directly from DATASET_SIZE (default smoke).
 make pretrain-smoke SIZE=smoke GPUS=1
 ```
 
@@ -159,7 +159,7 @@ make validate SIZE=mini
 make tokenizer SIZE=mini
 make tokenizer-test SIZE=mini
 make tokenize SIZE=mini
-make restore-size-tokenizer SIZE=mini
+# Tokenizer is resolved directly from DATASET_SIZE (default mini).
 make pretrain-mini SIZE=mini GPUS=1
 make prepare-sft SIZE=mini
 make sft-instruct-mini SIZE=mini GPUS=1
@@ -193,3 +193,15 @@ records each tokenizer's sequence and supervised-token totals.
 - [Command reference](COMMANDS.md)
 - [Troubleshooting](TROUBLESHOOTING.md)
 - [`tests/` component guide](../tests/README.md)
+
+## Consolidated frozen pretraining workflow
+
+See [Frozen pretraining and dataset reuse](FROZEN_PRETRAINING.md) for the train/val/test roles,
+existing-Mini migration, matched `DATASET_SIZE` artifacts and model budgets,
+S3/HF backend selection, retention/restore, environment separation, fixed probes,
+size-aware final evaluation, and hardware experiments. New Make targets include
+`freeze-test`, `regenerate-mini-frozen`, `artifacts-index`, `test-frozen-contract`,
+`pretrain-probes`, `eval-pretrain-final`, and `pretrain-benchmark`.
+
+`GPUS=N` means the user-selected GPU count, not a fixed requirement. Generate
+the matching Mini/production config before launch; Smoke remains separate.

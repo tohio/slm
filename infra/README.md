@@ -111,3 +111,15 @@ make config-gen SIZE=125m GPUS=1
 - Re-run environment and GPU acceptance after changing any pinned framework,
   CUDA wheel, driver, or GPU type.
 - vLLM uses its own runtime/image contract; validate serving separately.
+
+## Consolidated frozen pretraining workflow
+
+See [Frozen pretraining and dataset reuse](../docs/FROZEN_PRETRAINING.md) for the train/val/test roles,
+existing-Mini migration, matched `DATASET_SIZE` artifacts and model budgets,
+S3/HF backend selection, retention/restore, environment separation, fixed probes,
+size-aware final evaluation, and hardware experiments. New Make targets include
+`freeze-test`, `regenerate-mini-frozen`, `artifacts-index`, `test-frozen-contract`,
+`pretrain-probes`, `eval-pretrain-final`, and `pretrain-benchmark`.
+
+`GPUS=N` means the user-selected GPU count, not a fixed requirement. Generate
+the matching Mini/production config before launch; Smoke remains separate.

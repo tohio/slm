@@ -117,3 +117,19 @@ make test-model
 The model suite covers construction, parameter counts, causal and padding
 masks, cached decoding, generation parity, validation errors, and checkpoint
 round trips.
+
+## Derived RoPE state during checkpoint loading
+
+`RotaryEmbedding.inv_freq` is not learned state and remains non-persistent.
+Native low-memory checkpoint loading can materialize such a buffer without a
+checkpoint tensor to fill it. `SLMForCausalLM.from_pretrained` therefore
+reconstructs it from `rope_theta` and `head_dim` after native loading completes.
+The RoPE module also reconstructs it after state-dict loads and device/dtype
+conversion, retaining FP32 frequencies. This is architecture-level behavior,
+not a Mini or generation workaround. No broad `init_weights()` call is made on
+the loaded model; learned embeddings and other learned tensors are unchanged.
+
+Run `tests/model/test_rope_loading.py` on the pinned training stack and reproduce
+the real Mini validation baseline with the matching original tokenizer/data.
+See [the migration guide](../docs/FROZEN_PRETRAINING.md) for the distinction
+between that validation check and an unseen frozen-test evaluation.

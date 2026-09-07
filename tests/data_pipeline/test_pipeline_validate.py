@@ -52,14 +52,15 @@ class TestValidatedOutput:
         with open(path, encoding="utf-8") as f:
             assert any(line.strip() for line in f), f"{path} is empty"
 
-    def test_validated_is_subset_of_curated_sample(self):
+    @pytest.mark.parametrize("split", ["train", "val", "test"])
+    def test_validated_is_subset_of_curated_sample(self, split):
         """
         Validation only filters — sampled validated docs must exist in curated.
 
         This is bounded so make test-validate stays quick on larger runs.
         """
         validated_hashes: list[bytes] = []
-        with open(pipeline_path("validated", "train.jsonl"), encoding="utf-8") as f:
+        with open(pipeline_path("validated", f"{split}.jsonl"), encoding="utf-8") as f:
             for line in f:
                 if not line.strip():
                     continue
@@ -71,7 +72,7 @@ class TestValidatedOutput:
 
         wanted = set(validated_hashes)
         found: set[bytes] = set()
-        with open(pipeline_path("curated", "train.jsonl"), encoding="utf-8") as f:
+        with open(pipeline_path("curated", f"{split}.jsonl"), encoding="utf-8") as f:
             for line in f:
                 if not line.strip():
                     continue
@@ -87,13 +88,14 @@ class TestValidatedOutput:
             f"validation may be adding documents, not just filtering"
         )
 
-    def test_validated_docs_pass_quality_checks(self):
+    @pytest.mark.parametrize("split", ["train", "val", "test"])
+    def test_validated_docs_pass_quality_checks(self, split):
         """Validated prose-like docs should still pass quality filters."""
         qf = QualityFilter()
         failures = []
         checked = 0
 
-        with open(pipeline_path("validated", "train.jsonl"), encoding="utf-8") as f:
+        with open(pipeline_path("validated", f"{split}.jsonl"), encoding="utf-8") as f:
             for line in f:
                 if not line.strip():
                     continue
@@ -115,9 +117,10 @@ class TestValidatedOutput:
             + "\n".join(failures[:5])
         )
 
-    def test_validated_has_required_fields(self):
+    @pytest.mark.parametrize("split", ["train", "val", "test"])
+    def test_validated_has_required_fields(self, split):
         checked = 0
-        with open(pipeline_path("validated", "train.jsonl"), encoding="utf-8") as f:
+        with open(pipeline_path("validated", f"{split}.jsonl"), encoding="utf-8") as f:
             for line in f:
                 if not line.strip():
                     continue
@@ -187,22 +190,30 @@ class TestValidationStats:
         """
         Per-split kept counts should match per-split output line counts.
 
-        The top-level `kept` field aggregates train + val, so comparing it
-        directly to train.jsonl is wrong by exactly val.kept.
+        The top-level `kept` field aggregates train + val + test; compare
+        every physical split with its own recorded kept count.
         """
         stats = self._load_stats()
         splits = stats.get("splits", {})
         assert splits, (
             "validation_stats.json missing 'splits' field — "
-            "expected per-split train/val breakdown"
+            "expected per-split train/val/test breakdown"
         )
 
         for split_name, split_stats in splits.items():
             path = pipeline_path("validated", f"{split_name}.jsonl")
-            if not path.exists():
-                continue
+            assert path.exists(), f"Missing validated split: {path}"
             actual = _count_jsonl(path)
             assert split_stats["kept"] == actual, (
                 f"validation_stats.json splits.{split_name}.kept = "
                 f"{split_stats['kept']} but {split_name}.jsonl has {actual} lines"
             )
+
+
+def test_frozen_validation_contract_and_all_split_counts():
+    from config.holdout import verify_jsonl_contract
+    frozen = verify_jsonl_contract(pipeline_path("validated"), stage="validated")["contract"]
+    stats = json.loads(pipeline_path("validated", "validation_stats.json").read_text())
+    assert set(stats["splits"]) == {"train", "val", "test"}
+    for split in ("train", "val", "test"):
+        assert stats["splits"][split]["kept"] == frozen["splits"][split]["documents"] > 0

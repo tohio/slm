@@ -50,16 +50,17 @@ Performance notes:
     - Tokens are streamed directly to disk in deterministic input order via
       pool.imap — peak RAM per split is O(chunk_size × avg_tokens),
       not O(shard_size) or O(corpus_size).
-    - One persistent mp.Pool for both splits — no pool startup cost per split
+    - One persistent mp.Pool for all three splits — no pool startup cost per split
 
 Usage:
     python pretrain/data/tokenize_data.py
     python pretrain/data/tokenize_data.py --size 125m
-python pretrain/data/tokenize_data.py --train data/runs/125m/validated/train.jsonl \\
+    python pretrain/data/tokenize_data.py --train data/runs/125m/validated/train.jsonl
     python pretrain/data/tokenize_data.py --workers 24
 """
 
 import argparse
+import shutil
 import hashlib
 import json
 import logging
@@ -85,6 +86,7 @@ from curator.state import (
     write_manifest,
 )
 from pretrain.data.mixture import build_realized_mixture_report
+from config.holdout import CONTRACT_NAME, SPLITS, sha256_file, verify_jsonl_contract
 
 logging.basicConfig(
     level=logging.INFO,
@@ -452,6 +454,8 @@ def _tokenize_split(
         "format_version": TOKENIZED_FORMAT_VERSION,
         "implementation_sha256": current_implementation_sha256,
         "source_counts": source_counts,
+        "vocab_size": Tokenizer.from_file(str(tokenizer_path)).get_vocab_size(with_added_tokens=True),
+        "binary_sha256": sha256_file(bin_path),
     }
 
     atomic_write_json(meta_path, meta)
@@ -467,53 +471,36 @@ def _write_tokens(tokens: list[int], bin_file) -> None:
 
 
 def verify_dataset(bin_path: Path, meta_path: Path) -> None:
-    """Quick sanity check on the tokenized dataset."""
-    with open(meta_path) as f:
-        meta = json.load(f)
-
+    """Full streamed integrity check; bounded memory even for multi-billion tokens."""
+    meta = json.loads(meta_path.read_text())
     if "bos_id" not in meta:
         raise RuntimeError(f"{meta_path} missing bos_id metadata")
-
+    if meta.get("dtype", "uint16") != "uint16":
+        raise RuntimeError("Unsupported binary dtype")
+    n_tokens = meta.get("n_tokens", 0)
+    if not isinstance(n_tokens, int) or n_tokens <= 0 or bin_path.stat().st_size != n_tokens * 2:
+        raise RuntimeError("Token count mismatch or empty binary")
     arr = np.memmap(str(bin_path), dtype=np.uint16, mode="r")
-
-    log.info("=== Dataset Verification ===")
-    log.info(f"  File:         {bin_path}")
-    log.info(f"  Format ver:   {meta.get('format_version', '<unknown>')}")
-    log.info(f"  Shape:        {arr.shape}")
-    log.info(f"  N tokens:     {len(arr):,} (expected {meta['n_tokens']:,})")
-    log.info(f"  Min token ID: {arr.min()}")
-    log.info(f"  Max token ID: {arr.max()}")
-    
-    bos_count = int((arr == meta["bos_id"]).sum())
-    eos_count = int((arr == meta["eos_id"]).sum())
-    
-    log.info(f"  BOS count:    {bos_count:,} (expected n_docs={meta['n_docs']:,})")
-    log.info(f"  EOS count:    {eos_count:,} (expected n_docs={meta['n_docs']:,})")
-    log.info(f"  First 20 IDs: {arr[:20].tolist()}")
-
-    assert len(arr) == meta["n_tokens"], "Token count mismatch"
-
+    bos_count = eos_count = 0
+    maximum = 0
+    digest = hashlib.sha256()
+    for offset in range(0, len(arr), 4 * 1024 * 1024):
+        chunk = arr[offset:offset + 4 * 1024 * 1024]
+        bos_count += int(np.count_nonzero(chunk == meta["bos_id"]))
+        eos_count += int(np.count_nonzero(chunk == meta["eos_id"]))
+        maximum = max(maximum, int(chunk.max()))
+        digest.update(chunk.tobytes())
     if bos_count != meta["n_docs"]:
-        raise RuntimeError(
-            f"BOS count mismatch: BOS={bos_count:,}, n_docs={meta['n_docs']:,}"
-        )
-
+        raise RuntimeError(f"BOS count mismatch: BOS={bos_count}, n_docs={meta['n_docs']}")
     if eos_count != meta["n_docs"]:
-        raise RuntimeError(
-            f"EOS count mismatch: EOS={eos_count:,}, n_docs={meta['n_docs']:,}"
-        )
-
-    # Every supported BOS/document/EOS binary layout must start with BOS.
-    # Catches the case where BOS prepending is broken in a way that
-    # still produces the right BOS count but wrong layout.
-    if int(arr[0]) != meta["bos_id"]:
-        raise RuntimeError(
-            f"First token is {int(arr[0])}, expected BOS={meta['bos_id']}. "
-            f"Binary layout is wrong — format_version={meta.get('format_version')!r} "
-            f"requires BOS at position 0."
-        )
-
-    log.info("  ✓ Verification passed")
+        raise RuntimeError(f"EOS count mismatch: EOS={eos_count}, n_docs={meta['n_docs']}")
+    if int(arr[0]) != meta["bos_id"] or int(arr[-1]) != meta["eos_id"]:
+        raise RuntimeError("Binary must start with BOS and end with EOS")
+    if maximum >= meta.get("vocab_size", UINT16_MAX_VOCAB):
+        raise RuntimeError(f"Token ID outside tokenizer vocabulary: {maximum}")
+    if meta.get("binary_sha256") and digest.hexdigest() != meta["binary_sha256"]:
+        raise RuntimeError(f"Binary fingerprint mismatch: {bin_path}")
+    log.info("Verified %s: %s tokens, %s BOS/EOS documents", bin_path, n_tokens, bos_count)
 
 
 def main():
@@ -529,7 +516,7 @@ def main():
         "--val",
         type=Path,
         default=None,
-        help="Input val JSONL file (skipped if missing)",
+        help="Required validated val JSONL (defaults to the size-scoped path)",
     )
     parser.add_argument(
         "--output",
@@ -560,128 +547,65 @@ def main():
         action="store_true",
         help="Verify output after tokenization",
     )
+    parser.add_argument("--test", type=Path, default=None, help="Frozen validated test JSONL")
     args = parser.parse_args()
+    if args.workers < 1 or args.chunk_size < 1:
+        parser.error("workers and chunk-size must be positive")
 
     run_validated_dir = validated_dir(args.size)
     args.train = args.train or (run_validated_dir / "train.jsonl")
     args.val = args.val or (run_validated_dir / "val.jsonl")
+    args.test = args.test or (run_validated_dir / "test.jsonl")
     args.output = args.output or tokenized_dir(args.size)
     args.tokenizer = args.tokenizer or (tokenizer_dir(args.size) / "slm_tokenizer.json")
 
-    # Pre-flight checks — fail with clear messages before spawning the pool
-    if not args.train.exists():
-        log.error(f"Train input not found: {args.train}")
-        log.error("Run: make validate SIZE=<size>")
-        sys.exit(1)
-    if (
-        args.train.parent == run_validated_dir
-        and args.val.parent == run_validated_dir
-        and not manifest_outputs_match(
-            run_validated_dir,
-            output_pattern="*.json*",
-        )
-    ):
-        raise RuntimeError(
-            f"Validated tokenization inputs are not manifest-complete: "
-            f"{run_validated_dir}"
-        )
-
-    if not args.tokenizer.exists():
-        log.error(f"Tokenizer not found: {args.tokenizer}")
-        log.error("Run: make tokenizer SIZE=<size>")
-        log.error(
-            "Or restore it with: make artifacts-download SIZE=<size> "
-            "RUN_ID=<run-id> ARTIFACT_STAGES=tokenizer"
-        )
-        sys.exit(1)
-
-    # Single-pass tokenizer validation: vocab size + special token IDs.
-    # Fails fast if the tokenizer is unusable, before spawning workers.
-    _, bos_id, eos_id = _validate_tokenizer(args.tokenizer)
-    log.info(f"Special token IDs: BOS={bos_id}, EOS={eos_id}")
-
-    if not args.val.exists():
-        raise FileNotFoundError(
-            f"Val input not found: {args.val}. Tokenization requires both "
-            f"validated splits."
-        )
-    val_available = True
-
-    log.info(f"Train:      {args.train}")
-    log.info(f"Val:        {args.val if val_available else '(not found, skipping)'}")
-    log.info(f"Output:     {args.output}")
-    log.info(f"Tokenizer:  {args.tokenizer}")
-    log.info(f"Workers:    {args.workers}")
-    log.info(f"Chunk size: {args.chunk_size}")
-
-    tokenizer_path_str = str(args.tokenizer)
-
-    # One persistent pool for both splits — avoids pool startup cost twice.
-    with mp.Pool(
-        processes=args.workers,
-        initializer=_worker_init,
-        initargs=(tokenizer_path_str, bos_id, eos_id),
-    ) as pool:
-        train_meta = _tokenize_split(
-            input_path=args.train,
-            output_dir=args.output,
-            split="train",
-            pool=pool,
-            bos_id=bos_id,
-            eos_id=eos_id,
-            tokenizer_path=args.tokenizer,
-            chunk_size=args.chunk_size,
-        )
-
-        if val_available:
-            val_meta = _tokenize_split(
-                input_path=args.val,
-                output_dir=args.output,
-                split="val",
-                pool=pool,
-                bos_id=bos_id,
-                eos_id=eos_id,
-                tokenizer_path=args.tokenizer,
-                chunk_size=args.chunk_size,
-            )
-
-    mixture_report = build_realized_mixture_report(train_meta, val_meta)
-    mixture_report_path = args.output / "token_mixture.json"
-    atomic_write_json(mixture_report_path, mixture_report)
-    log.info("Realized token mixture report saved: %s", mixture_report_path)
-
-    tokenization_contract = {
+    inputs = {split: getattr(args, split) for split in SPLITS}
+    if len({path.parent for path in inputs.values()}) != 1:
+        parser.error("train/val/test must belong to the same validated artifact set")
+    if not manifest_outputs_match(args.train.parent, output_pattern="*.json*"):
+        raise RuntimeError(f"Validated inputs are not manifest-complete: {args.train.parent}")
+    frozen = verify_jsonl_contract(args.train.parent, stage="validated")
+    if not args.tokenizer.is_file():
+        raise FileNotFoundError(f"Missing matched tokenizer: {args.tokenizer}")
+    vocab_size, bos_id, eos_id = _validate_tokenizer(args.tokenizer)
+    args.output.mkdir(parents=True, exist_ok=True)
+    # An interrupted rebuild is not a completed training artifact set.
+    (args.output / "_SUCCESS.json").unlink(missing_ok=True)
+    metadata = {}
+    with mp.Pool(processes=args.workers, initializer=_worker_init,
+                 initargs=(str(args.tokenizer), bos_id, eos_id)) as pool:
+        for split, path in inputs.items():
+            meta = _tokenize_split(path, args.output, split, pool, bos_id, eos_id,
+                                   args.tokenizer, args.chunk_size)
+            expected = frozen["contract"]["splits"][split]
+            if meta["input_sha256"] != expected["sha256"] or meta["n_docs"] != expected["documents"]:
+                raise RuntimeError(f"Tokenized {split} does not match frozen validated membership")
+            meta.update({"vocab_size": vocab_size, "frozen_split_sha256": frozen["sha256"],
+                         "tokenizer_file_sha256": sha256_file(args.tokenizer)})
+            atomic_write_json(args.output / f"{split}.json", meta)
+            # Always gate completion on integrity; --verify remains accepted.
+            verify_dataset(args.output / f"{split}.bin", args.output / f"{split}.json")
+            metadata[split] = meta
+    if args.size == "mini":
+        seq_len = 2048
+        usable = metadata["train"]["n_tokens"] // seq_len * seq_len
+        if usable < 1_400_000_000:
+            raise RuntimeError(f"Mini train floor failed after test/filtering: {usable:,} usable tokens < 1.4B")
+    mixture = build_realized_mixture_report(metadata["train"], metadata["val"], metadata["test"])
+    atomic_write_json(args.output / "token_mixture.json", mixture)
+    shutil.copy2(args.train.parent / CONTRACT_NAME, args.output / CONTRACT_NAME)
+    contract = {
         "implementation_sha256": code_fingerprint(_tokenize_split),
-        "format_version": TOKENIZED_FORMAT_VERSION,
-        "dtype": "uint16",
-        "tokenizer_sha256": train_meta["tokenizer_sha256"],
-        "inputs": {
-            "train": train_meta["input_sha256"],
-            "val": val_meta["input_sha256"],
-        },
-        "mixture_contract_sha256": mixture_report["contract_sha256"],
+        "format_version": TOKENIZED_FORMAT_VERSION, "dtype": "uint16",
+        "tokenizer_sha256": metadata["train"]["tokenizer_sha256"],
+        "inputs": {split: meta["input_sha256"] for split, meta in metadata.items()},
+        "frozen_split_sha256": frozen["sha256"],
+        "mixture_contract_sha256": mixture["contract_sha256"],
     }
-    write_manifest(
-        args.output,
-        stage="tokenize",
-        contract=tokenization_contract,
-        input_signature=stable_digest(tokenization_contract["inputs"]),
-        output_pattern="[tv]*",
-    )
-
-    if args.verify:
-        verify_dataset(
-            bin_path=args.output / "train.bin",
-            meta_path=args.output / "train.json",
-        )
-        if val_available:
-            verify_dataset(
-                bin_path=args.output / "val.bin",
-                meta_path=args.output / "val.json",
-            )
-
-    log.info("Tokenization complete.")
-    log.info('Next step: make artifacts-upload SIZE=<size> ARTIFACT_STAGES="raw,curated,validated,tokenized,tokenizer,metadata"')
+    write_manifest(args.output, stage="tokenize", contract=contract,
+                   input_signature=stable_digest(contract["inputs"]), output_pattern="[tv]*")
+    log.info("Tokenization complete. Frozen train/val/test counts: %s",
+             {split: meta["n_tokens"] for split, meta in metadata.items()})
 
 
 if __name__ == "__main__":

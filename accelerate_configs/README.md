@@ -14,8 +14,8 @@ Accelerate.
 `fsdp.yaml`:
 
 ```bash
-make accel-gen-ddp GPUS=8
-make accel-gen-fsdp GPUS=8
+make accel-gen-ddp GPUS=N
+make accel-gen-fsdp GPUS=N
 ```
 
 The normal training Make targets pass process count and precision directly to
@@ -33,9 +33,12 @@ For interactive Accelerate defaults, copy a checked-in configuration with:
 
 ```bash
 make accelerate-config-single
-make accelerate-config-multi GPUS=8
+make accelerate-config-multi GPUS=N
 ```
 
 Before using FSDP for an expensive run, verify checkpoint save, resume,
 promotion, and export with the same topology. Training hyperparameters remain
 in the stage YAML files; these files control process orchestration only.
+
+In generic examples, replace `N` with the GPU count you choose to use. Mini
+uses the existing pretraining config-generation flow; Smoke stays separate.

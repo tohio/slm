@@ -120,3 +120,19 @@ def eval_dir(size: str) -> Path:
 
 def export_dir(size: str) -> Path:
     return BASE_EXPORTS_DIR / size
+
+
+def resolve_dataset_paths(size: str, dataset_size: str | None = None,
+                          *, data_root: Path | None = None) -> dict[str, Path | str]:
+    """Resolve one matched artifact set; never fall back to a global tokenizer."""
+    supported = {"smoke", "mini", "125m", "350m", "1b"}
+    dataset_size = dataset_size or size
+    if size not in supported or dataset_size not in supported:
+        raise ValueError("SIZE and DATASET_SIZE must be smoke, mini, 125m, 350m, or 1b")
+    root = (Path(data_root) if data_root is not None else BASE_DATA_DIR) / "runs" / dataset_size
+    if (root / "_RESTORE_PENDING.json").exists():
+        raise RuntimeError(f"Interrupted dataset restore: inspect {root / '_RESTORE_PENDING.json'} before loading")
+    return {"size": size, "dataset_size": dataset_size, "root": root,
+            "tokenizer": root / "tokenizer", "tokenized": root / "tokenized",
+            "validated": root / "validated", "metadata": root / "metadata",
+            "run_id": root / "RUN_ID"}

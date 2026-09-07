@@ -382,6 +382,7 @@ class TestBlendStats:
         assert "total_documents" in stats
         assert "train_documents" in stats
         assert "val_documents" in stats
+        assert "test_documents" in stats
         assert "val_fraction" in stats
         assert "estimated_tokens_from_chars" in stats
         assert stats["token_count_status"].startswith("estimate_only")
@@ -455,7 +456,9 @@ class TestBlendStats:
 
         assert stats["train_documents"] == len(train_docs)
         assert stats["val_documents"] == len(val_docs)
-        assert stats["total_documents"] == len(train_docs) + len(val_docs)
+        test_docs = read_jsonl(pipeline_path("curated", "test.jsonl"))
+        assert stats["test_documents"] == len(test_docs) > 0
+        assert stats["total_documents"] == len(train_docs) + len(val_docs) + len(test_docs)
 
     def test_blend_stats_deficits_are_closed(self):
         """
@@ -472,3 +475,13 @@ class TestBlendStats:
         }
 
         assert not deficits, f"Unresolved source deficits in blend_stats: {deficits}"
+
+
+def test_frozen_curated_contract_preserves_validation_and_all_pair_gates():
+    from config.holdout import verify_jsonl_contract
+    frozen = verify_jsonl_contract(pipeline_path("curated"), stage="curated")["contract"]
+    assert frozen["splits"]["val"] == frozen["origin"]["splits"]["val"]
+    assert set(frozen["pair_audits"]) == {"train_val", "train_test", "test_val"}
+    for report in frozen["pair_audits"].values():
+        assert report["near"]["passed"]
+        assert report["final_exact"]["passed"]

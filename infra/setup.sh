@@ -96,7 +96,7 @@ pip install --upgrade pip --quiet
 
 echo ""
 echo "==> Installing Python dependencies..."
-pip install -r "${REPO_DIR}/requirements.txt"
+pip install -r "${REPO_DIR}/requirements-curation.txt"
 
 # ── 4. KenLM Python bindings ──────────────────────────────────────────────────
 # KenLM is not on PyPI — must be built from source.
@@ -293,7 +293,12 @@ fi
 # not required for setup itself to succeed.
 echo ""
 echo "==> Checking .env variables..."
-REQUIRED_VARS=("S3_BUCKET" "AWS_ACCESS_KEY_ID" "AWS_SECRET_ACCESS_KEY" "WANDB_API_KEY" "HF_TOKEN")
+REQUIRED_VARS=("HF_TOKEN")
+if [[ "${ARTIFACT_BACKEND:-s3}" == "s3" ]]; then
+    REQUIRED_VARS+=("S3_BUCKET")  # SDK default chain supports IAM roles.
+else
+    REQUIRED_VARS+=("HF_ARTIFACT_BUCKET")
+fi
 MISSING_CREDS=0
 for var in "${REQUIRED_VARS[@]}"; do
     value=$(grep "^${var}=" "$ENV_FILE" | cut -d'=' -f2 || true)

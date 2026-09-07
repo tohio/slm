@@ -190,10 +190,9 @@ def test_pretrain_tokenizer_validation_uses_explicit_tokenized_dir(
 
     canonical = Tokenizer.from_file(str(tokenizer_path)).to_str()
     fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    (tokenized_dir / "train.json").write_text(
-        json.dumps({"tokenizer_sha256": fingerprint}) + "\n",
-        encoding="utf-8",
-    )
+    for split in ("train", "val", "test"):
+        (tokenized_dir / f"{split}.json").write_text(
+            json.dumps({"tokenizer_sha256": fingerprint}) + "\n", encoding="utf-8")
 
     validate_tokenizer(tokenizer_dir, tokenized_dir)
 
@@ -256,58 +255,16 @@ def test_pretrain_model_tokenizer_contract_rejects_special_token_mismatch(
 
 
 def test_tokenized_data_identity_captures_manifest_and_splits(tmp_path: Path):
-    completion = {
-        "manifest_version": 2,
-        "contract_sha256": "contract",
-        "input_signature": "input",
-        "output_signature": "output",
-    }
-    (tmp_path / "_SUCCESS.json").write_text(
-        json.dumps(completion),
-        encoding="utf-8",
-    )
-    split_metadata = {}
-    for split, multiplier in (("train", 2), ("val", 1)):
-        source_counts = {
-            source: {"documents": multiplier, "tokens": multiplier}
-            for source in ALL_SOURCES
-        }
-        tokens = sum(row["tokens"] for row in source_counts.values())
-        metadata = {
-            "n_tokens": tokens,
-            "n_docs": sum(row["documents"] for row in source_counts.values()),
-            "bos_id": 2,
-            "eos_id": 3,
-            "dtype": "uint16",
-            "format_version": "test",
-            "input_sha256": f"{split}-input",
-            "tokenizer_sha256": "tokenizer",
-            "implementation_sha256": "implementation",
-            "source_counts": source_counts,
-        }
-        split_metadata[split] = metadata
-        (tmp_path / f"{split}.json").write_text(
-            json.dumps(metadata),
-            encoding="utf-8",
-        )
-        (tmp_path / f"{split}.bin").write_bytes(b"\0\0" * tokens)
-
-    mixture = build_realized_mixture_report(
-        split_metadata["train"], split_metadata["val"]
-    )
-    (tmp_path / "token_mixture.json").write_text(
-        json.dumps(mixture),
-        encoding="utf-8",
-    )
-
-    identity = tokenized_data_identity(tmp_path)
-
-    assert identity["manifest"] == completion
-    assert identity["splits"]["train"]["binary_bytes"] == 4 * len(ALL_SOURCES)
-    assert identity["splits"]["val"]["n_tokens"] == len(ALL_SOURCES)
-    assert identity["realized_mixture"]["status"] == (
-        "passed_structural_checks_report_only"
-    )
+    from tests.frozen_helpers import make_bundle
+    root = make_bundle(tmp_path) / "tokenized"
+    completion = json.loads((root / "_SUCCESS.json").read_text())
+    identity = tokenized_data_identity(root)
+    assert identity["manifest"] == {key: completion[key] for key in (
+        "manifest_version", "contract_sha256", "input_signature", "output_signature")}
+    assert set(identity["splits"]) == {"train", "val", "test"}
+    assert identity["splits"]["train"]["binary_bytes"] == 8 * len(ALL_SOURCES)
+    assert identity["splits"]["test"]["n_tokens"] == 4 * len(ALL_SOURCES)
+    assert identity["realized_mixture"]["status"] == "passed_structural_checks_report_only"
 
 
 def test_pretrain_audit_rejects_changed_resume_contract(tmp_path: Path):

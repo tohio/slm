@@ -279,7 +279,7 @@ class TestTokenizedBinIntegrity:
     def test_tokenization_completion_manifest_exists(self):
         assert pipeline_path("tokenized", "_SUCCESS.json").exists()
 
-    @pytest.mark.parametrize("split", ["train", "val"])
+    @pytest.mark.parametrize("split", ["train", "val", "test"])
     def test_tokenized_metadata_has_reproducibility_fields(self, split):
         path = pipeline_path("tokenized", f"{split}.json")
         with open(path) as handle:
@@ -390,3 +390,17 @@ class TestFertilityBaseline:
             f"Your tokenizer is significantly less efficient than the reference. "
             f"Consider retraining on more data or inspecting the training corpus."
         )
+
+
+@pytest.mark.parametrize("split", ["train", "val", "test"])
+def test_all_tokenized_splits_have_complete_frozen_integrity(split):
+    from config.holdout import load_contract
+    from pretrain.data.tokenize_data import verify_dataset
+    root = pipeline_path("tokenized")
+    frozen = load_contract(root, stage="validated")
+    metadata = json.loads((root / f"{split}.json").read_text())
+    assert metadata["frozen_split_sha256"] == frozen["sha256"]
+    assert metadata["input_sha256"] == frozen["contract"]["splits"][split]["sha256"]
+    assert metadata["n_docs"] == frozen["contract"]["splits"][split]["documents"]
+    assert metadata["binary_sha256"]
+    verify_dataset(root / f"{split}.bin", root / f"{split}.json")

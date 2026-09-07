@@ -18,6 +18,8 @@ data:
   val_fraction: 0.005
 
 training:
+  # Same-size uses its realized corpus. Cross-size uses this model's bounded prefix.
+  cross_size_max_train_tokens: 1000448
   # ── Batch size ──────────────────────────────────────────────────────────────
   # Bounded execution check. Output quality is not an acceptance criterion.
   max_steps: 8
@@ -36,6 +38,17 @@ training:
   seed: 42
   lr_scheduler: cosine
   report_to: []
+
+generation_probes:
+  enabled: true
+  every_steps: 5000
+  steps: []
+  at_final: true
+  do_sample: false
+  max_new_tokens: 64
+
+final_evaluation:
+  prefix_count: 5
 
 optimizer:
   lr: 3.0e-4
