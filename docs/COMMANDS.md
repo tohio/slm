@@ -41,10 +41,14 @@ make download-fasttext-model DATA_DIR=/data/slm/data
 make download-kenlm-model    DATA_DIR=/data/slm/data
 make curate-smoke            DATA_DIR=/data/slm/data
 make validate SIZE=smoke     DATA_DIR=/data/slm/data
+make tokenizer SIZE=smoke    DATA_DIR=/data/slm/data
+make tokenizer-test SIZE=smoke DATA_DIR=/data/slm/data
+make tokenize SIZE=smoke     DATA_DIR=/data/slm/data
 ```
 
-Then use `make curate-mini` for the functional mini-scale run or `curate-all`
-for a complete production-size workflow:
+Then optionally select Mini (at least 1.4B usable training tokens) or use
+`curate-all` directly for a complete production-size workflow. Mini is not a
+mandatory intermediate:
 
 ```bash
 make curate-all \
@@ -63,7 +67,9 @@ make train-all \
   DATA_DIR=/data/slm/data
 ```
 
-Both commands check common and selected-backend environment settings.
+Both commands require common settings including W&B API key/project. Transfer
+code validates only its selected storage credentials; model publication requires
+`HF_USERNAME`.
 `curate-all` creates the corpus and uploads the stages selected by `ARTIFACT_STAGES`. `train-all` restores that artifact run and
 trains the base, instruct, code, and chat variants. It is restricted to new
 training runs; use the stage-specific resume targets after an interruption.
@@ -129,8 +135,9 @@ make validate SIZE=mini
 make curate SIZE=125m WORKERS=62
 ```
 
-`curate-smoke` is the bounded pipeline-validation run. `curate-mini` is the
-functional mini-scale curation run. Runtime depends on host and network
+These are alternative curation profiles, not a required sequence.
+`curate-smoke` is the bounded curation run; validation and tokenization are
+subsequent stages. `curate-mini` is an optional larger curation run. Runtime depends on host and network
 conditions; fixed duration estimates are intentionally not published.
 
 Stage-specific curation:
@@ -280,6 +287,10 @@ Sources and immutable Hub revisions are configured in
 and integrity manifest; changing the source contract requires an intentional
 rerun with `finetune/data/prepare_sft.py --force`.
 
+Training verifies the preparation manifest and split isolation before sampling.
+SFT/DPO require the actual parent checkpoint's bundled tokenizer. New-run and
+resume protection is documented in [training](TRAIN.md#post-training-identity-and-resume).
+
 Instruct SFT:
 
 ```bash
@@ -332,7 +343,11 @@ make prepare-dpo SIZE=125m
 The pinned source and preference-quality contract are configured in
 `alignment/configs/dpo_data_sources.yaml`. Prepared data includes a manifest;
 changing the contract requires an intentional
-`alignment/data/prepare_dpo.py --force` run.
+`alignment/data/prepare_dpo.py --force` run. Preparation resolves the instruct
+checkpoint from `DPO_CHAT_CONFIG`, shared with training. Optional
+`DPO_BASE_MODEL=/path/to/instruct/final` overrides the same parent for both paths.
+The preparer also accepts `--training-config` and `--base-model` directly.
+Tokenizer/template changes invalidate the DPO rendering fingerprint.
 
 Train:
 
@@ -464,7 +479,15 @@ make test-sft-chat
 make test-dpo
 ```
 
-Unit tests (use the pinned training stack installed by `make setup-train`):
+Shared/curation tests (no real corpus required):
+
+```bash
+make test-data-unit       # either installed role
+make test-curation-unit   # curation role, includes shared tests
+```
+
+Training/common unit tests (CPU-executed tests within the pinned training
+stack installed on a GPU host by `make setup-train`):
 
 ```bash
 make test-model

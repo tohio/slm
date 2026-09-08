@@ -41,8 +41,8 @@ Warmup:
     warmup_ratio directly. Computing in code preserves the auto-rescaling property
     when GPU count changes — `warmup_steps` baked into YAML would not.
 
-Target library versions are pinned together in requirements.txt.
-See requirements.txt for the full compatible stack.
+Target library versions are pinned in requirements-training.txt.
+Curation uses the separate requirements-curation.txt stack.
 
 Usage:
     python alignment/train_dpo.py --config alignment/configs/dpo_chat_125m.yaml
@@ -79,8 +79,14 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-from config.paths import tokenizer_dir, dpo_chat_dir
+from config.paths import dpo_chat_dir
 from config.runtime import configure_torch_runtime
+from config.chat import tokenizer_fingerprint
+from config.checkpoints import (
+    bundled_tokenizer_dir, checkpoint_identity, posttraining_contract,
+    resolve_training_checkpoint, validate_or_write_run_audit,
+)
+from alignment.data.prepare_dpo import sha256_json
 
 
 def load_config(config_path: Path) -> dict:
@@ -121,7 +127,7 @@ def load_tokenizer(tokenizer_path: Path):
     if not (tokenizer_path / "tokenizer_config.json").exists():
         raise FileNotFoundError(
             f"tokenizer_config.json not found at {tokenizer_path}. "
-            f"Retrain the tokenizer: python tokenizer/train_tokenizer.py"
+            f"Restore the tokenizer/template saved with this checkpoint; do not retrain a tokenizer for learned weights."
         )
 
     tokenizer = PreTrainedTokenizerFast.from_pretrained(str(tokenizer_path))
@@ -129,7 +135,7 @@ def load_tokenizer(tokenizer_path: Path):
     if not getattr(tokenizer, "chat_template", None):
         raise ValueError(
             f"Tokenizer at {tokenizer_path} has no chat_template. "
-            f"Retrain the tokenizer: python tokenizer/train_tokenizer.py"
+            f"Restore the tokenizer/template saved with this checkpoint; do not retrain a tokenizer for learned weights."
         )
 
     return tokenizer
@@ -353,21 +359,6 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def tokenizer_fingerprint(path: Path) -> str:
-    files = [
-        path / name
-        for name in ("tokenizer.json", "tokenizer_config.json", "special_tokens_map.json")
-        if (path / name).exists()
-    ]
-    if not files:
-        raise FileNotFoundError(f"No tokenizer files found at {path}")
-    digest = hashlib.sha256()
-    for file_path in files:
-        digest.update(file_path.name.encode("utf-8"))
-        digest.update(bytes.fromhex(sha256_file(file_path)))
-    return digest.hexdigest()
-
-
 def validate_model_tokenizer_contract(model, tokenizer, max_length: int) -> None:
     embedding_rows = model.get_input_embeddings().num_embeddings
     if len(tokenizer) != embedding_rows:
@@ -430,7 +421,15 @@ def validate_data_manifest(
             f"DPO manifest not found: {manifest_path}. Regenerate preference data."
         )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    for path in (train_path, val_path):
+    if not isinstance(manifest, dict):
+        raise RuntimeError(f"Invalid DPO preparation manifest: {manifest_path}")
+    contract = manifest.get("contract")
+    if (manifest.get("schema_version") != 1 or not isinstance(contract, dict)
+            or manifest.get("contract_sha256") != sha256_json(contract)):
+        raise RuntimeError(f"Invalid DPO preparation contract: {manifest_path}")
+    for filename, path in (("train.jsonl", train_path), ("val.jsonl", val_path)):
+        if path.resolve() != (manifest_path.parent / filename).resolve():
+            raise RuntimeError(f"DPO {filename} must belong to {manifest_path}")
         expected = manifest.get("files", {}).get(path.name, {}).get("sha256")
         if not expected or sha256_file(path) != expected:
             raise RuntimeError(f"{path} does not match its DPO manifest")
@@ -493,6 +492,12 @@ def main():
         os.path.expandvars(cfg["model"]["base_model_path"])
     )
     beta = cfg["dpo"].get("beta", 0.1)
+    audit_filename = "dpo_run_audit.json"
+    resume_checkpoint = resolve_training_checkpoint(
+        output_dir, resume=args.resume, audit_filename=audit_filename,
+    )
+    tokenizer_path = bundled_tokenizer_dir(base_model_path)
+    base_identity = checkpoint_identity(base_model_path)
 
     log.info(f"=== SLM DPO Alignment ===")
     log.info(f"Config:     {args.config}")
@@ -516,17 +521,6 @@ def main():
     log.info(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     # ── Tokenizer ─────────────────────────────────────────────────────────────
-    tokenizer_path = base_model_path / "tokenizer"
-    if not (tokenizer_path / "tokenizer_config.json").exists():
-        log.warning(
-            f"tokenizer_config.json not found at {tokenizer_path} — "
-            f"falling back to target-scoped tokenizer"
-        )
-        size = _size_from_model_name(model_name)
-        if size not in {"mini", "125m", "350m", "1b"}:
-            raise ValueError(f"Cannot infer tokenizer size from model name {model_name!r}")
-        tokenizer_path = tokenizer_dir(size)
-
     log.info(f"Loading tokenizer from {tokenizer_path}...")
     tokenizer = load_tokenizer(tokenizer_path)
     log.info(f"Vocab size: {tokenizer.vocab_size:,}")
@@ -544,13 +538,6 @@ def main():
     train_dataset = load_dataset_from_jsonl(train_path)
     val_dataset   = load_dataset_from_jsonl(val_path)
 
-    # Optionally truncate for mini validation runs
-    max_samples = data_cfg.get("max_samples")
-    if max_samples:
-        train_dataset = train_dataset.select(range(min(max_samples, len(train_dataset))))
-        val_dataset   = val_dataset.select(range(min(max_samples // 10, len(val_dataset))))
-        log.info(f"Truncated to {max_samples} train / {len(val_dataset)} val (max_samples set)")
-
     log.info(f"Train: {len(train_dataset):,} pairs | Val: {len(val_dataset):,} pairs")
     train_prompts = validate_preference_dataset(train_dataset, "train")
     val_prompts = validate_preference_dataset(val_dataset, "validation")
@@ -566,11 +553,21 @@ def main():
         val_path,
         tokenizer_path,
     )
+    for filename, dataset in (("train.jsonl", train_dataset), ("val.jsonl", val_dataset)):
+        if data_manifest["files"][filename].get("records") != len(dataset):
+            raise RuntimeError(f"DPO record count does not match {filename}")
     expected_size = _size_from_model_name(model_name)
     if data_manifest.get("contract", {}).get("size") != expected_size:
         raise RuntimeError(
             f"DPO manifest size does not match model size {expected_size!r}"
         )
+
+    # Optionally truncate for mini validation runs
+    max_samples = data_cfg.get("max_samples")
+    if max_samples:
+        train_dataset = train_dataset.select(range(min(max_samples, len(train_dataset))))
+        val_dataset   = val_dataset.select(range(min(max_samples // 10, len(val_dataset))))
+        log.info(f"Truncated to {max_samples} train / {len(val_dataset)} val (max_samples set)")
 
     # ── DPO args ──────────────────────────────────────────────────────────────
     # Pass num_train_examples so warmup_steps can be derived from the recipe
@@ -594,6 +591,16 @@ def main():
     )
     log.info("Best-checkpoint selection enabled (metric_for_best_model=eval_loss)")
 
+    run_contract = posttraining_contract(
+        cfg=cfg, size=expected_size, stage="dpo_chat", model_config=model.config,
+        base_identity=base_identity, tokenizer_path=tokenizer_path,
+        chat_template=tokenizer.chat_template, data_manifest=data_manifest,
+        world_size=int(os.environ.get("WORLD_SIZE", "1")),
+    )
+    validate_or_write_run_audit(
+        output_dir, run_contract, audit_filename=audit_filename, schema_version=1,
+        resume=args.resume, write=False,
+    )
     preflight_audit = {
         "config": str(args.config),
         "base_model": str(base_model_path),
@@ -609,14 +616,8 @@ def main():
         "precompute_ref_log_probs": dpo_args.precompute_ref_log_probs,
         "source_contract_sha256": data_manifest["contract_sha256"],
     }
-    output_dir.mkdir(parents=True, exist_ok=True)
-    audit_path = output_dir / "dpo_run_audit.json"
-    audit_path.write_text(
-        json.dumps(preflight_audit, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
     if args.preflight_only:
-        log.info("DPO preflight passed; no reference pass or optimization was run.")
+        log.info("DPO preflight passed; no reference pass, optimization, or run-audit write was performed.")
         return
 
     # ── DPOTrainer ────────────────────────────────────────────────────────────
@@ -661,14 +662,16 @@ def main():
             )
     preflight_audit["train"] = train_audit
     preflight_audit["validation"] = validation_audit
-    audit_path.write_text(
-        json.dumps(preflight_audit, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+    trainer.accelerator.wait_for_everyone()
+    audit_path = validate_or_write_run_audit(
+        output_dir, run_contract, audit_filename=audit_filename, schema_version=1,
+        resume=args.resume, write=trainer.is_world_process_zero(), details=preflight_audit,
     )
+    trainer.accelerator.wait_for_everyone()
 
     # ── Train ─────────────────────────────────────────────────────────────────
     log.info("Starting DPO training...")
-    trainer.train(resume_from_checkpoint=args.resume)
+    trainer.train(resume_from_checkpoint=str(resume_checkpoint) if resume_checkpoint else None)
 
     # ── Save ──────────────────────────────────────────────────────────────────
     # load_best_model_at_end=True means trainer.model is now the best
@@ -677,19 +680,11 @@ def main():
     final_dir = output_dir / "final"
     trainer.save_model(str(final_dir))
 
-    if tokenizer_path.exists() and any(tokenizer_path.iterdir()):
+    if trainer.is_world_process_zero():
         shutil.copytree(tokenizer_path, final_dir / "tokenizer", dirs_exist_ok=True)
-        log.info("Tokenizer copied alongside model")
-    else:
-        log.warning(f"Tokenizer empty or missing at {tokenizer_path} — skipping copy")
-    preflight_audit["best_metric"] = trainer.state.best_metric
-    preflight_audit["best_checkpoint"] = trainer.state.best_model_checkpoint
-    audit_path.write_text(
-        json.dumps(preflight_audit, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    shutil.copy2(audit_path, final_dir / "dpo_run_audit.json")
-    shutil.copy2(manifest_path, final_dir / "dpo_data_manifest.json")
+        shutil.copy2(audit_path, final_dir / audit_filename)
+        shutil.copy2(manifest_path, final_dir / "dpo_data_manifest.json")
+    trainer.accelerator.wait_for_everyone()
 
     log.info(f"Model saved to {final_dir}")
     log.info("DPO complete. Next: make eval")

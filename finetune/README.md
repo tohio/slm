@@ -30,7 +30,8 @@ pretrain/final
             └─ sft_code_completion/final  (optional)
 ```
 
-Instruct SFT starts from the reinitialized base checkpoint. Code SFT starts
+Instruct SFT starts directly from the pretrained base checkpoint, with learned
+embeddings and weights preserved. Code SFT starts
 from instruct SFT so it retains the general assistant behavior learned by the
 first stage.
 
@@ -65,7 +66,7 @@ $DATA_DIR/runs/<size>/sft_code/
 The preparation stage normalizes records to the project's conversation
 schema, validates required roles/content, rejects excessive invalid or
 duplicate rates, and splits by normalized user prompt. The manifest records
-the source revision, selection settings, tokenizer hash, file hashes,
+the source revision, selection settings, file hashes, record counts,
 retention statistics, and zero prompt overlap between train and validation.
 Existing output is reused only when its manifest matches the current contract.
 
@@ -86,9 +87,11 @@ python finetune/data/prepare_sft.py \
   --force
 ```
 
-The target tokenizer must already be available at
-`$DATA_DIR/runs/<size>/tokenizer/`; preparation uses its exact chat rendering
-and token budgets.
+SFT preparation validates/splits text and does not require a tokenizer or apply
+a token budget. During training, the input checkpoint supplies its bundled
+tokenizer and chat template; TRL performs length filtering and assistant-mask
+construction. Cross-size pretraining already copied the source tokenizer into
+the base checkpoint, so no model-size tokenizer fallback is needed.
 
 ## Train
 
@@ -126,14 +129,26 @@ the configured minimum retention ratio, validates context and vocabulary
 compatibility, and keeps packing disabled so examples cannot attend across
 packed boundaries.
 
-Before training starts, it writes `sft_run_audit.json`. The promoted `final/`
-directory contains the lowest-validation-loss checkpoint, the run audit, and
-the prepared-data manifest:
+Before Trainer construction, training verifies the manifest's own checksum,
+stage/size, complete file hashes/counts, and normalized train/validation prompt
+separation, before any `max_samples` selection. A fresh run records an immutable
+`sft_run_audit.json`; resume compares config, architecture, parent config/weights,
+tokenizer/template, data, and process count before accepting the latest numbered
+checkpoint. New runs cannot overwrite occupied outputs. Preflight uses temporary
+Trainer output and never replaces an established run audit.
+
+The promoted `final/` directory contains the lowest-validation-loss checkpoint,
+its actual tokenizer/template, the run audit, and the prepared-data manifest:
 
 ```text
 $RESULTS_DIR/runs/<size>/sft_instruct/final/
 $RESULTS_DIR/runs/<size>/sft_code/final/
 ```
+
+For interrupted-run preflight add `--resume`. Older post-training audits without
+an immutable contract cannot be used to assert safe resume. See
+[training identity and compatibility](../docs/TRAIN.md#post-training-identity-and-resume).
+Trainer state/logs, not a rewritten run audit, record best-checkpoint metrics.
 
 ## Optional raw code completion
 

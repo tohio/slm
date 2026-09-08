@@ -18,7 +18,9 @@ data or training stages.
 
 | Gate | Command | Required input |
 |---|---|---|
-| CPU model/training contracts | `make test-unit` | Pinned training stack (`make setup-train`) |
+| CPU-executed model/training contracts | `make test-unit` | Already installed pinned GPU training environment |
+| Shared data contracts | `make test-data-unit` | Curation or training environment; no real corpus required |
+| Curation-only unit contracts | `make test-curation-unit` | Curation environment; no model assets or real corpus |
 | GPU acceptance | `make test-gpu-gate` | Supported NVIDIA environment |
 | New pretraining readiness | `make test-pretrain-ready SIZE=<size> GPUS=<n>` | GPU environment and restored tokenized artifacts |
 | Resume readiness | `make test-pretrain-resume-ready SIZE=<size> GPUS=<n>` | Compatible pretraining audit and checkpoint |
@@ -36,18 +38,17 @@ data or training stages.
 
 ## CPU model and training contracts
 
-Install the CPU build of the same dependency contract used by training, then
-run the aggregate gate:
+On a supported NVIDIA GPU host, prepare the training environment once using
+`make setup-train`. In that installed environment, run:
 
 ```bash
-make setup-train
 make test-unit
 ```
 
-`make setup-train` installs the full pinned GPU training/evaluation stack into
-`.venv`; model-facing unit tests can use its CPU device without a separate CPU
-installer. `make setup-curate` installs the curation/tokenizer role and is not a
-substitute for the training stack. Do not layer the two roles together.
+These tests execute model contracts on CPU; that does **not** mean setup supports
+a CPU-only workstation. `setup-train` requires a working NVIDIA driver and
+installs the pinned CUDA training/evaluation stack. No separate CPU installer is
+provided. Curation uses `setup-curate` and must not be layered into that `.venv`.
 
 The gate covers architecture, native checkpoint loading, configuration, data
 contracts, export, training arguments, generated configurations, one-step
@@ -55,6 +56,23 @@ synthetic SFT/DPO, and repository consistency. Each model-facing Make target
 runs `check-training-env` first and fails before pytest if the pinned training
 versions are not installed. Focused targets are listed in
 [`COMMANDS.md`](COMMANDS.md).
+
+## Shared and curation-only unit scope
+
+`test-data-unit` selects the existing data-config, curator-state, realized-mixture,
+fresh tokenization, SFT-data, and DPO-data contract modules. It works with either
+role's dependencies and includes complete split-writing and post-training
+manifest/identity checks with bounded fixtures.
+
+On the curation host, `make test-curation-unit` runs those shared modules plus
+benchmark contamination, Common Crawl source, curation audit stats, dedup
+partitioning, exact overlap, long-document segmentation, near overlap, quality
+filtering, sensitive-content, and KenLM-validation modules. These are the
+existing suites; the gate does not run production curation or download models.
+
+`test-unit` remains the training/common aggregate. It does not select
+DataTrove-dependent suites. Direct pytest discovery is broader than either role
+gate and can include tests needing the other environment or real artifacts.
 
 ## GPU acceptance
 
@@ -100,8 +118,9 @@ make test-pretrain-resume-ready SIZE=125m GPUS=1
 ```
 
 These bounded gates run the training/configuration contracts, CUDA acceptance,
-and pretraining preflight. They do not allocate model weights or perform an
-optimizer step. With `GPUS>1`, preflight verifies that the requested number of
+and pretraining preflight. The preflight itself does not allocate model weights
+or optimize; the model/TRL/CUDA acceptance tests do allocate tiny fixture models
+and perform bounded synthetic steps. With `GPUS>1`, preflight verifies that the requested number of
 devices is visible; the actual training command retains the existing
 Accelerate multi-process launch.
 
@@ -134,10 +153,10 @@ bounded response:
 make test-vllm-export SIZE=125m EXPORT_VARIANT=base
 ```
 
-## Smoke rehearsal and functional mini
+## Smoke rehearsal and optional Mini
 
-Use the isolated `smoke` namespace for the bounded curation and pretraining
-execution rehearsal:
+On the curation host, exercise the bounded `smoke` namespace through the writer,
+not merely source processing:
 
 ```bash
 make curate-smoke
@@ -145,32 +164,24 @@ make validate SIZE=smoke
 make tokenizer SIZE=smoke
 make tokenizer-test SIZE=smoke
 make tokenize SIZE=smoke
-# Tokenizer is resolved directly from DATASET_SIZE (default smoke).
+```
+
+Transfer the selected matched artifacts using the existing artifact workflow.
+On a separately prepared training host, after restoration:
+
+```bash
 make pretrain-smoke SIZE=smoke GPUS=1
 ```
 
-Use `mini` for the 69.9M-parameter functional pilot. Its pretraining schedule
-is derived from the realized tokenized corpus and the one-epoch contract:
+Mini is optional and substantially larger: approximately 69.9M parameters and
+at least 1.4B usable selected training tokens. It is not required before a
+production profile. Follow [curation](CURATION.md) and [training](TRAIN.md) using
+`SIZE=mini`, keeping setup roles separate and generating config for the selected
+`GPUS` count. Neither smoke nor Mini demonstrates production model quality.
 
-```bash
-make curate-mini WORKERS=62
-make validate SIZE=mini
-make tokenizer SIZE=mini
-make tokenizer-test SIZE=mini
-make tokenize SIZE=mini
-# Tokenizer is resolved directly from DATASET_SIZE (default mini).
-make pretrain-mini SIZE=mini GPUS=1
-make prepare-sft SIZE=mini
-make sft-instruct-mini SIZE=mini GPUS=1
-make sft-code-mini SIZE=mini GPUS=1
-make prepare-dpo SIZE=mini
-make dpo-chat-mini SIZE=mini GPUS=1
-make test-artifacts SIZE=mini
-```
-
-The smoke run validates execution, not model quality. Mini post-training keeps
-the existing bounded SFT and DPO recipes until those stages are scaled in a
-separate change.
+Data artifact gates run on the curation host; GPU artifact gates run on the
+training host. Do not assume the combined `test-artifacts` alias makes both
+incompatible dependency stacks available in one environment.
 
 ## Controlled SFT comparison
 

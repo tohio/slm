@@ -5,8 +5,10 @@ and artifact-transfer failures.
 
 ## Environment configuration
 
-Check required common/selected-backend settings rather than requiring every
-optional field in `.env.sample` to be populated:
+Check the common settings, including required `HF_TOKEN`, `WANDB_API_KEY`, and
+`WANDB_PROJECT`. W&B is not optional. Storage credentials and `HF_USERNAME` are
+checked by selected transfers and model publication, not required for unused
+services. Do not fill unused fields with dummy credentials:
 
 ```bash
 make check-env
@@ -85,6 +87,36 @@ python curator/scripts/sample_source.py \
   --limit 10
 ```
 
+An intact test split with changed blend inputs/configuration is not a successful
+resume. Blend now rejects that mismatch. Use a new data root for a new corpus;
+do not delete `test_contract.json` or `_SUCCESS.json` to force new membership.
+Restoring/training from retained artifacts does not require curation scratch.
+
+## Tokenization or post-training identity failures
+
+A `.bin` without a matching verified JSON sidecar/completion manifest is not a
+completed stage. After repairing code, rerun the existing tokenization command
+on the same validated inputs/tokenizer; the split writer replaces the orphaned
+derived binary. Do not manufacture metadata to mark it complete.
+
+SFT verifies full train/validation hashes, record counts, stage/size, and actual
+normalized prompt separation. Restore the original prepared files or deliberately
+re-prepare a new input and start a new training output. Matching row shapes alone
+are not evidence that validation is disjoint.
+
+DPO preparation requires the actual instruct checkpoint tokenizer. A template
+change, including `chat_template.jinja`, requires intentional re-preparation.
+Use the same `DPO_CHAT_CONFIG`/`DPO_BASE_MODEL` for preparation and training.
+Missing checkpoint tokenizers must be restored with the checkpoint; another
+same-size tokenizer is not a substitute.
+
+SFT/DPO resume requires a numbered checkpoint plus the original immutable run
+audit. Changed recipe/data/parent/reference/tokenizer inputs are rejected before
+the audit can be overwritten. Legacy audits without a run contract cannot be
+promoted into evidence of compatibility. Preserve the old run and use a new
+output root for an intentionally new run. Export likewise requires authentic
+size/stage provenance; changing CLI labels does not make Mini exportable.
+
 ## Stage validation failures
 
 Run the gate for the stage that just completed:
@@ -144,6 +176,11 @@ partial dataset. Repeat the same run/stages; use `ARTIFACT_OVERWRITE=1` for
 corrupt same-size local files. Do not delete the marker to bypass verification.
 
 ## GPU environment failures
+
+`setup-train` is GPU-host setup. A missing `nvidia-smi` produces an explicit
+unsupported-host error before installation. CPU-executed model tests require an
+already installed training environment; do not invoke this command as a CPU-only
+installer. See [testing](TESTING.md#cpu-model-and-training-contracts).
 
 On a training host, require the CUDA contract and then run the dataset-free
 acceptance gate:

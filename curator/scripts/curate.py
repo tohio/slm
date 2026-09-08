@@ -1843,7 +1843,7 @@ def _shuffle_chunked_from_sources(
 
 def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None:
     """
-    Blend sources to the target token ratio and write final train.jsonl + val.jsonl.
+    Blend sources to the target token ratio and establish train/val/test.
 
     Pass 1 (parallel): each source streams to its own staging file up to
                        its character target or its supply, whichever is
@@ -1859,9 +1859,10 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
                               for val. Both paths produce a globally-mixed
                               train and a uniform-sample val.
 
-    Staging files are always rewritten — any existing files from prior
-    runs with different mixes would have wrong char counts and are
-    removed before staging begins.
+    Matching completed outputs are reused. On a fresh blend, staging files
+    are rewritten; after test membership is established, changed inputs/policy
+    are rejected instead of replacing the holdout. Test is carved from the
+    training pool after the existing train/validation overlap passes.
     """
     log.info(f"=== Stage 4: Blend (target={target}) ===")
     from config.holdout import CONTRACT_NAME, verify_jsonl_contract
@@ -1871,8 +1872,6 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
             raise RuntimeError("Test curated stage is incomplete; restore the complete original artifacts")
         if holdout["contract"]["size"] != target:
             raise RuntimeError("Test dataset size does not match the requested blend")
-        log.info("Test blend retained; use a new DATA_DIR for a different corpus")
-        return
     cfg = TARGET_CONFIGS[target]
     total_tokens = cfg["corpus_tokens"]
     val_fraction = cfg.get("val_fraction", PRETRAIN_VAL_FRACTION)
@@ -1946,6 +1945,12 @@ def stage_blend(target: str, seed: int = 42, workers: int | None = None) -> None
     ):
         log.info("Verified blend manifest matches inputs/configuration — reusing")
         return
+
+    if (CURATED_DIR / CONTRACT_NAME).exists():
+        raise RuntimeError(
+            "Existing test split is intact, but blend inputs or policy changed. "
+            "Use a new DATA_DIR for a new corpus; do not replace established test membership."
+        )
 
     # Resolve the small, pinned benchmark inputs before replacing any existing
     # blend output. Network/cache failure therefore cannot destroy a previously

@@ -10,7 +10,8 @@ contracts. Stage code should import these values instead of duplicating them.
 | `data_mix.py` | Pretraining source mix, code sub-mix, curation limits, split policy, and per-size token targets |
 | `paths.py` | Run-scoped data, result, evaluation, and export path builders |
 | `holdout.py` | Split identity and train/val/test integrity |
-| `chat.py` | Shared no-tool/tool-aware templates and the web_search data contract |
+| `chat.py` | No-tool/tool-aware templates, rendering fingerprints, web_search contract |
+| `checkpoints.py` | Bundled tokenizer resolution, checkpoint hashes, immutable start/resume checks |
 | `runtime.py` | Safe CUDA matmul and SDPA dispatcher configuration |
 | `__init__.py` | Public configuration exports |
 
@@ -69,6 +70,15 @@ results are scoped under `$RESULTS_DIR/runs/<size>/`.
 Set path environment variables before importing `config.paths`. Prefer its
 helper functions over string concatenation so local, mounted, and restored
 runs share one layout.
+
+## Checkpoint and run identity
+
+`checkpoints.py` is shared by pretraining, instruct/code SFT, DPO, and export.
+It never repairs learned weights or substitutes a tokenizer by model-size label.
+Post-training binds config/weights, data, tokenizer/rendering, and process count
+before accepting a resume; DPO also binds the fixed reference policy. Existing
+audits are compared before any write and remain immutable. See
+[training identity](../docs/TRAIN.md#post-training-identity-and-resume).
 
 ## CUDA runtime policy
 

@@ -30,7 +30,9 @@ from dotenv import load_dotenv
 load_dotenv()
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from config.paths import dpo_chat_data_dir, tokenizer_dir
+from config.paths import dpo_chat_data_dir, sft_instruct_dir
+from config.chat import tokenizer_fingerprint
+from config.checkpoints import bundled_tokenizer_dir
 
 logging.basicConfig(
     level=logging.INFO,
@@ -60,21 +62,6 @@ def sha256_file(path: Path) -> str:
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
-    return digest.hexdigest()
-
-
-def tokenizer_fingerprint(path: Path) -> str:
-    files = [
-        path / name
-        for name in ("tokenizer.json", "tokenizer_config.json", "special_tokens_map.json")
-        if (path / name).exists()
-    ]
-    if not files:
-        raise FileNotFoundError(f"No tokenizer files found at {path}")
-    digest = hashlib.sha256()
-    for file_path in files:
-        digest.update(file_path.name.encode("utf-8"))
-        digest.update(bytes.fromhex(sha256_file(file_path)))
     return digest.hexdigest()
 
 
@@ -408,16 +395,12 @@ def source_contract(
     }
 
 
-def prepare(config: dict[str, Any], size: str, force: bool) -> None:
-    from transformers import PreTrainedTokenizerFast
-
+def prepare(config: dict[str, Any], size: str, force: bool,
+            base_model: Path | None = None) -> None:
     destination = dpo_chat_data_dir(size)
     manifest_path = destination / "manifest.json"
-    tokenizer_path = tokenizer_dir(size)
-    if not (tokenizer_path / "tokenizer_config.json").exists():
-        raise FileNotFoundError(
-            f"Tokenizer not found at {tokenizer_path}. Run tokenizer preparation first."
-        )
+    checkpoint = base_model or sft_instruct_dir(size) / "final"
+    tokenizer_path = bundled_tokenizer_dir(checkpoint)
     contract = source_contract(config, size, tokenizer_path)
     contract_hash = sha256_json(contract)
 
@@ -443,6 +426,8 @@ def prepare(config: dict[str, Any], size: str, force: bool) -> None:
             f"{destination} contains unmanifested data. Inspect or archive it, "
             "then rerun with --force."
         )
+
+    from transformers import PreTrainedTokenizerFast
 
     tokenizer = PreTrainedTokenizerFast.from_pretrained(str(tokenizer_path))
     source = contract["source"]
@@ -540,8 +525,15 @@ def main() -> None:
         action="store_true",
         help="Replace prepared data after intentionally changing its contract",
     )
+    parser.add_argument("--training-config", type=Path,
+                        help="DPO training YAML; resolves the same base checkpoint as training")
+    parser.add_argument("--base-model", type=Path, help="Override the instruct checkpoint")
     args = parser.parse_args()
-    prepare(load_config(args.source_config), args.size, args.force)
+    training_config = args.training_config or Path(f"alignment/configs/dpo_chat_{args.size}.yaml")
+    with training_config.open(encoding="utf-8") as handle:
+        training = yaml.safe_load(handle)
+    base_model = args.base_model or Path(os.path.expandvars(training["model"]["base_model_path"]))
+    prepare(load_config(args.source_config), args.size, args.force, base_model)
 
 
 if __name__ == "__main__":

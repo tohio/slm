@@ -108,7 +108,7 @@ python validation/scripts/validate.py \
   --perplexity-threshold 800
 ```
 
-Disable perplexity filtering explicitly:
+Disable both perplexity measurement and filtering explicitly:
 
 ```bash
 python validation/scripts/validate.py \
@@ -123,8 +123,10 @@ python validation/scripts/validate.py \
   --size 125m \
   --train /data/slm/data/runs/125m/curated/train.jsonl \
   --val /data/slm/data/runs/125m/curated/val.jsonl \
+  --test /data/slm/data/runs/125m/curated/test.jsonl \
   --train-output /data/slm/data/runs/125m/validated/train.jsonl \
   --val-output /data/slm/data/runs/125m/validated/val.jsonl \
+  --test-output /data/slm/data/runs/125m/validated/test.jsonl \
   --kenlm-model /data/slm/data/models/en.arpa.bin \
   --kenlm-sentencepiece-model /data/slm/data/models/en.sp.model
 ```

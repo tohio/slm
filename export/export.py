@@ -44,6 +44,8 @@ import os
 import sys
 from pathlib import Path
 
+import yaml
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -61,7 +63,6 @@ from config.paths import (                                          # noqa: E402
     pretrain_dir,
     sft_code_dir,
     sft_instruct_dir,
-    tokenizer_dir,
 )
 
 logging.basicConfig(
@@ -70,6 +71,9 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger(__name__)
+
+from config.checkpoints import bundled_tokenizer_dir, architecture_identity
+from curator.state import stable_digest
 
 HF_USERNAME = os.environ.get("HF_USERNAME")
 HF_TOKEN    = os.environ.get("HF_TOKEN", "")
@@ -607,7 +611,7 @@ def load_tokenizer(tokenizer_path: Path):
     if not getattr(tokenizer, "chat_template", None):
         raise ValueError(
             f"Tokenizer at {tokenizer_path} has no chat_template. "
-            f"Retrain the tokenizer: python tokenizer/train_tokenizer.py"
+            f"Restore the tokenizer/template saved with this checkpoint; do not retrain a tokenizer for learned weights."
         )
 
     return tokenizer
@@ -1036,15 +1040,17 @@ def _write_export_manifest(
     source_config,
     n_params: int,
     source_dtype,
+    source_identity: dict,
 ) -> None:
-    """Record the conversion contract without hashing multi-GB weights."""
+    """Record the verified training identity and the conversion contract."""
     manifest = {
         "schema_version": 1,
         "format": "transformers_native_llama",
         "source": {
             "size": size,
             "variant": variant,
-            "stage": source_checkpoint.parent.name,
+            "stage": source_identity["stage"],
+            "run_contract_sha256": source_identity["contract_sha256"],
             "checkpoint": source_checkpoint.name,
         },
         "source_model_type": source_config.model_type,
@@ -1067,6 +1073,50 @@ def _write_export_manifest(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+
+
+def validate_export_identity(checkpoint: Path, size: str, variant: str, config) -> dict:
+    """Reject size/branch relabeling, including a Mini checkpoint under --size 125m."""
+    from model import SLMConfig
+
+    if size not in {"125m", "350m", "1b"}:
+        raise RuntimeError("Smoke and Mini checkpoints cannot be exported")
+    stages = {"base": ("pretrain", "pretrain_run_audit.json"),
+              "instruct": ("sft_instruct", "sft_run_audit.json"),
+              "code": ("sft_code", "sft_run_audit.json"),
+              "chat": ("dpo_chat", "dpo_run_audit.json")}
+    stage, audit_name = stages[variant]
+    audit_path = checkpoint / audit_name
+    if not audit_path.is_file():
+        raise RuntimeError(f"Export requires the checkpoint's {audit_name}; "
+                           "restore its verified training provenance")
+    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    contract = audit.get("contract") if isinstance(audit, dict) else None
+    if (not isinstance(contract, dict)
+            or audit.get("contract_sha256") != stable_digest(contract)):
+        raise RuntimeError(f"Export requires a valid run contract in {audit_path}")
+    if contract.get("run_size") != size:
+        raise RuntimeError("Export size does not match the checkpoint's recorded run size")
+    recorded_stage = contract.get("stage", "pretrain" if audit_name == "pretrain_run_audit.json" else None)
+    if recorded_stage != stage:
+        raise RuntimeError("Export variant does not match the checkpoint's recorded training stage")
+    expected_name = f"slm-{size}" + {"base": "", "instruct": "-instruct",
+                                    "code": "-code", "chat": "-chat"}[variant]
+    if contract.get("resolved_config", {}).get("name") != expected_name:
+        raise RuntimeError("Export variant does not match the recorded training configuration")
+    profile_path = Path(__file__).resolve().parents[1] / "pretrain" / "configs" / f"gpt_{size}.yaml"
+    with profile_path.open(encoding="utf-8") as handle:
+        profile = yaml.safe_load(handle)
+    expected = architecture_identity(SLMConfig(**profile["model"]))
+    actual = architecture_identity(config)
+    if actual != expected:
+        raise RuntimeError("Checkpoint architecture does not match the declared production profile")
+    recorded = (architecture_identity(SLMConfig(**contract["resolved_config"]["model"]))
+                if stage == "pretrain" else contract.get("architecture"))
+    if recorded != actual:
+        raise RuntimeError("Checkpoint architecture does not match its training audit")
+    return {"stage": stage, "size": size, "contract_sha256": audit["contract_sha256"]}
+
 
 def export(
     size: str,
@@ -1109,14 +1159,16 @@ def export(
         log.error(f"Checkpoint not found: {checkpoint}")
         log.error(
             f"Run the training pipeline first. For chat variant: "
-            f"make pretrain sft-instruct sft-code dpo-chat SIZE={size}"
+            f"make pretrain sft-instruct dpo-chat SIZE={size}"
         )
         sys.exit(1)
 
+    config = SLMConfig.from_pretrained(str(checkpoint))
+    source_identity = validate_export_identity(checkpoint, size, variant, config)
+    tokenizer_path = bundled_tokenizer_dir(checkpoint)
     source_dtype = _checkpoint_dtype(checkpoint)
     log.info(f"Checkpoint dtype: {source_dtype}")
     log.info("Loading source SLM checkpoint...")
-    config = SLMConfig.from_pretrained(str(checkpoint))
     model = SLMForCausalLM.from_pretrained(
         str(checkpoint),
         dtype=source_dtype,
@@ -1125,9 +1177,6 @@ def export(
     n_params = sum(p.numel() for p in model.parameters())
     log.info(f"Parameters: {n_params:,} ({n_params / 1e6:.1f}M)")
 
-    tokenizer_path = checkpoint / "tokenizer"
-    if not (tokenizer_path / "tokenizer_config.json").exists():
-        tokenizer_path = tokenizer_dir(size)
     tokenizer = load_tokenizer(tokenizer_path)
     log.info(f"Tokenizer loaded from {tokenizer_path}")
 
@@ -1155,6 +1204,7 @@ def export(
         config,
         n_params,
         source_dtype,
+        source_identity,
     )
 
     model_card = generate_model_card(

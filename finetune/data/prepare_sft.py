@@ -434,6 +434,49 @@ def load_config(path: Path) -> dict[str, Any]:
     return config
 
 
+def validate_data_manifest(manifest_path: Path, train_path: Path, val_path: Path,
+                           *, stage: str, size: str) -> dict:
+    """Validate the prepared bytes and full prompt boundary before SFT sampling."""
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"SFT manifest not found: {manifest_path}. Prepare SFT data first.")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict):
+        raise RuntimeError(f"Invalid SFT preparation manifest: {manifest_path}")
+    contract = manifest.get("contract")
+    if (manifest.get("schema_version") != 1 or not isinstance(contract, dict)
+            or manifest.get("contract_sha256") != sha256_json(contract)):
+        raise RuntimeError(f"Invalid SFT preparation contract: {manifest_path}")
+    if contract.get("stage") != stage or contract.get("size") != size:
+        raise RuntimeError("SFT manifest stage/size does not match this training invocation")
+    prompts = []
+    for filename, path in (("train.jsonl", train_path), ("val.jsonl", val_path)):
+        if path.resolve() != (manifest_path.parent / filename).resolve():
+            raise RuntimeError(f"SFT {filename} must belong to {manifest_path}")
+        entry = manifest.get("files", {}).get(filename, {})
+        if not path.is_file() or entry.get("sha256") != sha256_file(path):
+            raise RuntimeError(f"{path} does not match its SFT manifest")
+        split_prompts, count = set(), 0
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                messages = record.get("conversations", record.get("messages"))
+                if not isinstance(messages, list):
+                    raise RuntimeError(f"Missing SFT conversation in {path}")
+                prompt = first_user_prompt(messages)
+                if not prompt:
+                    raise RuntimeError(f"Missing SFT user prompt in {path}")
+                split_prompts.add(prompt)
+                count += 1
+        if count <= 0 or entry.get("records") != count:
+            raise RuntimeError(f"SFT record count does not match {path}")
+        prompts.append(split_prompts)
+    if prompts[0] & prompts[1] or manifest.get("split", {}).get("prompt_overlap") != 0:
+        raise RuntimeError("SFT train/validation prompt leakage")
+    return manifest
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stage", choices=(*VALID_STAGES, "both"), default="both")

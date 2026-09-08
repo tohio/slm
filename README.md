@@ -26,23 +26,26 @@ The repository produces four model variants:
 
 ![SLM pipeline and model architecture](docs/architecture.svg)
 
-The data pipeline creates a validated corpus and size-specific BPE tokenizer.
+Each dataset run carries a matched byte-level BPE tokenizer and tokenized
+train/validation/test artifacts. The corpus is English-focused, including code
+and technical text; Unicode support does not imply multilingual capability.
 The training pipeline initializes the decoder from scratch, then branches from
 the instruct checkpoint into code-specialized and chat-aligned models. Export
 converts each branch into a native Transformers Llama package for standard
 inference and vLLM serving.
 
-| Size | Parameters | Layers | Hidden size | Q/KV heads | Context |
+| Size | Approx. parameters | Layers | Hidden size | Q/KV heads | Context |
 |---|---:|---:|---:|---:|---:|
-| `smoke` | 22M | 6 | 384 | 6 / 2 | 1,024 |
+| `smoke` | 21.7M | 6 | 384 | 6 / 2 | 1,024 |
 | `mini` | 69.9M | 17 | 512 | 8 / 4 | 2,048 |
-| `125m` | 125M | 16 | 768 | 12 / 4 | 2,048 |
-| `350m` | 350M | 27 | 1,024 | 16 / 8 | 2,048 |
-| `1b` | 1B | 21 | 2,048 | 32 / 8 | 4,096 |
+| `125m` | 125.3M | 16 | 768 | 12 / 4 | 2,048 |
+| `350m` | 351.3M | 27 | 1,024 | 16 / 8 | 2,048 |
+| `1b` | 1.012B | 21 | 2,048 | 32 / 8 | 4,096 |
 
 All profiles use RoPE, RMSNorm, SwiGLU, grouped-query attention,
 pre-normalized residual blocks, tied token embeddings, bias-free projections,
-and generation KV caching.
+and generation KV caching. Smoke and Mini are development profiles, not
+production-export profiles.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for component ownership,
 model lineage, and artifact flow.
@@ -62,14 +65,14 @@ model lineage, and artifact flow.
   compatibility gates.
 - Native Transformers Llama export, local generation, Hub publication, and
   vLLM serving.
-- Opt-in, single-call web search in chat with the existing tool tokens and SFT
-  path; see [tool calling](docs/TOOL_CALLING.md).
+- Opt-in, single-call web-search runtime and tool-use SFT support using the
+  existing tool tokens; see [tool calling](docs/TOOL_CALLING.md).
 
 ## Pretraining data and dataset reuse
 
 Train, validation, and final-only test use one matched artifact contract.
 `DATASET_SIZE` can differ from model `SIZE` while model-specific budgets still
-control training. Artifact stages remain user-selected. With HF selected,
+control training. Artifact stages remain user-selected. With `ARTIFACT_BACKEND=hf`,
 curated/validated text goes to Dataset repositories and operational objects go
 to Storage Buckets; models are published separately after training.
 See [pretraining data and reuse](docs/PRETRAINING_DATA.md).
@@ -84,19 +87,12 @@ two roles into the same `.venv`. See [installer details](infra/README.md).
 
 ### CPU curation server
 
-Use this path on a CPU/data-processing host. It installs the curation stack,
-downloads the required FastText and KenLM assets, then validates the pipeline
-with `smoke` before running `mini` or a production-size curation.
-
-Prerequisites:
-
-- Ubuntu host with persistent storage for curation.
-- Hugging Face account and token.
-- S3 credentials or the HF Dataset/Bucket credentials required by selected artifact stages.
-- Weights & Biases credentials if enabled by the active workflow.
-
-The curation guide lists gated datasets whose terms must be accepted before
-downloading them.
+Use an Ubuntu host with persistent storage, Python 3 available for bootstrap,
+and administrative access for system-package installation. Configure your
+Hugging Face token and accept gated-source terms listed in the curation guide.
+**W&B is required:** set `WANDB_API_KEY` and `WANDB_PROJECT` in `.env`.
+Storage credentials are required only when uploading/restoring selected
+artifacts; `HF_USERNAME` is required for model publication, not local curation.
 
 ```bash
 git clone https://github.com/tohio/slm.git
@@ -112,60 +108,77 @@ make download-kenlm-model    DATA_DIR=/data/slm/data
 
 make curate-smoke DATA_DIR=/data/slm/data
 make validate SIZE=smoke DATA_DIR=/data/slm/data
-
-make curate-mini DATA_DIR=/data/slm/data
-make validate SIZE=mini DATA_DIR=/data/slm/data
+make tokenizer SIZE=smoke DATA_DIR=/data/slm/data
+make tokenizer-test SIZE=smoke DATA_DIR=/data/slm/data
+make tokenize SIZE=smoke DATA_DIR=/data/slm/data
 ```
 
-`curate-smoke` is the first pipeline-validation run. `curate-mini` is the
-functional mini-scale curation run. Curation time depends on CPU count, network
-bandwidth, cache state, storage throughput, and Common Crawl availability, so
-the repository does not publish fixed runtime estimates.
+Setup installs dependencies, including KenLM bindings. The two download targets
+fetch the external model assets; missing assets stop curation before source
+processing. The activation command above is for pip/uv; conda users use
+`conda activate "$PWD/.venv"`.
 
-All curation entry points fail before source processing begins when the
-FastText or KenLM model files are missing. Install them explicitly with the two
-download targets above.
+Smoke is a bounded execution check through tokenization, not a model-quality
+measurement. Mini is an **optional** end-to-end development profile requiring
+at least **1.4B usable training tokens**; it is not a prerequisite for choosing
+125M, 350M, or 1B. Curation time depends on CPU, network, cache, storage, and
+source availability; no fixed runtime is promised.
 
-For a production-size run after smoke and mini are healthy:
+For a complete data-preparation workflow, explicitly select what to upload:
 
 ```bash
-make curate SIZE=125m WORKERS=62 DATA_DIR=/data/slm/data
-# or SIZE=350m / SIZE=1b
+make curate-all \
+  SIZE=125m WORKERS=62 DATA_DIR=/data/slm/data \
+  ARTIFACT_STAGES=validated,tokenized,tokenizer,metadata
 ```
 
-Use [`docs/CURATION.md`](docs/CURATION.md) for gated-source prerequisites,
-worker sizing, resume behavior, validation, tokenization, and artifact upload.
+This runs curation → validation → tokenizer training/checks → tokenization →
+artifact checks → selected upload, then prints the source dataset `RUN_ID`.
+Choose workers for your host; 62 is an example for a 64-vCPU machine.
+`make curate SIZE=...` alone only constructs the corpus. See
+[`docs/CURATION.md`](docs/CURATION.md) for stage-by-stage execution, optional
+Mini, gated sources, reuse, and transfer configuration.
 
 ### GPU training server
 
-Use this path on a supported NVIDIA GPU host. Selecting a source run also
-restores its uploaded artifact set; omit RUN_ID for environment setup only. The training stack is pinned
-separately from the curation stack.
+Use a supported NVIDIA GPU host with a working compatible driver and
+administrative access. Prepare a separate checkout/environment and `.env` as
+above, including the required W&B settings and credentials for the source
+artifact backend. Training dependencies are separate from the curation stack.
 
-```bash
-git clone https://github.com/tohio/slm.git
-cd slm
-cp .env.sample .env
-vi .env
-
-make setup-train \
-  SIZE=125m \
-  RUN_ID=125m-YYYYMMDD-abcdef \
-  DATA_DIR=/data/slm/data
-```
-
-Then use the stage-specific commands or the complete new-run workflow:
+For a **complete new training run**, use:
 
 ```bash
 make train-all \
-  SIZE=125m \
-  GPUS=1 \
+  SIZE=125m GPUS=1 \
   RUN_ID=125m-YYYYMMDD-abcdef \
   DATA_DIR=/data/slm/data
 ```
 
-Use [`docs/TRAIN.md`](docs/TRAIN.md) for pretraining, instruct SFT, code SFT,
-DPO, resume procedures, evaluation, and export.
+Replace the placeholder with the recorded **source dataset** run. `train-all`
+already invokes `setup-train`, restores selected artifacts, generates configs,
+and runs pretraining/instruct/code/DPO stages. Do not run setup separately first
+when using this route. Evaluation, export, publication, and serving are explicit
+subsequent operations.
+
+**Alternatively**, set up and launch individual stages:
+
+```bash
+make setup-train \
+  SIZE=125m RUN_ID=125m-YYYYMMDD-abcdef DATA_DIR=/data/slm/data
+make config-gen SIZE=125m GPUS=1
+make pretrain SIZE=125m GPUS=1
+```
+
+Use the same chosen `GPUS` count for configuration and launch; 1 is only an
+example. With no source run selected, `setup-train` installs the environment
+only. Restore defaults to `tokenized,tokenizer,metadata`, not every uploaded
+stage. Include `validated` in `ARTIFACT_STAGES` for test-document completions.
+`DATASET_SIZE` and `DATASET_RUN_ID` explicitly select a different source profile
+and run without changing the model output size.
+
+Use [`docs/TRAIN.md`](docs/TRAIN.md) for post-training, resume, final evaluation,
+and export, and [`infra/README.md`](infra/README.md) for installer prerequisites.
 
 ## Project Structure
 
@@ -213,9 +226,11 @@ the root README.
 ## Testing
 
 Tests are separated into CPU model/training contracts, environment
-acceptance, and checks against existing data or model artifacts. Model-facing
-CPU tests use the pinned training stack rather than the separate curation stack.
-Full curation and training are not launched merely to test the repository.
+acceptance, and checks against existing data or model artifacts.
+CPU-executed model tests use an already installed training environment; the
+supported training setup targets NVIDIA GPU hosts, not CPU-only workstations.
+Curation-only suites use the curation environment. Tests do not launch full
+curation or training; some bounded model tests perform synthetic optimizer steps.
 
 See [`docs/TESTING.md`](docs/TESTING.md) for test order, commands, and artifact
 requirements.

@@ -81,6 +81,13 @@ HumanEval executes generated code in the evaluation process. Use it only in an
 isolated environment. The evaluator enables the harness code-execution switch
 only when HumanEval is selected.
 
+For generative harness tasks the wrapper preserves the tokenizer's padding
+mask, supplied decoding settings, and stop-sequence criteria. If invoked without
+a mask it derives one from a distinct PAD ID; when PAD equals EOS and that ID is
+present, callers must supply an explicit mask. This path does not change the
+separate multiple-choice likelihood objective. Actual benchmark results still
+require execution on the selected model and evaluation stack.
+
 ## Behavior sanity checks
 
 Sanity cases are rendered with the tokenizer's chat template, so use them for

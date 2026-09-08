@@ -57,6 +57,8 @@ Usage:
 """
 
 import argparse
+from contextlib import nullcontext
+import tempfile
 import json
 import logging
 import math
@@ -81,8 +83,13 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 DATA_DIR    = Path(os.environ.get("DATA_DIR", "data"))
-from config.paths import tokenizer_dir, sft_instruct_dir, sft_code_dir, BASE_RESULTS_DIR
+from config.paths import sft_instruct_dir, sft_code_dir, BASE_RESULTS_DIR
 from config.runtime import configure_torch_runtime
+from config.checkpoints import (
+    bundled_tokenizer_dir, checkpoint_identity, posttraining_contract,
+    resolve_training_checkpoint, validate_or_write_run_audit,
+)
+from finetune.data.prepare_sft import validate_data_manifest
 
 RESULTS_DIR = BASE_RESULTS_DIR
 
@@ -134,7 +141,7 @@ def load_tokenizer(tokenizer_path: Path):
     if not (tokenizer_path / "tokenizer_config.json").exists():
         raise FileNotFoundError(
             f"tokenizer_config.json not found at {tokenizer_path}. "
-            f"Retrain the tokenizer: python tokenizer/train_tokenizer.py"
+            f"Restore the tokenizer/template saved with this checkpoint; do not retrain a tokenizer for learned weights."
         )
 
     tokenizer = PreTrainedTokenizerFast.from_pretrained(str(tokenizer_path))
@@ -142,14 +149,14 @@ def load_tokenizer(tokenizer_path: Path):
     if not getattr(tokenizer, "chat_template", None):
         raise ValueError(
             f"Tokenizer at {tokenizer_path} has no chat_template. "
-            f"Retrain the tokenizer: python tokenizer/train_tokenizer.py"
+            f"Restore the tokenizer/template saved with this checkpoint; do not retrain a tokenizer for learned weights."
         )
 
     if "{% generation %}" not in tokenizer.chat_template:
         raise ValueError(
             f"Chat template at {tokenizer_path} is missing {{% generation %}} tags. "
             f"Required for assistant_only_loss=True. "
-            f"Retrain the tokenizer: python tokenizer/train_tokenizer.py"
+            f"Restore the tokenizer/template saved with this checkpoint; do not retrain a tokenizer for learned weights."
         )
 
     return tokenizer
@@ -454,6 +461,22 @@ def main():
         os.path.expandvars(cfg["model"]["base_model_path"])
     )
 
+    size = _size_from_model_name(model_name)
+    stage = "code" if output_dir == sft_code_dir(size) else "instruct"
+    audit_filename = "sft_run_audit.json"
+    resume_checkpoint = resolve_training_checkpoint(
+        output_dir, resume=args.resume, audit_filename=audit_filename,
+    )
+    data_cfg = cfg["data"]
+    train_path = Path(os.path.expandvars(data_cfg["train_path"]))
+    val_path = Path(os.path.expandvars(data_cfg["val_path"]))
+    manifest_path = train_path.parent / "manifest.json"
+    data_manifest = validate_data_manifest(
+        manifest_path, train_path, val_path, stage=stage, size=size,
+    )
+    tokenizer_path = bundled_tokenizer_dir(base_model_path)
+    base_identity = checkpoint_identity(base_model_path)
+
     log.info(f"=== SLM Supervised Fine-Tuning ===")
     log.info(f"Config:     {args.config}")
     log.info(f"Name:       {model_name}")
@@ -479,17 +502,6 @@ def main():
     log.info(f"Parameters: {n_params:,} ({n_params / 1e6:.1f}M)")
 
     # ── Tokenizer ─────────────────────────────────────────────────────────────
-    tokenizer_path = base_model_path / "tokenizer"
-    if not (tokenizer_path / "tokenizer_config.json").exists():
-        log.warning(
-            f"tokenizer_config.json not found at {tokenizer_path} — "
-            f"falling back to target-scoped tokenizer"
-        )
-        size = _size_from_model_name(model_name)
-        if size not in {"mini", "125m", "350m", "1b"}:
-            raise ValueError(f"Cannot infer tokenizer size from model name {model_name!r}")
-        tokenizer_path = tokenizer_dir(size)
-
     log.info(f"Loading tokenizer from {tokenizer_path}...")
     tokenizer = load_tokenizer(tokenizer_path)
     log.info(f"Vocab size: {tokenizer.vocab_size:,}")
@@ -506,10 +518,6 @@ def main():
     # → "messages" so trl auto-detects the conversational format and applies
     # tokenizer.apply_chat_template() internally. assistant_only_loss=True then
     # uses the {% generation %} tags in the template to mask prompt tokens.
-    data_cfg   = cfg["data"]
-    train_path = Path(os.path.expandvars(data_cfg["train_path"]))
-    val_path   = Path(os.path.expandvars(data_cfg["val_path"]))
-
     log.info(f"Loading dataset from {train_path}...")
     train_dataset = load_dataset_from_jsonl(train_path)
     val_dataset   = load_dataset_from_jsonl(val_path)
@@ -536,101 +544,112 @@ def main():
     raw_train_count = len(train_dataset)
     raw_val_count = len(val_dataset)
 
-    # ── SFT args ──────────────────────────────────────────────────────────────
-    # Pass num_train_examples so warmup_steps can be derived from the recipe
-    # ratio without adding another round-trip after the trainer is built.
-    sft_args = build_sft_args(cfg, output_dir, num_train_examples=len(train_dataset))
-    log.info("Answer-only loss enabled (assistant_only_loss=True)")
-    log.info(f"Packing: {sft_args.packing}")
-    log.info(f"torch_compile: {sft_args.torch_compile}")
-    log.info(f"train_sampling_strategy: {sft_args.train_sampling_strategy}")
-    log.info(f"length_column_name: {getattr(sft_args, 'length_column_name', None)}")
-    log.info(
-        f"Batch sizes: train={sft_args.per_device_train_batch_size}, "
-        f"eval={sft_args.per_device_eval_batch_size}"
+    run_contract = posttraining_contract(
+        cfg=cfg, size=size, stage=f"sft_{stage}", model_config=model.config,
+        base_identity=base_identity, tokenizer_path=tokenizer_path,
+        chat_template=tokenizer.chat_template, data_manifest=data_manifest,
+        world_size=int(os.environ.get("WORLD_SIZE", "1")),
     )
-    log.info("Best-checkpoint selection enabled (metric_for_best_model=eval_loss)")
+    validate_or_write_run_audit(
+        output_dir, run_contract, audit_filename=audit_filename, schema_version=1,
+        resume=args.resume, write=False,
+    )
 
-    # ── SFTTrainer ────────────────────────────────────────────────────────────────
-    from trl import SFTTrainer
-
-    trainer = SFTTrainer(
-        model=model,
-        args=sft_args,
-        train_dataset=train_dataset,
-        eval_dataset=val_dataset,
-        processing_class=tokenizer,
-    )
-    train_audit = processed_dataset_audit(
-        trainer.train_dataset, raw_train_count, "train"
-    )
-    val_audit = processed_dataset_audit(
-        trainer.eval_dataset, raw_val_count, "validation"
-    )
-    minimum_retention = float(data_cfg.get("min_retention_ratio", 0.90))
-    for label, audit in (("train", train_audit), ("validation", val_audit)):
+    context = (tempfile.TemporaryDirectory(prefix="slm-sft-preflight-")
+               if args.preflight_only else nullcontext(str(output_dir)))
+    with context as trainer_output:
+        # ── SFT args ──────────────────────────────────────────────────────────────
+        # Pass num_train_examples so warmup_steps can be derived from the recipe
+        # ratio without adding another round-trip after the trainer is built.
+        sft_args = build_sft_args(cfg, Path(trainer_output), num_train_examples=len(train_dataset))
+        if args.preflight_only:
+            # Preprocessing can create Trainer output/logging state. Keep it outside
+            # the real run and do not start a tracking run for a non-training check.
+            sft_args.report_to = []
+        log.info("Answer-only loss enabled (assistant_only_loss=True)")
+        log.info(f"Packing: {sft_args.packing}")
+        log.info(f"torch_compile: {sft_args.torch_compile}")
+        log.info(f"train_sampling_strategy: {sft_args.train_sampling_strategy}")
+        log.info(f"length_column_name: {getattr(sft_args, 'length_column_name', None)}")
         log.info(
-            "%s preprocessing: retained %s/%s (%.2f%%), supervised tokens=%s",
-            label,
-            f'{audit["retained_examples"]:,}',
-            f'{audit["input_examples"]:,}',
-            100.0 * audit["retention_ratio"],
-            f'{audit["supervised_tokens"]:,}',
+            f"Batch sizes: train={sft_args.per_device_train_batch_size}, "
+            f"eval={sft_args.per_device_eval_batch_size}"
         )
-        if audit["retention_ratio"] < minimum_retention:
-            raise RuntimeError(
-                f"{label} retained only {audit['retention_ratio']:.2%} after "
-                f"tokenization/truncation; required >= {minimum_retention:.2%}. "
-                "Revise the source selection or max sequence length before training."
+        log.info("Best-checkpoint selection enabled (metric_for_best_model=eval_loss)")
+
+        # ── SFTTrainer ────────────────────────────────────────────────────────────────
+        from trl import SFTTrainer
+
+        trainer = SFTTrainer(
+            model=model,
+            args=sft_args,
+            train_dataset=train_dataset,
+            eval_dataset=val_dataset,
+            processing_class=tokenizer,
+        )
+        train_audit = processed_dataset_audit(
+            trainer.train_dataset, raw_train_count, "train"
+        )
+        val_audit = processed_dataset_audit(
+            trainer.eval_dataset, raw_val_count, "validation"
+        )
+        minimum_retention = float(data_cfg.get("min_retention_ratio", 0.90))
+        for label, audit in (("train", train_audit), ("validation", val_audit)):
+            log.info(
+                "%s preprocessing: retained %s/%s (%.2f%%), supervised tokens=%s",
+                label,
+                f'{audit["retained_examples"]:,}',
+                f'{audit["input_examples"]:,}',
+                100.0 * audit["retention_ratio"],
+                f'{audit["supervised_tokens"]:,}',
             )
+            if audit["retention_ratio"] < minimum_retention:
+                raise RuntimeError(
+                    f"{label} retained only {audit['retention_ratio']:.2%} after "
+                    f"tokenization/truncation; required >= {minimum_retention:.2%}. "
+                    "Revise the source selection or max sequence length before training."
+                )
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    data_manifest = train_path.parent / "manifest.json"
-    run_audit = {
-        "config": str(args.config),
-        "base_model": str(base_model_path),
-        "tokenizer": str(tokenizer_path),
-        "loss_type": sft_args.loss_type,
-        "max_length": sft_args.max_length,
-        "train": train_audit,
-        "validation": val_audit,
-        "data_manifest": str(data_manifest) if data_manifest.exists() else None,
-    }
-    (output_dir / "sft_run_audit.json").write_text(
-        json.dumps(run_audit, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    if args.preflight_only:
-        log.info("SFT preflight passed; no optimization was run.")
-        return
-    # ── Train ─────────────────────────────────────────────────────────────────
-    log.info("Starting SFT...")
-    trainer.train(resume_from_checkpoint=args.resume)
+        if args.preflight_only:
+            log.info("SFT preflight passed; no optimization or run-audit write was performed.")
+            return
+        trainer.accelerator.wait_for_everyone()
+        validate_or_write_run_audit(
+            output_dir, run_contract, audit_filename=audit_filename, schema_version=1,
+            resume=args.resume, write=trainer.is_world_process_zero(),
+            details={
+                "config": str(args.config), "base_model": str(base_model_path),
+                "tokenizer": str(tokenizer_path), "data_manifest": str(manifest_path),
+                "loss_type": sft_args.loss_type, "max_length": sft_args.max_length,
+                "train": train_audit, "validation": val_audit,
+            },
+        )
+        trainer.accelerator.wait_for_everyone()
+        # ── Train ─────────────────────────────────────────────────────────────────
+        log.info("Starting SFT...")
+        trainer.train(resume_from_checkpoint=str(resume_checkpoint) if resume_checkpoint else None)
 
-    # ── Save ──────────────────────────────────────────────────────────────────
-    # load_best_model_at_end=True means trainer.model is now the best
-    # checkpoint by eval_loss, not the last. save_model() persists that.
-    log.info("Saving best model (lowest eval_loss)...")
-    final_dir = output_dir / "final"
-    trainer.save_model(str(final_dir))
+        # ── Save ──────────────────────────────────────────────────────────────────
+        # load_best_model_at_end=True means trainer.model is now the best
+        # checkpoint by eval_loss, not the last. save_model() persists that.
+        log.info("Saving best model (lowest eval_loss)...")
+        final_dir = output_dir / "final"
+        trainer.save_model(str(final_dir))
 
-    if tokenizer_path.exists() and any(tokenizer_path.iterdir()):
-        shutil.copytree(tokenizer_path, final_dir / "tokenizer", dirs_exist_ok=True)
-        # Persist the active rendering template, not only the pre-SFT source copy.
-        tokenizer.save_pretrained(str(final_dir / "tokenizer"))
-        log.info("Tokenizer copied alongside model")
-    else:
-        log.warning(f"Tokenizer empty or missing at {tokenizer_path} — skipping copy")
-    shutil.copy2(output_dir / "sft_run_audit.json", final_dir / "sft_run_audit.json")
-    if data_manifest.exists():
-        shutil.copy2(data_manifest, final_dir / "sft_data_manifest.json")
+        if trainer.is_world_process_zero():
+            shutil.copytree(tokenizer_path, final_dir / "tokenizer", dirs_exist_ok=True)
+            # Save the actual rendering template, including opt-in tool SFT.
+            tokenizer.save_pretrained(str(final_dir / "tokenizer"))
+            shutil.copy2(output_dir / audit_filename, final_dir / audit_filename)
+            shutil.copy2(manifest_path, final_dir / "sft_data_manifest.json")
+        trainer.accelerator.wait_for_everyone()
 
-    log.info(f"Model saved to {final_dir}")
-    log.info("SFT complete.")
-    if model_name.endswith("-code") or "chat-code" in model_name:
-        log.info("SFT code branch complete. Next optional step: make eval-code or prepare code-specific alignment.")
-    else:
-        log.info("SFT instruct branch complete. Next steps: make dpo for chat alignment or make sft-code for code specialization.")
+        log.info(f"Model saved to {final_dir}")
+        log.info("SFT complete.")
+        if model_name.endswith("-code") or "chat-code" in model_name:
+            log.info("SFT code branch complete. Next optional step: make eval-code or prepare code-specific alignment.")
+        else:
+            log.info("SFT instruct branch complete. Next steps: make dpo for chat alignment or make sft-code for code specialization.")
 
 
 if __name__ == "__main__":

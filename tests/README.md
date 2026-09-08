@@ -36,8 +36,11 @@ Pytest options defined in `conftest.py`:
 Use the Make targets documented in [`docs/TESTING.md`](../docs/TESTING.md) for
 normal execution so the correct options and environment variables are applied.
 Model, export, TRL, and training-argument tests require the pinned training
-stack installed by `make setup-train`, not
-the separate Transformers 4.57.6 curation environment.
+stack installed on a supported NVIDIA host by `make setup-train`, not
+the separate Transformers 4.57.6 curation environment. CPU-executed tests do not
+imply a CPU-only setup path. `test-data-unit` works in either role;
+`test-curation-unit` selects shared plus DataTrove/curation-specific suites.
+See the testing guide for the exact selections.
 
 RoPE reload coverage remains in `model/test_rope_loading.py`. Extend the existing
 pipeline/contract tests only where needed; no parallel test framework is used.

@@ -24,7 +24,9 @@ probabilistic near-duplicate detector, not a guarantee of semantic disjointness.
 
 `test_contract.json` records split hashes/counts, policy, original blend identity,
 and pair-audit provenance. `test_membership.jsonl` records text-free membership.
-Repeated curation verifies this identity rather than reshuffling test. A changed
+Repeated blending verifies this identity and compares current source signatures,
+budgets, mix, seed, and implementation with the saved blend manifest rather than
+reshuffling test or silently accepting a stale corpus. A changed
 corpus/policy requires an explicit new data run; do not discard provenance to
 force reuse. Validation applies the same source-aware filtering policy to all
 three splits and records rejection statistics. Tokenizer training uses only
@@ -75,6 +77,12 @@ training prefix when sizes differ. `training.max_train_tokens` explicitly
 overrides that cap, including for same-size use. Same-size defaults use the
 realized corpus. Existing epoch and optimizer-step rounding rules determine the
 consumed training budget; holdouts are not sliced to that budget.
+
+The pretraining final checkpoint carries that dataset tokenizer forward.
+Instruct/code SFT, DPO preparation/training, and export use the actual input
+checkpoint bundle, never `runs/<model-size>/tokenizer` as a fallback. DPO includes
+the active rendering files in its preparation fingerprint. See
+[post-training identity](TRAIN.md#post-training-identity-and-resume).
 
 ## User-selected artifact transfer
 

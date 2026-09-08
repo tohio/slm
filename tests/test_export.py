@@ -114,3 +114,26 @@ def test_remote_code_artifact_detection_is_recursive():
         "slm_remote/configuration_slm.py",
         "tools/example.py",
     ]
+
+
+def test_export_binds_declared_profile_and_stage_to_checkpoint(tmp_path):
+    import pytest
+    import yaml
+    from pathlib import Path
+    from curator.state import stable_digest
+    from export.export import validate_export_identity
+
+    cfg = yaml.safe_load((Path(__file__).resolve().parents[1] / "pretrain/configs/gpt_125m.yaml").read_text())
+    contract = {"run_size": "125m", "resolved_config": cfg}
+    audit = tmp_path / "pretrain_run_audit.json"
+    audit.write_text(json.dumps({"contract": contract, "contract_sha256": stable_digest(contract)}))
+    config = SLMConfig(**cfg["model"])
+    assert validate_export_identity(tmp_path, "125m", "base", config)["stage"] == "pretrain"
+    with pytest.raises(RuntimeError, match="production profile"):
+        validate_export_identity(tmp_path, "125m", "base", SLMConfig(**yaml.safe_load(
+            (Path(__file__).resolve().parents[1] / "pretrain/configs/gpt_mini.yaml").read_text()
+        )["model"]))
+    with pytest.raises(RuntimeError, match="run size"):
+        validate_export_identity(tmp_path, "350m", "base", config)
+    with pytest.raises(RuntimeError, match="sft_run_audit"):
+        validate_export_identity(tmp_path, "125m", "instruct", config)

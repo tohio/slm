@@ -13,7 +13,7 @@ import shutil
 import sys
 from pathlib import Path
 from tokenizers import Tokenizer
-from transformers import Trainer, TrainerCallback
+from transformers import Trainer, TrainerCallback, set_seed
 
 import torch
 import yaml
@@ -40,6 +40,7 @@ DATA_DIR    = Path(os.environ.get("DATA_DIR", "data"))
 from config.paths import pretrain_dir, resolve_dataset_paths, BASE_RESULTS_DIR
 from config.holdout import CONTRACT_NAME, SPLITS, load_contract
 from config.runtime import configure_torch_runtime
+from config.checkpoints import resolve_training_checkpoint, validate_or_write_run_audit
 from curator.state import atomic_write_json, stable_digest
 from pretrain.data.mixture import validate_realized_mixture_report
 from pretrain.schedule import resolve_realized_token_schedule, resolve_train_token_limit
@@ -159,63 +160,9 @@ def validate_tokenizer(tokenizer_dir: Path, tokenized_dir: Path) -> None:
     validate_active_tokenizer_matches_tokenized_data(tokenized_dir, tokenizer_dir)
 
 
-def _find_latest_checkpoint(output_dir: Path) -> Path | None:
-    if not output_dir.exists():
-        return None
-    candidates = [
-        p for p in output_dir.iterdir()
-        if p.is_dir() and p.name.startswith("checkpoint-")
-    ]
-    if not candidates:
-        return None
-    numbered = []
-    for p in candidates:
-        try:
-            step = int(p.name.split("-", 1)[1])
-            numbered.append((step, p))
-        except (IndexError, ValueError):
-            continue
-    if not numbered:
-        return None
-    numbered.sort()
-    return numbered[-1][1]
-
-
-def resolve_pretrain_checkpoint(
-    output_dir: Path,
-    *,
-    resume: bool,
-) -> Path | None:
-    """Resolve a safe start state without silently mixing training runs."""
-    latest_checkpoint = _find_latest_checkpoint(output_dir)
-
-    if resume:
-        if latest_checkpoint is None:
-            raise RuntimeError(
-                f"--resume was requested but no checkpoint-* directory exists "
-                f"in {output_dir}. Refusing to start from scratch. Use the "
-                f"normal pretrain target for a new run or restore the expected "
-                f"checkpoint."
-            )
-        return latest_checkpoint
-
-    if output_dir.exists():
-        existing_artifacts = sorted(
-            path
-            for path in output_dir.iterdir()
-            if path.name != PRETRAIN_AUDIT_FILENAME
-        )
-        if existing_artifacts:
-            rendered = "\n  ".join(str(path) for path in existing_artifacts)
-            raise RuntimeError(
-                "A new pretraining run was requested in an output directory "
-                "that already contains training artifacts:\n  "
-                f"{rendered}\n"
-                "Use --resume for the interrupted run or choose a different "
-                "RESULTS_DIR for a new run."
-            )
-
-    return None
+def resolve_pretrain_checkpoint(output_dir: Path, *, resume: bool) -> Path | None:
+    return resolve_training_checkpoint(output_dir, resume=resume,
+                                       audit_filename=PRETRAIN_AUDIT_FILENAME)
 
 
 def validate_model_tokenizer_contract(model_config, tokenizer_dir: Path) -> None:
@@ -483,68 +430,13 @@ def build_pretrain_run_contract(
     }
 
 
-def _contract_differences(expected, actual, prefix: str = "") -> list[str]:
-    """Return concise key paths that differ between two run contracts."""
-    if isinstance(expected, dict) and isinstance(actual, dict):
-        differences = []
-        for key in sorted(set(expected) | set(actual)):
-            path = f"{prefix}.{key}" if prefix else str(key)
-            if key not in expected or key not in actual:
-                differences.append(path)
-            else:
-                differences.extend(
-                    _contract_differences(expected[key], actual[key], path)
-                )
-        return differences
-    return [] if expected == actual else [prefix or "<root>"]
-
-
 def validate_or_write_pretrain_audit(
-    output_dir: Path,
-    contract: dict,
-    *,
-    resume: bool,
-    write: bool,
+    output_dir: Path, contract: dict, *, resume: bool, write: bool,
 ) -> Path:
-    """Persist a new-run contract or reject an incompatible resume."""
-    audit_path = output_dir / PRETRAIN_AUDIT_FILENAME
-    current_payload = {
-        "schema_version": PRETRAIN_AUDIT_VERSION,
-        "contract_sha256": stable_digest(contract),
-        "contract": contract,
-    }
-
-    if audit_path.exists():
-        saved_payload = _read_required_json(audit_path, "pretraining run audit")
-        saved_contract = saved_payload.get("contract")
-        if not isinstance(saved_contract, dict):
-            raise RuntimeError(
-                f"{audit_path} does not contain a valid run contract"
-            )
-        if saved_payload.get("contract_sha256") != stable_digest(saved_contract):
-            raise RuntimeError(
-                f"{audit_path} failed its own contract checksum"
-            )
-        if saved_contract != contract:
-            differences = _contract_differences(saved_contract, contract)
-            rendered = "\n  ".join(differences[:20])
-            raise RuntimeError(
-                "Pretraining run contract mismatch. Refusing to "
-                f"{'resume' if resume else 'reuse the output directory'}.\n"
-                f"Changed fields:\n  {rendered}"
-            )
-    elif resume:
-        raise RuntimeError(
-            f"Cannot resume without {audit_path}. The checkpoint predates the "
-            "fail-closed provenance contract or its audit was removed."
-        )
-
-    if write and not audit_path.exists():
-        atomic_write_json(audit_path, current_payload)
-        log.info("Pretraining run audit written to %s", audit_path)
-    elif audit_path.exists():
-        log.info("Pretraining run audit matches: %s", audit_path)
-    return audit_path
+    return validate_or_write_run_audit(
+        output_dir, contract, audit_filename=PRETRAIN_AUDIT_FILENAME,
+        schema_version=PRETRAIN_AUDIT_VERSION, resume=resume, write=write,
+    )
 
 
 class VRAMProbe(TrainerCallback):
@@ -954,7 +846,10 @@ def main():
             write=True,
         )
 
-    log.info("Initializing model from scratch...")
+    # Trainer seeds after construction; apply the recorded seed before weights
+    # are drawn. On resume Trainer still restores the saved weights/RNG state.
+    set_seed(training_args.seed)
+    log.info("Initializing model%s...", " for resume" if args.resume else " from scratch")
     model = SLMForCausalLM(model_config)
     n_params = sum(p.numel() for p in model.parameters())
     log.info(f"Parameters: {n_params:,} ({n_params / 1e6:.1f}M)")

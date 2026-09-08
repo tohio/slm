@@ -1,6 +1,6 @@
 # Tokenizer
 
-This directory trains and validates the size-specific tokenizer used by
+This directory trains and validates the dataset-run-specific tokenizer used by
 pretraining, SFT, DPO, evaluation, export, and inference.
 
 ## Contents
@@ -156,6 +156,11 @@ make artifacts-upload \
   corresponding `.bin` files.
 - Restore the tokenizer as part of the matched `DATASET_SIZE` artifact set.
   No global-tokenizer copy is needed before model training.
+- SFT/DPO/export require the tokenizer bundled with the actual checkpoint;
+  matching vocabulary size alone does not establish vocabulary identity.
+- DPO preparation and training share a fingerprint including standalone
+  `chat_template.jinja` and named `chat_templates/*.jinja`; a rendering change
+  requires intentional re-preparation, not embedding reinitialization.
 - Review SFT, DPO, inference, export, and serving whenever the chat template or
   special-token set changes.
 

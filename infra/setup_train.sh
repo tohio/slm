@@ -85,6 +85,11 @@ fi
 
 # ── GPU check ─────────────────────────────────────────────────────────────────
 log "GPU check:"
+if ! command -v nvidia-smi >/dev/null 2>&1; then
+    log "ERROR: setup-train requires an NVIDIA GPU host with a working driver (nvidia-smi)."
+    log "CPU-executed training tests use an already installed training environment; this is not a CPU-only installer."
+    exit 1
+fi
 GPU_NAME="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1 | tr -d '\r')"
 DRIVER_VERSION="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1 | tr -d '\r')"
 MIN_DRIVER_VERSION="580.65.06"
@@ -207,9 +212,6 @@ export RESULTS_DIR="$RESULTS_DIR"
 # ── Pull selected run-scoped artifacts ─────────────────────────────────────────
 if [[ "$SKIP_DATA" == "true" ]]; then
     log "[SKIP] Artifact pull (--skip-data)"
-elif [[ "$ARTIFACT_BACKEND" == "s3" && -z "${S3_BUCKET:-}" ]]; then
-    log "WARNING: S3_BUCKET not set in .env — skipping artifact pull"
-    log "  Run manually: make artifacts-download SIZE=$SIZE DATASET_SIZE=$DATASET_SIZE DATASET_RUN_ID=<run_id> ARTIFACT_STAGES=tokenized,tokenizer,metadata"
 elif [[ -z "$RUN_ID" ]]; then
     log "No dataset RUN_ID selected; environment setup only. Restore artifacts explicitly when ready."
 else
@@ -255,7 +257,7 @@ log "=== Setup complete ==="
 log ""
 log "Next steps (N is the number of GPUs you choose; no GPU family/count is required):"
 log "  source ~/.bashrc"
-log "  vi .env                                    # verify credentials: S3_BUCKET, AWS keys, WANDB_API_KEY, HF_TOKEN"
+log "  vi .env                                    # HF_TOKEN, required W&B key/project, selected storage credentials"
 log "  make config-gen SIZE=$SIZE GPUS=N"
 log "  make pretrain SIZE=$SIZE DATASET_SIZE=$DATASET_SIZE DATASET_RUN_ID=$RUN_ID GPUS=N            # full pretraining"
 log ""

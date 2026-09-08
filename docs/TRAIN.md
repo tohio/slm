@@ -14,7 +14,8 @@ base, instruct, code, and chat model variants.
 | `DATA_DIR` | Persistent data and cache root on the GPU host |
 | `.env` | AWS, Hugging Face, W&B, cache, results, and export configuration |
 
-Populate the common environment settings and the selected backend's settings.
+Populate the common environment settings, including required W&B API key and
+project, and the credentials for the artifact backend used by restoration.
 S3 can use SDK/instance-role credentials; HF uses Dataset credentials for text
 and separate HF S3 credentials for Bucket objects.
 The GPU host
@@ -33,7 +34,7 @@ vi .env
 ```
 
 The `RUN_ID` comes from the final output of
-[`curate-all`](CURATION.md#complete-workflow).
+[`curate-all`](CURATION.md#fresh-host-workflow).
 
 ## Complete workflow
 
@@ -49,7 +50,8 @@ make train-all \
 
 `train-all` performs the following sequence:
 
-1. Validates common/selected-backend environment settings and required Make inputs.
+1. Validates common environment settings (including W&B) and required Make inputs.
+   Selected transfer code validates its backend credentials.
 2. Installs the GPU environment and pinned CUDA training dependencies.
 3. Restores the selected source-run artifacts (all tokenized splits, tokenizer,
    and metadata by default) identified by `DATASET_SIZE` and `DATASET_RUN_ID`.
@@ -69,6 +71,8 @@ Evaluation, export, publication, and serving remain explicit operations after
 training.
 
 ## Stage-by-stage workflow
+
+This route is an alternative to `train-all`, not a follow-on setup sequence.
 
 ### Restore the curation run
 
@@ -209,6 +213,36 @@ pretrain/final
     ├── sft_code/final
     └── dpo_chat/final
 ```
+
+## Post-training identity and resume
+
+Instruct/code SFT and DPO require the tokenizer bundled with their input
+checkpoint, in `tokenizer/` or at the checkpoint root. They never substitute a
+model-size tokenizer. Pretraining copies the chosen dataset tokenizer into its
+final checkpoint, so cross-size reuse continues through post-training.
+
+SFT verifies preparation-manifest checksums, stage/size, complete JSONL hashes
+and counts, and normalized prompt separation before sampling or constructing a
+trainer. DPO verifies its preference manifest and the actual instruct tokenizer
+and rendering template. Both validate the whole input before `max_samples`.
+
+The immutable run audit binds the resolved recipe, model architecture, input
+checkpoint config/weight hashes, tokenizer/template, prepared data, and process
+count. DPO also binds its original fixed reference checkpoint. Resume must find
+a numbered checkpoint and a matching audit; a new run into an occupied directory
+is rejected. `--preflight-only` does not replace the run audit. Use it with
+`--resume` when checking an interrupted run.
+
+Older SFT/DPO audits without a checksum-verified run contract cannot establish
+resume compatibility. Preserve their artifacts; do not invent an audit or delete
+it to bypass the check. Start an explicitly new output run when redoing that
+stage. Pretraining retains its existing audit format.
+
+DPO preparation and training must use the same instruct checkpoint/config.
+`DPO_CHAT_CONFIG` selects the recipe and optional `DPO_BASE_MODEL` overrides its
+parent for both Make paths. A change to the tokenizer or standalone template
+requires intentional DPO re-preparation; old template-incomplete fingerprints
+are not treated as equivalent.
 
 ## Evaluate and export
 

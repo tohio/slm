@@ -19,8 +19,7 @@ spacy>=3.7.0
 
 # ── Validation ────────────────────────────────────────────────────────────────
 sentencepiece>=0.2.0,<0.3.0
-# kenlm — install from source (not on PyPI):
-#   setup-curate builds the bindings internally.
+# KenLM bindings: setup-curate builds the pinned upstream source internally.
 
 
 # ── Notebooks ─────────────────────────────────────────────────────────────────

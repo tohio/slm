@@ -16,14 +16,20 @@ truth for production runs.
 | `08_eval_exploration.ipynb` | Benchmark result analysis |
 | `09_inference_exploration.ipynb` | Generation behavior |
 
-Install the development environment and register its kernel:
+The curation stack supplies notebook tools for data/validation/tokenizer
+inspection (02–04). Register that kernel on the curation host:
 
 ```bash
 make setup-curate
 source .venv/bin/activate
-python -m ipykernel install --user --name slm --display-name "SLM"
+python -m ipykernel install --user --name slm-curate --display-name "SLM curation"
 jupyter lab
 ```
+
+Model-facing notebooks (01 and 05–09) require the pinned training environment,
+not the curation Transformers version. The training installer does not include
+Jupyter/kernel tooling; install that optional tooling in the training environment
+before registering a separate kernel. Do not merge the two requirement stacks.
 
 Set `DATA_DIR`, `RESULTS_DIR`, and `EXPORTS_DIR` before launching Jupyter so
 notebooks resolve the same run-scoped artifacts as the CLI.

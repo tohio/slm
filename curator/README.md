@@ -4,8 +4,8 @@
 
 `curator/` builds the pretraining corpus. It loads configured sources, applies
 source-aware quality filters, performs deterministic exact and fuzzy
-deduplication, allocates source budgets, and produces shuffled train and
-validation JSONL files. Post-curation perplexity validation, tokenizer
+deduplication, allocates source budgets, and produces train, validation, and
+held-out test JSONL files. Post-curation perplexity validation, tokenizer
 training, and binary tokenization are separate stages.
 
 ## Contents
@@ -28,6 +28,8 @@ The curator reads the data contract in `config/data_mix.py` and writes:
 ```text
 $DATA_DIR/runs/<size>/curated/train.jsonl
 $DATA_DIR/runs/<size>/curated/val.jsonl
+$DATA_DIR/runs/<size>/curated/test.jsonl
+$DATA_DIR/runs/<size>/curated/test_contract.json
 ```
 
 `validation/` consumes those files. `pretrain/data/tokenize_data.py` later
@@ -93,7 +95,7 @@ dedup
   filtered source → $DATA_DIR/runs/<size>/filtered/<source>_deduped/
 
 blend
-  all complete dedup outputs → curated/{train,val}.jsonl
+  all complete dedup outputs → curated/{train,val,test}.jsonl
 ```
 
 Every reusable stage directory contains `_SUCCESS.json`. A stage is reused only
@@ -139,8 +141,8 @@ code, synthetic, and specialized sources retain their existing behavior.
 Filter manifests record input documents, segmented inputs, and produced
 segments so segmentation cannot silently change document accounting.
 
-After blending and splitting, every train and validation record receives the
-same normalized exact hash used by deduplication. Curation fails if validation
+The initial train/validation overlap pass uses the same normalized exact hash
+as deduplication. Curation fails if validation
 contains exact duplicates or if any normalized document occurs in both splits.
 The full-corpus result is stored in `curated/exact_overlap_report.json` and in
 `blend_stats.json`.
@@ -175,17 +177,29 @@ The blend stage:
 - stages every source to its effective budget;
 - chooses in-memory or disk-backed shuffling from
   `SHUFFLE_RAM_BUDGET_GB`;
-- creates the train/validation split from one shuffled population.
+- creates the initial train/validation split from one shuffled population;
+- establishes test from train, leaving validation byte-for-byte unchanged;
+- uses the existing exact/MinHash policy across all three split pairs, verifies
+  physical removals against accounting, and records holdout provenance.
+
+The final pair-audit and membership contract is described in
+[`PRETRAINING_DATA.md`](../docs/PRETRAINING_DATA.md). Reusing an established blend
+requires both intact output bytes and matching current inputs/policy. A budget,
+seed, source, mix, or implementation mismatch fails before replacing the split.
+Raw intermediates are needed to run blending, not to restore or train from a
+complete retained artifact set.
 
 ## Prerequisites
 
-Set `DATA_DIR` to persistent storage and complete every variable in `.env`
-before starting the pipeline.
+Set `DATA_DIR` to persistent storage and configure the common paths, HF token,
+and required W&B API key/project in `.env`. Storage/publication credentials are
+needed only for the selected transfer/publication operation.
 
 ```bash
 make setup-curate DATA_DIR=/data/slm/data
 source .venv/bin/activate
 make download-fasttext-model DATA_DIR=/data/slm/data
+make download-kenlm-model DATA_DIR=/data/slm/data
 ```
 
 `HF_TOKEN` is required for authenticated or gated Hub sources. Accept each
@@ -203,10 +217,16 @@ accepting access.
 
 ## Usage
 
-Bounded pipeline validation:
+Bounded curation execution:
 
 ```bash
 make curate-smoke
+```
+
+Optional Mini curation is a separate, substantially larger run with a 1.4B
+usable training-token floor. It is not required before a production profile:
+
+```bash
 make curate-mini WORKERS=62
 ```
 
@@ -278,6 +298,9 @@ $DATA_DIR/runs/<size>/
 └── curated/
     ├── train.jsonl
     ├── val.jsonl
+    ├── test.jsonl
+    ├── test_contract.json
+    ├── test_membership.jsonl
     ├── blend_stats.json
     ├── exact_overlap_report.json
     ├── benchmark_contamination_report.json
@@ -297,7 +320,7 @@ The first artifact upload creates:
 $DATA_DIR/runs/<size>/RUN_ID
 ```
 
-Artifact storage uses:
+S3 artifact storage uses:
 
 ```text
 s3://$S3_BUCKET/$S3_PREFIX/<size>/<run_id>/<stage>/
@@ -325,6 +348,11 @@ make artifacts-download \
 
 Downloads require an explicit `RUN_ID`. A restored stage is accepted only when
 its artifact metadata matches the requested run and stage.
+
+For `ARTIFACT_BACKEND=hf`, curated/validated stages go to a Dataset repository;
+operational stages go to a Storage Bucket. User stage selection is unchanged.
+See [artifact routing](../docs/PRETRAINING_DATA.md#user-selected-artifact-transfer)
+for credentials and the object-storage interface.
 
 ## Gotchas
 

@@ -75,3 +75,25 @@ def test_verify_dataset_rejects_embedded_structural_token_ids(tmp_path):
 
     with pytest.raises(RuntimeError, match="EOS count mismatch"):
         tokenize_data.verify_dataset(bin_path, meta_path)
+
+
+@pytest.mark.parametrize("split", ["train", "val", "test"])
+def test_fresh_split_writes_complete_verifiable_metadata(tmp_path, split):
+    tokenizer_path = tmp_path / "tokenizer.json"
+    tokenizer = _write_test_tokenizer(tokenizer_path)
+    source = tmp_path / f"input-{split}.jsonl"
+    source.write_text(json.dumps({"text": "ordinary text", "source": "wikipedia"}) + "\n")
+    output = tmp_path / "bins"
+    output.mkdir()
+    # Recover an orphaned binary from the formerly failing metadata path.
+    (output / f"{split}.bin").write_bytes(b"incomplete")
+    bos, eos = tokenizer.token_to_id("<BOS>"), tokenizer.token_to_id("<EOS>")
+    with tokenize_data.mp.Pool(1, initializer=tokenize_data._worker_init,
+                               initargs=(str(tokenizer_path), bos, eos)) as pool:
+        metadata = tokenize_data._tokenize_split(
+            source, output, split, pool, bos, eos, tokenizer_path, chunk_size=1,
+        )
+    assert metadata["vocab_size"] == tokenizer.get_vocab_size(with_added_tokens=True)
+    assert metadata["n_docs"] == 1
+    assert json.loads((output / f"{split}.json").read_text()) == metadata
+    tokenize_data.verify_dataset(output / f"{split}.bin", output / f"{split}.json")

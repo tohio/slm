@@ -49,7 +49,7 @@ CCNET_EN_SP_MD5   := e55b10980b6bdbd8599a3fd3a54eb9ed
 REQUIRED_ENV_VARS := \
 	DATA_DIR RESULTS_DIR EXPORTS_DIR HF_HOME \
 	HF_DATASETS_CACHE HF_XET_HIGH_PERFORMANCE WANDB_API_KEY WANDB_PROJECT \
-	HF_TOKEN HF_USERNAME
+	HF_TOKEN
 
 # Read path settings from .env when they are not already set in the
 # environment or on the make command line. Preserve spaces in paths and strip
@@ -65,12 +65,9 @@ ifeq ($(origin EXPORTS_DIR),undefined)
   EXPORTS_DIR := $(or $(call _env_value,EXPORTS_DIR),$(RESULTS_DIR)/exports)
 endif
 ARTIFACT_BACKEND ?= $(or $(call _env_value,ARTIFACT_BACKEND),s3)
-ifeq ($(ARTIFACT_BACKEND),s3)
-  REQUIRED_ENV_VARS += S3_BUCKET S3_PREFIX AWS_DEFAULT_REGION
-else ifeq ($(ARTIFACT_BACKEND),hf)
-  # HF credentials/destinations are validated only by the selected transfer.
-  # Curation/setup does not require a model or a bucket to exist.
-else
+# Transfer/publication code validates only its selected destination. W&B stays
+# required for the workflow; local curation does not require unused S3/Hub repos.
+ifeq ($(filter $(ARTIFACT_BACKEND),s3 hf),)
   $(error ARTIFACT_BACKEND must be s3 or hf)
 endif
 export DATA_DIR RESULTS_DIR EXPORTS_DIR ARTIFACT_BACKEND
@@ -83,6 +80,8 @@ SFT_INSTRUCT_CONFIG ?= finetune/configs/sft_instruct_$(SIZE).yaml
 SFT_CODE_CONFIG ?= finetune/configs/sft_code_$(SIZE).yaml
 DPO_CHAT_CONFIG ?= alignment/configs/dpo_chat_$(SIZE).yaml
 DPO_CONFIG      ?= $(DPO_CHAT_CONFIG)
+DPO_BASE_MODEL ?=
+_DPO_BASE_FLAG = $(if $(DPO_BASE_MODEL),--base-model "$(DPO_BASE_MODEL)",)
 _DATASET_FLAGS = --dataset-size "$(DATASET_SIZE)" $(if $(DATASET_RUN_ID),--dataset-run-id "$(DATASET_RUN_ID)",)
 _ARTIFACT_FLAGS = --backend "$(ARTIFACT_BACKEND)"
 
@@ -141,7 +140,7 @@ endif
         check-training-env test-upgrade-gpu \
         download-kenlm-model download-fasttext-model \
         test-curator test-validate test-tokenizer test-data-pipeline \
-        test-training test-sft-instruct test-sft-chat test-sft-code test-dpo-chat test-dpo test-gpu-pipeline test-model test-export test-export-acceptance test-vllm-export test-data-unit test-training-args test-config-gen test-accel-gen test-comparison test-misc test-unit test-gpu-gate test-pretrain-ready test-pretrain-resume-ready test-artifacts \
+        test-training test-sft-instruct test-sft-chat test-sft-code test-dpo-chat test-dpo test-gpu-pipeline test-model test-export test-export-acceptance test-vllm-export test-data-unit test-curation-unit test-training-args test-config-gen test-accel-gen test-comparison test-misc test-unit test-gpu-gate test-pretrain-ready test-pretrain-resume-ready test-artifacts \
         compare-sft-preflight compare-sft \
         sanity-train sanity-train-small sanity-train-tiny sanity-train-save \
         clean clean-data clean-results clean-logs help
@@ -154,7 +153,7 @@ all:
 	@echo "'make train-all ...' on the GPU host."
 
 check-env:
-	@test -f .env || (echo "Missing .env. Copy .env.sample to .env and fill every value."; exit 1)
+	@test -f .env || (echo "Missing .env. Copy .env.sample to .env and configure paths, HF access, and required W&B credentials."; exit 1)
 	@missing=""; \
 	for var in $(REQUIRED_ENV_VARS); do \
 		value=$$(sed -n "s/^$${var}=//p" .env | head -1 | sed 's/[[:space:]]*#.*$$//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$$//'); \
@@ -500,22 +499,23 @@ eval-code-completion:
 
 prepare-dpo:
 	@echo "==> Stage 6a: Prepare DPO data ($(SIZE))"
-	$(PYTHON) alignment/data/prepare_dpo.py --size $(SIZE)
+	$(PYTHON) alignment/data/prepare_dpo.py --size $(SIZE) \
+		--training-config "$(DPO_CHAT_CONFIG)" $(_DPO_BASE_FLAG) $(FORCE_FLAG)
 
 dpo-chat:
 	@echo "==> Stage 6b: Chat DPO alignment ($(SIZE), $(GPUS) GPU(s), config=$(DPO_CHAT_CONFIG))"
 	$(ACCELERATE) alignment/train_dpo.py \
-		--config $(DPO_CHAT_CONFIG)
+		--config $(DPO_CHAT_CONFIG) $(_DPO_BASE_FLAG)
 
 dpo-chat-resume:
 	$(ACCELERATE) alignment/train_dpo.py \
-		--config $(DPO_CHAT_CONFIG) \
+		--config $(DPO_CHAT_CONFIG) $(_DPO_BASE_FLAG) \
 		--resume
 
 dpo-chat-mini:
 	@echo "==> Stage 6b: Mini chat DPO (pipeline validation)"
 	$(ACCELERATE) alignment/train_dpo.py \
-		--config alignment/configs/dpo_chat_mini.yaml
+		--config alignment/configs/dpo_chat_mini.yaml $(_DPO_BASE_FLAG)
 
 dpo: dpo-chat
 
@@ -763,8 +763,19 @@ test-vllm-export: test-export-acceptance
 		--model "$(EXPORTS_DIR)/$(SIZE)/$(EXPORT_VARIANT)"
 
 test-data-unit:
-	@echo "==> Running data contract/state unit tests..."
-	.venv/bin/pytest tests/test_data_config.py tests/test_curator_state.py -v --tb=short
+	@echo "==> Running shared data/tokenization/post-training contract tests..."
+	.venv/bin/pytest tests/test_data_config.py tests/test_curator_state.py \
+		tests/test_realized_mixture.py tests/test_tokenize_data.py \
+		tests/test_sft_data_contract.py tests/test_dpo_data_contract.py -v --tb=short
+
+test-curation-unit: test-data-unit
+	@echo "==> Running curation-only unit tests (no corpus/model assets required)..."
+	$(PYTHON) infra/verify_environment.py --profile curation
+	.venv/bin/pytest tests/test_benchmark_contamination.py tests/test_common_crawl_source.py \
+		tests/test_curation_audit_stats.py tests/test_dedup_partitioning.py \
+		tests/test_exact_split_overlap.py tests/test_long_document_segmentation.py \
+		tests/test_near_overlap.py tests/test_quality_filter.py \
+		tests/test_sensitive_content.py tests/test_validation_kenlm.py -v --tb=short
 
 test-training-args: check-training-env
 	@echo "==> Running Transformers/TRL compatibility tests..."
@@ -787,7 +798,7 @@ test-misc: check-training-env
 	.venv/bin/pytest tests/test_misc_contract.py -v --tb=short
 
 test-unit: test-model test-export test-data-unit test-training-args test-config-gen test-accel-gen test-comparison test-misc
-	@echo "==> Unit tests complete"
+	@echo "==> Training/common unit tests complete (curation host: make test-curation-unit)"
 
 test-gpu-gate: check-training-env
 	@echo "==> Validating the installed GPU stack without datasets or checkpoints..."
@@ -926,12 +937,13 @@ help:
 	@echo "  test-export              Native Transformers export contract tests"
 	@echo "  test-export-acceptance   Build and clean-load one real native export"
 	@echo "  test-vllm-export         Load that export in vLLM and generate one response"
-	@echo "  test-data-unit           Data config and manifest-state unit tests"
+	@echo "  test-data-unit           Shared data, tokenization, and SFT/DPO contract tests"
 	@echo "  test-training-args       Transformers/TRL argument compatibility tests"
 	@echo "  test-config-gen          Config generator unit tests"
 	@echo "  test-accel-gen           Accelerate config generator unit tests"
 	@echo "  test-comparison          Controlled SFT comparison unit tests"
-	@echo "  test-unit                All unit tests above"
+	@echo "  test-curation-unit       Curation/common unit tests in the curation environment"
+	@echo "  test-unit                Training/common unit tests in the training environment"
 	@echo "  test-gpu-gate            Bounded CUDA/compile/cache test; no datasets"
 	@echo "  test-pretrain-ready      Bounded new-run contracts, CUDA gate, and preflight"
 	@echo "  test-pretrain-resume-ready Bounded resume contracts and provenance preflight"

@@ -131,5 +131,5 @@ the loaded model; learned embeddings and other learned tensors are unchanged.
 
 Run `tests/model/test_rope_loading.py` on the pinned training stack and reproduce
 the real Mini validation baseline with the matching original tokenizer/data.
-See [the migration guide](../docs/PRETRAINING_DATA.md) for the distinction
+See [the data/evaluation guide](../docs/PRETRAINING_DATA.md) for the distinction
 between that validation check and an unseen test evaluation.

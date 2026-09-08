@@ -61,7 +61,8 @@ split documents again. Validation is training-time; test is final-only.
 The smoke profile uses the 21.7M-parameter architecture and capped 1M-token
 corpus only to exercise execution and artifact contracts. The mini profile is
 a 69.9M-parameter functional pilot trained for one epoch over its realized
-tokenized corpus, with a 1.4B-token curation planning target.
+selected tokenized corpus, with a fail-closed minimum of 1.4B usable train
+tokens. Mini is optional and is not a second lightweight smoke test.
 
 `dataset.py` memory maps the flat token arrays and returns fixed-length causal
 language-model windows without loading the entire corpus into memory.
@@ -84,8 +85,9 @@ Generate the selected recipe on the target training host:
 make config-gen-pretrain SIZE=125m GPUS=1
 ```
 
-`SIZE=smoke` and `SIZE=mini` generate pretraining recipes only. Their
-post-training recipes remain the checked-in bounded mini configurations.
+Smoke generates pretraining recipes only. Mini uses the same pretraining,
+SFT, and DPO generation flow as production sizes, while retaining its smaller
+post-training sample/step budgets.
 
 To generate pretraining, SFT, and DPO recipes together:
 
@@ -179,6 +181,11 @@ The run root contains `pretrain_run_audit.json`. It binds the resolved
 training configuration, tokenizer fingerprint, tokenized-data identity,
 process count, and distributed strategy. `--resume` requires the audit and
 latest checkpoint and refuses changed inputs instead of starting over.
+
+The configured seed is applied before fresh weight initialization. On resume,
+Trainer restores the selected checkpoint and its RNG state; construction does
+not overwrite saved learned weights. A recorded seed is not a guarantee of
+bitwise results across different hardware/runtime versions.
 
 The audit is copied into `final/`. The final checkpoint is the parent of
 instruct SFT and is consumed without post-pretraining embedding mutation.

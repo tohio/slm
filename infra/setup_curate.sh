@@ -83,6 +83,7 @@ sudo apt-get install -y \
     libboost-all-dev \
     git \
     curl \
+    wget \
     tmux \
     htop \
     nvme-cli
@@ -97,12 +98,14 @@ echo "==> Installing curation environment ($INSTALLER) at $VENV_DIR..."
 install_environment "${REPO_DIR}/requirements-curation.txt"
 
 # ── 4. KenLM Python bindings ──────────────────────────────────────────────────
-# KenLM is not on PyPI — must be built from source.
-# Required for the perplexity filter in the validation stage.
+# Build the selected KenLM revision for validation's perplexity scorer.
+# Model assets are downloaded separately with download-kenlm-model.
 
 echo ""
 echo "==> Installing KenLM Python bindings..."
-install_packages https://github.com/kpu/kenlm/archive/master.zip
+# Reviewed immutable upstream revision; do not silently track master.
+KENLM_REVISION=4cb443e60b7bf2c0ddf3c745378f76cb59e254e5
+install_packages "https://github.com/kpu/kenlm/archive/${KENLM_REVISION}.zip"
 echo "  KenLM installed"
 
 # ── 5. spaCy English model ────────────────────────────────────────────────────
@@ -292,11 +295,11 @@ echo ""
 echo "==> Checking .env variables..."
 # Storage settings depend on the later selected stages/destination. A
 # Dataset-only HF push must not require a Bucket (or any model repository).
-REQUIRED_VARS=("HF_TOKEN")
+REQUIRED_VARS=("HF_TOKEN" "WANDB_API_KEY" "WANDB_PROJECT")
 MISSING_CREDS=0
 for var in "${REQUIRED_VARS[@]}"; do
-    value=$(grep "^${var}=" "$ENV_FILE" | cut -d'=' -f2 || true)
-    if [ -z "$value" ]; then
+    value=$(sed -n "s/^${var}=//p" "$ENV_FILE" | head -1 | sed 's/[[:space:]]*#.*$//;s/^[[:space:]]*//;s/[[:space:]]*$//')
+    if [ -z "$value" ] || [ "$value" = "..." ]; then
         echo "  WARNING: ${var} is not set in .env — required before running pipeline"
         MISSING_CREDS=$((MISSING_CREDS + 1))
     else
@@ -313,16 +316,20 @@ if [ "$ERRORS" -eq 0 ]; then
     echo "========================================"
     echo ""
     echo "Next steps:"
-    echo "  1. Review ${ENV_FILE}; configure only the storage destination you will use"
+    echo "  1. Review ${ENV_FILE}; HF_TOKEN and W&B key/project are required for the pipeline"
+    echo "     Configure storage credentials only for selected transfers"
     echo "  2. source ~/.bashrc  (or open a new shell)"
     echo "  3. $(activation_command)"
     echo "  4. make download-fasttext-model DATA_DIR=${DATA_DIR}"
     echo "  5. make download-kenlm-model    DATA_DIR=${DATA_DIR}"
-    echo "  6. Validate the curation pipeline with smoke (prerequisite checks run internally):"
+    echo "  6. Run the bounded curation-to-tokenization smoke check (prerequisite checks run internally):"
     echo "       make curate-smoke DATA_DIR=${DATA_DIR}"
     echo "       make validate SIZE=smoke DATA_DIR=${DATA_DIR}"
+    echo "       make tokenizer SIZE=smoke DATA_DIR=${DATA_DIR}"
+    echo "       make tokenizer-test SIZE=smoke DATA_DIR=${DATA_DIR}"
+    echo "       make tokenize SIZE=smoke DATA_DIR=${DATA_DIR}"
     echo ""
-    echo "     If smoke passes, continue with mini or a production size:"
+    echo "     Then choose optional Mini (1.4B usable train tokens) or a production size:"
     echo "       make curate-mini DATA_DIR=${DATA_DIR}                 # functional mini-scale curation"
     echo "       make curate SIZE=125m WORKERS=<n> DATA_DIR=${DATA_DIR}"
     echo "       make curate SIZE=350m WORKERS=<n> DATA_DIR=${DATA_DIR}"

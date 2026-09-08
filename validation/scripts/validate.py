@@ -185,15 +185,13 @@ def validate_manual_split(
 
     Applies:
         - Terminal punctuation check (C4-style) — prose sources only
-        - Repeated line ratio (Gopher-style) — prose sources only
+        - Repeated line ratio (Gopher-style) — every source
         - Perplexity measurement (KenLM, when enabled) — prose sources only
         - Perplexity filtering only with an explicit threshold
 
-    Code sources (codesearchnet, stack_smol, stack_v1, jupyter, conala)
-    bypass the structural prose checks because code does not always end
-    in terminal punctuation and may have legitimate repeated lines
-    (boilerplate imports, standard patterns). They also bypass prose KenLM,
-    which is not meaningful for code, math templates, or symbol-heavy data.
+    Configured non-prose sources bypass terminal punctuation and prose KenLM,
+    which are inappropriate for code, math templates, or symbol-heavy data.
+    The repeated-line check still applies to every source.
 
     Args:
         input_path: Input JSONL file.

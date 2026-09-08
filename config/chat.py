@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+
+from config.holdout import sha256_file
+from curator.state import stable_digest
 
 TOOL_OPEN = "<|tool|>"
 TOOL_CLOSE = "<|endoftool|>"
@@ -144,3 +148,19 @@ def validate_tool_conversation(messages: list[dict]) -> None:
             expected = "assistant"
     if expected != "user":
         raise ValueError("Conversation must end with a final assistant answer")
+
+
+def tokenizer_fingerprint(path: Path) -> str:
+    """Identity of the HF tokenizer files AND its standalone rendering templates.
+
+    A rendering change invalidates DPO length filtering even when vocabulary IDs
+    are unchanged. Use this one implementation in preparation and consumption.
+    """
+    path = Path(path)
+    names = ("tokenizer.json", "tokenizer_config.json", "special_tokens_map.json",
+             "added_tokens.json", "chat_template.jinja")
+    files = [path / name for name in names if (path / name).is_file()]
+    files.extend(sorted((path / "chat_templates").glob("*.jinja")))
+    if not files:
+        raise FileNotFoundError(f"No tokenizer files found at {path}")
+    return stable_digest({str(p.relative_to(path)): sha256_file(p) for p in files})

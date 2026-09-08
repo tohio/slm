@@ -100,3 +100,40 @@ def test_string_preference_schema_can_replace_current_source():
     assert len(records) == 10
     assert records[0]["source_id"].startswith("pair-")
     assert stats["invalid_rows"] == 0
+
+
+def test_dpo_reuse_uses_checkpoint_bundle_and_detects_template_change(tmp_path, monkeypatch):
+    import json
+    from pathlib import Path
+    from alignment.data import prepare_dpo as prep
+    from config.checkpoints import bundled_tokenizer_dir
+
+    # A Mini output may carry a 350M-source tokenizer. There is intentionally
+    # no data/runs/mini/tokenizer, nor any fallback copy.
+    checkpoint = tmp_path / "results/runs/mini/sft_instruct/final"
+    tokenizer = checkpoint / "tokenizer"
+    tokenizer.mkdir(parents=True)
+    for name in ("tokenizer.json", "tokenizer_config.json"):
+        (tokenizer / name).write_text("{}")
+    template = tokenizer / "chat_template.jinja"
+    template.write_text("original template")
+    config = prep.load_config(Path(__file__).resolve().parents[1] / "alignment/configs/dpo_data_sources.yaml")
+    contract = prep.source_contract(config, "mini", tokenizer)
+    destination = tmp_path / "data/runs/mini/dpo_chat"
+    destination.mkdir(parents=True)
+    for name in ("train.jsonl", "val.jsonl"):
+        (destination / name).write_text("{}\n")
+    (destination / "manifest.json").write_text(json.dumps({
+        "contract_sha256": prep.sha256_json(contract), "contract": contract,
+        "files": {name: {"sha256": prep.sha256_file(destination / name)}
+                  for name in ("train.jsonl", "val.jsonl")},
+    }))
+    monkeypatch.setattr(prep, "dpo_chat_data_dir", lambda size: destination)
+    prep.prepare(config, "mini", False, checkpoint)  # no native tokenizer load/download on reuse
+    template.write_text("different template")
+    assert prep.tokenizer_fingerprint(tokenizer) != contract["tokenizer_sha256"]
+    with pytest.raises(RuntimeError, match="different DPO contract"):
+        prep.prepare(config, "mini", False, checkpoint)
+    (tokenizer / "tokenizer.json").unlink()
+    with pytest.raises(FileNotFoundError, match="bundled tokenizer"):
+        bundled_tokenizer_dir(checkpoint)

@@ -18,7 +18,10 @@ running on an existing multi-purpose host.
 ## Setup by role
 
 Prepare `.env` from `.env.sample`, selecting the data/results/export paths and
-credentials required by the chosen workflow. Use separate checkouts/environments
+credentials required by the chosen workflow. W&B is required: populate
+`WANDB_API_KEY` and `WANDB_PROJECT`, along with `HF_TOKEN` and the common paths.
+Storage settings are validated when selected transfers execute; `HF_USERNAME`
+is needed only for model publication. Use separate checkouts/environments
 for the two host roles; curation and training require different Transformers/Hub
 versions.
 
@@ -54,8 +57,11 @@ an existing environment aside explicitly; setup does not silently delete it.
 
 ## Curation assets
 
-Setup installs Python dependencies and verifies the curation package contract.
-The language-ID and perplexity model **assets** remain explicit downloads:
+Setup installs Python dependencies, `wget` for asset downloads, and KenLM Python
+bindings from pinned revision `4cb443e60b7bf2c0ddf3c745378f76cb59e254e5`.
+It verifies the curation package contract; a pinned source does not substitute
+for testing the build on the target host. The language-ID and perplexity model
+**assets** remain explicit downloads:
 
 ```bash
 make download-fasttext-model DATA_DIR=/data/slm/data
@@ -69,9 +75,13 @@ operator's responsibility.
 
 ## Training and optional restoration
 
-Training setup checks the existing NVIDIA/CUDA/BF16 contract and installs the
-pinned GPU stack. With no source run selected it performs setup only. With a
-source run selected it also restores the requested artifacts:
+Training setup requires an already working NVIDIA driver (`nvidia-smi`), then
+checks the NVIDIA/CUDA/BF16 contract and installs the pinned GPU stack. It does
+not install a driver or provide a CPU-only training installation. Model tests
+can execute on CPU after this environment has been installed. With no source
+run selected it performs setup only. With a source run selected it restores
+the requested artifacts; missing credentials fail the transfer rather than
+silently skipping it:
 
 ```bash
 make setup-train SIZE=mini DATASET_SIZE=350m DATASET_RUN_ID=350m-YYYYMMDD-abcdef \
@@ -94,6 +104,9 @@ make test-gpu-gate
 
 The GPU gate uses a tiny model, not a production corpus or checkpoint. Passing it
 is not proof of model convergence or production throughput.
+
+`train-all` already invokes this setup/restore flow. Use it directly for a new
+end-to-end training run, or use setup followed by individual stages—not both.
 
 ## Configure before launching
 

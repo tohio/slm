@@ -5,7 +5,7 @@ Llama packages for local use or publication on the Hugging Face Hub.
 
 ## Variants
 
-| Variant | Source checkpoint | Default Hub repository |
+| Variant | Source checkpoint | Example Hub repository (`HF_USERNAME=tohio`) |
 |---|---|---|
 | Base | `$RESULTS_DIR/runs/<size>/pretrain/final` | `tohio/slm-<size>` |
 | Instruct | `$RESULTS_DIR/runs/<size>/sft_instruct/final` | `tohio/slm-<size>-instruct` |
@@ -58,7 +58,8 @@ python export/export.py \
   --private
 ```
 
-Override the mapped source checkpoint with `--model PATH`. Hub publication
+Override the mapped source checkpoint with `--model PATH`; its recorded size and
+stage must still match `--size` and `--variant`. Hub publication
 reads `HF_USERNAME` and `HF_TOKEN` from the environment or `.env`; local
 `--dry-run` export does not require Hub credentials.
 
@@ -81,6 +82,17 @@ make test-vllm-export \
 ```
 
 ## Conversion contract
+
+Only 125M/350M/1B production profiles are exportable. Before loading model weights,
+export checks the checkpoint config against the declared profile and its
+checksum-verified pretraining/SFT/DPO run audit. The audit must identify the
+requested training stage and recipe; relabeling a Mini/base checkpoint through
+`--size`/`--variant` is rejected. Missing or legacy unverifiable audits require
+restoring genuine provenance, not manufacturing metadata.
+
+The tokenizer must be bundled with this checkpoint, either in `tokenizer/` or
+at its root. There is no fallback to a tokenizer selected merely by model size.
+Never retrain a replacement tokenizer for already learned embeddings.
 
 The project model and Transformers Llama model share the same decoder
 structure: tied token embeddings, pre-normalized decoder blocks, grouped-query
@@ -119,7 +131,8 @@ export_manifest.json
 
 Large models may use multiple safetensor shards and an index file.
 `export_manifest.json` records the source stage, variant, architecture,
-parameter count, source dtype, and package format.
+parameter count, source dtype, package format, and verified run-contract hash.
+Its stage comes from the audit, not a guess from the source directory name.
 
 ## Validation
 

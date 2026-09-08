@@ -61,7 +61,8 @@ Prepared records use TRL's conversational preference schema:
 }
 ```
 
-Preparation renders prompts with the target tokenizer, verifies a shared
+Preparation renders prompts with the instruct checkpoint's bundled tokenizer
+and active chat template, verifies a shared
 prompt prefix, enforces prompt/total token budgets, rejects identical or
 reversed pairs, controls duplicates, and splits by normalized complete prompt.
 The resulting manifest records source and tokenizer hashes, selection and
@@ -72,6 +73,21 @@ retention statistics, file hashes, and zero prompt overlap.
 ```bash
 make prepare-dpo SIZE=125m
 ```
+
+Prepare after instruct SFT completes. `make prepare-dpo` reads the same
+`DPO_CHAT_CONFIG` as training; by default its parent is the instruct final
+checkpoint. Cross-size pretraining does not require a second Mini tokenizer.
+An explicit parent override must be used consistently:
+
+```bash
+make prepare-dpo SIZE=mini DPO_BASE_MODEL=/path/to/instruct/final
+make dpo-chat SIZE=mini GPUS=1 DPO_BASE_MODEL=/path/to/instruct/final
+```
+
+The direct preparer accepts `--training-config` and `--base-model`. The shared
+fingerprint includes tokenizer files, `chat_template.jinja`, and named templates
+under `chat_templates/`. Changing rendering can change length-filter decisions,
+so old template-incomplete fingerprints require intentional re-preparation.
 
 Prepared output:
 
@@ -114,8 +130,8 @@ Run the bounded mini stage:
 make dpo-chat-mini SIZE=mini GPUS=1
 ```
 
-Run all preprocessing and compatibility checks without optimization or a
-reference-model pass:
+Run model/tokenizer, manifest, and raw-pair compatibility checks without
+optimization or a reference-model pass (TRL retention is checked at training):
 
 ```bash
 python alignment/train_dpo.py \
@@ -133,7 +149,14 @@ tokenizer hashes, preference schema, split isolation, TRL retention,
 non-empty completions, and evaluation/checkpoint cadence. It writes
 `dpo_run_audit.json` before optimization and promotes the
 lowest-validation-loss checkpoint to `final/` with the audit and data
-manifest.
+manifest. Resume requires an unchanged immutable run contract and an existing
+numbered checkpoint. That contract includes the original instruct weight/config
+hashes as both the initial policy and the fixed reference identity, plus config,
+data, tokenizer/rendering, and process count. New runs reject occupied outputs;
+preflight does not replace audit files. Best-checkpoint metrics remain in Trainer
+state/logs rather than mutating the run identity. See
+[post-training compatibility](../docs/TRAIN.md#post-training-identity-and-resume)
+for older audits and `--resume --preflight-only`.
 
 ## Validation
 

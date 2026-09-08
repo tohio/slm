@@ -49,11 +49,18 @@ no `auto_map`, and load with `trust_remote_code=False`.
 
 ## Data and Artifact Identity
 
-Reusable data artifacts are scoped by model size and an opaque `RUN_ID`.
+Reusable data artifacts are scoped by dataset profile (`DATASET_SIZE`) and an
+opaque source `RUN_ID`/`DATASET_RUN_ID`. Model architecture and output paths
+remain scoped by `SIZE`; the two sizes may differ.
 Stage manifests bind derived outputs to their inputs and configuration.
 Training and post-training checkpoints copy the relevant data manifest into
 their final directory so export can produce model-card provenance without
 guessing.
+
+Pretraining, instruct/code SFT, and DPO share immutable start/resume checks in
+`config/checkpoints.py`. The parent checkpoint supplies the tokenizer; model
+size is not a tokenizer identity. Export checks actual architecture and the
+recorded training stage before accepting the requested size/variant label.
 
 ## See Also
 

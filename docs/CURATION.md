@@ -12,8 +12,10 @@ uploaded, training-ready corpus.
 | `DATA_DIR` | Persistent storage root for datasets and artifacts |
 | `.env` | AWS, Hugging Face, W&B, cache, results, and export configuration |
 
-Fill the required common environment settings and the credentials for the
-selected artifact backend. Optional HF/search fields can remain blank when unused.
+Fill the required common settings, including `HF_TOKEN`, `WANDB_API_KEY`, and
+`WANDB_PROJECT`; W&B is required. Configure storage credentials when uploading
+or restoring artifacts. `HF_USERNAME` and search-provider fields may stay blank
+when model publication and web search are unused.
 
 Before running curation, use the Hugging Face account associated with
 `HF_TOKEN` to accept the terms for the gated sources in the active data mix:
@@ -60,9 +62,14 @@ Run smoke first:
 ```bash
 make curate-smoke DATA_DIR=/data/slm/data
 make validate SIZE=smoke DATA_DIR=/data/slm/data
+make tokenizer SIZE=smoke DATA_DIR=/data/slm/data
+make tokenizer-test SIZE=smoke DATA_DIR=/data/slm/data
+make tokenize SIZE=smoke DATA_DIR=/data/slm/data
 ```
 
-If smoke passes, run the functional mini-scale curation:
+Mini is optional, not a mandatory intermediate before a production dataset.
+It requires at least 1.4B usable selected training tokens after tokenization.
+To choose Mini, begin with:
 
 ```bash
 make curate-mini DATA_DIR=/data/slm/data
@@ -79,7 +86,8 @@ For a complete production-size workflow after bootstrap and smoke validation:
 make curate-all \
   SIZE=125m \
   WORKERS=62 \
-  DATA_DIR=/data/slm/data
+  DATA_DIR=/data/slm/data \
+  ARTIFACT_STAGES=validated,tokenized,tokenizer,metadata
 ```
 
 `curate-all` performs the following sequence:
@@ -89,7 +97,7 @@ make curate-all \
 3. Curates, filters, deduplicates, and blends the configured sources.
 4. Establishes test from training during blending without changing validation,
    audits all three overlap relationships, and validates all three splits.
-5. Trains and validates the size-specific BPE tokenizer.
+5. Trains and validates the dataset-run-specific BPE tokenizer on train only.
 6. Tokenizes and integrity-checks train, validation, and test binaries.
 7. Runs each artifact gate without rebuilding completed stages.
 8. Uploads only the stages selected by `ARTIFACT_STAGES` to the chosen backend;
@@ -126,8 +134,9 @@ make curate SIZE=125m WORKERS=62
 make test-curator SIZE=125m
 ```
 
-Use `make curate-smoke` for the bounded pipeline-validation run. Use
-`make curate-mini` for the functional mini-scale curation run. Both write to
+`make curate-smoke` exercises curation only; follow it through validation and
+tokenization for the bounded data-pipeline check. `make curate-mini` starts the
+optional Mini curation run. Both write to
 their own `$DATA_DIR/runs/<size>` namespace. Run smoke first on a new host.
 
 ### Validation
@@ -168,6 +177,12 @@ inputs, implementation, configuration, and outputs still match.
 
 Do not use `FORCE=1` as a normal resume mechanism. It is reserved for a
 specifically diagnosed stale or invalid stage.
+
+Once test membership exists, blend reuse also compares the current deduplicated
+input signatures, budget, mix, seed, and implementation with the saved blend
+manifest. Changed inputs/policy stop the command; use a new data root for a new
+corpus. The command never silently replaces an established test split. Restoring
+or training from completed artifacts does not require raw/dedup intermediates.
 
 ## Outputs
 

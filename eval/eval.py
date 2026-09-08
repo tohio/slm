@@ -156,24 +156,39 @@ def make_lm(model_path: Path, batch_size: int, device: str, dtype: str):
 
     class SLMHFLM(HFLM):
         def _model_generate(self, context, max_length: int, stop: list[str], **generation_kwargs):
-            """Use the verified SLM generation path for lm-eval.
+            """Preserve harness padding, stopping rules and decoding controls."""
+            from lm_eval.models.utils import stop_sequences_criteria
+            from transformers import StoppingCriteriaList
 
-            lm-eval's default HFLM generation path can diverge for this custom
-            model and produce unrelated prefixes before HumanEval stop strings.
-            This wrapper keeps canonical lm-eval tasks intact while making
-            generation match SLM inference/model.generate behavior.
-            """
-            input_len = context.shape[1]
-            max_new_tokens = max(1, max_length - input_len)
-            attention_mask = torch.ones_like(context)
-
+            attention_mask = generation_kwargs.pop("attention_mask", None)
+            if attention_mask is None:
+                pad_id = self.tokenizer.pad_token_id
+                if pad_id is None:
+                    attention_mask = torch.ones_like(context)
+                elif pad_id == self.tokenizer.eos_token_id and (context == pad_id).any():
+                    raise ValueError("An explicit attention_mask is required when PAD equals EOS")
+                else:
+                    attention_mask = context.ne(pad_id).long()
+            if attention_mask.shape != context.shape:
+                raise ValueError("Generation attention_mask must match the context shape")
+            budget = max_length - context.shape[1]
+            if "max_new_tokens" not in generation_kwargs:
+                if budget <= 0:
+                    raise ValueError("Generation max_length must exceed the padded input length")
+                generation_kwargs["max_new_tokens"] = budget
+            generation_kwargs.setdefault("do_sample", False)
+            if not generation_kwargs["do_sample"] and generation_kwargs.get("temperature") == 0:
+                generation_kwargs.pop("temperature")
+            criteria = list(generation_kwargs.pop("stopping_criteria", None) or [])
+            criteria.extend(stop_sequences_criteria(
+                self.tokenizer, stop, context.shape[1], context.shape[0],
+            ))
+            generation_kwargs.setdefault("eos_token_id", self.tokenizer.eos_token_id)
+            generation_kwargs.setdefault("pad_token_id", self.tokenizer.pad_token_id)
+            generation_kwargs.setdefault("use_cache", True)
             return self.model.generate(
-                input_ids=context,
-                attention_mask=attention_mask,
-                max_new_tokens=max_new_tokens,
-                do_sample=generation_kwargs.get("do_sample", False),
-                eos_token_id=self.tokenizer.eos_token_id,
-                pad_token_id=self.tokenizer.pad_token_id,
+                input_ids=context, attention_mask=attention_mask,
+                stopping_criteria=StoppingCriteriaList(criteria), **generation_kwargs,
             )
     from transformers import AutoConfig, AutoModelForCausalLM
     from model import SLMConfig, SLMForCausalLM

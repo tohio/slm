@@ -28,14 +28,16 @@ Output:
     data/runs/<size>/tokenized/train.json   — metadata (n_tokens, n_docs, dtype, vocab_size)
     data/runs/<size>/tokenized/val.bin      — same, for validation split
     data/runs/<size>/tokenized/val.json
+    data/runs/<size>/tokenized/test.bin     — same, for final-only test
+    data/runs/<size>/tokenized/test.json
     data/runs/<size>/tokenized/token_mixture.json
                                               — configured vs realized token shares
 
 Inputs:
-    By default both validated/train.jsonl and validated/val.jsonl are tokenized.
-    The val split was produced upstream by the curator's blend stage as a
-    uniform random sample of the shuffled documents, so val and train come
-    from the same distribution.
+    Validated train.jsonl, val.jsonl, and test.jsonl are tokenized together,
+    using the same tokenizer and document-boundary policy. Membership is
+    established upstream; tokenization verifies the existing holdout contract
+    rather than resplitting the corpus. Test remains final-evaluation-only.
 
 Tokenizer:
     Uses the raw tokenizers.Tokenizer from slm_tokenizer.json directly —
@@ -300,6 +302,9 @@ def _tokenize_split(
 
     Returns the metadata dict written to disk.
     """
+    vocab_size, validated_bos, validated_eos = _validate_tokenizer(tokenizer_path)
+    if (bos_id, eos_id) != (validated_bos, validated_eos):
+        raise RuntimeError("Split BOS/EOS IDs differ from the selected tokenizer")
     output_dir.mkdir(parents=True, exist_ok=True)
     bin_path  = output_dir / f"{split}.bin"
     meta_path = output_dir / f"{split}.json"
@@ -454,7 +459,7 @@ def _tokenize_split(
         "format_version": TOKENIZED_FORMAT_VERSION,
         "implementation_sha256": current_implementation_sha256,
         "source_counts": source_counts,
-        "vocab_size": Tokenizer.from_file(str(tokenizer_path)).get_vocab_size(with_added_tokens=True),
+        "vocab_size": vocab_size,
         "binary_sha256": sha256_file(bin_path),
     }
 
