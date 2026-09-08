@@ -101,22 +101,19 @@ cp .env.sample .env
 vi .env
 
 make setup-curate DATA_DIR=/data/slm/data
-source .venv/bin/activate
 
-make download-fasttext-model DATA_DIR=/data/slm/data
-make download-kenlm-model    DATA_DIR=/data/slm/data
-
-make curate-smoke DATA_DIR=/data/slm/data
-make validate SIZE=smoke DATA_DIR=/data/slm/data
-make tokenizer SIZE=smoke DATA_DIR=/data/slm/data
-make tokenizer-test SIZE=smoke DATA_DIR=/data/slm/data
-make tokenize SIZE=smoke DATA_DIR=/data/slm/data
+make curate-smoke
+make validate SIZE=smoke
+make tokenizer SIZE=smoke
+make tokenizer-test SIZE=smoke
+make tokenize SIZE=smoke
 ```
 
-Setup installs dependencies, including KenLM bindings. The two download targets
-fetch the external model assets; missing assets stop curation before source
-processing. The activation command above is for pip/uv; conda users use
-`conda activate "$PWD/.venv"`.
+Setup installs the curation software, prepares and checks the FastText and matched
+KenLM/SentencePiece model assets, and persists `DATA_DIR` in `.env`. No separate
+model-download step or shell activation is required for these Make commands.
+Existing valid assets are reused; missing or invalid assets make setup fail rather
+than report success. See [installer details](infra/README.md) for interactive use.
 
 Smoke is a bounded execution check through tokenization, not a model-quality
 measurement. Mini is an **optional** end-to-end development profile requiring

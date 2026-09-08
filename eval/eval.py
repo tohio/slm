@@ -57,7 +57,7 @@ load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from config.benchmarks import BENCHMARKS
+from config.benchmarks import BENCHMARKS, LM_EVAL_VERSION, LM_EVAL_REVISION
 
 logging.basicConfig(
     level=logging.INFO,
@@ -241,6 +241,67 @@ def metric_score(task_result: dict, metric: str):
     return None
 
 
+def pinned_task_manager(task_key: str):
+    """Pin each resolved leaf before lm-eval constructs it (and loads data).
+
+    lm-eval 0.4.9 recursively dispatches groups/tags through this method. Using
+    that dispatch preserves the harness's templates, metrics and MMLU subjects;
+    changing an already-created Task would be too late to pin its dataset.
+    """
+    from importlib.metadata import version
+    from lm_eval.tasks import TaskManager
+
+    if version("lm-eval") != LM_EVAL_VERSION:
+        raise RuntimeError(f"Benchmark task loading requires lm-eval=={LM_EVAL_VERSION}")
+    spec = BENCHMARKS[task_key]
+
+    class RevisionTaskManager(TaskManager):
+        def __init__(self):
+            super().__init__()
+            self.effective_tasks = {}
+
+        def _load_individual_task_or_group(self, name_or_config=None,
+                                          parent_name=None, update_config=None):
+            name = name_or_config if isinstance(name_or_config, str) else (
+                name_or_config.get("task") if isinstance(name_or_config, dict) else None)
+            if isinstance(name, str) and self._name_is_task(name):
+                config = dict(self._get_config(name))
+                if isinstance(name_or_config, dict):
+                    config.update(name_or_config)
+                config.update(update_config or {})
+                if "class" in config:
+                    raise RuntimeError("Python task classes cannot bypass the benchmark revision contract")
+                config["task"] = name
+                config["dataset_path"] = spec["dataset_path"]
+                # MMLU's decontamination source is the aggregate 'all' config;
+                # evaluation must retain the harness's per-subject configs.
+                if task_key != "mmlu":
+                    config["dataset_name"] = spec["dataset_name"]
+                elif not config.get("dataset_name") or config["dataset_name"] == "all":
+                    raise RuntimeError(f"Missing MMLU subject configuration for {name}")
+                actual_split = config.get("test_split") or config.get("validation_split")
+                if actual_split != spec["split"]:
+                    raise RuntimeError(f"Benchmark split mismatch for {name}: {actual_split!r}")
+                config["dataset_kwargs"] = {
+                    **(config.get("dataset_kwargs") or {}), "revision": spec["dataset_revision"],
+                }
+                self.effective_tasks[name] = {
+                    "dataset_path": config["dataset_path"],
+                    "dataset_name": config.get("dataset_name"),
+                    "dataset_revision": spec["dataset_revision"],
+                    "split": actual_split,
+                }
+                # Pass a fresh dict: the pinned harness consumes the 'task' key.
+                return super()._load_individual_task_or_group(
+                    config, parent_name=parent_name, update_config=None)
+            if isinstance(name, str) and self._name_is_python_task(name):
+                raise RuntimeError(f"Unpinnable Python benchmark task: {name}")
+            return super()._load_individual_task_or_group(
+                name_or_config, parent_name=parent_name, update_config=update_config)
+
+    return RevisionTaskManager()
+
+
 def run_evaluation(
     model_path: Path,
     tasks: list[str],
@@ -268,7 +329,8 @@ def run_evaluation(
 
     lm = make_lm(model_path, batch_size, device, dtype)
 
-    merged_results: dict = {"results": {}, "groups": {}, "samples": {}, "config": {}}
+    merged_results: dict = {"results": {}, "groups": {}, "samples": {}, "config": {},
+                            "configs": {}, "benchmark_identity": {}}
     failed_tasks: list[str] = []
 
     for task_key in tasks:
@@ -296,14 +358,24 @@ def run_evaluation(
             # When model is an HFLM instance, simple_evaluate ignores
             # device/batch_size kwargs — they're already set on the LM.
             # Keep only the args that actually apply.
+            manager = pinned_task_manager(task_key)
             results = evaluator.simple_evaluate(
                 model=lm,
                 tasks=[task_name],
+                task_manager=manager,
                 num_fewshot=num_fewshot,   # int — required by lm-eval 0.4.x
                 limit=limit,
                 log_samples=log_samples,
                 confirm_run_unsafe_code=confirm_unsafe,
             )
+            if not manager.effective_tasks:
+                raise RuntimeError(f"No revision-pinned dataset tasks resolved for {task_key}")
+            merged_results["benchmark_identity"][task_key] = {
+                "task": task_name, "num_fewshot": num_fewshot,
+                "lm_eval_version": LM_EVAL_VERSION, "lm_eval_revision": LM_EVAL_REVISION,
+                "datasets": manager.effective_tasks,
+            }
+            merged_results["configs"].update(results.get("configs", {}))
             # Stamp num_fewshot onto each per-task result so the saved JSON
             # is self-documenting. lm-eval 0.4.x doesn't include shot counts
             # in its output, so the canonical values from BENCHMARKS would

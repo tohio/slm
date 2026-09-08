@@ -9,7 +9,7 @@ running on an existing multi-purpose host.
 
 | File | Purpose |
 |---|---|
-| `setup_curate.sh` | Curation bootstrap, KenLM build, spaCy model, paths, and verification |
+| `setup_curate.sh` | Curation bootstrap, KenLM build, spaCy/FastText/KenLM assets, paths, and verification |
 | `setup_train.sh` | GPU bootstrap, training stack, optional source-run restoration |
 | `setup_environment.sh` | Internal pip/uv/conda installer shared by both roles |
 | `verify_environment.py` | Pinned role versions and optional CUDA checks |
@@ -51,7 +51,8 @@ make setup-train INSTALLER=conda DATA_DIR=/data/slm/data
 ```
 
 These illustrate alternative hosts, not two roles to layer into one `.venv`.
-Activate a pip/uv environment with `source .venv/bin/activate`; for conda use
+Make recipes address the repository environment directly. For interactive Python
+or pip commands, activate pip/uv with `source .venv/bin/activate`; for conda use
 `conda activate "$PWD/.venv"`. Switching between conda and venv requires moving
 an existing environment aside explicitly; setup does not silently delete it.
 
@@ -59,19 +60,18 @@ an existing environment aside explicitly; setup does not silently delete it.
 
 Setup installs Python dependencies, `wget` for asset downloads, and KenLM Python
 bindings from pinned revision `4cb443e60b7bf2c0ddf3c745378f76cb59e254e5`.
-It verifies the curation package contract; a pinned source does not substitute
-for testing the build on the target host. The language-ID and perplexity model
-**assets** remain explicit downloads:
+Setup invokes the existing internal download helpers to prepare FastText
+`lid.176.ftz` and the matched CCNet `en.arpa.bin` / `en.sp.model` pair, then
+checks that all three assets load. Expect the KenLM assets to require several GB
+of network transfer and storage on a new host. Valid assets are reused; the
+CCNet pair is checksum-verified and FastText is validated before promotion from
+its partial file. Failed transfers or invalid assets fail setup.
 
-```bash
-make download-fasttext-model DATA_DIR=/data/slm/data
-make download-kenlm-model DATA_DIR=/data/slm/data
-```
-
-Curation's internal prerequisite gate checks those three model files, `.env`,
-and pinned curation versions before source processing. Missing assets produce
-instructions and stop curation. Dataset access terms and credentials remain the
-operator's responsibility.
+No follow-up download targets are required in the normal workflow. The
+`download-fasttext-model` and `download-kenlm-model` helpers remain available for
+explicit repair, not as additional setup steps. Curation rechecks prerequisites
+at runtime. Dataset access terms and required credentials remain the operator's
+responsibility.
 
 ## Training and optional restoration
 
@@ -87,6 +87,11 @@ silently skipping it:
 make setup-train SIZE=mini DATASET_SIZE=350m DATASET_RUN_ID=350m-YYYYMMDD-abcdef \
   DATA_DIR=/data/slm/data ARTIFACT_BACKEND=hf
 ```
+
+Setup never recursively changes ownership of `DATA_DIR`'s parent or an existing
+directory tree. It may create a missing project data/cache/results leaf with
+privileges and assign that leaf to the invoking user. An existing unwritable
+project path fails with an instruction to grant access to that specific path.
 
 The setup restore default is `tokenized,tokenizer,metadata`. Select additional
 stages explicitly, for example `ARTIFACT_STAGES=validated,tokenized,tokenizer,metadata`

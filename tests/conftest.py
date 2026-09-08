@@ -98,3 +98,19 @@ def code_sft_model_dir(results_dir, model_size):
 @pytest.fixture(scope="session")
 def dpo_model_dir(results_dir, model_size):
     return results_dir / "runs" / model_size / "dpo_chat" / "final"
+
+
+@pytest.fixture
+def recovery_files():
+    """Structural recovery fixture only; these bytes are not native torch states."""
+    import json
+    def create(path, *, world_size=1):
+        path.mkdir(parents=True, exist_ok=True)
+        for name in ("config.json", "model.safetensors", "optimizer.pt", "scheduler.pt"):
+            (path / name).write_text("{}")
+        rng = ["rng_state.pth"] if world_size == 1 else [f"rng_state_{i}.pth" for i in range(world_size)]
+        for name in rng:
+            (path / name).write_bytes(b"structural fixture")
+        (path / "trainer_state.json").write_text(json.dumps({"global_step": int(path.name.split("-")[-1])}))
+        return path
+    return create

@@ -98,12 +98,18 @@ class TestRMSNorm:
         out = norm(x)
         assert out.shape == x.shape
 
-    def test_output_dtype_preserved(self):
+    def test_output_dtype_matches_native_llama(self):
         from model.norm import RMSNorm
-        norm = RMSNorm(384)
-        x = torch.randn(2, 16, 384).to(torch.float16)
-        out = norm(x)
-        assert out.dtype == torch.float16
+        from transformers.models.llama.modeling_llama import LlamaRMSNorm
+
+        x = torch.randn(2, 16, 384, dtype=torch.float16)
+        for weight_dtype in (torch.float32, torch.float16):
+            norm = RMSNorm(384).to(weight_dtype)
+            native = LlamaRMSNorm(384, eps=norm.eps).to(weight_dtype)
+            native.load_state_dict(norm.state_dict())
+            out, expected = norm(x), native(x)
+            assert out.dtype == expected.dtype
+            torch.testing.assert_close(out, expected)
 
     def test_normalized_rms_close_to_one(self):
         """After RMSNorm with weight=1, RMS of output should be ~1."""
@@ -511,13 +517,8 @@ class TestSLMForCausalLM:
         sharded,
     ):
         """Regression for Transformers 5 reinitializing loaded custom weights."""
-        from transformers import PreTrainedModel
-
         from model.model import SLMForCausalLM
 
-        assert "from_pretrained" not in SLMForCausalLM.__dict__, (
-            "SLM must use the native PreTrainedModel.from_pretrained implementation"
-        )
         assert "tie_weights" not in SLMForCausalLM.__dict__, (
             "SLM must use the native tied-weight mapping during checkpoint loading"
         )
@@ -561,8 +562,7 @@ class TestSLMForCausalLM:
 
         # A different seed makes accidental post-load reinitialization obvious.
         torch.manual_seed(991)
-        loaded, loading_info = PreTrainedModel.from_pretrained.__func__(
-            SLMForCausalLM,
+        loaded, loading_info = SLMForCausalLM.from_pretrained(
             str(tmp_path),
             output_loading_info=True,
             use_safetensors=use_safetensors,

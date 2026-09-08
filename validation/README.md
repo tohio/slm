@@ -78,11 +78,11 @@ fallback for a missing model.
 
 ## Prerequisites
 
-Install the KenLM bindings and download the matched English model pair:
+The curation setup installs the KenLM bindings and prepares the matched English
+model pair, together with FastText:
 
 ```bash
-make setup-curate
-make download-kenlm-model DATA_DIR=/data/slm/data
+make setup-curate DATA_DIR=/data/slm/data
 ```
 
 The default model paths are:

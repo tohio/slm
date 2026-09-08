@@ -44,3 +44,9 @@ See the testing guide for the exact selections.
 
 RoPE reload coverage remains in `model/test_rope_loading.py`. Extend the existing
 pipeline/contract tests only where needed; no parallel test framework is used.
+
+
+The existing model/reload tests preserve learned-weight and native RMSNorm parity
+checks. Recovery-file fixtures test incomplete latest checkpoints without pretending
+that dummy bytes are valid native optimizer state. Runtime acceptance still needs
+the pinned training environment; see [test scope](../docs/TESTING.md).

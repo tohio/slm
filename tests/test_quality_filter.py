@@ -158,7 +158,20 @@ def test_fineweb_newline_to_word_ratio_rejects_list_like_text():
 
 
 def test_fineweb_metrics_apply_only_to_raw_common_crawl():
-    text = "\n".join(_long_line(index, punctuated=False) for index in range(10))
+    # Natural, distinct lines isolate terminal punctuation without triggering
+    # the earlier repetition detector (the old numbered template repeated 4-grams).
+    text = "\n".join([
+        "A careful gardener measures rainfall before planting seedlings in the sheltered vegetable beds",
+        "Research teams compare independent observations when investigating unusual patterns across distant galaxies",
+        "The museum curator described ancient pottery techniques while visitors examined several restored vessels",
+        "Local engineers designed a footbridge that withstands seasonal flooding without blocking river traffic",
+        "Students learn geometric reasoning by drawing diagrams and explaining why each construction works",
+        "Mountain trails pass through varied habitats where hikers sometimes encounter rare flowering plants",
+        "An experienced baker adjusts fermentation time according to room temperature and flour properties",
+        "Historical archives preserve letters describing daily life during periods of rapid industrial change",
+        "Community volunteers restored damaged wetlands using native vegetation adapted to shallow water",
+        "Reliable software handles unexpected input carefully instead of assuming every request is valid",
+    ])
 
     common_crawl = QualityFilter()
     assert common_crawl.check({"text": text, "source": "common_crawl"}) == (

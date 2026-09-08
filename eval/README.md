@@ -39,7 +39,12 @@ The benchmark wrapper supports:
 Evaluation and curation share the version-locked benchmark contract in
 `config/benchmarks.py`. It pins lm-eval v0.4.9 task definitions and immutable
 Hugging Face dataset commits used by exact and 13-word benchmark
-decontamination.
+decontamination. The wrapper checks the installed lm-eval version and applies
+`dataset_kwargs.revision` to resolved task configs **before** dataset loading,
+including every group/tag leaf. MMLU keeps each subject's dataset config while
+using the shared pinned commit (curation audits its aggregate `all` config).
+A split or unsupported harness mismatch fails the task rather than falling back
+to an unpinned dataset. Merely pinning the harness package is not sufficient.
 
 Run a complete branch evaluation:
 
@@ -127,6 +132,10 @@ Other local model paths use:
 ```text
 $RESULTS_DIR/eval/<model name>/eval_<UTC timestamp>.json
 ```
+
+Saved JSON includes `benchmark_identity` with the harness version/revision,
+effective dataset path/config/commit/split for each leaf, and few-shot count.
+`configs` retains all resolved task configs rather than only the last benchmark.
 
 Benchmark evaluation exits nonzero if any selected task fails. Sanity
 evaluation prints each failed rule, writes JSON when `--json-out` is supplied,

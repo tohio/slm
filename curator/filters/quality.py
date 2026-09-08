@@ -25,8 +25,8 @@ Source-conditional filter skips:
     notebooks can fall on either side.
 
 FastText language detection:
-    Requires the fasttext lid.176.ftz model — download once via:
-        make download-fasttext-model
+    Requires the fasttext lid.176.ftz model — prepared by:
+        make setup-curate
     Model path defaults to DATA_DIR/models/lid.176.ftz.
     The canonical curation stage fails before prose filtering if the model or
     Python package is unavailable, so environment drift cannot silently change
@@ -134,7 +134,7 @@ def _get_fasttext_model():
         if not _fasttext_warned:
             log.warning(
                 f"FastText model not found at {_FASTTEXT_MODEL_PATH}. "
-                f"Language detection disabled — run 'make download-fasttext-model'. "
+                f"Language detection disabled — rerun 'make setup-curate'. "
                 f"Stop word fallback will be used instead."
             )
             _fasttext_warned = True
@@ -162,7 +162,7 @@ def require_fasttext_model():
     if model is None:
         raise RuntimeError(
             "FastText language detection is required for prose filtering. "
-            "Install fasttext-wheel and run 'make download-fasttext-model'."
+            "Install fasttext-wheel and rerun 'make setup-curate'."
         )
     return model
 

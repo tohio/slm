@@ -7,10 +7,12 @@ from scripts.sft_model_comparison import (
     _tokenized_training_row,
 )
 from tests.test_trl_smoke import _tokenizer
+from config.chat import CHAT_TEMPLATE
 
 
 def test_explicit_completion_labels_retain_eos_and_mask_prompt():
     tokenizer = _tokenizer()
+    tokenizer.chat_template = CHAT_TEMPLATE
     row = _tokenized_training_row(
         tokenizer,
         user_text="Say hello",
@@ -28,6 +30,7 @@ def test_explicit_completion_labels_retain_eos_and_mask_prompt():
 
 def test_explicit_token_budget_rejects_complete_example():
     tokenizer = _tokenizer()
+    tokenizer.chat_template = CHAT_TEMPLATE
     row = _tokenized_training_row(
         tokenizer,
         user_text="Say hello",

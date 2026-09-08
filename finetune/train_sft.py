@@ -61,7 +61,6 @@ from contextlib import nullcontext
 import tempfile
 import json
 import logging
-import math
 import os
 import shutil
 import sys
@@ -163,82 +162,13 @@ def load_tokenizer(tokenizer_path: Path):
 
 
 def resolve_warmup_steps(train_cfg: dict, num_train_examples: int) -> int:
-    """
-    Resolve warmup_steps from the recipe ratio and the actual training shape.
-
-    Reads `warmup_ratio_recipe` (the recipe value, written by config_gen)
-    and computes the equivalent step count. Honours an explicit
-    `warmup_steps` override if present (back-compat for hand-edited
-    configs). Refuses to silently accept the deprecated `warmup_ratio` key.
-
-    Returns 0 if no warmup is configured.
-    """
-    if "warmup_steps" in train_cfg and train_cfg["warmup_steps"]:
-        # Explicit override — trust it. Caveat: this won't auto-rescale
-        # across GPU counts the way the ratio does. Logged for visibility.
-        steps = int(train_cfg["warmup_steps"])
-        log.info(
-            f"Warmup: {steps} steps (explicit override; will not auto-rescale "
-            f"across GPU counts)"
-        )
-        return steps
-
-    if "warmup_ratio" in train_cfg:
-        # Old-style key. TRL deprecated it; we refuse to pass it through to
-        # avoid the deprecation warning, but we honour the value the user
-        # clearly intended.
-        log.warning(
-            "Config uses deprecated `warmup_ratio` key. Rename to "
-            "`warmup_ratio_recipe` (or regenerate the config with "
-            "`make config-gen-sft`). Honouring the value for this run."
-        )
-        ratio = float(train_cfg["warmup_ratio"])
-    elif "warmup_ratio_recipe" in train_cfg:
-        ratio = float(train_cfg["warmup_ratio_recipe"])
-    else:
-        return 0
-
-    if ratio <= 0.0:
-        return 0
-    if ratio > 1.0:
-        raise ValueError(f"warmup ratio must be <= 1.0, got {ratio}")
-
-    # Resolve world size — accelerate/torchrun set this; fallback to 1.
-    world_size = int(os.environ.get("WORLD_SIZE", "1"))
-    micro_batch = int(train_cfg["micro_batch_size"])
-    grad_accum  = int(train_cfg.get("gradient_accumulation_steps", 1))
-    epochs = int(train_cfg.get("epochs", 1))
-
-    global_batch = micro_batch * grad_accum * world_size
-    steps_per_epoch = math.ceil(num_train_examples / global_batch)
-    configured_max_steps = int(train_cfg.get("max_steps", -1))
-    total_steps = (
-        configured_max_steps
-        if configured_max_steps > 0
-        else steps_per_epoch * epochs
-    )
-    steps = max(1, round(total_steps * ratio))
-
-    log.info(
-        f"Warmup: {steps} steps "
-        f"({ratio:.1%} of {total_steps} total = "
-        f"{steps_per_epoch} steps/epoch × {epochs} epochs; "
-        f"global_batch={global_batch}, world_size={world_size})"
-    )
-    return steps
+    from config.schedule import resolve_warmup_steps as shared_warmup
+    return shared_warmup(train_cfg, num_train_examples, default_epochs=2)
 
 
 def resolve_total_steps(train_cfg: dict, num_train_examples: int) -> int:
-    max_steps = int(train_cfg.get("max_steps", -1))
-    if max_steps > 0:
-        return max_steps
-    world_size = int(os.environ.get("WORLD_SIZE", "1"))
-    global_batch = (
-        int(train_cfg["micro_batch_size"])
-        * int(train_cfg.get("gradient_accumulation_steps", 1))
-        * world_size
-    )
-    return math.ceil(num_train_examples / global_batch) * int(train_cfg.get("epochs", 1))
+    from config.schedule import resolve_total_steps as shared_total
+    return shared_total(train_cfg, num_train_examples, default_epochs=2)
 
 
 def build_sft_args(cfg: dict, output_dir: Path, num_train_examples: int):
@@ -323,7 +253,7 @@ def build_sft_args(cfg: dict, output_dir: Path, num_train_examples: int):
         warmup_steps=warmup_steps,
         per_device_train_batch_size=micro_batch,
         per_device_eval_batch_size=eval_micro_batch,
-        gradient_accumulation_steps=train_cfg.get("gradient_accumulation_steps", 4),
+        gradient_accumulation_steps=train_cfg.get("gradient_accumulation_steps", 1),
         learning_rate=lr,
         weight_decay=weight_decay,
         adam_beta1=beta1,
@@ -446,7 +376,8 @@ def main():
     parser = argparse.ArgumentParser(description="SLM Supervised Fine-Tuning")
     parser.add_argument("--config",     type=Path, required=True, help="Path to SFT config YAML")
     parser.add_argument("--base-model", type=Path, default=None,  help="Override base model path")
-    parser.add_argument("--resume",     action="store_true",       help="Resume from latest checkpoint")
+    parser.add_argument("--resume", nargs="?", const="latest", default=None,
+                        help="Resume latest complete checkpoint, or select a same-run checkpoint path")
     parser.add_argument(
         "--preflight-only",
         action="store_true",
@@ -466,6 +397,7 @@ def main():
     audit_filename = "sft_run_audit.json"
     resume_checkpoint = resolve_training_checkpoint(
         output_dir, resume=args.resume, audit_filename=audit_filename,
+        require_scaler=bool(torch.cuda.is_available() and cfg["training"].get("precision") == "fp16"),
     )
     data_cfg = cfg["data"]
     train_path = Path(os.path.expandvars(data_cfg["train_path"]))
@@ -476,6 +408,8 @@ def main():
     )
     tokenizer_path = bundled_tokenizer_dir(base_model_path)
     base_identity = checkpoint_identity(base_model_path)
+    from config.provenance import collect_training_provenance, save_training_provenance
+    collect_training_provenance(base_model_path)
 
     log.info(f"=== SLM Supervised Fine-Tuning ===")
     log.info(f"Config:     {args.config}")
@@ -642,6 +576,7 @@ def main():
             tokenizer.save_pretrained(str(final_dir / "tokenizer"))
             shutil.copy2(output_dir / audit_filename, final_dir / audit_filename)
             shutil.copy2(manifest_path, final_dir / "sft_data_manifest.json")
+            save_training_provenance(final_dir, parent=base_model_path)
         trainer.accelerator.wait_for_everyone()
 
         log.info(f"Model saved to {final_dir}")

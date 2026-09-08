@@ -213,3 +213,14 @@ training stack and does not establish the real Mini checkpoint's loss baseline.
 No separate retention, test-contract, split-integration, or diagnostics suites
 are required. Tool-call parsing/SFT contract checks live in the existing relevant
 contract tests; full model and live-provider behavior require the actual runtime.
+
+
+Existing reload tests validate preserved checkpoint tensors through the normal
+model loader, not the absence of a loader wrapper. RMSNorm checks compare the
+native implementation at matching input/weight dtypes. Comparison fixtures use
+the production chat template; quality-filter fixtures isolate their intended
+rejection instead of depending on an earlier repetition-filter decision.
+Recovery fixtures check missing optimizer/scheduler/RNG state and explicit earlier
+selection; those structural fixtures are not serialized native optimizer states.
+A passing structural gate does not replace a real interrupted/resumed training
+check in the pinned runtime. No new standalone test suite is required.

@@ -36,14 +36,11 @@ before starting a larger run:
 
 ```bash
 make setup-curate DATA_DIR=/data/slm/data
-source .venv/bin/activate
-make download-fasttext-model DATA_DIR=/data/slm/data
-make download-kenlm-model    DATA_DIR=/data/slm/data
-make curate-smoke            DATA_DIR=/data/slm/data
-make validate SIZE=smoke     DATA_DIR=/data/slm/data
-make tokenizer SIZE=smoke    DATA_DIR=/data/slm/data
-make tokenizer-test SIZE=smoke DATA_DIR=/data/slm/data
-make tokenize SIZE=smoke     DATA_DIR=/data/slm/data
+make curate-smoke
+make validate SIZE=smoke
+make tokenizer SIZE=smoke
+make tokenizer-test SIZE=smoke
+make tokenize SIZE=smoke
 ```
 
 Then optionally select Mini (at least 1.4B usable training tokens) or use
@@ -99,11 +96,13 @@ FastText/orjson, and curation verification. `setup-train` installs the complete
 GPU/evaluation stack from `requirements-training.txt`. Both include shared
 `requirements.txt`. All installers use `.venv`. See [setup details](../infra/README.md).
 
-Download required curation model assets before curation:
+Curation setup includes FastText and KenLM runtime assets and persists `DATA_DIR`
+in `.env`; do not run separate download commands after successful setup. These
+internal helpers remain available for deliberate asset repair only:
 
 ```bash
-make download-fasttext-model DATA_DIR=/data/slm/data
-make download-kenlm-model DATA_DIR=/data/slm/data
+make download-fasttext-model
+make download-kenlm-model
 ```
 
 The curation prerequisite and training environment checks are internal workflow
@@ -247,6 +246,12 @@ configuration and training. Mini uses this flow; Smoke remains separate.
 ---
 
 ## Pretraining
+
+All stage-specific resume targets accept `RESUME_CHECKPOINT=/path/to/checkpoint-N`
+to select a verified earlier checkpoint under the configured run output. Without
+it, the latest numeric checkpoint is selected. Incomplete recovery state is an
+error, never a request to reset the optimizer or silently fall back. See
+[recovery requirements](TRAIN.md#recovery-checkpoint-completeness).
 
 ```bash
 make pretrain-preflight SIZE=125m GPUS=1

@@ -96,7 +96,7 @@ def test_sft_manifest_checks_full_prepared_identity(tmp_path, fault):
 
 
 @pytest.mark.parametrize("audit_name", ["sft_run_audit.json", "dpo_run_audit.json"])
-def test_posttraining_audit_is_immutable_and_resume_is_explicit(tmp_path, audit_name):
+def test_posttraining_audit_is_immutable_and_resume_is_explicit(tmp_path, audit_name, recovery_files):
     from config.checkpoints import resolve_training_checkpoint, validate_or_write_run_audit
 
     contract = {"config": "same", "base_checkpoint": "weights-a", "reference_checkpoint": "ref-a"}
@@ -108,7 +108,7 @@ def test_posttraining_audit_is_immutable_and_resume_is_explicit(tmp_path, audit_
     path = check(contract, write=True)
     original = path.read_bytes()
     (tmp_path / "checkpoint-2").mkdir()
-    (tmp_path / "checkpoint-10").mkdir()
+    recovery_files(tmp_path / "checkpoint-10")
     assert resolve_training_checkpoint(tmp_path, resume=True, audit_filename=audit_name).name == "checkpoint-10"
     with pytest.raises(RuntimeError, match="already contains"):
         resolve_training_checkpoint(tmp_path, resume=False, audit_filename=audit_name)
@@ -117,3 +117,31 @@ def test_posttraining_audit_is_immutable_and_resume_is_explicit(tmp_path, audit_
             check(changed, write=True, resume=True)
     check(contract, resume=True)
     assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("missing", ["optimizer.pt", "scheduler.pt", "rng_state.pth", "model.safetensors", "trainer_state.json"])
+def test_incomplete_latest_recovery_requires_explicit_earlier_checkpoint(tmp_path, recovery_files, missing):
+    from config.checkpoints import resolve_training_checkpoint
+    earlier = recovery_files(tmp_path / "checkpoint-2")
+    newest = recovery_files(tmp_path / "checkpoint-10")
+    (newest / missing).unlink()
+    with pytest.raises(RuntimeError, match="Incomplete recovery"):
+        resolve_training_checkpoint(tmp_path, resume=True, audit_filename="sft_run_audit.json")
+    assert resolve_training_checkpoint(tmp_path, resume=earlier, audit_filename="sft_run_audit.json") == earlier
+
+
+def test_recovery_requires_matching_rank_rng_scaler_and_step(tmp_path, recovery_files):
+    import json
+    from config.checkpoints import validate_recovery_checkpoint
+    checkpoint = recovery_files(tmp_path / "checkpoint-2", world_size=2)
+    with pytest.raises(RuntimeError, match="scaler.pt"):
+        validate_recovery_checkpoint(checkpoint, world_size=2, require_scaler=True)
+    (checkpoint / "scaler.pt").write_text("fixture")
+    validate_recovery_checkpoint(checkpoint, world_size=2, require_scaler=True)
+    (checkpoint / "rng_state_1.pth").unlink()
+    with pytest.raises(RuntimeError, match="rng_state_1.pth"):
+        validate_recovery_checkpoint(checkpoint, world_size=2)
+    (checkpoint / "rng_state_1.pth").write_text("fixture")
+    (checkpoint / "trainer_state.json").write_text(json.dumps({"global_step": 1}))
+    with pytest.raises(RuntimeError, match="Invalid Trainer recovery"):
+        validate_recovery_checkpoint(checkpoint, world_size=2)

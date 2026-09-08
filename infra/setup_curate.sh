@@ -15,7 +15,8 @@
 #   5. Downloads the spaCy English model
 #   6. Creates the required data directory structure
 #   7. Configures .env with correct paths
-#   8. Validates the environment
+#   8. Prepares FastText and matched KenLM/SentencePiece runtime assets
+#   9. Validates the environment and model assets
 #
 # Assumptions:
 #   - Ubuntu 22.04
@@ -99,7 +100,7 @@ install_environment "${REPO_DIR}/requirements-curation.txt"
 
 # ── 4. KenLM Python bindings ──────────────────────────────────────────────────
 # Build the selected KenLM revision for validation's perplexity scorer.
-# Model assets are downloaded separately with download-kenlm-model.
+# Model assets are prepared below through the existing download helpers.
 
 echo ""
 echo "==> Installing KenLM Python bindings..."
@@ -217,6 +218,13 @@ export HF_HOME="${HF_CACHE_DIR}"
 export HF_DATASETS_CACHE="${HF_CACHE_DIR}"
 export DATA_DIR="${DATA_DIR}"
 
+# Prepare runtime assets after installing their loaders. Downloads use the
+# configured data directory and finish before setup can report success.
+echo ""
+echo "==> Preparing FastText and KenLM runtime model assets..."
+run_environment make -C "$REPO_DIR" download-fasttext-model download-kenlm-model \
+    DATA_DIR="$DATA_DIR" PYTHON="$VENV_DIR/bin/python"
+
 # ── 9. Validate ───────────────────────────────────────────────────────────────
 
 echo ""
@@ -272,21 +280,17 @@ for size in "${CURATION_SIZES[@]}"; do
     done
 done
 
-# Check fasttext model — warn only (downloaded separately)
-if [ -f "${DATA_DIR}/models/lid.176.ftz" ]; then
-    echo "  OK: fasttext language model found"
-else
-    echo "  WARNING: fasttext model not found — run: make download-fasttext-model DATA_DIR=${DATA_DIR}"
-    echo "           Required before running any curation target"
-fi
-
-# Check matched CCNet model pair — warn only (downloaded separately)
-if [ -f "${DATA_DIR}/models/en.arpa.bin" ] && [ -f "${DATA_DIR}/models/en.sp.model" ]; then
-    echo "  OK: CCNet KenLM and SentencePiece models found"
-else
-    echo "  WARNING: CCNet model pair incomplete — run: make download-kenlm-model DATA_DIR=${DATA_DIR}"
-    echo "           Required before running any curation target"
-fi
+# Load the complete asset set, not merely its filenames.
+run_environment "$VENV_DIR/bin/python" - <<'ASSET_CHECK' || ERRORS=$((ERRORS + 1))
+import os
+from pathlib import Path
+import fasttext, kenlm, sentencepiece
+models = Path(os.environ["DATA_DIR"]) / "models"
+fasttext.load_model(str(models / "lid.176.ftz"))
+kenlm.Model(str(models / "en.arpa.bin"))
+sentencepiece.SentencePieceProcessor(model_file=str(models / "en.sp.model"))
+print("  FastText and matched KenLM/SentencePiece assets are loadable")
+ASSET_CHECK
 
 # Check .env required variables — warnings only, not hard errors.
 # Credentials must be populated before running the pipeline but are
@@ -318,16 +322,12 @@ if [ "$ERRORS" -eq 0 ]; then
     echo "Next steps:"
     echo "  1. Review ${ENV_FILE}; HF_TOKEN and W&B key/project are required for the pipeline"
     echo "     Configure storage credentials only for selected transfers"
-    echo "  2. source ~/.bashrc  (or open a new shell)"
-    echo "  3. $(activation_command)"
-    echo "  4. make download-fasttext-model DATA_DIR=${DATA_DIR}"
-    echo "  5. make download-kenlm-model    DATA_DIR=${DATA_DIR}"
-    echo "  6. Run the bounded curation-to-tokenization smoke check (prerequisite checks run internally):"
-    echo "       make curate-smoke DATA_DIR=${DATA_DIR}"
-    echo "       make validate SIZE=smoke DATA_DIR=${DATA_DIR}"
-    echo "       make tokenizer SIZE=smoke DATA_DIR=${DATA_DIR}"
-    echo "       make tokenizer-test SIZE=smoke DATA_DIR=${DATA_DIR}"
-    echo "       make tokenize SIZE=smoke DATA_DIR=${DATA_DIR}"
+    echo "  2. Run the bounded curation-to-tokenization smoke check (no shell activation needed):"
+    echo "       make curate-smoke"
+    echo "       make validate SIZE=smoke"
+    echo "       make tokenizer SIZE=smoke"
+    echo "       make tokenizer-test SIZE=smoke"
+    echo "       make tokenize SIZE=smoke"
     echo ""
     echo "     Then choose optional Mini (1.4B usable train tokens) or a production size:"
     echo "       make curate-mini DATA_DIR=${DATA_DIR}                 # functional mini-scale curation"

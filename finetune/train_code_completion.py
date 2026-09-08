@@ -30,6 +30,15 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import AutoConfig, AutoTokenizer, get_cosine_schedule_with_warmup
 
 from config.runtime import configure_torch_runtime
+from config.chat import tokenizer_fingerprint
+from config.checkpoints import (
+    bundled_tokenizer_dir, checkpoint_identity, find_latest_checkpoint,
+    resolve_training_checkpoint, validate_or_write_run_audit, architecture_identity,
+)
+from config.holdout import sha256_file
+from curator.state import stable_digest
+
+RAW_AUDIT = "code_completion_run_audit.json"
 
 from model.config import SLMConfig
 from model.model import SLMForCausalLM
@@ -160,12 +169,23 @@ def evaluate_loss(model, loader, device: torch.device) -> float:
     return weighted_loss / supervised_tokens
 
 
-def save_checkpoint(model, tokenizer, out_dir: Path, metadata: dict[str, Any]) -> None:
+def save_checkpoint(model, tokenizer, out_dir: Path, metadata: dict[str, Any], *,
+                    tokenizer_source: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     model.save_pretrained(str(out_dir))
-    tokenizer.save_pretrained(str(out_dir / "tokenizer"))
-    tokenizer.save_pretrained(str(out_dir))
+    # Raw completion does not alter the tokenizer/template. Preserve its exact
+    # source files instead of reserializing incidental tokenizer-config fields.
+    names = ("tokenizer.json", "tokenizer_config.json", "special_tokens_map.json",
+             "added_tokens.json", "chat_template.jinja", "slm_tokenizer.json")
+    for destination in (out_dir / "tokenizer", out_dir):
+        destination.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            source = tokenizer_source / name
+            if source.is_file():
+                shutil.copy2(source, destination / name)
+        if (tokenizer_source / "chat_templates").is_dir():
+            shutil.copytree(tokenizer_source / "chat_templates", destination / "chat_templates", dirs_exist_ok=True)
 
     (out_dir / "generation_config.json").write_text(
         json.dumps(
@@ -207,13 +227,52 @@ def validate_model_tokenizer(model, tokenizer, max_length: int) -> None:
 
 
 def latest_recovery_checkpoint(output_dir: Path) -> Path | None:
-    checkpoints: list[tuple[int, Path]] = []
-    for path in output_dir.glob("checkpoint-*"):
-        try:
-            checkpoints.append((int(path.name.split("-")[-1]), path))
-        except ValueError:
-            continue
-    return max(checkpoints, default=(0, None))[1]
+    return find_latest_checkpoint(output_dir)
+
+
+def training_batches(num_examples: int, batch_size: int, *, seed: int,
+                     epoch: int, next_batch: int = 0) -> list[list[int]]:
+    """Replay an epoch's permutation from its own generator, then apply the cursor.
+
+    The sampler never consumes the model/dropout RNG. Checkpoints are saved only
+    after complete optimizer updates, so no partially accumulated gradients need
+    to be reconstructed.
+    """
+    if min(num_examples, batch_size) <= 0 or epoch < 0:
+        raise ValueError("Invalid sampler dimensions or epoch")
+    count = math.ceil(num_examples / batch_size)
+    if not 0 <= next_batch <= count:
+        raise RuntimeError("Recovery data cursor is outside the current dataset")
+    order = torch.randperm(num_examples, generator=torch.Generator().manual_seed(seed + epoch)).tolist()
+    return [order[start:start + batch_size]
+            for start in range(next_batch * batch_size, num_examples, batch_size)]
+
+
+def validate_prepared_data(train_path: Path, val_path: Path, base_model: Path) -> dict:
+    """Require records derived only from the parent stage's original split membership."""
+    stats_path = train_path.parent / "stats.json"
+    if val_path.parent != train_path.parent or not stats_path.is_file():
+        raise RuntimeError("Restore/reprepare raw completion train, val and stats.json together")
+    stats = json.loads(stats_path.read_text(encoding="utf-8"))
+    if stats.get("validation_origin") != "parent_val_only":
+        raise RuntimeError("Reprepare raw completion data: validation must come only from the parent holdout")
+    for path in (train_path, val_path):
+        if stats.get("files", {}).get(path.name) != sha256_file(path):
+            raise RuntimeError(f"Raw completion preparation identity mismatch: {path}")
+    parent_path = base_model / "sft_data_manifest.json"
+    if not parent_path.is_file():
+        raise RuntimeError("Raw completion requires the parent code-SFT data manifest")
+    parent = json.loads(parent_path.read_text(encoding="utf-8"))
+    audit = json.loads((base_model / "sft_run_audit.json").read_text(encoding="utf-8"))
+    contract = audit.get("contract", {})
+    if (audit.get("contract_sha256") != stable_digest(contract)
+            or contract.get("stage") != "sft_code"
+            or contract.get("data_manifest_sha256") != stable_digest(parent)):
+        raise RuntimeError("Parent code-SFT manifest/audit identity mismatch")
+    for filename in ("train.jsonl", "val.jsonl"):
+        if stats.get("parent_files", {}).get(filename) != parent.get("files", {}).get(filename, {}).get("sha256"):
+            raise RuntimeError("Raw completion inputs do not match the parent SFT training/holdout files")
+    return stats
 
 
 def save_recovery_state(
@@ -225,10 +284,29 @@ def save_recovery_state(
     update: int,
     best_val: float,
     metadata: dict[str, Any],
+    *, epoch: int, next_batch: int, sampler_shape: dict,
+    run_contract_sha256: str, tokenizer_source: Path,
 ) -> None:
     checkpoint_dir = output_dir / f"checkpoint-{update}"
-    save_checkpoint(model, tokenizer, checkpoint_dir, metadata)
+    if checkpoint_dir.exists():
+        raise RuntimeError(f"Recovery checkpoint already exists: {checkpoint_dir}. "
+                           "Move later checkpoints aside before explicitly rewinding this run.")
+    staging = output_dir / f".checkpoint-{update}.tmp"
+    if staging.exists():
+        shutil.rmtree(staging)
+    save_checkpoint(model, tokenizer, staging, metadata, tokenizer_source=tokenizer_source)
+    shutil.copy2(output_dir / RAW_AUDIT, staging / RAW_AUDIT)
+    best_dir = output_dir / "best"
+    # 'best/' can advance after this recovery step and before a crash. Snapshot
+    # it here so a valid recovery does not depend on that mutable future state.
+    saved_best = staging / "best"
+    if best_dir.is_dir() and best_val < float("inf"):
+        shutil.copytree(best_dir, saved_best)
     state = {
+        "schema_version": 2,
+        "contract_sha256": run_contract_sha256,
+        "data_cursor": {"epoch": epoch, "next_batch": next_batch, **sampler_shape},
+        "best_checkpoint_identity": checkpoint_identity(saved_best) if saved_best.is_dir() else None,
         "update": update,
         "best_val": best_val,
         "optimizer": optimizer.state_dict(),
@@ -238,7 +316,8 @@ def save_recovery_state(
     }
     if torch.cuda.is_available():
         state["cuda_random_state"] = torch.cuda.get_rng_state_all()
-    torch.save(state, checkpoint_dir / "training_state.pt")
+    torch.save(state, staging / "training_state.pt")
+    staging.replace(checkpoint_dir)
 
 
 def main() -> None:
@@ -282,6 +361,8 @@ def main() -> None:
     eval_steps = int(train_cfg.get("eval_steps", 100))
     save_steps = int(train_cfg.get("save_steps", eval_steps))
     save_best = bool(train_cfg.get("save_best", True))
+    if min(micro_batch_size, eval_micro_batch_size, gradient_accumulation_steps) <= 0:
+        raise SystemExit("Batch sizes and gradient accumulation must be positive")
     if max_updates <= 0 or eval_steps <= 0 or save_steps <= 0:
         raise SystemExit("max_updates, eval_steps, and save_steps must be positive")
     if eval_steps > max_updates or save_steps > max_updates:
@@ -311,10 +392,6 @@ def main() -> None:
     print(f"Max updates: {max_updates}")
     print(f"LR:          {learning_rate}")
 
-    tokenizer = AutoTokenizer.from_pretrained(str(base_model / "tokenizer"))
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
     resume_dir: Path | None = None
     if args.resume:
         resume_dir = (
@@ -322,8 +399,22 @@ def main() -> None:
             if args.resume == "latest"
             else expand_path(args.resume)
         )
-        if resume_dir is None or not (resume_dir / "training_state.pt").exists():
-            raise SystemExit(f"No recoverable checkpoint found for --resume in {output_dir}")
+        if resume_dir is None or not (resume_dir / "training_state.pt").is_file():
+            raise SystemExit(f"Incomplete raw recovery checkpoint in {output_dir}; "
+                             "restore all state or explicitly select an earlier checkpoint")
+        if resume_dir.resolve().parent != output_dir.resolve():
+            raise SystemExit("Restore the recovery checkpoint and run audit together under the configured output_dir")
+    else:
+        resolve_training_checkpoint(output_dir, resume=False, audit_filename=RAW_AUDIT)
+
+    if int(os.environ.get("WORLD_SIZE", "1")) != 1:
+        raise SystemExit("The optional raw-completion loop is single-process; use one GPU for this branch")
+    preparation = validate_prepared_data(train_path, val_path, base_model)
+    base_identity = checkpoint_identity(base_model)
+    tokenizer_path = bundled_tokenizer_dir(resume_dir or base_model)
+    tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_path))
+    if tokenizer_fingerprint(tokenizer_path) != base_identity["tokenizer_sha256"]:
+        raise RuntimeError("Recovery tokenizer differs from the original parent tokenizer")
 
     model = SLMForCausalLM.from_pretrained(
         str(resume_dir or base_model),
@@ -345,17 +436,12 @@ def main() -> None:
     print(f"Train tokenization audit: {json.dumps(train_dataset.stats, sort_keys=True)}")
     print(f"Val tokenization audit:   {json.dumps(val_dataset.stats, sort_keys=True)}")
 
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=micro_batch_size,
-        shuffle=True,
-        collate_fn=Collator(tokenizer.pad_token_id),
-    )
     val_loader = DataLoader(
         val_dataset,
         batch_size=eval_micro_batch_size,
         shuffle=False,
         collate_fn=Collator(tokenizer.pad_token_id),
+        generator=torch.Generator().manual_seed(seed),
     )
 
     optimizer = torch.optim.AdamW(
@@ -373,6 +459,18 @@ def main() -> None:
         num_training_steps=max_updates,
     )
 
+    contract = {
+        "contract_version": 1, "stage": "sft_code_completion",
+        "resolved_config": cfg, "base_checkpoint": base_identity,
+        "architecture": architecture_identity(model.config),
+        "tokenizer_sha256": tokenizer_fingerprint(tokenizer_path),
+        "preparation_sha256": stable_digest(preparation),
+        "sampler": "seed_plus_epoch_v1", "precision": str(dtype),
+    }
+    validate_or_write_run_audit(
+        output_dir, contract, audit_filename=RAW_AUDIT, schema_version=1,
+        resume=bool(args.resume), write=False,
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
 
     model.train()
@@ -382,12 +480,43 @@ def main() -> None:
     micro = 0
     running_loss = 0.0
     best_val = float("inf")
+    epoch = 0
+    next_batch = 0
+    sampler_shape = {"examples": len(train_dataset), "batch_size": micro_batch_size,
+                     "gradient_accumulation_steps": gradient_accumulation_steps}
     if resume_dir is not None:
         state = torch.load(
             resume_dir / "training_state.pt",
             map_location="cpu",
-            weights_only=False,
+            weights_only=True,
         )
+        required = {"optimizer", "scheduler", "update", "best_val", "python_random_state",
+                    "torch_random_state", "data_cursor", "contract_sha256", "best_checkpoint_identity"}
+        if state.get("schema_version") != 2 or not required.issubset(state):
+            raise RuntimeError("Incomplete/legacy raw recovery state: sampler cursor and complete optimizer state are required")
+        if state["contract_sha256"] != stable_digest(contract):
+            raise RuntimeError("Raw recovery state belongs to a different run contract")
+        cursor = state["data_cursor"]
+        if any(cursor.get(k) != v for k, v in sampler_shape.items()):
+            raise RuntimeError("Raw recovery sampler shape changed")
+        epoch, next_batch = cursor["epoch"], cursor["next_batch"]
+        training_batches(len(train_dataset), micro_batch_size, seed=seed, epoch=epoch, next_batch=next_batch)
+        step_suffix = resume_dir.name.removeprefix("checkpoint-")
+        if not step_suffix.isdigit() or state["update"] != int(step_suffix) or not 0 < state["update"] <= max_updates:
+            raise RuntimeError("Raw recovery update does not match its checkpoint")
+        expected_batches = state["update"] * gradient_accumulation_steps
+        actual_batches = epoch * math.ceil(len(train_dataset) / micro_batch_size) + next_batch
+        if actual_batches != expected_batches:
+            raise RuntimeError("Raw recovery cursor disagrees with completed optimizer updates")
+        if device.type == "cuda" and "cuda_random_state" not in state:
+            raise RuntimeError("Missing CUDA RNG recovery state")
+        if (not state["optimizer"].get("state")
+                or state["scheduler"].get("last_epoch") != state["update"]):
+            raise RuntimeError("Raw recovery is missing optimizer progress or its matching scheduler step")
+        if save_best and state["best_val"] < float("inf"):
+            saved_best = resume_dir / "best"
+            if not saved_best.is_dir() or checkpoint_identity(saved_best) != state["best_checkpoint_identity"]:
+                raise RuntimeError("Restore the best-model snapshot contained in this raw recovery checkpoint")
         optimizer.load_state_dict(state["optimizer"])
         scheduler.load_state_dict(state["scheduler"])
         update = int(state["update"])
@@ -396,10 +525,29 @@ def main() -> None:
         torch.set_rng_state(state["torch_random_state"])
         if device.type == "cuda" and "cuda_random_state" in state:
             torch.cuda.set_rng_state_all(state["cuda_random_state"])
-        print(f"Resumed from {resume_dir} at update {update}")
+        if save_best:
+            # Restore the best model belonging to this step, not an uncommitted
+            # best from later work. This is run-state recovery, not retention.
+            best_dir = output_dir / "best"
+            if best_dir.exists():
+                shutil.rmtree(best_dir)
+            if best_val < float("inf"):
+                shutil.copytree(resume_dir / "best", best_dir)
+        print(f"Resumed from {resume_dir} at update {update}, epoch {epoch}, next batch {next_batch}")
 
+    validate_or_write_run_audit(
+        output_dir, contract, audit_filename=RAW_AUDIT, schema_version=1,
+        resume=bool(args.resume), write=True,
+    )
     while update < max_updates:
+        batches = training_batches(len(train_dataset), micro_batch_size, seed=seed,
+                                   epoch=epoch, next_batch=next_batch)
+        train_loader = DataLoader(
+            train_dataset, batch_sampler=batches, collate_fn=Collator(tokenizer.pad_token_id),
+            generator=torch.Generator().manual_seed(seed + epoch),
+        )
         for batch in train_loader:
+            next_batch += 1
             batch = {k: v.to(device) for k, v in batch.items()}
 
             out = model(**batch)
@@ -445,6 +593,7 @@ def main() -> None:
                                 "update": update,
                                 "val_loss": val_loss,
                             },
+                            tokenizer_source=tokenizer_path,
                         )
                         print(f"Saved best checkpoint: {output_dir / 'best'}")
 
@@ -469,11 +618,16 @@ def main() -> None:
                             "train_tokenization": train_dataset.stats,
                             "val_tokenization": val_dataset.stats,
                         },
+                        epoch=epoch, next_batch=next_batch, sampler_shape=sampler_shape,
+                        run_contract_sha256=stable_digest(contract), tokenizer_source=tokenizer_path,
                     )
                     print(f"Saved recovery checkpoint: {output_dir / f'checkpoint-{update}'}")
 
                 if update >= max_updates:
                     break
+        if next_batch == math.ceil(len(train_dataset) / micro_batch_size):
+            epoch += 1
+            next_batch = 0
 
     # Evaluate the actual final update if it did not coincide with eval_steps.
     if update % eval_steps:
@@ -486,6 +640,7 @@ def main() -> None:
                 tokenizer,
                 output_dir / "best",
                 {"config": str(cfg_path), "update": update, "val_loss": val_loss},
+                tokenizer_source=tokenizer_path,
             )
 
     final_metadata = {
@@ -517,7 +672,8 @@ def main() -> None:
             encoding="utf-8",
         )
     else:
-        save_checkpoint(model, tokenizer, final_dir, final_metadata)
+        save_checkpoint(model, tokenizer, final_dir, final_metadata, tokenizer_source=tokenizer_path)
+    shutil.copy2(output_dir / RAW_AUDIT, final_dir / RAW_AUDIT)
     print(f"Saved final checkpoint: {final_dir}")
 
 

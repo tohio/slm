@@ -198,3 +198,23 @@ See [`HARDWARE.md`](HARDWARE.md) for the supported hardware contract.
 - [Disk setup](DISK_SETUP.md)
 - [Command reference](COMMANDS.md)
 - [Curation component guide](../curator/README.md)
+
+
+## Incomplete recovery or relocated export
+
+An incomplete newest `checkpoint-N` is an error even when its model weights load.
+Restore optimizer, scheduler, Trainer and RNG files (and the FP16 scaler when
+applicable), or select a verified earlier checkpoint under the same run with
+`RESUME_CHECKPOINT=...`. Do not delete only the failed checkpoint and assume the
+next one is a valid continuation. See [recovery details](TRAIN.md#recovery-checkpoint-completeness).
+Raw completion additionally requires its sampler cursor and bundled best-model snapshot;
+legacy raw state without a cursor cannot be upgraded into exact continuation.
+
+A relocated final should include `training_provenance.json`. For a legacy final
+without that bundle, use verified original ancestors through repeated
+`--provenance-parent` export arguments; do not edit old audit paths/hashes or
+substitute another model-size corpus. See [portable export](../export/README.md#portable-provenance).
+
+Training setup refuses an existing unwritable project path. Grant access to that
+specific directory or choose another `DATA_DIR`; do not recursively change the
+ownership of a shared parent such as `/mnt`.

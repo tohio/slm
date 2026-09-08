@@ -37,7 +37,7 @@ KenLM model:
     wget https://dl.fbaipublicfiles.com/cc_net/lm/en.arpa.bin
     wget https://dl.fbaipublicfiles.com/cc_net/lm/en.sp.model
 
-    Use ``make download-kenlm-model`` so both files are installed together.
+    ``make setup-curate`` prepares and checks both files together.
 
 Usage:
     python validation/scripts/validate.py

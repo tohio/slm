@@ -930,7 +930,7 @@ def stage_filter(workers: int | None = None, sources: list[str] | None = None) -
         raise RuntimeError(
             f"FastText language model is required for prose filtering but "
             f"was not found at {fasttext_path}. Run "
-            f"'make download-fasttext-model' before filtering."
+            f"'make setup-curate' before filtering."
         )
     if prose_sources:
         require_fasttext_model()

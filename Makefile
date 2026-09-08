@@ -177,9 +177,8 @@ check-curation-prereqs: check-env
 	[ -s "$$kenlm_sp" ] || missing="$$missing\n  KenLM SP: $$kenlm_sp"; \
 	if [ -n "$$missing" ]; then \
 		printf 'ERROR: curation prerequisites are missing:%b\n\n' "$$missing"; \
-		echo "Install them with:"; \
-		echo "  make download-fasttext-model DATA_DIR=$(DATA_DIR)"; \
-		echo "  make download-kenlm-model    DATA_DIR=$(DATA_DIR)"; \
+		echo "Prepare the curation environment and assets with:"; \
+		echo "  make setup-curate DATA_DIR=$(DATA_DIR)"; \
 		exit 1; \
 	fi
 
@@ -390,7 +389,7 @@ pretrain-resume-preflight:
 	@echo "==> Pretraining resume preflight ($(SIZE), $(GPUS) GPU(s), config=$(PRETRAIN_CONFIG))"
 	$(PYTHON) pretrain/train.py \
 		--config "$(PRETRAIN_CONFIG)" $(_DATASET_FLAGS) \
-		--resume \
+		--resume $(if $(RESUME_CHECKPOINT),"$(RESUME_CHECKPOINT)",) \
 		--preflight-only \
 		--expected-gpus "$(GPUS)"
 
@@ -402,7 +401,7 @@ pretrain:
 pretrain-resume:
 	$(ACCELERATE) pretrain/train.py \
 		--config "$(PRETRAIN_CONFIG)" $(_DATASET_FLAGS) \
-		--resume
+		--resume $(if $(RESUME_CHECKPOINT),"$(RESUME_CHECKPOINT)",)
 
 pretrain-mini:
 	@echo "==> Generate the Mini config for the selected GPUS=$(GPUS), then use the standard pretraining path"
@@ -450,7 +449,7 @@ sft: sft-instruct
 sft-instruct-resume:
 	$(ACCELERATE) finetune/train_sft.py \
 		--config $(SFT_INSTRUCT_CONFIG) \
-		--resume
+		--resume $(if $(RESUME_CHECKPOINT),"$(RESUME_CHECKPOINT)",)
 
 sft-instruct-mini:
 	@echo "==> Stage 5b: Mini instruct SFT (pipeline validation)"
@@ -468,7 +467,7 @@ sft-code:
 sft-code-resume:
 	$(ACCELERATE) finetune/train_sft.py \
 		--config $(SFT_CODE_CONFIG) \
-		--resume
+		--resume $(if $(RESUME_CHECKPOINT),"$(RESUME_CHECKPOINT)",)
 
 sft-code-mini:
 	@echo "==> Stage 5c: Mini code SFT (pipeline validation)"
@@ -510,7 +509,7 @@ dpo-chat:
 dpo-chat-resume:
 	$(ACCELERATE) alignment/train_dpo.py \
 		--config $(DPO_CHAT_CONFIG) $(_DPO_BASE_FLAG) \
-		--resume
+		--resume $(if $(RESUME_CHECKPOINT),"$(RESUME_CHECKPOINT)",)
 
 dpo-chat-mini:
 	@echo "==> Stage 6b: Mini chat DPO (pipeline validation)"
@@ -648,7 +647,7 @@ test-upgrade-gpu: test-gpu-gate
 
 download-kenlm-model:
 	@echo "==> Downloading matched CCNet English model pair (~4GB)..."
-	mkdir -p $(DATA_DIR)/models
+	mkdir -p "$(DATA_DIR)/models"
 	@if [ -s "$(DATA_DIR)/models/en.arpa.bin" ] && \
 		echo "$(CCNET_EN_ARPA_MD5)  $(DATA_DIR)/models/en.arpa.bin" | md5sum -c --status; then \
 		echo "  Reusing $(DATA_DIR)/models/en.arpa.bin"; \
@@ -676,12 +675,18 @@ download-kenlm-model:
 	@echo "  CCNet KenLM and SentencePiece models are ready"
 
 download-fasttext-model:
-	@echo "==> Downloading fasttext language identification model (~1MB)..."
-	mkdir -p $(DATA_DIR)/models
-	wget -q --show-progress \
-		https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.ftz \
-		-O $(DATA_DIR)/models/lid.176.ftz
-	@echo "  Saved to $(DATA_DIR)/models/lid.176.ftz"
+	@echo "==> Preparing FastText language identification model (~1MB)..."
+	mkdir -p "$(DATA_DIR)/models"
+	@if [ -s "$(DATA_DIR)/models/lid.176.ftz" ] && \
+		$(PYTHON) -c 'import fasttext; fasttext.load_model("$(DATA_DIR)/models/lid.176.ftz")' >/dev/null 2>&1; then \
+		echo "  Reusing $(DATA_DIR)/models/lid.176.ftz"; \
+	else \
+		wget -q --show-progress \
+			https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.ftz \
+			-O "$(DATA_DIR)/models/lid.176.ftz.partial" && \
+		$(PYTHON) -c 'import fasttext; fasttext.load_model("$(DATA_DIR)/models/lid.176.ftz.partial")' && \
+		mv "$(DATA_DIR)/models/lid.176.ftz.partial" "$(DATA_DIR)/models/lid.176.ftz" || exit 1; \
+	fi
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -915,8 +920,8 @@ help:
 	@echo "One-time setup (INSTALLER=pip|uv|conda; default pip):"
 	@echo "  setup-curate             Curation environment; accepts DATA_DIR=..."
 	@echo "  setup-train              GPU training environment; optional dataset RUN_ID restore"
-	@echo "  download-fasttext-model  Download fasttext language ID model (~1MB)"
-	@echo "  download-kenlm-model     Download CCNet English model pair (~4GB)"
+	@echo "  download-fasttext-model  Internal FastText asset repair (called by setup-curate)"
+	@echo "  download-kenlm-model     Internal KenLM asset repair (called by setup-curate)"
 	@echo "  test-upgrade-gpu         One-shot CUDA/compile/cache acceptance test"
 	@echo ""
 	@echo "Tests (CPU — data pipeline):"
@@ -974,7 +979,7 @@ help:
 	@echo "  pretrain-preflight Validate a new run without allocating model weights"
 	@echo "  pretrain           Stage 4b — pretrain from scratch"
 	@echo "  pretrain-resume-preflight Validate checkpoint and provenance before resume"
-	@echo "  pretrain-resume    Stage 4b — resume the latest compatible checkpoint"
+	@echo "  pretrain-resume    Stage 4b — resume complete state (optional RESUME_CHECKPOINT)"
 	@echo "  pretrain-smoke     Stage 4b — bounded smoke pretraining run"
 	@echo "  pretrain-mini      Stage 4b — 69.9M functional mini pilot"
 	@echo "  smoke-gen          Stage 4b — generate from \$$(RESULTS_DIR)/runs/\$$(SIZE)/pretrain/final to spot-check"

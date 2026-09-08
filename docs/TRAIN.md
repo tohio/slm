@@ -214,6 +214,38 @@ pretrain/final
     └── dpo_chat/final
 ```
 
+## Recovery checkpoint completeness
+
+Resume verifies both the immutable run inputs **and** the selected recovery
+checkpoint. `final/` is a model artifact, not a substitute for optimizer recovery.
+Keep the run-root audit and the complete numbered checkpoint together:
+model config and weights (all indexed shards), `trainer_state.json`, `optimizer.pt`,
+`scheduler.pt`, and RNG state (`rng_state.pth` for one process or one
+`rng_state_<rank>.pth` per DDP rank). FP16 CUDA recovery also needs `scaler.pt`.
+The saved global step must match the checkpoint number. Native loading remains
+responsible for validating serialized state contents; file presence alone is not
+a numerical reproducibility guarantee across different hardware or runtimes.
+
+The latest numeric checkpoint is selected by default. If it is incomplete, the
+command stops and reports missing files; it does not silently reset optimizer
+state or select another step. Restore that checkpoint fully, or explicitly select
+a verified earlier checkpoint under the same run output:
+
+```bash
+make pretrain-resume SIZE=125m GPUS=1 \
+  RESUME_CHECKPOINT=/data/slm/results/runs/125m/pretrain/checkpoint-1000
+```
+
+The same selector works with `pretrain-resume-preflight`, `sft-instruct-resume`,
+`sft-code-resume`, and `dpo-chat-resume`. The corresponding Python entry points
+accept `--resume /path/to/checkpoint-N`. Preserve any best-checkpoint artifacts
+referenced by Trainer state as well; a transfer must not be limited to weights.
+
+SFT/DPO accept positive fractional `epochs`. Update planning rounds batches and
+accumulation as the pinned Trainer does, then takes the ceiling after multiplying
+by epochs; a positive `max_steps` overrides epoch-derived planning. Warmup uses
+the same planned update count. Existing integer-epoch recipes are unchanged.
+
 ## Post-training identity and resume
 
 Instruct/code SFT and DPO require the tokenizer bundled with their input
@@ -229,7 +261,7 @@ and rendering template. Both validate the whole input before `max_samples`.
 The immutable run audit binds the resolved recipe, model architecture, input
 checkpoint config/weight hashes, tokenizer/template, prepared data, and process
 count. DPO also binds its original fixed reference checkpoint. Resume must find
-a numbered checkpoint and a matching audit; a new run into an occupied directory
+a complete numbered recovery checkpoint and a matching audit; a new run into an occupied directory
 is rejected. `--preflight-only` does not replace the run audit. Use it with
 `--resume` when checking an interrupted run.
 
@@ -310,3 +342,19 @@ for the separate Smoke path.
 
 [Tool calling](TOOL_CALLING.md) describes the optional reviewed SFT input and
 single-call chat runtime. It uses the existing trainer and tool vocabulary.
+
+
+## Portable final-checkpoint provenance
+
+New pretraining, SFT and DPO finals include `training_provenance.json`. It contains
+small, checksum-verified stage audits, prepared-data manifests, checkpoint
+fingerprints and pretraining corpus metadata—not ancestor model weights or corpus
+copies. This history is carried forward at each branch, so export does not need
+the historical absolute parent paths on the original training host.
+
+Model cards use the audited `dataset_size` and dataset run rather than assuming
+`SIZE` identifies the source corpus. Full source-corpus counts, selected unique
+training tokens, recorded consumed tokens and the planned schedule are reported
+separately. New pretraining runs count actual training inputs; legacy resumes
+without full-run counting report consumption as unrecorded, never infer it from
+an advanced step counter. See [export inputs and legacy recovery](../export/README.md#portable-provenance).

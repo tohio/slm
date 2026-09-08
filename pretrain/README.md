@@ -180,15 +180,23 @@ $RESULTS_DIR/runs/<size>/pretrain/final/
 The run root contains `pretrain_run_audit.json`. It binds the resolved
 training configuration, tokenizer fingerprint, tokenized-data identity,
 process count, and distributed strategy. `--resume` requires the audit and
-latest checkpoint and refuses changed inputs instead of starting over.
+selected complete checkpoint and refuses changed inputs instead of starting over.
+Missing optimizer, scheduler, per-rank RNG, Trainer or required FP16 scaler state
+causes an error even when model weights are present. An earlier checkpoint can be
+selected with `RESUME_CHECKPOINT=...`; see [recovery requirements](../docs/TRAIN.md#recovery-checkpoint-completeness).
 
 The configured seed is applied before fresh weight initialization. On resume,
 Trainer restores the selected checkpoint and its RNG state; construction does
 not overwrite saved learned weights. A recorded seed is not a guarantee of
 bitwise results across different hardware/runtime versions.
 
-The audit is copied into `final/`. The final checkpoint is the parent of
-instruct SFT and is consumed without post-pretraining embedding mutation.
+The audit and a small `training_provenance.json` bundle are copied into `final/`.
+The bundle captures the source dataset size/run, verified tokenizer-measured
+source mix, selected unique token budget, and observed input-token count when
+counting covered the full run. Legacy resumes without that guarantee report the
+count as unrecorded. No later export reads a mutable model-size data directory
+to reconstruct this history. The final checkpoint is the parent of instruct SFT
+and is consumed without post-pretraining embedding mutation.
 
 Run the base generation smoke check after a completed pretraining run:
 

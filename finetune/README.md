@@ -138,14 +138,17 @@ checkpoint. New runs cannot overwrite occupied outputs. Preflight uses temporary
 Trainer output and never replaces an established run audit.
 
 The promoted `final/` directory contains the lowest-validation-loss checkpoint,
-its actual tokenizer/template, the run audit, and the prepared-data manifest:
+its actual tokenizer/template, the run audit, the prepared-data manifest, and
+the portable `training_provenance.json` ancestry bundle:
 
 ```text
 $RESULTS_DIR/runs/<size>/sft_instruct/final/
 $RESULTS_DIR/runs/<size>/sft_code/final/
 ```
 
-For interrupted-run preflight add `--resume`. Older post-training audits without
+For interrupted-run preflight add `--resume` (optionally followed by an explicit
+checkpoint path). Missing recovery state is rejected; see
+[recovery requirements](../docs/TRAIN.md#recovery-checkpoint-completeness). Older post-training audits without
 an immutable contract cannot be used to assert safe resume. See
 [training identity and compatibility](../docs/TRAIN.md#post-training-identity-and-resume).
 Trainer state/logs, not a rewritten run audit, record best-checkpoint metrics.
@@ -159,9 +162,15 @@ make prepare-code-completion SIZE=125m
 make sft-code-completion SIZE=125m
 ```
 
-The preparation stage checks prompt and pair leakage. Training masks prompt
-tokens, uses token-weighted validation loss, writes resumable checkpoints, and
-promotes the best validation checkpoint to:
+Preparation preserves parent split membership: validation comes only from the
+original held-out code-SFT file. A small nonempty holdout is kept; an empty one
+fails instead of borrowing examples the parent model already trained on.
+`stats.json` binds output files to the parent train/validation file hashes.
+Training verifies those hashes against the parent code-SFT manifest/audit.
+
+This optional single-process trainer masks prompt tokens, uses token-weighted
+validation loss, writes recoverable checkpoints, and promotes the best validation
+checkpoint to:
 
 ```text
 $RESULTS_DIR/runs/<size>/sft_code_completion/final/
@@ -174,6 +183,26 @@ python finetune/train_code_completion.py \
   --config finetune/configs/code_completion_125m.yaml \
   --resume
 ```
+
+Recovery stores the epoch and next-batch cursor alongside optimizer, scheduler
+and Python/Torch/CUDA RNG states. Each epoch's permutation comes from an
+independent seed-based sampler, so restarting an iterator cannot repeat or skip
+the remaining examples or perturb dropout RNG. The raw run audit is immutable;
+resumes verify recipe, prepared data, parent identity and tokenizer. Tokenizer
+files are loaded from recovery and preserved without rewriting the vocabulary.
+
+With `save_best` enabled, each recovery directory contains a verified `best/`
+snapshot for that step. This requires additional model storage, but prevents a
+later best-model update from invalidating an otherwise complete recovery.
+Resume restores the run's mutable best model from that snapshot; copying only
+`training_state.pt` is insufficient. To rewind, move later checkpoints aside
+explicitly; saves do not overwrite existing numbered directories. Legacy raw checkpoints without a
+cursor cannot provide exact continuation and are rejected. Legacy preparation
+without `validation_origin=parent_val_only` must be re-prepared. These restrictions
+do not delete or modify the old artifacts.
+
+This optional branch remains a local completion experiment; it is not a fifth
+production export variant.
 
 Evaluate the branch with HumanEval:
 

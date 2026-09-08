@@ -197,10 +197,11 @@ needed only for the selected transfer/publication operation.
 
 ```bash
 make setup-curate DATA_DIR=/data/slm/data
-source .venv/bin/activate
-make download-fasttext-model DATA_DIR=/data/slm/data
-make download-kenlm-model DATA_DIR=/data/slm/data
 ```
+
+Setup installs dependencies, downloads/reuses the FastText and matched KenLM
+assets, checks that they load, and stores `DATA_DIR` in `.env`. The Make workflow
+uses `.venv/bin/python` directly; there is no separate asset-download step.
 
 `HF_TOKEN` is required for authenticated or gated Hub sources. Accept each
 enabled dataset's terms before starting a full run:

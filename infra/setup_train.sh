@@ -103,13 +103,27 @@ fi
 # ── Directories ───────────────────────────────────────────────────────────────
 log "Creating directory structure..."
 
-# If DATA_DIR parent doesn't exist or is owned by root, fix ownership
-DATA_PARENT="$(dirname "$DATA_DIR")"
-if [[ ! -w "$DATA_PARENT" ]]; then
-    log "  $DATA_PARENT not writable — fixing ownership with sudo..."
-    sudo mkdir -p "$DATA_PARENT"
-    sudo chown -R "$(whoami):$(whoami)" "$DATA_PARENT"
-fi
+# Never chown DATA_PARENT (e.g. /mnt) or traverse existing directory trees.
+# Only create missing project roots. Existing unwritable locations require the
+# operator to grant access explicitly; setup must not take ownership of shared data.
+ensure_project_directory() {
+    local path="$1"
+    if [[ -e "$path" ]]; then
+        if [[ ! -d "$path" || ! -w "$path" || ! -x "$path" ]]; then
+            log "ERROR: Project path is not a writable/searchable directory: $path"
+            log "Grant access to this specific path, or select a different project location."
+            exit 1
+        fi
+    elif ! mkdir -p -- "$path" 2>/dev/null; then
+        log "  Creating project directory with sudo: $path"
+        sudo mkdir -p -- "$path"
+        # No -R: parent directories, existing contents and sibling mounts are untouched.
+        sudo chown "$(id -u):$(id -g)" -- "$path"
+    fi
+}
+ensure_project_directory "$DATA_DIR"
+ensure_project_directory "$HF_CACHE_DIR"
+ensure_project_directory "$RESULTS_DIR"
 
 mkdir -p \
     "$RUN_DATA_DIR/tokenized" \

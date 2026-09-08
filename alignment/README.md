@@ -148,10 +148,11 @@ The trainer validates model/tokenizer compatibility, prepared-data and
 tokenizer hashes, preference schema, split isolation, TRL retention,
 non-empty completions, and evaluation/checkpoint cadence. It writes
 `dpo_run_audit.json` before optimization and promotes the
-lowest-validation-loss checkpoint to `final/` with the audit and data
-manifest. Resume requires an unchanged immutable run contract and an existing
-numbered checkpoint. That contract includes the original instruct weight/config
-hashes as both the initial policy and the fixed reference identity, plus config,
+lowest-validation-loss checkpoint to `final/` with the audit, data manifest, and
+portable `training_provenance.json` ancestry bundle. Resume requires an unchanged
+immutable run contract and a complete numbered recovery checkpoint. That contract
+includes the original instruct weight/config hashes as both the initial policy
+and the fixed reference identity, plus config,
 data, tokenizer/rendering, and process count. New runs reject occupied outputs;
 preflight does not replace audit files. Best-checkpoint metrics remain in Trainer
 state/logs rather than mutating the run identity. See
@@ -175,3 +176,10 @@ Validate a completed DPO artifact:
 ```bash
 make test-dpo-chat SIZE=125m
 ```
+
+
+Recovery files and explicit earlier-checkpoint selection follow the shared
+[training recovery contract](../docs/TRAIN.md#recovery-checkpoint-completeness).
+Fractional positive epochs use the same update/warmup calculation as SFT. New
+finals retain the verified pretraining and instruct provenance so relocating a
+chat checkpoint does not require the original instruct filesystem path at export.

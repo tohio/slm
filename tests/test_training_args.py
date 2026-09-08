@@ -136,6 +136,7 @@ def test_sft_config_uses_current_length_sampler(tmp_path: Path):
 def test_dpo_config_coerces_yaml_numeric_values(tmp_path: Path):
     cfg = {
         "name": "dpo-smoke",
+        "data": {},
         "training": _training(),
         "optimizer": {
             "lr": "5.0e-7",
@@ -202,10 +203,10 @@ def test_pretrain_resume_requires_a_checkpoint(tmp_path: Path):
         resolve_pretrain_checkpoint(tmp_path, resume=True)
 
 
-def test_pretrain_resume_selects_latest_checkpoint(tmp_path: Path):
+def test_pretrain_resume_selects_latest_checkpoint(tmp_path: Path, recovery_files):
     (tmp_path / "checkpoint-20").mkdir()
     expected = tmp_path / "checkpoint-120"
-    expected.mkdir()
+    recovery_files(expected)
     (tmp_path / "checkpoint-invalid").mkdir()
 
     assert resolve_pretrain_checkpoint(tmp_path, resume=True) == expected
@@ -352,3 +353,17 @@ def test_pretrain_gpu_preflight_accepts_requested_bf16_devices(monkeypatch):
     )
 
     validate_preflight_gpu(expected_gpus=4, precision="bf16")
+
+
+@pytest.mark.parametrize("epochs,expected", [(0.5, 50), (1.5, 150), (2, 200)])
+def test_sft_dpo_fractional_epochs_use_the_same_update_schedule(monkeypatch, epochs, expected):
+    from finetune.train_sft import resolve_total_steps as sft_steps
+    from alignment.train_dpo import resolve_total_steps as dpo_steps
+    monkeypatch.setenv("WORLD_SIZE", "1")
+    cfg = {"epochs": epochs, "micro_batch_size": 10, "gradient_accumulation_steps": 1}
+    assert sft_steps(cfg, 1000) == dpo_steps(cfg, 1000) == expected
+    # ceil(loader batches / accumulation), then ceil(epochs * updates).
+    cfg.update(micro_batch_size=3, gradient_accumulation_steps=2, epochs=1.5)
+    assert sft_steps(cfg, 19) == dpo_steps(cfg, 19) == 6
+    cfg["max_steps"] = 3
+    assert sft_steps(cfg, 19) == dpo_steps(cfg, 19) == 3

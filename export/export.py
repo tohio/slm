@@ -23,13 +23,11 @@ Four variants are exported per model size:
     chat        results/runs/{size}/dpo_chat/final                           <user>/slm-{size}-chat
     code        results/runs/{size}/sft_code/final                      <user>/slm-{size}-code
 
-Data mix and token targets are imported from config/data_mix.py — the
-single source of truth for design intent. The model card additionally
-loads data/runs/{size}/curated/blend_stats.json (if present and matching --size) to
-render the realized per-source breakdown alongside the design targets,
-so the published card reflects what actually shipped — not just what
-was planned. Falls back to design-only with a caveat note if blend_stats
-is missing or scale-mismatched.
+Model cards use checkpoint-bound training_provenance.json: the audited dataset
+size/run, tokenizer-measured corpus mixture, selected unique tokens, and recorded
+consumed-token count. Cards never look up whichever blend_stats.json happens to
+occupy the model-size data directory. Ancestor audits/manifests travel with final
+checkpoints. Legacy exports can explicitly supply verified parent checkpoints.
 
 The source training checkpoint is never mutated. Export writes a separate
 artifact under results/exports/{size}/{variant}, validates source/native
@@ -52,14 +50,9 @@ load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from config import (                                                # noqa: E402
-    DATA_MIX, CODE_SUBMIX, dataset_link, corpus_tokens_display,
-)
 from config.paths import (                                          # noqa: E402
-    curated_dir,
     dpo_chat_dir,
     export_dir as export_size_dir,
-    metadata_dir,
     pretrain_dir,
     sft_code_dir,
     sft_instruct_dir,
@@ -73,7 +66,8 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 from config.checkpoints import bundled_tokenizer_dir, architecture_identity
-from curator.state import stable_digest
+from curator.state import stable_digest, atomic_write_json
+from config.provenance import collect_training_provenance, PROVENANCE_FILENAME
 
 HF_USERNAME = os.environ.get("HF_USERNAME")
 HF_TOKEN    = os.environ.get("HF_TOKEN", "")
@@ -90,11 +84,6 @@ OBSOLETE_REMOTE_CODE_PATTERNS = [
     "slm_remote/",
     "slm_remote/**",
 ]
-
-# blend_stats.json is written by curator/scripts/curate.py at the end of the
-# blend stage. Reading from data/runs/<size>/curated/ matches the curator's output
-# location regardless of how DATA_DIR is set.
-# Blend stats path is target-scoped; see _load_blend_stats(size).
 
 VARIANTS: dict[str, dict] = {
     "base": {
@@ -124,165 +113,61 @@ VARIANTS: dict[str, dict] = {
 }
 
 
-def _load_blend_stats(size: str) -> dict:
-    """Load curation blend stats when available.
-
-    Preferred location:
-      data/runs/{size}/metadata/blend_stats.json
-
-    Legacy fallback:
-      data/runs/{size}/curated/blend_stats.json
-    """
-    candidates = [
-        metadata_dir(size) / "blend_stats.json",
-        curated_dir(size) / "blend_stats.json",
-    ]
-
-    for blend_stats_path in candidates:
-        if blend_stats_path.exists():
-            with blend_stats_path.open("r", encoding="utf-8") as f:
-                return json.load(f)
-
-    return {}
-
-
-def _format_data_mix_table(size: str) -> str:
-    """
-    Render the pretraining data mix as a markdown table.
-
-    If data/runs/{size}/curated/blend_stats.json exists and matches `size`, the table
-    shows both target % and realized % per source, so the model card
-    reflects what actually shipped in the published corpus. Otherwise it
-    falls back to a design-target-only view with a caveat note that the
-    realized mix may differ.
-
-    Top-level vs code sub-sources:
-        DATA_MIX has a logical "code" bucket — the actual code
-        sources live in CODE_SUBMIX. blend_stats.json's source_mix dict
-        contains the 5 expanded code sub-sources (no "code" entry). To
-        render correctly we expand "code" into its sub-sources here when
-        rendering, with realized% pulled from blend_stats per-source.
-    """
-    stats = _load_blend_stats(size)
-
-    if not stats:
-        # Design-only fallback: render DATA_MIX percentages without
-        # realized numbers, plus a caveat that reality may have drifted.
-        lines = [
-            "| Source | Target Share | Link |",
-            "|---|---|---|",
-        ]
-        for name, entry in DATA_MIX.items():
-            if name == "code":
-                code_top_pct = entry["pct"]
-                for code_name, code_entry in CODE_SUBMIX.items():
-                    target_pct = (code_entry["pct"] / 100.0) * code_top_pct
-                    lines.append(
-                        f"| `{code_name}` | {target_pct:.2f}% | "
-                        f"{dataset_link(code_entry)} |"
-                    )
-                continue
-
-            lines.append(f"| `{name}` | {entry['pct']:.1f}% | {dataset_link(entry)} |")
-        lines.append("")
-        lines.append(
-            "> _Realized mix may differ from target — supply-bound sources "
-            "(pes2o, jupyter at this scale) route their deficit to FineWeb_."
-        )
-        return "\n".join(lines)
-
-    # Realized + target view. Compute per-source realized share from
-    # the char totals in blend_stats.source_mix.
-    source_mix = stats.get("source_mix", {})
-    total_chars = sum(v.get("chars", 0) for v in source_mix.values())
-    if total_chars == 0:
-        # Defensive: shouldn't happen for a valid blend, but if chars sum
-        # to zero we can't compute percentages — fall back to design-only
-        # rather than print all zeros.
-        log.warning("blend_stats.source_mix has zero total chars — using design targets only")
-        return _format_data_mix_table_design_only()
-
-    lines = [
-        "| Source | Target Share | Realized Share | Link |",
-        "|---|---|---|---|",
-    ]
-
-    # Top-level non-code sources from DATA_MIX, in declaration order.
-    for name, entry in DATA_MIX.items():
-        if name == "code":
-            # Expand code into its sub-sources below, not as a single line.
-            continue
-        realized_chars = source_mix.get(name, {}).get("chars", 0)
-        realized_pct = (realized_chars / total_chars) * 100
-        lines.append(
-            f"| `{name}` | {entry['pct']:.1f}% | {realized_pct:.2f}% | "
-            f"{dataset_link(entry)} |"
-        )
-
-    # Code sub-sources, each as its own row. Their target % is
-    # CODE_SUBMIX[name].pct of the current DATA_MIX['code'] share.
-    code_top_pct = DATA_MIX["code"]["pct"]
-    for name, entry in CODE_SUBMIX.items():
-        target_pct_of_total = (entry["pct"] / 100.0) * code_top_pct
-        realized_chars = source_mix.get(name, {}).get("chars", 0)
-        realized_pct = (realized_chars / total_chars) * 100
-        lines.append(
-            f"| `{name}` | {target_pct_of_total:.2f}% | {realized_pct:.2f}% | "
-            f"{dataset_link(entry)} |"
-        )
-
-    # Footer line summarising the realized totals so readers don't have
-    # to add the column themselves.
-    estimated_tokens = stats.get("estimated_tokens_from_chars", 0)
-    train_docs = stats.get("train_documents", 0)
-    val_docs = stats.get("val_documents", 0)
-    lines.append("")
-    lines.append(
-        f"_Realized: ~{estimated_tokens / 1e9:.2f}B tokens "
-        f"({train_docs:,} train + {val_docs:,} val docs). "
-        f"Supply-bound sources route their deficit to FineWeb._"
-    )
-
-    return "\n".join(lines)
-
-
-def _format_data_mix_table_design_only() -> str:
-    """
-    Render the design target table with concrete source rows.
-
-    DATA_MIX contains a logical "code" bucket, so expand that bucket into
-    CODE_SUBMIX rows instead of showing a single abstract code row.
-    """
-    lines = [
-        "| Source | Target Share | Link |",
-        "|---|---|---|",
-    ]
-
-    for name, entry in DATA_MIX.items():
-        if name == "code":
-            code_top_pct = entry["pct"]
-            for code_name, code_entry in CODE_SUBMIX.items():
-                target_pct = (code_entry["pct"] / 100.0) * code_top_pct
-                lines.append(
-                    f"| `{code_name}` | {target_pct:.2f}% | "
-                    f"{dataset_link(code_entry)} |"
-                )
-            continue
-
-        lines.append(f"| `{name}` | {entry['pct']:.1f}% | {dataset_link(entry)} |")
-
-    return "\n".join(lines)
-
-
 def _read_json(path: Path, label: str) -> dict:
-    """Read a required JSON artifact with a useful export error."""
+    """Read a required export JSON artifact without guessing missing contents."""
     if not path.is_file():
-        raise FileNotFoundError(
-            f"{label} not found at {path}. Export will not guess training "
-            "provenance; regenerate the checkpoint with the current trainer."
-        )
+        raise FileNotFoundError(f"{label} not found at {path}. Restore the required artifact before export.")
     with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
+        value = json.load(handle)
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be a JSON object: {path}")
+    return value
+
+
+def _format_data_mix_table(pretraining: dict) -> str:
+    """Render verified full-source train tokens, not a claimed consumed-prefix mix."""
+    mixture = pretraining.get("token_mixture")
+    if mixture is None:
+        return ("Tokenizer-measured source mix was not bundled with this legacy checkpoint. "
+                "No realized mix is inferred from the current filesystem or planning defaults.")
+    contract = pretraining["audit"]["contract"]
+    expected = contract["tokenized_data"]
+    if stable_digest(mixture) != expected["realized_mixture"]["report_sha256"]:
+        raise RuntimeError("Pretraining mixture does not match the checkpoint's audited corpus")
+    rows = {source: info["splits"]["train"] for source, info in mixture["sources"].items()}
+    total = sum(row["tokens"] for row in rows.values())
+    if total <= 0 or total != expected["splits"]["train"]["n_tokens"]:
+        raise RuntimeError("Source token counts do not match audited training-corpus counts")
+    lines = ["| Source | Full source train tokens | Share of source train corpus |",
+             "|---|---:|---:|"]
+    for source, row in rows.items():
+        lines.append(f"| `{source}` | {row['tokens']:,} | {100 * row['tokens'] / total:.2f}% |")
+    lines.extend(["", "Shares describe the complete source train split, not necessarily the selected "
+                  "prefix or the examples consumed across epochs. Validation/test tokens are excluded."])
+    return "\n".join(lines)
+
+
+def _pretraining_summary(pretraining: dict) -> str:
+    contract = pretraining["audit"]["contract"]
+    dataset_size = contract.get("dataset_size")
+    if not dataset_size:
+        raise RuntimeError("Pretraining audit has no dataset_size; export will not infer the corpus from model size")
+    run_id = contract.get("dataset_run_id")
+    splits = contract.get("tokenized_data", {}).get("splits", {})
+    selected = contract.get("selected_training_tokens") or {}
+    metrics = pretraining.get("training_metrics") or {}
+    def count(value):
+        return f"{value:,}" if type(value) is int and value >= 0 else "not recorded"
+    lines = [f"Source dataset profile: `{dataset_size}`. "
+             f"Source dataset run: `{run_id}`." if run_id else
+             f"Source dataset profile: `{dataset_size}`. Source dataset run: not recorded.",
+             "", "| Quantity | Tokens |", "|---|---:|"]
+    for split in ("train", "val", "test"):
+        lines.append(f"| Full source {split} split | {count(splits.get(split, {}).get('n_tokens'))} |")
+    lines.append(f"| Selected unique training tokens | {count(selected.get('selected_unique_tokens'))} |")
+    lines.append(f"| Consumed training input tokens (including repeated epochs) | {count(metrics.get('consumed_input_tokens'))} |")
+    lines.append(f"| Scheduled input-token budget (planned, not observed) | {count(metrics.get('scheduled_input_tokens'))} |")
+    return "\n".join(lines)
 
 
 def _manifest_dataset_row(label: str, manifest: dict) -> str:
@@ -309,50 +194,16 @@ def _manifest_dataset_row(label: str, manifest: dict) -> str:
     )
 
 
-def _parent_checkpoint(checkpoint: Path, audit_name: str) -> Path:
-    """Resolve the exact parent checkpoint recorded by a training audit."""
-    audit = _read_json(checkpoint / audit_name, f"{audit_name} training audit")
-    parent = audit.get("base_model")
-    if not parent:
-        raise ValueError(f"{audit_name} does not record base_model")
-    return Path(os.path.expandvars(parent))
-
-
-def _fine_tuning_table(size: str, variant: str, checkpoint: Path) -> str:
-    """Build model-card training rows from immutable preparation manifests."""
+def _fine_tuning_table(size: str, variant: str, checkpoint: Path, *,
+                       provenance: dict | None = None, parents=()) -> str:
+    """Render the bundled lineage without reopening historical absolute paths."""
     if variant == "base":
         return ""
-
-    rows = [
-        "| Stage | Dataset | Revision | Prepared records |",
-        "|---|---|---:|---:|",
-    ]
-
-    if variant == "instruct":
-        instruct_checkpoint = checkpoint
-    else:
-        audit_name = "dpo_run_audit.json" if variant == "chat" else "sft_run_audit.json"
-        instruct_checkpoint = _parent_checkpoint(checkpoint, audit_name)
-
-    instruct_manifest = _read_json(
-        instruct_checkpoint / "sft_data_manifest.json",
-        "instruct SFT data manifest",
-    )
-    rows.append(_manifest_dataset_row("Instruct SFT", instruct_manifest))
-
-    if variant == "code":
-        code_manifest = _read_json(
-            checkpoint / "sft_data_manifest.json",
-            "code SFT data manifest",
-        )
-        rows.append(_manifest_dataset_row("Code SFT", code_manifest))
-    elif variant == "chat":
-        dpo_manifest = _read_json(
-            checkpoint / "dpo_data_manifest.json",
-            "DPO data manifest",
-        )
-        rows.append(_manifest_dataset_row("DPO alignment", dpo_manifest))
-
+    provenance = provenance or collect_training_provenance(checkpoint, parents=parents)
+    rows = ["| Stage | Dataset | Revision | Prepared records |", "|---|---|---:|---:|"]
+    labels = {"sft_instruct": "Instruct SFT", "sft_code": "Code SFT", "dpo_chat": "DPO alignment"}
+    for entry in provenance["stages"][1:]:
+        rows.append(_manifest_dataset_row(labels[entry["stage"]], entry["data_manifest"]))
     return "\n".join(rows)
 
 
@@ -364,12 +215,14 @@ def generate_model_card(
     checkpoint: Path,
     config,
     hf_username: str,
+    provenance: dict | None = None,
 ) -> str:
     size_upper    = size.upper()
     variant_cfg   = VARIANTS[variant]
     description   = variant_cfg["description"]
     pipeline_tag  = variant_cfg["pipeline_tag"]
-    token_tgt     = corpus_tokens_display(size)
+    provenance = provenance or collect_training_provenance(checkpoint)
+    pretraining = provenance["stages"][0]
     param_str     = f"{n_params / 1e6:.1f}M ({n_params:,} parameters)"
 
     if variant == "base":
@@ -381,7 +234,8 @@ def generate_model_card(
 
     variant_section = {
         "base": f"""\
-This is the **base** variant — pretrained from a {token_tgt} curation target with no fine-tuning.
+This is the **base** variant — pretrained from scratch with no fine-tuning.
+Its source dataset and measured token counts are recorded below.
 It is suitable for research and as a starting point for further fine-tuning.
 Use [`{hf_username}/slm-{size}-instruct`](https://huggingface.co/{hf_username}/slm-{size}-instruct) for instruction following or
 [`{hf_username}/slm-{size}-chat`](https://huggingface.co/{hf_username}/slm-{size}-chat) for aligned conversation.
@@ -404,17 +258,17 @@ Use [`{hf_username}/slm-{size}-chat`](https://huggingface.co/{hf_username}/slm-{
 """,
     }[variant]
 
-    pretrain_table = _format_data_mix_table(size)
+    pretrain_table = _pretraining_summary(pretraining) + "\n\n" + _format_data_mix_table(pretraining)
 
-    fine_tuning_table = _fine_tuning_table(size, variant, checkpoint)
+    fine_tuning_table = _fine_tuning_table(size, variant, checkpoint, provenance=provenance)
     training_section = {
         "base": f"""\
-**Pretraining corpus** — {token_tgt} curation target blended across the following sources:
+**Pretraining data** — checkpoint-bound source provenance:
 
 {pretrain_table}
 """,
         "instruct": f"""\
-**Pretraining corpus** — {token_tgt} curation target blended across the following sources:
+**Pretraining data** — checkpoint-bound source provenance:
 
 {pretrain_table}
 
@@ -423,7 +277,7 @@ Use [`{hf_username}/slm-{size}-chat`](https://huggingface.co/{hf_username}/slm-{
 {fine_tuning_table}
 """,
         "chat": f"""\
-**Pretraining corpus** — {token_tgt} curation target blended across the following sources:
+**Pretraining data** — checkpoint-bound source provenance:
 
 {pretrain_table}
 
@@ -432,7 +286,7 @@ Use [`{hf_username}/slm-{size}-chat`](https://huggingface.co/{hf_username}/slm-{
 {fine_tuning_table}
 """,
         "code": f"""\
-**Pretraining corpus** — {token_tgt} curation target blended across the following sources:
+**Pretraining data** — checkpoint-bound source provenance:
 
 {pretrain_table}
 
@@ -1124,6 +978,7 @@ def export(
     model_path: Path | None = None,
     dry_run: bool = False,
     private: bool = False,
+    provenance_parents: list[Path] | None = None,
 ) -> None:
     import gc
     import shutil
@@ -1165,6 +1020,13 @@ def export(
 
     config = SLMConfig.from_pretrained(str(checkpoint))
     source_identity = validate_export_identity(checkpoint, size, variant, config)
+    # Resolve all card inputs before allocating/converting models. Legacy
+    # parents may be explicitly relocated, but must match the child's fingerprint.
+    provenance = collect_training_provenance(checkpoint, parents=provenance_parents or [])
+    source_identity["provenance_sha256"] = provenance["sha256"]
+    _pretraining_summary(provenance["stages"][0])
+    _format_data_mix_table(provenance["stages"][0])
+    _fine_tuning_table(size, variant, checkpoint, provenance=provenance)
     tokenizer_path = bundled_tokenizer_dir(checkpoint)
     source_dtype = _checkpoint_dtype(checkpoint)
     log.info(f"Checkpoint dtype: {source_dtype}")
@@ -1196,6 +1058,7 @@ def export(
     )
     _export_tokenizer_to_checkpoint_root(tokenizer, tokenizer_path, staging_dir)
     _write_generation_config(staging_dir, tokenizer)
+    atomic_write_json(staging_dir / PROVENANCE_FILENAME, provenance)
     _write_export_manifest(
         staging_dir,
         checkpoint,
@@ -1215,6 +1078,7 @@ def export(
         checkpoint=checkpoint,
         config=config,
         hf_username=hf_username,
+        provenance=provenance,
     )
     card_path = staging_dir / "README.md"
     card_path.write_text(model_card, encoding="utf-8")
@@ -1436,6 +1300,8 @@ Examples:
                         help="Override checkpoint path (defaults to variant mapping)")
     parser.add_argument("--dry-run", action="store_true", help="Validate without pushing to Hub")
     parser.add_argument("--private", action="store_true", help="Create private Hub repository")
+    parser.add_argument("--provenance-parent", type=Path, action="append", default=[],
+                        help="Relocated legacy parent; repeat for ancestors. Identity is verified before conversion.")
     args = parser.parse_args()
 
     export(
@@ -1444,6 +1310,7 @@ Examples:
         model_path=args.model,
         dry_run=args.dry_run,
         private=args.private,
+        provenance_parents=args.provenance_parent,
     )
 
 

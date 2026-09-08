@@ -11,7 +11,10 @@ contracts. Stage code should import these values instead of duplicating them.
 | `paths.py` | Run-scoped data, result, evaluation, and export path builders |
 | `holdout.py` | Split identity and train/val/test integrity |
 | `chat.py` | No-tool/tool-aware templates, rendering fingerprints, web_search contract |
-| `checkpoints.py` | Bundled tokenizer resolution, checkpoint hashes, immutable start/resume checks |
+| `checkpoints.py` | Bundled tokenizer resolution, checkpoint hashes, immutable run inputs and recovery-file checks |
+| `provenance.py` | Portable final-checkpoint ancestry and measured source-corpus history |
+| `schedule.py` | Shared SFT/DPO fractional-epoch update/warmup calculations |
+| `benchmarks.py` | Immutable benchmark dataset revisions shared by curation and evaluation |
 | `runtime.py` | Safe CUDA matmul and SDPA dispatcher configuration |
 | `__init__.py` | Public configuration exports |
 

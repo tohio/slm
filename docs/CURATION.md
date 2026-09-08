@@ -51,20 +51,22 @@ Bootstrap a fresh CPU curation host explicitly before starting source work:
 
 ```bash
 make setup-curate DATA_DIR=/data/slm/data
-source .venv/bin/activate
 
-make download-fasttext-model DATA_DIR=/data/slm/data
-make download-kenlm-model    DATA_DIR=/data/slm/data
 ```
+
+Setup also prepares and checks the required FastText and KenLM model assets. It
+persists the selected `DATA_DIR` in `.env`; later Make commands use that setting
+and the repository environment directly. No separate download or activation step
+is required. See [infrastructure](../infra/README.md) for installer details.
 
 Run smoke first:
 
 ```bash
-make curate-smoke DATA_DIR=/data/slm/data
-make validate SIZE=smoke DATA_DIR=/data/slm/data
-make tokenizer SIZE=smoke DATA_DIR=/data/slm/data
-make tokenizer-test SIZE=smoke DATA_DIR=/data/slm/data
-make tokenize SIZE=smoke DATA_DIR=/data/slm/data
+make curate-smoke
+make validate SIZE=smoke
+make tokenizer SIZE=smoke
+make tokenizer-test SIZE=smoke
+make tokenize SIZE=smoke
 ```
 
 Mini is optional, not a mandatory intermediate before a production dataset.
@@ -72,8 +74,8 @@ It requires at least 1.4B usable selected training tokens after tokenization.
 To choose Mini, begin with:
 
 ```bash
-make curate-mini DATA_DIR=/data/slm/data
-make validate SIZE=mini DATA_DIR=/data/slm/data
+make curate-mini
+make validate SIZE=mini
 ```
 
 Curation runtime varies with CPU count, network bandwidth, cache state, storage
@@ -117,8 +119,6 @@ interruption.
 ```bash
 make check-env
 make setup-curate DATA_DIR=/data/slm/data
-make download-fasttext-model DATA_DIR=/data/slm/data
-make download-kenlm-model DATA_DIR=/data/slm/data
 .venv/bin/python infra/verify_environment.py --profile curation
 ```
 

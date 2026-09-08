@@ -127,6 +127,7 @@ tokenizer_config.json
 special_tokens_map.json
 chat_template.jinja
 export_manifest.json
+training_provenance.json
 ```
 
 Large models may use multiple safetensor shards and an index file.
@@ -149,16 +150,37 @@ Every local and Hub export, including `test-export-acceptance`, must pass:
 
 The destination is replaced only after the staged artifact passes all checks.
 
-For non-base variants, export also requires the SFT or DPO data manifest copied
-into the final checkpoint. Model-card dataset names, revisions, and record
-counts come from those manifests. Pretraining provenance is read from:
+## Portable provenance
 
-```text
-$DATA_DIR/runs/<size>/metadata/blend_stats.json
+Export validates its card inputs before allocating/converting the model. New
+final checkpoints carry `training_provenance.json`, containing stage audits,
+prepared-data manifests and checkpoint fingerprints through the pretraining →
+instruct → code/chat lineage. No ancestor weights or training corpus are copied
+into the bundle. Its checksum, audits, manifests and parent links must match;
+a final can be moved/restored without the original parent directories.
+
+Pretraining provenance comes from the checkpoint's audited `dataset_size` and
+source run, not the model's export size and not a current `blend_stats.json`.
+Cards distinguish the full train/val/test corpus, selected unique training tokens,
+observed consumed input tokens, and planned schedule. Source shares describe the
+complete source train corpus, not necessarily the selected prefix. Missing legacy
+measurements are labelled **not recorded**, not replaced with planning defaults.
+
+Legacy finals without an ancestry bundle may supply authentic relocated parents:
+
+```bash
+.venv/bin/python export/export.py --size 125m --variant chat --dry-run \
+  --model /restore/chat/final \
+  --provenance-parent /restore/instruct/final \
+  --provenance-parent /restore/pretrain/final
 ```
 
-If realized blend metadata is unavailable, the model card labels the mix as
-the configured design rather than presenting it as observed data.
+Parents are matched against recorded config/weight/tokenizer identities, not
+filenames. The original audited path is used only as a verified legacy fallback;
+an unrelated checkpoint at that path is never trusted. A missing or mismatched
+ancestor fails before conversion. Source finals are not modified to manufacture
+missing history. The native package includes the verified **source** provenance
+and its digest in `export_manifest.json`, separate from converted model weights.
 
 ## Load an export
 

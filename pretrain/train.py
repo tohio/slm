@@ -160,9 +160,11 @@ def validate_tokenizer(tokenizer_dir: Path, tokenized_dir: Path) -> None:
     validate_active_tokenizer_matches_tokenized_data(tokenized_dir, tokenizer_dir)
 
 
-def resolve_pretrain_checkpoint(output_dir: Path, *, resume: bool) -> Path | None:
+def resolve_pretrain_checkpoint(output_dir: Path, *, resume,
+                                world_size: int | None = None, require_scaler: bool = False) -> Path | None:
     return resolve_training_checkpoint(output_dir, resume=resume,
-                                       audit_filename=PRETRAIN_AUDIT_FILENAME)
+                                       audit_filename=PRETRAIN_AUDIT_FILENAME,
+                                       world_size=world_size, require_scaler=require_scaler)
 
 
 def validate_model_tokenizer_contract(model_config, tokenizer_dir: Path) -> None:
@@ -605,6 +607,7 @@ def build_training_args(cfg: dict, output_dir: Path, resume: bool):
         dataloader_num_workers=train_cfg.get("num_workers", 4),
         dataloader_pin_memory=has_cuda,
         remove_unused_columns=False,
+        include_num_input_tokens_seen="all",
         seed=train_cfg.get("seed", 42),
 
         gradient_checkpointing=train_cfg.get("gradient_checkpointing", False),
@@ -668,7 +671,8 @@ def _size_from_model_name(model_name: str) -> str:
 def main():
     parser = argparse.ArgumentParser(description="SLM Pretraining")
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--resume", nargs="?", const="latest", default=None,
+                        help="Resume latest complete checkpoint, or select a same-run checkpoint path")
     parser.add_argument(
         "--preflight-only",
         action="store_true",
@@ -724,6 +728,9 @@ def main():
     resume_checkpoint = resolve_pretrain_checkpoint(
         output_dir,
         resume=args.resume,
+        world_size=(args.expected_gpus if args.preflight_only and args.expected_gpus is not None
+                    else int(os.environ.get("WORLD_SIZE", "1"))),
+        require_scaler=bool(torch.cuda.is_available() and cfg["training"].get("precision") == "fp16"),
     )
     if resume_checkpoint is not None:
         log.info(f"Resuming from checkpoint: {resume_checkpoint}")
@@ -823,6 +830,27 @@ def main():
         dataset_run_id=dataset_run_id,
         selected_training_tokens=budget,
     )
+
+    # Capture verified measured metadata now, rather than reading a mutable
+    # DATA_DIR later during model-card generation on another host.
+    measured_mixture = json.loads((resolved_tokenized_dir / "token_mixture.json").read_text(encoding="utf-8"))
+    if stable_digest(measured_mixture) != run_contract["tokenized_data"]["realized_mixture"]["report_sha256"]:
+        raise RuntimeError("Token mixture changed after preflight identity verification")
+    # Record whether counting covered the *whole* run. Legacy resumptions may
+    # acquire a nonzero counter after this upgrade; that is still only a suffix,
+    # even on a second resume, and must not be reported as full-run consumption.
+    previous_contract = {}
+    audit_path = output_dir / PRETRAIN_AUDIT_FILENAME
+    if audit_path.is_file():
+        previous_contract = json.loads(audit_path.read_text(encoding="utf-8")).get("contract", {})
+    complete_token_counter = (not audit_path.exists() and resume_checkpoint is None) or (
+        previous_contract.get("input_token_counting") == "all-from-start")
+    if complete_token_counter:
+        run_contract["input_token_counting"] = "all-from-start"
+        if resume_checkpoint is not None:
+            prior_state = json.loads((resume_checkpoint / "trainer_state.json").read_text(encoding="utf-8"))
+            if prior_state.get("global_step", 0) > 0 and prior_state.get("num_input_tokens_seen", 0) <= 0:
+                raise RuntimeError("Checkpoint is missing the input-token counter required by its run audit")
 
     if args.preflight_only:
         validate_or_write_pretrain_audit(
@@ -926,6 +954,16 @@ def main():
             final_dir / PRETRAIN_AUDIT_FILENAME,
         )
 
+        from config.provenance import save_training_provenance
+        save_training_provenance(
+            final_dir, token_mixture=measured_mixture,
+            training_metrics={
+                "global_step": trainer.state.global_step,
+                "consumed_input_tokens": trainer.state.num_input_tokens_seen if complete_token_counter else None,
+                "token_counter_complete": complete_token_counter,
+                "scheduled_input_tokens": scheduled_tokens,
+            },
+        )
         log.info(f"Model saved to {final_dir}")
 
     if torch.distributed.is_available() and torch.distributed.is_initialized():

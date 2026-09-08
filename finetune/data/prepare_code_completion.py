@@ -33,6 +33,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from config.paths import code_completion_data_dir, sft_code_data_dir
+from config.holdout import sha256_file
 
 
 BAD_COMPLETION_STARTS = (
@@ -399,16 +400,14 @@ def main() -> None:
     train_records = extract_records(train_rows, args.max_train_records, args.seed)
     val_records = extract_records(val_rows, args.max_val_records, args.seed + 1)
 
-    # If val extraction is too small, split a small validation set from train.
-    if len(val_records) < 100 and len(train_records) > 1000:
-        n_val = min(max(100, len(train_records) // 50), 1000)
-        val_records = train_records[:n_val]
-        train_records = train_records[n_val:]
-
+    # Never borrow training examples for validation: the parent code-SFT model
+    # has already trained on those answers. A small original holdout is valid;
+    # an empty one requires more held-out source records, not a fresh split.
     if len(train_records) < 100:
         raise SystemExit(f"Too few train records extracted: {len(train_records)}")
     if not val_records:
-        raise SystemExit("No validation records extracted")
+        raise SystemExit("No validation records extracted from the parent holdout; "
+                         "supply more held-out parent examples. Training records cannot be used as validation.")
 
     overlap = overlap_stats(train_records, val_records)
     if overlap["prompt_overlap"] or overlap["exact_pair_overlap"]:
@@ -429,6 +428,9 @@ def main() -> None:
         "train": summarize(train_records),
         "val": summarize(val_records),
         "overlap": overlap,
+        "validation_origin": "parent_val_only",
+        "parent_files": {p.name: sha256_file(p) for p in (input_dir / "train.jsonl", input_dir / "val.jsonl")},
+        "files": {p.name: sha256_file(p) for p in (output_dir / "train.jsonl", output_dir / "val.jsonl")},
         "format": {
             "prompt": "raw function signature/docstring prefix",
             "completion": "indented function body only",
