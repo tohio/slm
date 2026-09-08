@@ -129,7 +129,7 @@ else
   _MODE_FLAG =
 endif
 
-.PHONY: setup-curate setup-train _config-gen-launch all check-env check-curation-prereqs curate-all train-all curate curate-smoke curate-mini curate-download curate-filter curate-dedup \
+.PHONY: setup-curate setup-train _config-gen-launch all check-env check-curation-prereqs curate-all train-all curate curate-download curate-filter curate-dedup \
         curate-blend curate-upload validate validate-upload \
         tokenizer tokenizer-test tokenize artifacts-upload artifacts-download \
         config-gen config-gen-pretrain config-gen-sft config-gen-dpo \
@@ -239,16 +239,9 @@ train-all: check-env
 # ── Stage 1: Data curation ────────────────────────────────────────────────────
 
 curate: check-curation-prereqs
+	@case "$(SIZE)" in smoke|mini|125m|350m|1b) ;; *) echo "SIZE must be smoke, mini, 125m, 350m, or 1b"; exit 1;; esac
 	@echo "==> Stage 1: Curation (target=$(SIZE))"
 	ulimit -n 65536 && $(PYTHON) curator/scripts/curate.py --target $(SIZE) $(WORKERS_FLAG) $(FORCE_FLAG)
-
-curate-smoke: check-curation-prereqs
-	@echo "==> Stage 1: Smoke curation run (pipeline validation)"
-	ulimit -n 65536 && $(PYTHON) curator/scripts/curate.py --target smoke --smoke $(WORKERS_FLAG) $(FORCE_FLAG)
-
-curate-mini: check-curation-prereqs
-	@echo "==> Stage 1: Mini curation run (functional mini-scale curation)"
-	ulimit -n 65536 && $(PYTHON) curator/scripts/curate.py --target mini $(WORKERS_FLAG) $(FORCE_FLAG)
 
 curate-download: check-curation-prereqs
 	$(PYTHON) curator/scripts/curate.py --target $(SIZE) --stage download $(FORCE_FLAG)
@@ -965,9 +958,7 @@ help:
 	@echo "  sanity-train-save        same as sanity-train but saves the model"
 	@echo ""
 	@echo "Pipeline:"
-	@echo "  curate             Stage 1  — download, filter, deduplicate, and blend"
-	@echo "  curate-smoke       Stage 1  — capped smoke run for pipeline validation"
-	@echo "  curate-mini        Stage 1  — functional mini-scale curation run"
+	@echo "  curate             Stage 1  — curate SIZE=smoke|mini|125m|350m|1b"
 	@echo "  validate           Stage 2  — source-aware validation + KenLM audit"
 	@echo "  validate-upload    Upload validated artifacts through RUN_ID storage"
 	@echo "  tokenizer          Stage 3  — train BPE tokenizer"

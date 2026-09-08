@@ -397,7 +397,7 @@ SHUFFLE_RAM_BUDGET_GB: float = float(os.environ.get("SHUFFLE_RAM_BUDGET_GB", "12
 # (0.02 chat SFT, 0.05 code SFT, 0.05 DPO) — do not conflate with this.
 PRETRAIN_VAL_FRACTION: float = 0.005
 
-# Per-source doc caps used when `--smoke` is passed to the curator. Exercises
+# Per-source doc caps used when the curator target is `smoke`. Exercises
 # every source at small scale to validate the pipeline end-to-end before
 # committing to a full run. common_crawl's cap is in WARC segments (not docs)
 # because that's the unit of CC streaming.

@@ -53,7 +53,7 @@ Blend stage:
 
 Usage:
     python curator/scripts/curate.py --target 125m
-    python curator/scripts/curate.py --target smoke --smoke
+    python curator/scripts/curate.py --target smoke
     python curator/scripts/curate.py --target 125m --stage download
 """
 
@@ -589,7 +589,7 @@ def _build_source(
         # Full runs have enough WARC segments to benefit from the dynamic
         # worker split above. Smoke runs usually process only a few segments,
         # so clamp worker pools to the amount of actual segment work available.
-        # This avoids spawning dozens of idle workers for `curate-smoke` while
+        # This avoids spawning dozens of idle workers for the `smoke` profile while
         # preserving the higher-throughput defaults for full curation.
         if max_segments is not None:
             cc_download_workers = min(
@@ -2427,11 +2427,6 @@ def main():
     )
     parser.add_argument("--stage", choices=STAGES, default="all")
     parser.add_argument(
-        "--smoke",
-        action="store_true",
-        help="Apply bounded per-source caps for the smoke profile",
-    )
-    parser.add_argument(
         "--sources",
         default=None,
         help=(
@@ -2457,9 +2452,6 @@ def main():
     )
     args = parser.parse_args()
 
-    if args.smoke and args.target != "smoke":
-        parser.error("--smoke requires --target smoke")
-
     configure_data_dirs(args.target)
 
     try:
@@ -2473,10 +2465,11 @@ def main():
         parser.error("--sources is for source capacity runs; do not use it with blend")
 
     n_workers = args.workers or default_workers()
+    smoke = args.target == "smoke"
     log.info(
         f"SLM Curation — "
         f"target={args.target}, stage={args.stage}, "
-        f"smoke={args.smoke}, workers={n_workers} (cpu_count={os.cpu_count()}), "
+        f"smoke={smoke}, workers={n_workers} (cpu_count={os.cpu_count()}), "
         f"data_dir={DATA_DIR}, "
         f"sources={','.join(selected_sources) if source_scoped else 'all'}"
     )
@@ -2484,7 +2477,7 @@ def main():
     if args.stage in ("download", "all"):
         stage_download(
             args.target,
-            smoke=args.smoke,
+            smoke=smoke,
             workers=n_workers,
             sources=selected_sources,
             force=args.force,

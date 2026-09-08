@@ -62,7 +62,7 @@ is required. See [infrastructure](../infra/README.md) for installer details.
 Run smoke first:
 
 ```bash
-make curate-smoke
+make curate SIZE=smoke
 make validate SIZE=smoke
 make tokenizer SIZE=smoke
 make tokenizer-test SIZE=smoke
@@ -74,7 +74,7 @@ It requires at least 1.4B usable selected training tokens after tokenization.
 To choose Mini, begin with:
 
 ```bash
-make curate-mini
+make curate SIZE=mini
 make validate SIZE=mini
 ```
 
@@ -134,8 +134,8 @@ make curate SIZE=125m WORKERS=62
 make test-curator SIZE=125m
 ```
 
-`make curate-smoke` exercises curation only; follow it through validation and
-tokenization for the bounded data-pipeline check. `make curate-mini` starts the
+`make curate SIZE=smoke` exercises curation only; follow it through validation and
+tokenization for the bounded data-pipeline check. `make curate SIZE=mini` starts the
 optional Mini curation run. Both write to
 their own `$DATA_DIR/runs/<size>` namespace. Run smoke first on a new host.
 

@@ -1,9 +1,9 @@
 """
 tests/data_pipeline/test_pipeline_curator.py
 ---------------------------------------------
-Validates real outputs from 'make curate-mini'.
+Validates real outputs from 'make curate SIZE=<profile>'.
 
-Run after: make curate-mini
+Run after: make curate SIZE=mini  # or another profile
 Command:   make test-curator
 
 Checks:
@@ -43,7 +43,7 @@ FUZZY_DEDUP_SKIP_SOURCES = set(SYNTHETIC_SOURCES)
 QUALITY_SKIP_SOURCES = PROSE_HEURISTIC_SKIP_SOURCES
 
 
-pytestmark = requires_stage("curate-mini")
+pytestmark = requires_stage("curate")
 
 REQUIRED_IN_TRAIN = list(ALL_SOURCES)
 

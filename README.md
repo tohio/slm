@@ -102,7 +102,7 @@ vi .env
 
 make setup-curate DATA_DIR=/data/slm/data
 
-make curate-smoke
+make curate SIZE=smoke
 make validate SIZE=smoke
 make tokenizer SIZE=smoke
 make tokenizer-test SIZE=smoke

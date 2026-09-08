@@ -221,14 +221,14 @@ accepting access.
 Bounded curation execution:
 
 ```bash
-make curate-smoke
+make curate SIZE=smoke
 ```
 
 Optional Mini curation is a separate, substantially larger run with a 1.4B
 usable training-token floor. It is not required before a production profile:
 
 ```bash
-make curate-mini WORKERS=62
+make curate SIZE=mini WORKERS=62
 ```
 
 Full target:

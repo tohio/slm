@@ -159,7 +159,7 @@ On the curation host, exercise the bounded `smoke` namespace through the writer,
 not merely source processing:
 
 ```bash
-make curate-smoke
+make curate SIZE=smoke
 make validate SIZE=smoke
 make tokenizer SIZE=smoke
 make tokenizer-test SIZE=smoke

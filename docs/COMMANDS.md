@@ -36,7 +36,7 @@ before starting a larger run:
 
 ```bash
 make setup-curate DATA_DIR=/data/slm/data
-make curate-smoke
+make curate SIZE=smoke
 make validate SIZE=smoke
 make tokenizer SIZE=smoke
 make tokenizer-test SIZE=smoke
@@ -125,18 +125,18 @@ text for test-document completions. Source artifacts remain under `DATASET_SIZE`
 Run smoke first on a new host:
 
 ```bash
-make curate-smoke
+make curate SIZE=smoke
 make validate SIZE=smoke
 
-make curate-mini WORKERS=62
+make curate SIZE=mini WORKERS=62
 make validate SIZE=mini
 
 make curate SIZE=125m WORKERS=62
 ```
 
 These are alternative curation profiles, not a required sequence.
-`curate-smoke` is the bounded curation run; validation and tokenization are
-subsequent stages. `curate-mini` is an optional larger curation run. Runtime depends on host and network
+`curate SIZE=smoke` is the bounded curation run; validation and tokenization are
+subsequent stages. `curate SIZE=mini` is an optional larger curation run. Runtime depends on host and network
 conditions; fixed duration estimates are intentionally not published.
 
 Stage-specific curation:
