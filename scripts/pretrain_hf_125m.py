@@ -269,8 +269,18 @@ def verify_reference_bundle(data_root, *, expected_spec=None):
     digest = bundle.pop("sha256", None)
     if digest != stable_digest(bundle) or bundle.get("schema_version") != SCHEMA or bundle.get("status") != "complete":
         raise RuntimeError("Reference-data manifest is incomplete or corrupt")
-    if expected_spec is not None and bundle["spec"] != expected_spec:
-        raise RuntimeError("Reference-data request changed. Use a new diagnostic run directory.")
+    if expected_spec is not None:
+        # The driver also contains training/check orchestration. Training-only edits
+        # (for example probe cadence wiring) must not invalidate immutable prepared
+        # reference data. Keep the full driver hash in the manifest for provenance,
+        # but exclude it from cache-compatibility comparison; the production encoder
+        # hash and all data-selection/tokenization request fields remain fail-closed.
+        cached_spec = copy.deepcopy(bundle["spec"])
+        requested_spec = copy.deepcopy(expected_spec)
+        cached_spec.get("implementation", {}).pop("driver", None)
+        requested_spec.get("implementation", {}).pop("driver", None)
+        if cached_spec != requested_spec:
+            raise RuntimeError("Reference-data request changed. Use a new diagnostic run directory.")
     for name, expected in bundle["files"].items():
         path = data_root / name
         if Path(name).is_absolute() or ".." in Path(name).parts or not path.is_file() or path.is_symlink() or sha256_file(path) != expected:
