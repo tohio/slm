@@ -107,6 +107,7 @@ SANITY_TOKENIZED ?=
 SANITY_EVAL_TOKENIZED ?=
 SANITY_TARGET_TOKENS ?=
 SANITY_MAX_STEPS ?=
+SANITY_PROBE_EVERY_STEPS ?=
 SANITY_BACKEND ?= slm
 SANITY_REUSE_TOKENS ?= 0
 
@@ -870,6 +871,7 @@ sanity-train sanity-train-small sanity-train-tiny sanity-train-save: check-train
 		$(if $(SANITY_EVAL_TOKENIZED),--eval-tokenized-dir "$(SANITY_EVAL_TOKENIZED)",) \
 		$(if $(SANITY_TARGET_TOKENS),--target-tokens "$(SANITY_TARGET_TOKENS)",) \
 		$(if $(SANITY_MAX_STEPS),--max-steps "$(SANITY_MAX_STEPS)",) \
+		$(if $(SANITY_PROBE_EVERY_STEPS),--probe-every-steps "$(SANITY_PROBE_EVERY_STEPS)",) \
 		$(if $(filter 1 true yes,$(SANITY_REUSE_TOKENS)),--reuse-tokens,)
 
 # ── Clean ─────────────────────────────────────────────────────────────────────

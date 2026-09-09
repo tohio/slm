@@ -534,7 +534,9 @@ make sanity-train-save SIZE=mini SANITY_TARGET_TOKENS=50000000
 `SANITY_TOKENIZED` for read-only existing inputs. The default HF corpus is
 FineWeb-Edu and the default tokenizer is the existing size-specific tokenizer.
 `SANITY_TARGET_TOKENS` selects usable train tokens; holdouts are extra.
-`SANITY_BACKEND=llama` selects the matched native control arm.
+`SANITY_MAX_STEPS` bounds the training control, and `SANITY_PROBE_EVERY_STEPS`
+overrides only the diagnostic generation-probe cadence (for example, `250`) while
+reusing the production probe callback. `SANITY_BACKEND=llama` selects the matched native control arm.
 `SANITY_EVAL_TOKENIZED` supplies a shared validation distribution and requires
 its original validated val/test documents for exact exclusion from HF selection.
 Small/tiny are token-budget presets, not alternate architectures. These commands

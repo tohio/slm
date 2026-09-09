@@ -160,7 +160,11 @@ Results are under:
 ```
 
 The learning report contains heldout metrics, actual consumed input tokens,
-source identity through its immutable run audit, and six fixed greedy continuations with explicit BOS. All
+source identity through its immutable run audit, and fixed greedy continuations with explicit BOS. Diagnostic
+training also reuses the production qualitative-probe callback; use
+`SANITY_PROBE_EVERY_STEPS=<N>` / `--probe-every-steps <N>` to tighten the cadence
+for a bounded control without editing the production recipe. Probe JSON is written
+under the diagnostic pretrain output's `probes/` directory and remains non-gating. All
 training saves a checkpoint; `sanity-train-save`/`--save` are compatibility
 aliases, not separate retention policies. `sanity-train-small` and
 `sanity-train-tiny` choose 500M and 50M train-token targets respectively, without

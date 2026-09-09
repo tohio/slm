@@ -122,17 +122,24 @@ def _prepare_batch(tokenizer, prompts: list[str], *,
                 "attention_mask": list(attention_mask),
             })
     else:
-        encoded = [
-            {
-                "input_ids": tokenizer(
-                    p,
-                    truncation=True,
-                    max_length=max_input_length,
-                    add_special_tokens=add_bos,
-                )["input_ids"]
-            }
-            for p in prompts
-        ]
+        encoded = []
+        bos_id = tokenizer.bos_token_id if add_bos else None
+        if add_bos and bos_id is None:
+            raise ValueError("Base-model generation requires tokenizer.bos_token_id when add_bos=True")
+        for p in prompts:
+            # Do not delegate BOS insertion to add_special_tokens=True. A tokenizer
+            # can expose bos_token_id without having a post-processor that actually
+            # inserts it. Pretraining frames every document with BOS, so raw
+            # completion must enforce that contract explicitly and exactly once.
+            input_ids = list(tokenizer(
+                p,
+                truncation=True,
+                max_length=max_input_length,
+                add_special_tokens=False,
+            )["input_ids"])
+            if add_bos and (not input_ids or input_ids[0] != bos_id):
+                input_ids = [bos_id] + input_ids[: max(0, max_input_length - 1)]
+            encoded.append({"input_ids": input_ids})
 
     # Left-pad via the tokenizer so attention_mask is produced correctly.
     # Save and restore padding_side in case the caller set it elsewhere.

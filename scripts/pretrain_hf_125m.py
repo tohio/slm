@@ -79,6 +79,7 @@ def parse_args(argv=None, *, sanity=False):
     p.add_argument("--reuse-tokens", action="store_true", help="Reuse only a complete, hash-verified matching diagnostic bundle")
     p.add_argument("--backend", choices=["slm", "llama"], default="slm", help="Identical SLM-initialized tensors; same production Trainer")
     p.add_argument("--max-steps", type=int, help="Explicit bounded experiment override; logged, not a production token-floor waiver")
+    p.add_argument("--probe-every-steps", type=int, help="Override qualitative generation-probe cadence for bounded diagnostic training")
     p.add_argument("--batch-size", type=int, help="Explicit micro-batch override; default: recipe")
     p.add_argument("--gradient-accumulation", type=int, help="Explicit accumulation override; default: recipe")
     p.add_argument("--resume", nargs="?", const="latest")
@@ -529,6 +530,11 @@ def run_training(args, cfg, directory, tokenizer, data_identity):
     if args.max_steps is not None:
         cfg["training"]["max_steps"] = args.max_steps
         cfg["training"]["warmup_steps"] = min(args.max_steps, round(args.max_steps * schedule["warmup_ratio_from_planning_config"]))
+    if args.probe_every_steps is not None:
+        if args.probe_every_steps < 0:
+            raise ValueError("--probe-every-steps must be >= 0")
+        cfg.setdefault("generation_probes", {})["every_steps"] = args.probe_every_steps
+        cfg["generation_probes"]["enabled"] = True
     common_val = None
     common_identity = None
     if args.eval_tokenized_dir is not None:
@@ -583,8 +589,20 @@ def run_training(args, cfg, directory, tokenizer, data_identity):
                     if (key == "loss" or key.endswith("_loss") or key == "grad_norm") and not math.isfinite(float(value)):
                         raise FloatingPointError(f"Non-finite {key} at step {state.global_step}")
 
+        callbacks = [FiniteLoss()]
+        probe_cfg = cfg.get("generation_probes", {})
+        if probe_cfg.get("enabled", True):
+            from pretrain.diagnostics import make_probe_callback
+            tokenizer_dir = directory.parent / "tokenizer"
+            if not tokenizer_dir.is_dir():
+                tokenizer_dir = args.tokenizer_dir or BASE_DATA_DIR / "runs" / args.size / "tokenizer"
+            callbacks.append(make_probe_callback(tokenizer_dir, output, probe_cfg))
+            log.info(
+                "Training-time qualitative probes enabled: every_steps=%s explicit_steps=%s at_final=%s",
+                probe_cfg.get("every_steps", 5000), probe_cfg.get("steps", []), probe_cfg.get("at_final", True),
+            )
         trainer = SLMTrainer(model=model, args=training_args, train_dataset=train_ds, eval_dataset=val_ds,
-                             callbacks=[FiniteLoss()])
+                             callbacks=callbacks)
         if not checkpoint:
             baseline = trainer.evaluate(metric_key_prefix="baseline_validation")
             if not math.isfinite(baseline["baseline_validation_loss"]):

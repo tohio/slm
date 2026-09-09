@@ -224,7 +224,9 @@ pretraining and does not launch another full run.
 ## Final evaluation and generation probes
 
 `generation_probes` configures fixed pretraining prompts, sparse cadence, and
-deterministic decoding. Final reports separate test-prefix completions, generic
+deterministic decoding. Raw base-model probes explicitly prepend exactly one BOS
+token to match the BOS/document/EOS pretraining contract; they do not rely on the
+tokenizer's `add_special_tokens` behavior. Final reports separate test-prefix completions, generic
 prompts, and supplied corpus-supported QA. Use `make pretrain-probes` for saved
 checkpoints and `make eval-pretrain-final` for completed models with matching test
 provenance. These are not training pass/fail gates. See
