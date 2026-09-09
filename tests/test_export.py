@@ -137,3 +137,28 @@ def test_export_binds_declared_profile_and_stage_to_checkpoint(tmp_path):
         validate_export_identity(tmp_path, "350m", "base", config)
     with pytest.raises(RuntimeError, match="sft_run_audit"):
         validate_export_identity(tmp_path, "125m", "instruct", config)
+
+
+def test_hf_control_compares_gradients_and_optimizer_updates(tmp_path):
+    import numpy as np
+    from types import SimpleNamespace
+    from scripts.sanity_train import compare_implementations
+
+    source, tokenizer = _tiny_source_model()
+    directory = tmp_path / "tokens"
+    directory.mkdir()
+    values = np.array([1, 11, 12, 13, 14, 15, 16, 2] * 8, dtype=np.uint16)
+    values.tofile(directory / "train.bin")
+    (directory / "train.json").write_text(json.dumps({"dtype": "uint16", "n_tokens": len(values)}))
+    output = tmp_path / "check"
+    output.mkdir()
+    args = SimpleNamespace(run_dir=output, device="cpu", check_seq_len=8, check_batches=2,
+                           seed=42, rtol=1e-4, atol=1e-5)
+    cfg = {"name": "slm-test", "model": source.config.to_dict(),
+           "optimizer": {"lr": .0003, "beta1": .9, "beta2": .95, "weight_decay": .1},
+           "training": {"micro_batch_size": 1, "gradient_accumulation_steps": 1, "gradient_clip_val": 1.0}}
+    report = compare_implementations(args, cfg, directory, tokenizer, {"selected_train_tokens": len(values)})
+    assert report["status"] == "passed"
+    assert any("gradient/" in row["check"] for row in report["checks"])
+    assert any("updated_weight/" in row["check"] for row in report["checks"])
+    assert any("trainer_target_count" in row["check"] for row in report["checks"])

@@ -229,3 +229,13 @@ prompts, and supplied corpus-supported QA. Use `make pretrain-probes` for saved
 checkpoints and `make eval-pretrain-final` for completed models with matching test
 provenance. These are not training pass/fail gates. See
 [pretraining data and evaluation](../docs/PRETRAINING_DATA.md).
+
+## Isolated reference-data diagnostic
+
+To separate model implementation from corpus effects, use the existing
+[HF control scripts](../scripts/README.md). They read the generated recipe and
+reuse this stage's encoder, packed dataset, training arguments, schedule resolver,
+and `SLMTrainer`. They do not overwrite a production run or pretend a single HF
+source satisfies the production mixture contract. Compare identical initial
+weights against native Llama first; a passing numerical check is not a claim
+about learned generation quality.

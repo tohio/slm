@@ -1,388 +1,194 @@
+#!/usr/bin/env python3
+"""Model-learning control on pinned HF data or existing read-only token batches.
+
+--stage check compares local SLM with a native Transformers Llama initialized
+from exactly the same learned tensors. --stage train uses the production
+SLMTrainer on the selected inputs. This is evidence, not an automatic diagnosis
+of data quality. See scripts/README.md; all writes stay in --run-dir.
 """
-scripts/sanity_train.py
-------------------------
-Self-contained sanity check for the SLM model + training code.
+from __future__ import annotations
 
-Removes tokenizer and curated data as variables: tokenizes FineWeb-Edu with
-Mistral's tokenizer (vocab=32000, matches our architecture) and trains
-either the mini or the 125m architecture on it. If learning fails here,
-the issue is in model/ or the training loop. If it succeeds, both are
-fine and any failure on the real pipeline is in the curator or the SLM
-tokenizer.
-
-Usage:
-    python scripts/sanity_train.py                                  # 125m, 2.5B tokens
-    python scripts/sanity_train.py --arch mini                      # mini, default 2.5B (override w/ --target-tokens)
-    python scripts/sanity_train.py --arch mini --target-tokens 500000000
-    python scripts/sanity_train.py --save                           # keep the trained model
-
-Delete this file and the `sanity-train*` Makefile targets when no longer
-needed — nothing else in the codebase depends on it.
-"""
-
-import argparse
+import copy
 import logging
-import math
-import sys
-import time
 from pathlib import Path
+import sys
 
-import numpy as np
-import torch
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from config.paths import BASE_RESULTS_DIR
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    datefmt="%H:%M:%S",
+from scripts.pretrain_hf_125m import (
+    atomic_write_json, stable_digest, model_config, state_digest,
+    implementation_identity, versions, select_device,
 )
+
 log = logging.getLogger(__name__)
 
-# ── Architectures (mirror gpt_mini.yaml and gpt_125m.yaml) ──────────────────
-MODEL_ARCH_MINI = {
-    "hidden_size":             384,
-    "num_hidden_layers":       6,
-    "num_attention_heads":     6,
-    "num_key_value_heads":     2,
-    "max_position_embeddings": 1024,
-    "rope_theta":              500_000.0,
-    "rms_norm_eps":            1e-5,
-    "initializer_range":       0.02,
-    "tie_word_embeddings":     True,
-}
 
-MODEL_ARCH_125M = {
-    "hidden_size":             768,
-    "num_hidden_layers":       16,
-    "num_attention_heads":     12,
-    "num_key_value_heads":     4,
-    "max_position_embeddings": 2048,
-    "rope_theta":              500_000.0,
-    "rms_norm_eps":            1e-5,
-    "initializer_range":       0.02,
-    "tie_word_embeddings":     True,
-}
+def compare_implementations(args, cfg, directory, tokenizer, data_identity):
+    """Bounded forward/backward/update comparison, not a production export.
 
-ARCH_REGISTRY = {
-    "mini": MODEL_ARCH_MINI,
-    "125m": MODEL_ARCH_125M,
-}
+    FP32 without dropout/compile isolates arithmetic from stochastic masks and
+    precision. The chosen full model dimensions are preserved. Short unpadded
+    contexts come from the actual tokenized training stream. Both optimizers
+    use the production Trainer's parameter grouping and AdamW configuration.
+    """
+    from dataclasses import replace
+    import torch
+    import torch.nn.functional as F
+    from transformers import set_seed
+    from model import SLMForCausalLM
+    from export.export import _convert_to_native_llama
+    from pretrain.data.dataset import PretrainingDataset
+    from pretrain.train import SLMTrainer, build_training_args
 
-REFERENCE_TOKENIZER = "mistralai/Mistral-7B-v0.1"
-REFERENCE_DATASET   = "HuggingFaceFW/fineweb-edu"
-REFERENCE_SUBSET    = "sample-10BT"
+    report_dir = args.run_dir / "checks"
+    report_dir.mkdir(exist_ok=True)
+    report_file = report_dir / "implementation_check.json"
+    if report_file.exists():
+        raise RuntimeError(f"Comparison report already exists: {report_file}. Preserve it and use a new --run-dir for another check.")
+    device = select_device(args.device)
+    old_precision = torch.get_float32_matmul_precision()
+    old_cuda_tf32 = torch.backends.cuda.matmul.allow_tf32
+    old_cudnn_tf32 = torch.backends.cudnn.allow_tf32
+    torch.set_float32_matmul_precision("highest")
+    if device == "cuda":
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+    config = model_config(cfg, tokenizer)
+    if config.attention_dropout != 0:
+        log.info("Numerical comparison uses eval mode to disable attention dropout")
+    length = min(args.check_seq_len, config.max_position_embeddings)
+    dataset = PretrainingDataset(directory / "train.bin", seq_len=length, split="train",
+                                 max_tokens=data_identity["selected_train_tokens"])
+    if len(dataset) < args.check_batches:
+        raise ValueError("Too few complete contexts for the requested check batches")
+    set_seed(args.seed)
+    source = SLMForCausalLM(config).float()
+    initial_sha = state_digest(source)
+    native = _convert_to_native_llama(source, tokenizer, torch.float32)
+    if state_digest(native) != initial_sha:
+        raise RuntimeError("Reference model did not receive identical initial tensors")
+    source, native = source.to(device), native.to(device)
+    source.eval()
+    native.eval()
+    models = {"slm": source, "llama": native}
+    parameters = {kind: dict(model.named_parameters()) for kind, model in models.items()}
+    if parameters["slm"].keys() != parameters["llama"].keys():
+        raise RuntimeError("Unique learned parameter names differ (including tied-weight semantics)")
 
-# QA probes — loss-based factual knowledge tests. For each pair, the model
-# should assign lower loss to the correct continuation than the wrong one.
-QA_PROBES = [
-    ("The capital of France is", " Paris", " London"),
-    ("Two plus two equals",       " four",  " five"),
-    ("The sun rises in the",      " east",  " west"),
-    ("Water freezes at zero degrees", " Celsius", " Fahrenheit"),
-    ("The opposite of hot is",    " cold",  " warm"),
-]
-
-# Generation showcase — one greedy 50-token continuation to inspect by eye.
-GEN_PROMPT = "The"
-
-
-# ── Tokenization ─────────────────────────────────────────────────────────────
-
-def tokenize_fineweb(tokenizer, target_tokens: int, output_path: Path) -> int:
-    """Stream FineWeb-Edu, tokenize, write to bin file. Return tokens written."""
-    from datasets import load_dataset
-
-    log.info(f"Streaming {REFERENCE_DATASET}/{REFERENCE_SUBSET}...")
-    ds = load_dataset(REFERENCE_DATASET, name=REFERENCE_SUBSET, split="train", streaming=True)
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    arr = np.memmap(output_path, dtype=np.uint16, mode="w+", shape=(target_tokens,))
-
-    eos = tokenizer.eos_token_id or 2
-    written = 0
-    last_log = time.time()
-
-    for example in ds:
-        ids = tokenizer.encode(example["text"], add_special_tokens=False)
-        ids.append(eos)
-        end = min(written + len(ids), target_tokens)
-        arr[written:end] = ids[: end - written]
-        written = end
-        if time.time() - last_log > 10:
-            log.info(f"  Tokenized {written:,}/{target_tokens:,} "
-                     f"({100 * written / target_tokens:.1f}%)")
-            last_log = time.time()
-        if written >= target_tokens:
-            break
-
-    arr.flush()
-    log.info(f"Wrote {written:,} tokens to {output_path}")
-    return written
-
-
-# ── Dataset ──────────────────────────────────────────────────────────────────
-
-class PackedTokensDataset(Dataset):
-    """Memmap-backed dataset that returns fixed-length sequences."""
-
-    def __init__(self, bin_path: Path, seq_len: int, n_tokens: int):
-        self.data    = np.memmap(bin_path, dtype=np.uint16, mode="r")
-        self.seq_len = seq_len
-        # Trim to multiple of seq_len; reserve last 1% for eval
-        usable = (n_tokens // seq_len) * seq_len
-        n_eval = max(seq_len * 4, usable // 100)
-        n_eval = (n_eval // seq_len) * seq_len
-        self.train_end = usable - n_eval
-        self.eval_end  = usable
-
-    def __len__(self):
-        return self.train_end // self.seq_len
-
-    def __getitem__(self, idx):
-        start = idx * self.seq_len
-        chunk = np.array(self.data[start : start + self.seq_len], dtype=np.int64)
-        return torch.from_numpy(chunk)
-
-    def eval_batches(self, batch_size: int):
-        """Yield eval batches from the held-out tail."""
-        n = (self.eval_end - self.train_end) // self.seq_len
-        positions = [self.train_end + i * self.seq_len for i in range(n)]
-        for i in range(0, len(positions), batch_size):
-            batch_positions = positions[i : i + batch_size]
-            seqs = [
-                np.array(self.data[p : p + self.seq_len], dtype=np.int64)
-                for p in batch_positions
-            ]
-            yield torch.from_numpy(np.stack(seqs))
-
-
-# ── Training ─────────────────────────────────────────────────────────────────
-
-def cosine_lr(step: int, max_steps: int, peak_lr: float, warmup: int) -> float:
-    if step < warmup:
-        return peak_lr * step / warmup
-    progress = (step - warmup) / max(1, max_steps - warmup)
-    return peak_lr * 0.5 * (1 + math.cos(math.pi * min(1.0, progress)))
-
-
-@torch.no_grad()
-def evaluate(model, dataset, batch_size: int, device) -> float:
-    model.eval()
-    losses = []
-    for batch in dataset.eval_batches(batch_size):
-        batch = batch.to(device)
-        out = model(input_ids=batch, labels=batch)
-        losses.append(out.loss.item())
-    model.train()
-    return sum(losses) / max(len(losses), 1)
-
-
-def train(model, dataset, args, device, arch):
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=args.lr,
-        betas=(0.9, 0.95),
-        weight_decay=0.1,
-    )
-    loader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=2,
-        pin_memory=(device.type == "cuda"),
-        drop_last=True,
-    )
-
-    autocast_dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
-    use_autocast   = device.type == "cuda"
-
-    seq_len = arch["max_position_embeddings"]
-    log.info(f"Training: {args.max_steps:,} steps, batch={args.batch_size}, "
-             f"seq_len={seq_len}, "
-             f"~{args.batch_size * seq_len:,} tokens/step")
-
-    log.info("Baseline eval (step 0)...")
-    eval_loss = evaluate(model, dataset, args.batch_size, device)
-    log.info(f"  eval_loss: {eval_loss:.4f}")
-
-    model.train()
-    step = 0
-    t0 = time.time()
-
-    while step < args.max_steps:
-        for batch in loader:
-            if step >= args.max_steps:
-                break
-
-            batch = batch.to(device, non_blocking=True)
-            lr = cosine_lr(step, args.max_steps, args.lr, args.warmup_steps)
-            for pg in optimizer.param_groups:
-                pg["lr"] = lr
-
-            optimizer.zero_grad(set_to_none=True)
-            if use_autocast:
-                with torch.amp.autocast("cuda", dtype=autocast_dtype):
-                    out = model(input_ids=batch, labels=batch)
-                    loss = out.loss
-            else:
-                out = model(input_ids=batch, labels=batch)
-                loss = out.loss
-
-            loss.backward()
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-
-            if step % args.log_every == 0:
-                elapsed = time.time() - t0
-                log.info(
-                    f"  step {step:>6,}/{args.max_steps:,} | "
-                    f"loss {loss.item():.4f} | "
-                    f"grad_norm {grad_norm.item():.2f} | "
-                    f"lr {lr:.2e} | "
-                    f"{step / max(elapsed, 1):.1f} steps/s"
-                )
-
-            if step > 0 and step % args.eval_every == 0:
-                eval_loss = evaluate(model, dataset, args.batch_size, device)
-                log.info(f"  step {step:>6,} | eval_loss {eval_loss:.4f}")
-
-            step += 1
-
-    final_eval = evaluate(model, dataset, args.batch_size, device)
-    log.info(f"Final eval_loss: {final_eval:.4f}")
-    return final_eval
-
-
-# ── QA evaluation ────────────────────────────────────────────────────────────
-
-@torch.no_grad()
-def qa_loss(model, tokenizer, prefix: str, completion: str, device) -> float:
-    """Compute average loss on `completion` tokens given `prefix` context."""
-    prefix_ids = tokenizer.encode(prefix, add_special_tokens=False)
-    full_ids   = tokenizer.encode(prefix + completion, add_special_tokens=False)
-    completion_ids = full_ids[len(prefix_ids):]
-    if not completion_ids:
-        return float("inf")
-
-    input_ids = torch.tensor([full_ids], device=device)
-    labels = input_ids.clone()
-    # Only score the completion tokens
-    labels[0, : len(prefix_ids)] = -100
-    out = model(input_ids=input_ids, labels=labels)
-    return out.loss.item()
-
-
-@torch.no_grad()
-def run_qa_suite(model, tokenizer, device):
-    log.info("=" * 60)
-    log.info("QA probes (loss-based: lower loss on correct = ✓)")
-    log.info("=" * 60)
-    correct = 0
-    for prefix, right, wrong in QA_PROBES:
-        loss_right = qa_loss(model, tokenizer, prefix, right, device)
-        loss_wrong = qa_loss(model, tokenizer, prefix, wrong, device)
-        ok = loss_right < loss_wrong
-        marker = "✓" if ok else "✗"
-        if ok:
-            correct += 1
-        log.info(
-            f"  {marker} {prefix!r:40s} "
-            f"{right!r}={loss_right:.3f}  vs  {wrong!r}={loss_wrong:.3f}"
+    # Use real Trainer instances for production parameter grouping/AdamW setup,
+    # but do not call train(), initialize W&B, or publish models in this check.
+    check_cfg = copy.deepcopy(cfg)
+    check_cfg["training"].update({"precision": "fp32", "torch_compile": False, "gradient_checkpointing": False,
+                                  "report_to": [], "max_steps": 1, "warmup_steps": 0,
+                                  "torch_compile_backend": None, "torch_compile_mode": None})
+    optimizers = {}
+    trainers = {}
+    for kind, model in models.items():
+        training_args = replace(
+            build_training_args(check_cfg, report_dir / kind, resume=False),
+            use_cpu=device == "cpu", bf16=False, fp16=False, tf32=False,
+            torch_compile=False, torch_compile_backend=None, torch_compile_mode=None,
+            eval_strategy="no", save_strategy="no",
+            optim="adamw_torch_fused" if device == "cuda" else "adamw_torch",
         )
-    log.info(f"QA score: {correct}/{len(QA_PROBES)}")
+        if training_args.device.type != device:
+            raise RuntimeError("Trainer device differs from the requested control device; use CUDA_VISIBLE_DEVICES='' for a CPU check")
+        trainers[kind] = SLMTrainer(model=model, args=training_args)
+        model.eval()
+        optimizers[kind] = trainers[kind].create_optimizer()
+    groups = lambda opt, params: [
+        {"parameters": sorted(name for name, p in params.items() if any(p is q for q in group["params"])),
+         "weight_decay": group["weight_decay"], "lr": group["lr"]}
+        for group in opt.param_groups
+    ]
+    if groups(optimizers["slm"], parameters["slm"]) != groups(optimizers["llama"], parameters["llama"]):
+        raise RuntimeError("SLM/native optimizer parameter grouping differs")
 
-    # Generation showcase
-    log.info("=" * 60)
-    log.info(f"Generation from {GEN_PROMPT!r} (greedy, 50 tokens):")
-    log.info("=" * 60)
-    ids = tokenizer.encode(GEN_PROMPT, add_special_tokens=False, return_tensors="pt").to(device)
-    out = model.generate(ids, max_new_tokens=50, do_sample=False)
-    text = tokenizer.decode(out[0], skip_special_tokens=True)
-    log.info(f"  {text!r}")
+    checks = []
+    failures = []
 
+    def compare(label, actual, expected):
+        if actual.shape != expected.shape or not torch.isfinite(actual).all() or not torch.isfinite(expected).all():
+            failures.append(label)
+            checks.append({"check": label, "passed": False, "reason": "shape or non-finite values"})
+            return
+        diff = (actual.detach().float() - expected.detach().float()).abs()
+        passed = torch.allclose(actual, expected, rtol=args.rtol, atol=args.atol)
+        checks.append({"check": label, "passed": passed, "max_abs_difference": diff.max().item() if diff.numel() else 0.0})
+        if not passed:
+            failures.append(label)
 
-# ── Main ─────────────────────────────────────────────────────────────────────
-
-def main():
-    p = argparse.ArgumentParser(description="SLM sanity training (model + training code only)")
-    p.add_argument("--arch",          type=str, default="125m",
-                   choices=list(ARCH_REGISTRY.keys()),
-                   help="Architecture to use: mini (21.7M) or 125m")
-    p.add_argument("--target-tokens", type=int, default=2_500_000_000)
-    p.add_argument("--batch-size",    type=int, default=16,
-                   help="H200 default; lower for smaller GPUs")
-    p.add_argument("--lr",            type=float, default=3e-4)
-    p.add_argument("--warmup-steps",  type=int, default=200)
-    p.add_argument("--log-every",     type=int, default=50)
-    p.add_argument("--eval-every",    type=int, default=2000)
-    p.add_argument("--scratch-dir",   type=Path, default=Path("/tmp/slm-sanity"))
-    p.add_argument("--save",          action="store_true",
-                   help="Save trained model to results/sanity-<arch>/ instead of discarding")
-    p.add_argument("--reuse-tokens",  action="store_true",
-                   help="Skip tokenization if scratch bin already exists")
-    args = p.parse_args()
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    arch   = ARCH_REGISTRY[args.arch]
-    log.info(f"Device: {device}")
-    log.info(f"Architecture: {args.arch} "
-             f"(hidden={arch['hidden_size']}, layers={arch['num_hidden_layers']}, "
-             f"seq_len={arch['max_position_embeddings']})")
-
-    # ── Tokenizer ────────────────────────────────────────────────────────────
-    from transformers import AutoTokenizer
-    log.info(f"Loading {REFERENCE_TOKENIZER}...")
-    tokenizer = AutoTokenizer.from_pretrained(REFERENCE_TOKENIZER, use_fast=True)
-    log.info(f"  vocab_size: {tokenizer.vocab_size}")
-    assert tokenizer.vocab_size == 32000, (
-        f"Expected Mistral tokenizer vocab=32000, got {tokenizer.vocab_size}. "
-        f"Architecture mismatch — model uses vocab_size=32000."
-    )
-
-    # ── Tokenize FineWeb-Edu ─────────────────────────────────────────────────
-    bin_path = args.scratch_dir / "fineweb_mistral.bin"
-    if args.reuse_tokens and bin_path.exists():
-        log.info(f"Reusing existing tokens at {bin_path}")
-        n_tokens = bin_path.stat().st_size // 2  # uint16 = 2 bytes
-        n_tokens = min(n_tokens, args.target_tokens)
-    else:
-        n_tokens = tokenize_fineweb(tokenizer, args.target_tokens, bin_path)
-
-    # ── Model ────────────────────────────────────────────────────────────────
-    from model import SLMConfig, SLMForCausalLM
-    config = SLMConfig(vocab_size=32000, **arch)
-    model = SLMForCausalLM(config).to(device)
-    n_params = sum(p.numel() for p in model.parameters())
-    log.info(f"Model: {n_params:,} parameters ({n_params / 1e6:.1f}M)")
-
-    # ── Dataset ──────────────────────────────────────────────────────────────
-    seq_len = arch["max_position_embeddings"]
-    dataset = PackedTokensDataset(bin_path, seq_len=seq_len, n_tokens=n_tokens)
-    tokens_per_step = args.batch_size * seq_len
-    args.max_steps  = n_tokens // tokens_per_step
-    log.info(f"Dataset: {len(dataset):,} train sequences, max_steps={args.max_steps:,}")
-
-    # ── Train ────────────────────────────────────────────────────────────────
-    train(model, dataset, args, device, arch)
-
-    # ── QA suite ─────────────────────────────────────────────────────────────
-    run_qa_suite(model, tokenizer, device)
-
-    # ── Save (optional) ──────────────────────────────────────────────────────
-    if args.save:
-        out_dir = BASE_RESULTS_DIR / f"sanity-{args.arch}"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        model.save_pretrained(str(out_dir))
-        tokenizer.save_pretrained(str(out_dir / "tokenizer"))
-        log.info(f"Saved to {out_dir}")
-    else:
-        log.info("(Use --save to keep the trained model.)")
+    try:
+        for iteration in range(args.check_batches):
+            # Spread bounded samples over the selected training stream rather
+            # than checking only its first document.
+            index = iteration * (len(dataset) - 1) // max(args.check_batches - 1, 1)
+            inputs = dataset[index]["input_ids"].unsqueeze(0).to(device)
+            labels = inputs.clone()  # production contract: shift inside loss
+            mask = torch.ones_like(inputs)
+            boundary = length // 2
+            changed = inputs.clone()
+            changed[:, boundary:] = (changed[:, boundary:] + 17) % config.vocab_size
+            outputs = {}
+            for kind, model in models.items():
+                optimizers[kind].zero_grad(set_to_none=True)
+                batch = {"input_ids": inputs, "attention_mask": mask, "labels": labels, "use_cache": False}
+                item_count = trainers[kind]._get_num_items_in_batch([batch], torch.device(device))
+                if item_count is None:
+                    raise RuntimeError(f"{kind}: Trainer did not count causal targets")
+                compare(f"batch{iteration}/{kind}/trainer_target_count", torch.as_tensor(item_count, device=device), labels[:, 1:].ne(-100).sum())
+                _, output = trainers[kind].compute_loss(model, batch, return_outputs=True, num_items_in_batch=item_count)
+                manual = F.cross_entropy(output.logits[:, :-1].float().reshape(-1, config.vocab_size), labels[:, 1:].reshape(-1))
+                compare(f"batch{iteration}/{kind}/next_token_loss", output.loss, manual)
+                with torch.no_grad():
+                    altered = model(input_ids=changed, attention_mask=mask, use_cache=False).logits
+                    compare(f"batch{iteration}/{kind}/causality", output.logits[:, :boundary], altered[:, :boundary])
+                    counted = model(input_ids=inputs, attention_mask=mask, labels=labels, use_cache=False,
+                                    num_items_in_batch=labels[:, 1:].ne(-100).sum()).loss
+                    compare(f"batch{iteration}/{kind}/counted_next_token_loss", counted, manual)
+                outputs[kind] = output
+                output.loss.backward()
+            compare(f"batch{iteration}/logits", outputs["slm"].logits, outputs["llama"].logits)
+            compare(f"batch{iteration}/loss", outputs["slm"].loss, outputs["llama"].loss)
+            for name, parameter in parameters["slm"].items():
+                other = parameters["llama"][name]
+                if parameter.grad is None or other.grad is None:
+                    failures.append(f"batch{iteration}/missing_gradient/{name}")
+                else:
+                    compare(f"batch{iteration}/gradient/{name}", parameter.grad, other.grad)
+            before = {name: value.detach().clone() for name, value in parameters["slm"].items()}
+            for kind, model in models.items():
+                torch.nn.utils.clip_grad_norm_(model.parameters(), float(cfg["training"].get("gradient_clip_val", 1.0)))
+                optimizers[kind].step()
+            changed_parameters = 0
+            for name, parameter in parameters["slm"].items():
+                compare(f"batch{iteration}/updated_weight/{name}", parameter, parameters["llama"][name])
+                changed_parameters += not torch.equal(parameter, before[name])
+            if not changed_parameters:
+                failures.append(f"batch{iteration}/no_parameter_updates")
+            del outputs, before
+        report = {"status": "failed" if failures else "passed", "failures": failures, "checks": checks,
+            "model_config": config.to_dict(), "initial_state_sha256": initial_sha, "data": data_identity,
+            "config": cfg, "seed": args.seed, "dtype": "float32", "device": device,
+            "context_length_tested": length, "batches_tested": args.check_batches,
+            "rtol": args.rtol, "atol": args.atol, "versions": versions(), "implementation": implementation_identity(),
+            "limits": "Bounded unpadded FP32 eval-mode forward/backward/AdamW agreement. Not full-context, compiled, BF16, distributed, or capability acceptance."}
+        atomic_write_json(report_file, report)
+        if failures:
+            raise RuntimeError(f"Implementation comparison failed ({len(failures)} checks). Inspect {report_file}; do not tune tolerances blindly.")
+        log.info("SLM/native implementation check PASSED; report: %s", report_file)
+        return report
+    finally:
+        # No models/checkpoints from the numerical check are retained or published.
+        for opt in optimizers.values():
+            opt.zero_grad(set_to_none=True)
+        torch.set_float32_matmul_precision(old_precision)
+        torch.backends.cuda.matmul.allow_tf32 = old_cuda_tf32
+        torch.backends.cudnn.allow_tf32 = old_cudnn_tf32
 
 
 if __name__ == "__main__":
-    main()
+    from scripts.pretrain_hf_125m import main
+    main(sanity=True)

@@ -526,8 +526,19 @@ make compare-sft
 make sanity-train
 make sanity-train-small
 make sanity-train-tiny
-make sanity-train-save SANITY_SIZE=tiny
+make sanity-train-save SIZE=mini SANITY_TARGET_TOKENS=50000000
 ```
+
+`sanity-train` uses the actual `SIZE`/`SANITY_CONFIG` recipe. Select
+`SANITY_STAGE=prepare|check|train|all`, an isolated `SANITY_RUN_DIR`, and optionally
+`SANITY_TOKENIZED` for read-only existing inputs. The default HF corpus is
+FineWeb-Edu and the default tokenizer is the existing size-specific tokenizer.
+`SANITY_TARGET_TOKENS` selects usable train tokens; holdouts are extra.
+`SANITY_BACKEND=llama` selects the matched native control arm.
+`SANITY_EVAL_TOKENIZED` supplies a shared validation distribution and requires
+its original validated val/test documents for exact exclusion from HF selection.
+Small/tiny are token-budget presets, not alternate architectures. These commands
+never replace production checkpoints. See [control design and safeguards](../scripts/README.md).
 
 ---
 

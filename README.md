@@ -232,6 +232,10 @@ curation or training; some bounded model tests perform synthetic optimizer steps
 See [`docs/TESTING.md`](docs/TESTING.md) for test order, commands, and artifact
 requirements.
 
+For an isolated model-versus-data learning control, see the existing
+[HF diagnostic scripts](scripts/README.md). They use the selected model recipe
+and never replace the completed training run.
+
 ## License
 
 SLM is licensed under the [MIT License](LICENSE).

@@ -224,3 +224,12 @@ Recovery fixtures check missing optimizer/scheduler/RNG state and explicit earli
 selection; those structural fixtures are not serialized native optimizer states.
 A passing structural gate does not replace a real interrupted/resumed training
 check in the pinned runtime. No new standalone test suite is required.
+
+## HF learning controls
+
+The existing `scripts/sanity_train.py` can compare SLM and native Llama on
+identical tensors and data with `--stage check`. Actual HF-data learning uses
+the production dataset, argument builder, scheduler and Trainer in isolated
+diagnostic outputs; it is not part of `make test-unit` and is never started
+by pytest. See [scripts/README.md](../scripts/README.md) for staged commands,
+required W&B tracking for training, cache checks, interpretation, and limits.

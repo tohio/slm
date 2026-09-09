@@ -87,3 +87,33 @@ def test_role_setup_uses_the_matching_requirements():
         script = (ROOT / "infra" / f"setup_{role}.sh").read_text()
         assert f"requirements-{filename}.txt" in script
         assert "install_environment" in script
+
+
+def test_hf_control_groups_duplicate_documents_and_refuses_unowned_outputs(tmp_path):
+    import pytest
+    from scripts.pretrain_hf_125m import document_key, document_split, validate_run_dir
+
+    a = document_key("A\u00a0document\nwith  whitespace")
+    b = document_key("A document with whitespace")
+    assert a == b
+    assert document_split(a, 42, .005, .005) == document_split(b, 42, .005, .005)
+    assert {document_split(document_key(str(i)), 42, .2, .2) for i in range(100)} == {"train", "val", "test"}
+    root = tmp_path / "unowned"
+    root.mkdir()
+    sentinel = root / "checkpoint"
+    sentinel.write_bytes(b"must remain unchanged")
+    with pytest.raises(RuntimeError, match="unowned"):
+        validate_run_dir(root)
+    assert sentinel.read_bytes() == b"must remain unchanged"
+    with pytest.raises(ValueError, match="overlaps a read-only input"):
+        validate_run_dir(tmp_path / "new", [tmp_path])
+
+
+def test_hf_control_rejects_legacy_unmanifested_token_cache(tmp_path):
+    import pytest
+    from scripts.pretrain_hf_125m import verify_reference_bundle
+
+    # Old preallocation must never be mistaken for valid written tokens.
+    (tmp_path / "fineweb_mistral.bin").write_bytes(b"\x00" * 1024)
+    with pytest.raises(RuntimeError, match="No completed reference-data manifest"):
+        verify_reference_bundle(tmp_path)

@@ -97,7 +97,18 @@ endif
 
 FORCE_FLAG = $(if $(filter 1 true yes,$(FORCE)),--force,)
 
-SANITY_SIZE ?= 125m
+# Reference-data controls: SIZE selects the real generated recipe, not a second
+# architecture table. A stage may be run separately without retraining.
+SANITY_STAGE ?= all
+SANITY_CONFIG ?= $(PRETRAIN_CONFIG)
+SANITY_RUN_DIR ?= $(RESULTS_DIR)/diagnostics/hf-$(SIZE)
+SANITY_TOKENIZER ?= $(DATA_DIR)/runs/$(SIZE)/tokenizer
+SANITY_TOKENIZED ?=
+SANITY_EVAL_TOKENIZED ?=
+SANITY_TARGET_TOKENS ?=
+SANITY_MAX_STEPS ?=
+SANITY_BACKEND ?= slm
+SANITY_REUSE_TOKENS ?= 0
 
 # GPU pipeline tests should stay mini-focused by default.
 # If SIZE is explicitly supplied on the command line or environment, use it.
@@ -846,27 +857,20 @@ compare-sft:
 
 # ── Sanity check ──────────────────────────────────────────────────────────────
 
-sanity-train:
-	@echo "==> Sanity training: 125m arch on FineWeb-Edu (~2.5B tokens)"
-	$(PYTHON) scripts/sanity_train.py --arch 125m --target-tokens 2500000000
+# Small/tiny are token-budget presets only; all use the selected SIZE/config.
+sanity-train-small: SANITY_TARGET_TOKENS = 500000000
+sanity-train-tiny: SANITY_TARGET_TOKENS = 50000000
 
-sanity-train-small:
-	@echo "==> Sanity training: mini arch on FineWeb-Edu (~500M tokens)"
-	$(PYTHON) scripts/sanity_train.py --arch mini --target-tokens 500000000
-
-sanity-train-tiny:
-	@echo "==> Sanity training: mini arch on FineWeb-Edu (~50M tokens)"
-	$(PYTHON) scripts/sanity_train.py --arch mini --target-tokens 50000000
-
-sanity-train-save:
-	@echo "==> Sanity training (SANITY_SIZE=$(SANITY_SIZE), saves to results/sanity-*)"
-ifeq ($(SANITY_SIZE),small)
-	$(PYTHON) scripts/sanity_train.py --arch mini --target-tokens 500000000 --save
-else ifeq ($(SANITY_SIZE),tiny)
-	$(PYTHON) scripts/sanity_train.py --arch mini --target-tokens 50000000 --save
-else
-	$(PYTHON) scripts/sanity_train.py --arch 125m --target-tokens 2500000000 --save
-endif
+sanity-train sanity-train-small sanity-train-tiny sanity-train-save: check-training-env
+	@echo "==> HF control: stage=$(SANITY_STAGE), size=$(SIZE), backend=$(SANITY_BACKEND), outputs=$(SANITY_RUN_DIR)"
+	$(PYTHON) scripts/sanity_train.py --stage "$(SANITY_STAGE)" \
+		--config "$(SANITY_CONFIG)" --size "$(SIZE)" --run-dir "$(SANITY_RUN_DIR)" \
+		--tokenizer-dir "$(SANITY_TOKENIZER)" --backend "$(SANITY_BACKEND)" \
+		$(if $(SANITY_TOKENIZED),--tokenized-dir "$(SANITY_TOKENIZED)",) \
+		$(if $(SANITY_EVAL_TOKENIZED),--eval-tokenized-dir "$(SANITY_EVAL_TOKENIZED)",) \
+		$(if $(SANITY_TARGET_TOKENS),--target-tokens "$(SANITY_TARGET_TOKENS)",) \
+		$(if $(SANITY_MAX_STEPS),--max-steps "$(SANITY_MAX_STEPS)",) \
+		$(if $(filter 1 true yes,$(SANITY_REUSE_TOKENS)),--reuse-tokens,)
 
 # ── Clean ─────────────────────────────────────────────────────────────────────
 
@@ -952,10 +956,10 @@ help:
 	@echo "  compare-sft              Run the opt-in controlled SFT response comparison"
 	@echo ""
 	@echo "Sanity check (model + training code only):"
-	@echo "  sanity-train             125m arch, 2.5B tokens"
-	@echo "  sanity-train-small       mini arch, 500M tokens"
-	@echo "  sanity-train-tiny        mini arch, 50M tokens"
-	@echo "  sanity-train-save        same as sanity-train but saves the model"
+	@echo "  sanity-train             HF control using SIZE/config; SANITY_STAGE=prepare|check|train|all"
+	@echo "  sanity-train-small       same selected SIZE/config, 500M unique train-token target"
+	@echo "  sanity-train-tiny        same selected SIZE/config, 50M unique train-token target"
+	@echo "  sanity-train-save        compatibility alias; all control training preserves checkpoints"
 	@echo ""
 	@echo "Pipeline:"
 	@echo "  curate             Stage 1  — curate SIZE=smoke|mini|125m|350m|1b"
