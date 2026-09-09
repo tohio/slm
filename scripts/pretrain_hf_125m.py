@@ -434,6 +434,32 @@ def get_inputs(args, cfg):
         raise ValueError("--exclude-jsonl applies to HF selection, not immutable existing tokens")
     tok, _, tokenizer_identity, raw_sha = load_tokenizer(args)
     directory = args.tokenized_dir.resolve()
+
+    # A bundle created by this diagnostic has a different sidecar contract from
+    # production tokenized data. Reuse it through its own immutable manifest
+    # rather than forcing it through pretrain.train.tokenized_data_identity().
+    reference_root = directory.parent
+    reference_manifest = reference_root / MANIFEST
+    if directory.name == "tokenized" and reference_manifest.is_file():
+        bundle = verify_reference_bundle(reference_root)
+        if bundle.get("kind") != "diagnostic_not_production_curation":
+            raise RuntimeError(f"Unsupported reference-data bundle kind in {reference_manifest}")
+        if bundle["spec"]["tokenizer_sha256"] != raw_sha:
+            raise RuntimeError("Supplied tokenizer differs from the prepared reference-data tokenizer")
+        model_config(cfg, tok)
+        selected = int(bundle["selected_train_tokens"])
+        if args.target_tokens is not None:
+            length = cfg["model"]["max_position_embeddings"]
+            requested = math.ceil(args.target_tokens / length) * length
+            if requested != selected:
+                raise ValueError(
+                    "Prepared reference data is immutable and was selected for "
+                    f"{selected} usable train tokens; requested {requested}. "
+                    "Use the prepared budget or create a separate reference bundle."
+                )
+        log.info("Reusing verified reference-data bundle: %s", reference_root)
+        return directory, tok, bundle
+
     identity = verify_existing_tokens(directory, tok, raw_sha)
     available = identity["splits"]["train"]["n_tokens"]
     length = cfg["model"]["max_position_embeddings"]
