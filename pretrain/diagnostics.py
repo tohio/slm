@@ -100,10 +100,20 @@ def make_probe_callback(tokenizer_dir: Path, output_dir: Path, config: dict):
                 if state.is_world_process_zero and self.last_step != state.global_step:
                     if self.tokenizer is None:
                         self.tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_dir), local_files_only=True)
+                    log.info(
+                        "Qualitative probe starting: step=%s prompts=%s decoding=%s",
+                        state.global_step, len(FIXED_PROMPTS), settings,
+                    )
                     rows = generate_rows(model, self.tokenizer, generic_cases(),
                                          step=state.global_step, settings=settings)
-                    atomic_write_json(output_dir / "probes" / f"step-{state.global_step:09d}.json",
-                                      {"qualitative_only": True, "results": rows})
+                    probe_path = output_dir / "probes" / f"step-{state.global_step:09d}.json"
+                    atomic_write_json(probe_path, {"qualitative_only": True, "results": rows})
+                    for row in rows:
+                        log.info(
+                            "Qualitative probe: step=%s prompt=%r continuation=%r decoding=%s",
+                            state.global_step, row["prompt"], row["continuation"], row["decoding"],
+                        )
+                    log.info("Qualitative probe saved: %s", probe_path)
                     self.last_step = state.global_step
             except Exception:
                 # A failed qualitative diagnostic is recorded, never a training
