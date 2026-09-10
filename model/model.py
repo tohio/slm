@@ -116,6 +116,19 @@ class SLMModel(nn.Module):
 
         if use_cache is None:
             use_cache = self.config.use_cache and not self.training
+
+        # Fixed-length pretraining/evaluation batches contain no padding mask,
+        # no cache, and use the default monotonic positions. In that exact case
+        # SDPA can express causality directly with ``is_causal=True``. Avoiding
+        # create_causal_mask() here prevents torch.compile from materializing a
+        # dense 4D mask solely because the model is being traced. Any caller
+        # that supplies a mask, positions, or cache keeps the general path.
+        use_implicit_causal_mask = (
+            attention_mask is None
+            and position_ids is None
+            and past_key_values is None
+            and not use_cache
+        )
         if output_hidden_states is None:
             output_hidden_states = self.config.output_hidden_states
         if return_dict is None:
@@ -153,13 +166,16 @@ class SLMModel(nn.Module):
                 + past_seen_tokens
             ).unsqueeze(0)
 
-        causal_mask = create_causal_mask(
-            config=self.config,
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            past_key_values=past_key_values,
-            position_ids=position_ids,
-        )
+        if use_implicit_causal_mask:
+            causal_mask = None
+        else:
+            causal_mask = create_causal_mask(
+                config=self.config,
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                position_ids=position_ids,
+            )
         position_embeddings = self.rotary_emb(inputs_embeds, position_ids)
 
         hidden_states = inputs_embeds

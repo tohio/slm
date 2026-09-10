@@ -85,7 +85,13 @@ audits are compared before any write and remain immutable. See
 
 ## CUDA runtime policy
 
-`configure_torch_runtime()` runs only when CUDA is available. It enables high
+`configure_torch_runtime()` runs only when CUDA is available. It enables local
+Inductor FX-graph and AOTAutograd caches by default and stores compiler artifacts
+under `$TORCHINDUCTOR_CACHE_DIR` when explicitly set, otherwise
+`$DATA_DIR/cache/torchinductor`. Keeping `DATA_DIR` on persistent storage lets
+compatible compile artifacts survive Python-process and instance restarts; PyTorch
+validates cache compatibility before reuse. Explicit cache environment variables
+are never overwritten. It also enables high
 float32 matmul precision and sets automatic SDPA dispatch as the default for
 reference/evaluation paths. Its log reports policy, not the selected kernel.
 
