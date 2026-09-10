@@ -57,6 +57,15 @@ CPU, FP32 diagnostics, and eval-mode inference retain normal dispatch, and the
 call restores the caller's backend flags on exit. No architecture, weights,
 loss, optimizer, or training-schedule settings change.
 
+RoPE inverse frequencies use a canonical CPU FP32 calculation, followed by a
+copy to the buffer's destination device. Initialization, checkpoint-buffer
+recovery, and dtype/device moves use the same calculation; moving to CUDA must
+not recompute these constants with different rounding. The buffer stays FP32
+and non-persistent, including after BF16/FP16 conversion. This matches the
+CPU-initialized native Llama reference used by the implementation check without
+copying values from that reference or changing its tolerances. The forward
+path is unchanged: no CPU frequency calculation or transfer is added per step.
+
 ## Configured Profiles
 
 Counts are unique trainable parameters; tied embeddings are counted once.

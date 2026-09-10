@@ -38,8 +38,9 @@ class RotaryEmbedding(nn.Module):
     Rotary Position Embedding (RoPE).
 
     Key design decisions:
-    - inv_freq is computed from config and never saved to / loaded from
-      checkpoints (persistent=False). _load_from_state_dict drops it.
+    - inv_freq is rebuilt from config in FP32 on CPU, then copied to the
+      destination device. Device moves must not change its rounded values.
+      It is never saved to / loaded from checkpoints (persistent=False).
     - cos/sin are computed once per model forward and shared by every layer.
     - frequency computation stays in float32 before being cast back to the
       model dtype. This avoids reduced-precision RoPE position errors.
@@ -61,16 +62,24 @@ class RotaryEmbedding(nn.Module):
         empty storage. They have no checkpoint entry to restore them from.
         This method is also used after dtype/device conversion so BF16 cannot
         permanently round the frequencies that must be computed in FP32.
+        Build on CPU even for a CUDA destination: recomputing the power on a
+        different device can perturb the constants and break optimizer parity
+        with a native Llama initialized on CPU and then moved to CUDA.
         """
-        if device is None and hasattr(self, "inv_freq"):
-            device = self.inv_freq.device
+        if device is None:
+            device = (
+                self.inv_freq.device
+                if hasattr(self, "inv_freq")
+                else torch.get_default_device()
+            )
         inv_freq = 1.0 / (
             self.base ** (
-                torch.arange(0, self.head_dim, 2, dtype=torch.float32, device=device)
+                torch.arange(0, self.head_dim, 2, dtype=torch.int64, device="cpu")
+                .to(dtype=torch.float32)
                 / self.head_dim
             )
         )
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.register_buffer("inv_freq", inv_freq.to(device=device), persistent=False)
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse=recurse)
