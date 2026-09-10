@@ -30,6 +30,7 @@ from typing import Optional, Union
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers import PreTrainedModel, initialization as init
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.generation import GenerationMixin
@@ -254,7 +255,70 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         super().__init__(config)
         self.model = SLMModel(config)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self._fused_linear_ce_loss = None
+        self._fused_linear_ce_enabled = False
         self.post_init()
+
+    def enable_fused_linear_cross_entropy(self) -> None:
+        """Enable Liger fused LM-head + CE for loss-only pretraining calls."""
+        try:
+            from liger_kernel.transformers import LigerFusedLinearCrossEntropyLoss
+        except ImportError as exc:
+            raise RuntimeError(
+                "fused_linear_cross_entropy requires liger-kernel from "
+                "requirements-training.txt"
+            ) from exc
+
+        # Use sum reduction and normalize explicitly so Trainer's
+        # num_items_in_batch contract is identical to Transformers'
+        # ForCausalLMLoss. Liger remains responsible for chunking the
+        # vocabulary projection and avoiding the full [B,T,V] logits tensor.
+        self._fused_linear_ce_loss = LigerFusedLinearCrossEntropyLoss(
+            ignore_index=-100,
+            reduction="sum",
+        )
+        self._fused_linear_ce_enabled = True
+
+    @torch.compiler.disable
+    def _fused_causal_lm_loss(
+        self,
+        hidden_states: torch.Tensor,
+        labels: torch.LongTensor,
+        *,
+        num_items_in_batch=None,
+        shift_labels: Optional[torch.LongTensor] = None,
+        ignore_index: int = -100,
+    ) -> torch.Tensor:
+        if not self._fused_linear_ce_enabled or self._fused_linear_ce_loss is None:
+            raise RuntimeError(
+                "loss-only fused pretraining was requested before "
+                "enable_fused_linear_cross_entropy()"
+            )
+        if ignore_index != -100:
+            raise ValueError(
+                "fused pretraining currently supports ignore_index=-100 only"
+            )
+
+        if shift_labels is None:
+            padded = F.pad(labels, (0, 1), value=ignore_index)
+            shift_labels = padded[..., 1:].contiguous()
+        else:
+            shift_labels = shift_labels.contiguous()
+
+        flat_hidden = hidden_states.reshape(-1, hidden_states.shape[-1])
+        flat_targets = shift_labels.reshape(-1).to(hidden_states.device)
+        loss = self._fused_linear_ce_loss(
+            self.lm_head.weight,
+            flat_hidden,
+            flat_targets,
+        )
+
+        denominator = num_items_in_batch
+        if denominator is None:
+            denominator = flat_targets.ne(ignore_index).sum()
+        if torch.is_tensor(denominator):
+            denominator = denominator.to(device=loss.device, dtype=loss.dtype)
+        return loss / denominator
 
     @classmethod
     def from_pretrained(cls, *args, **kwargs):
@@ -329,6 +393,7 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
+        materialize_logits: bool = True,
         **kwargs,
     ) -> Union[CausalLMOutputWithPast, tuple]:
         if labels is not None and use_cache is None:
@@ -348,21 +413,42 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs.last_hidden_state
-        slice_indices = (
-            slice(-logits_to_keep, None)
-            if isinstance(logits_to_keep, int)
-            else logits_to_keep
-        )
-        logits = self.lm_head(hidden_states[:, slice_indices, :])
-
         loss = None
-        if labels is not None:
-            loss = self.loss_function(
-                logits=logits,
-                labels=labels,
-                vocab_size=self.config.vocab_size,
-                **kwargs,
+        logits = None
+
+        if labels is not None and not materialize_logits:
+            if logits_to_keep != 0:
+                raise ValueError(
+                    "logits_to_keep cannot be combined with materialize_logits=False"
+                )
+            supported_loss_kwargs = {"num_items_in_batch", "shift_labels", "ignore_index"}
+            unsupported = sorted(set(kwargs) - supported_loss_kwargs)
+            if unsupported:
+                raise ValueError(
+                    "Unsupported fused pretraining loss kwargs: "
+                    + ", ".join(unsupported)
+                )
+            loss = self._fused_causal_lm_loss(
+                hidden_states,
+                labels,
+                num_items_in_batch=kwargs.get("num_items_in_batch"),
+                shift_labels=kwargs.get("shift_labels"),
+                ignore_index=kwargs.get("ignore_index", -100),
             )
+        else:
+            slice_indices = (
+                slice(-logits_to_keep, None)
+                if isinstance(logits_to_keep, int)
+                else logits_to_keep
+            )
+            logits = self.lm_head(hidden_states[:, slice_indices, :])
+            if labels is not None:
+                loss = self.loss_function(
+                    logits=logits,
+                    labels=labels,
+                    vocab_size=self.config.vocab_size,
+                    **kwargs,
+                )
 
         if not return_dict:
             output = tuple(

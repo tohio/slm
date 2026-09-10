@@ -41,6 +41,7 @@ training:
   micro_batch_size: 4
   gradient_accumulation_steps: 16  # 1 GPU default — see scaling note above
   precision: bf16
+  fused_linear_cross_entropy: true
   gradient_clip_val: 1.0
   gradient_checkpointing: false
   eval_steps: 1000

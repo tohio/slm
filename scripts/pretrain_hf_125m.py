@@ -608,6 +608,9 @@ def run_training(args, cfg, directory, tokenizer, data_identity):
     set_seed(args.seed)
     model = SLMForCausalLM(config)
     initial_sha = state_digest(model)
+    if args.backend == "slm" and device == "cuda" and cfg["training"].get("fused_linear_cross_entropy", True):
+        model.enable_fused_linear_cross_entropy()
+        log.info("Fused linear cross-entropy enabled for SLM loss-only training/evaluation")
     if args.backend == "llama":
         from export.export import _convert_to_native_llama
         native = _convert_to_native_llama(model, tokenizer, torch.float32)

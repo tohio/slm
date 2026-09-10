@@ -66,6 +66,14 @@ CPU-initialized native Llama reference used by the implementation check without
 copying values from that reference or changing its tolerances. The forward
 path is unchanged: no CPU frequency calculation or transfer is added per step.
 
+Pretraining loss-only calls can enable Liger fused linear cross-entropy. In that
+path SLM passes final hidden states and the tied LM-head weight directly to the
+fused loss, so the full `[batch, sequence, vocab]` logits tensor is not
+materialized. Training and evaluation preserve Transformers' next-token shift,
+`ignore_index=-100`, and `num_items_in_batch` normalization. Generation, SFT/DPO,
+implementation checks that request outputs, and ordinary callers continue to use
+the standard logits-producing path.
+
 ## Configured Profiles
 
 Counts are unique trainable parameters; tied embeddings are counted once.

@@ -454,6 +454,10 @@ class VRAMProbe(TrainerCallback):
                      f"reserved peak: {reserved:.2f} GB")
 
 
+def _uses_fused_linear_cross_entropy(model) -> bool:
+    return bool(getattr(model, "_fused_linear_ce_enabled", False))
+
+
 class SLMTrainer(Trainer):
     """
     Trainer subclass for pretraining.
@@ -513,8 +517,11 @@ class SLMTrainer(Trainer):
         return_outputs=False,
         num_items_in_batch=None,
     ):
+        model_inputs = dict(inputs)
+        if _uses_fused_linear_cross_entropy(model) and not return_outputs:
+            model_inputs["materialize_logits"] = False
         outputs = model(
-            **inputs,
+            **model_inputs,
             num_items_in_batch=num_items_in_batch,
         )
         loss = self._extract_loss(outputs, context="training")
@@ -541,6 +548,10 @@ class SLMTrainer(Trainer):
         and log only scalar summaries.
         """
         inputs = self._prepare_inputs(inputs)
+
+        if _uses_fused_linear_cross_entropy(model):
+            inputs = dict(inputs)
+            inputs["materialize_logits"] = False
 
         with torch.no_grad():
             outputs = model(**inputs)
@@ -882,6 +893,9 @@ def main():
     set_seed(training_args.seed)
     log.info("Initializing model%s...", " for resume" if args.resume else " from scratch")
     model = SLMForCausalLM(model_config)
+    if torch.cuda.is_available() and cfg["training"].get("fused_linear_cross_entropy", True):
+        model.enable_fused_linear_cross_entropy()
+        log.info("Fused linear cross-entropy enabled for loss-only pretraining/evaluation")
     n_params = sum(p.numel() for p in model.parameters())
     log.info(f"Parameters: {n_params:,} ({n_params / 1e6:.1f}M)")
 

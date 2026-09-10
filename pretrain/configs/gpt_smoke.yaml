@@ -27,6 +27,7 @@ training:
   micro_batch_size: 2
   gradient_accumulation_steps: 4
   precision: bf16
+  fused_linear_cross_entropy: true
   gradient_clip_val: 1.0
   gradient_checkpointing: false
   torch_compile: true
