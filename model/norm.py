@@ -16,8 +16,10 @@ Reference:
 
 import torch
 import torch.nn as nn
+from transformers.integrations import use_kernel_forward_from_hub
 
 
+@use_kernel_forward_from_hub("RMSNorm")
 class RMSNorm(nn.Module):
     """
     Root Mean Square Layer Normalization.

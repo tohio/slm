@@ -226,6 +226,9 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
     _supports_sdpa = True
+    # Match native Llama's compile contract. The forward path is static for
+    # fixed-shape pretraining and contains no data-dependent Python control flow.
+    _can_compile_fullgraph = True
     _no_split_modules = ["SLMDecoderBlock"]
     _skip_keys_device_placement = ["past_key_values"]
 

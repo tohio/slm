@@ -23,6 +23,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers.cache_utils import Cache
+from transformers.integrations import use_kernel_func_from_hub, use_kernelized_func
 
 from .config import SLMConfig
 
@@ -100,6 +101,7 @@ def rotate_half(x: torch.Tensor) -> torch.Tensor:
     return torch.cat([-x2, x1], dim=-1)
 
 
+@use_kernel_func_from_hub("rotary_pos_emb")
 def apply_rotary_emb(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -120,6 +122,7 @@ def apply_rotary_emb(
 
 # ── GQA ───────────────────────────────────────────────────────────────────────
 
+@use_kernelized_func(apply_rotary_emb)
 class GroupedQueryAttention(nn.Module):
     """
     Grouped Query Attention (GQA) with RoPE.
