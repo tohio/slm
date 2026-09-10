@@ -85,7 +85,9 @@ audits are compared before any write and remain immutable. See
 
 ## CUDA runtime policy
 
-`configure_torch_runtime()` runs only when CUDA is available. It enables local
+The runtime module establishes Inductor cache environment before importing
+PyTorch in supported training entry points; `configure_torch_runtime()` then
+runs the CUDA-specific policy only when CUDA is available. It enables local
 Inductor FX-graph and AOTAutograd caches by default and stores compiler artifacts
 under `$TORCHINDUCTOR_CACHE_DIR` when explicitly set, otherwise
 `$DATA_DIR/cache/torchinductor`. Keeping `DATA_DIR` on persistent storage lets

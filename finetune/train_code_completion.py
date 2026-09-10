@@ -24,12 +24,14 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+# Establish compiler cache policy before importing torch.
+from config.runtime import configure_torch_runtime
+
 import torch
 import yaml
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoConfig, AutoTokenizer, get_cosine_schedule_with_warmup
 
-from config.runtime import configure_torch_runtime
 from config.chat import tokenizer_fingerprint
 from config.checkpoints import (
     bundled_tokenizer_dir, checkpoint_identity, find_latest_checkpoint,

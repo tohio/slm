@@ -538,6 +538,9 @@ def select_device(request):
 
 def run_training(args, cfg, directory, tokenizer, data_identity):
     from dataclasses import replace
+    # Import runtime policy before torch/transformers so diagnostic training
+    # uses the same persistent Inductor-cache bootstrap as production.
+    from config.runtime import configure_torch_runtime
     import torch
     from transformers import set_seed, TrainerCallback
     from model import SLMForCausalLM
@@ -545,7 +548,6 @@ def run_training(args, cfg, directory, tokenizer, data_identity):
     from pretrain.data.dataset import load_train_val, load_test
     from pretrain.schedule import resolve_realized_token_schedule
     from config.checkpoints import resolve_training_checkpoint, validate_or_write_run_audit
-    from config.runtime import configure_torch_runtime
     import wandb
     # Training is an explicit W&B-tracked experiment. Pure numerical checks do not log in.
     for key in ("WANDB_API_KEY", "WANDB_PROJECT"):

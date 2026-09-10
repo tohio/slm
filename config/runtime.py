@@ -6,6 +6,23 @@ import logging
 import os
 from pathlib import Path
 
+
+def configure_inductor_cache_env() -> str:
+    """Set Inductor cache environment before importing PyTorch."""
+    os.environ.setdefault("TORCHINDUCTOR_FX_GRAPH_CACHE", "1")
+    os.environ.setdefault("TORCHINDUCTOR_AUTOGRAD_CACHE", "1")
+    cache_dir = os.environ.setdefault(
+        "TORCHINDUCTOR_CACHE_DIR",
+        str(Path(os.environ.get("DATA_DIR", "data")) / "cache" / "torchinductor"),
+    )
+    return cache_dir
+
+
+# This must happen before the first torch import. PyTorch/Inductor may otherwise
+# establish its process default under /tmp, after which setdefault() is too late
+# to select SLM's persistent DATA_DIR location. Explicit caller settings win.
+configure_inductor_cache_env()
+
 import torch
 
 
@@ -14,18 +31,10 @@ def configure_torch_runtime(log: logging.Logger | None = None) -> None:
     if not torch.cuda.is_available():
         return
 
-    # Keep compiler artifacts across Python processes. PyTorch validates cache
-    # entries against the graph/configuration/runtime, so stale or incompatible
-    # entries are not blindly reused. Put the cache under DATA_DIR by default
-    # rather than /tmp so training environments with a persistent DATA_DIR can
-    # retain the expensive Inductor/Triton artifacts. Explicit user settings
-    # always win.
-    os.environ.setdefault("TORCHINDUCTOR_FX_GRAPH_CACHE", "1")
-    os.environ.setdefault("TORCHINDUCTOR_AUTOGRAD_CACHE", "1")
-    cache_dir = os.environ.setdefault(
-        "TORCHINDUCTOR_CACHE_DIR",
-        str(Path(os.environ.get("DATA_DIR", "data")) / "cache" / "torchinductor"),
-    )
+    # The cache environment is established at module import, before torch, by
+    # supported training entry points. Re-read it here for logging and ensure
+    # the selected directory exists.
+    cache_dir = configure_inductor_cache_env()
     Path(cache_dir).mkdir(parents=True, exist_ok=True)
 
     # Allows TF32 tensor-core matmuls where PyTorch considers them appropriate.

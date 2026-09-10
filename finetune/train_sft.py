@@ -65,14 +65,17 @@ import os
 import shutil
 import sys
 from pathlib import Path
-
-import torch
-import yaml
 from dotenv import load_dotenv
 
 load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+# Establish compiler cache policy before importing torch/TRL.
+from config.runtime import configure_torch_runtime
+
+import torch
+import yaml
 
 logging.basicConfig(
     level=logging.INFO,
@@ -83,7 +86,6 @@ log = logging.getLogger(__name__)
 
 DATA_DIR    = Path(os.environ.get("DATA_DIR", "data"))
 from config.paths import sft_instruct_dir, sft_code_dir, BASE_RESULTS_DIR
-from config.runtime import configure_torch_runtime
 from config.checkpoints import (
     bundled_tokenizer_dir, checkpoint_identity, posttraining_contract,
     resolve_training_checkpoint, validate_or_write_run_audit,

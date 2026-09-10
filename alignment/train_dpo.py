@@ -62,14 +62,17 @@ import os
 import shutil
 import sys
 from pathlib import Path
-
-import torch
-import yaml
 from dotenv import load_dotenv
 
 load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+# Establish compiler cache policy before importing torch/TRL.
+from config.runtime import configure_torch_runtime
+
+import torch
+import yaml
 
 logging.basicConfig(
     level=logging.INFO,
@@ -79,7 +82,6 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 from config.paths import dpo_chat_dir
-from config.runtime import configure_torch_runtime
 from config.chat import tokenizer_fingerprint
 from config.checkpoints import (
     bundled_tokenizer_dir, checkpoint_identity, posttraining_contract,

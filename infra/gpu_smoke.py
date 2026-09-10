@@ -10,9 +10,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import torch
-
 from config.runtime import configure_torch_runtime
+
+import torch
 from infra.verify_environment import verify_cuda, verify_versions
 from model import SLMConfig, SLMForCausalLM
 

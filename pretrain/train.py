@@ -12,16 +12,20 @@ import os
 import shutil
 import sys
 from pathlib import Path
-from tokenizers import Tokenizer
-from transformers import Trainer, TrainerCallback, set_seed
-
-import torch
-import yaml
 from dotenv import load_dotenv
 
 load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+# Import runtime policy before torch/transformers so Inductor cache location is
+# fixed before PyTorch can establish its /tmp process default.
+from config.runtime import configure_torch_runtime
+
+from tokenizers import Tokenizer
+from transformers import Trainer, TrainerCallback, set_seed
+import torch
+import yaml
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,7 +43,6 @@ def _is_rank_zero() -> bool:
 DATA_DIR    = Path(os.environ.get("DATA_DIR", "data"))
 from config.paths import pretrain_dir, resolve_dataset_paths, BASE_RESULTS_DIR
 from config.holdout import CONTRACT_NAME, SPLITS, load_contract
-from config.runtime import configure_torch_runtime
 from config.checkpoints import resolve_training_checkpoint, validate_or_write_run_audit
 from curator.state import atomic_write_json, stable_digest
 from pretrain.data.mixture import validate_realized_mixture_report
