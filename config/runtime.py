@@ -8,7 +8,7 @@ import torch
 
 
 def configure_torch_runtime(log: logging.Logger | None = None) -> None:
-    """Enable safe CUDA fast paths while retaining dispatcher fallbacks."""
+    """Set CUDA defaults; SLM attention scopes its mixed-precision training policy."""
     if not torch.cuda.is_available():
         return
 
@@ -16,9 +16,9 @@ def configure_torch_runtime(log: logging.Logger | None = None) -> None:
     # Model parameters and outputs remain in their configured dtypes.
     torch.set_float32_matmul_precision("high")
 
-    # Keep all SDPA implementations enabled. The dispatcher selects Flash,
-    # memory-efficient, cuDNN, or math attention for each shape/mask. Disabling
-    # math globally turns an unsupported fast-kernel shape into a hard failure.
+    # Keep reference/evaluation defaults available. SLM attention itself
+    # excludes math for CUDA BF16/FP16 training, including compiled forwards.
+    # Do not globally disable math: FP32 diagnostics need independent dispatch.
     cuda_backend = torch.backends.cuda
     for name in (
         "enable_flash_sdp",
@@ -32,6 +32,8 @@ def configure_torch_runtime(log: logging.Logger | None = None) -> None:
 
     if log is not None:
         log.info(
-            "CUDA runtime: TF32=high; Flash/memory-efficient/cuDNN/math "
-            "SDPA dispatch enabled"
+            "CUDA runtime: TF32=high; default SDPA dispatch=automatic. "
+            "SLM CUDA BF16/FP16 training requires fused SDPA (math disabled "
+            "per attention call); CPU/FP32/eval retain normal dispatch. "
+            "This reports backend policy, not the kernel actually selected."
         )

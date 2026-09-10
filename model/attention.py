@@ -17,13 +17,16 @@ References:
     RoPE: Su et al. (2021) — https://arxiv.org/abs/2104.09864
 """
 
+from contextlib import nullcontext
 from typing import Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from transformers.cache_utils import Cache
 from transformers.integrations import use_kernel_func_from_hub, use_kernelized_func
+from transformers.integrations.sdpa_attention import repeat_kv, use_gqa_in_sdpa
 
 from .config import SLMConfig
 
@@ -179,16 +182,42 @@ class GroupedQueryAttention(nn.Module):
         # is required. A None mask means SDPA may use its causal fast path.
         is_causal = attention_mask is None and q_len > 1
 
+        # Match the pinned Transformers Llama SDPA eligibility policy. An
+        # explicit mask (including one produced during compilation) can make
+        # native GQA fall back to math attention. Expand K/V only in that case
+        # or when the native-GQA shape/backend guard rejects the inputs, so
+        # fused memory-efficient SDPA remains eligible. Do not drop the mask.
+        # Cache updates above still store only the original KV heads.
+        enable_gqa = False
+        if self.num_query_groups > 1:
+            enable_gqa = use_gqa_in_sdpa(attention_mask, k, v)
+            if not enable_gqa:
+                k = repeat_kv(k, self.num_query_groups)
+                v = repeat_kv(v, self.num_query_groups)
+
         dropout_p = self.attention_dropout if self.training else 0.0
-        attn_output = F.scaled_dot_product_attention(
-            q, k, v,
-            attn_mask=attention_mask,
-            dropout_p=dropout_p,
-            is_causal=is_causal,
-            # Native SDPA GQA avoids materialising repeated K/V heads and lets
-            # CUDA dispatch directly to an eligible fused implementation.
-            enable_gqa=self.num_kv_heads != self.num_heads,
+        # CUDA BF16/FP16 training must use a fused attention backend. Keep the
+        # restriction at the SDPA call, inside the compiled forward, rather
+        # than relying only on process-global flags outside torch.compile.
+        # An unsupported fused shape/mask must raise, never retry with math.
+        # CPU, FP32 diagnostics and eval-mode inference retain normal dispatch.
+        require_fused = self.training and q.is_cuda and q.dtype in (torch.bfloat16, torch.float16)
+        attention_context = (
+            sdpa_kernel([
+                SDPBackend.FLASH_ATTENTION,
+                SDPBackend.EFFICIENT_ATTENTION,
+                SDPBackend.CUDNN_ATTENTION,
+            ])
+            if require_fused else nullcontext()
         )
+        with attention_context:
+            attn_output = F.scaled_dot_product_attention(
+                q, k, v,
+                attn_mask=attention_mask,
+                dropout_p=dropout_p,
+                is_causal=is_causal,
+                enable_gqa=enable_gqa,
+            )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.view(bsz, q_len, self.num_heads * self.head_dim)

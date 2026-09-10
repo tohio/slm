@@ -41,9 +41,21 @@ stage maps the compatible weights and configuration into a native
 | Generation | Transformers `Cache` support and legacy-cache conversion |
 | Dropout | configurable attention dropout; zero in the supplied profiles |
 
-The attention layer accepts only the SDPA implementation. CUDA runtime setup
-leaves Flash, memory-efficient, cuDNN, and math SDPA kernels enabled so PyTorch
-can select the valid implementation for each shape and mask.
+The attention layer accepts only the SDPA implementation. Grouped KV heads
+are temporarily expanded when Transformers' native-GQA eligibility check
+rejects the mask/head shape, matching the pinned Llama SDPA wrapper. Cache
+updates occur before expansion, so the stored KV cache stays grouped. The
+attention mask is never removed to obtain a faster kernel.
+
+SLM CUDA BF16/FP16 forwards in training mode require fused SDPA: Flash,
+memory-efficient, or cuDNN. The restriction is scoped at the attention call
+inside the compiled forward; math attention is not an allowed training
+fallback. If no fused backend supports the inputs, PyTorch reports the backend
+rejection reasons and raises an error. Inspect those reasons and the input
+shape/mask/dtype; do not catch the error and retry with math or drop the mask.
+CPU, FP32 diagnostics, and eval-mode inference retain normal dispatch, and the
+call restores the caller's backend flags on exit. No architecture, weights,
+loss, optimizer, or training-schedule settings change.
 
 ## Configured Profiles
 

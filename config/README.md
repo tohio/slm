@@ -86,13 +86,18 @@ audits are compared before any write and remain immutable. See
 ## CUDA runtime policy
 
 `configure_torch_runtime()` runs only when CUDA is available. It enables high
-float32 matmul precision and leaves Flash, memory-efficient, cuDNN, and math
-SDPA implementations available to PyTorch's dispatcher. Keeping the math
-fallback enabled prevents an unsupported fast-kernel shape from becoming a
-hard failure.
+float32 matmul precision and sets automatic SDPA dispatch as the default for
+reference/evaluation paths. Its log reports policy, not the selected kernel.
 
-Training entry points call this helper; utilities that construct a standalone
-CUDA model should do the same.
+`GroupedQueryAttention` overrides that default locally for SLM CUDA BF16/FP16
+forwards in training mode: only Flash, memory-efficient, and cuDNN SDPA are
+allowed. Unsupported fused inputs raise instead of silently using math. The
+scope is inside the compiled attention call and restores previous backend
+flags on exit, including failure. CPU, FP32 diagnostics, and eval-mode
+inference keep normal dispatch. Native Llama is not modified by this policy.
+
+Training entry points call the runtime helper; utilities that construct a
+standalone CUDA model should do the same.
 
 ## Validation
 
