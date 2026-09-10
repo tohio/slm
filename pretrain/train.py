@@ -560,15 +560,20 @@ def build_training_args(cfg: dict, output_dir: Path, resume: bool):
     use_bf16  = has_cuda and precision == "bf16"
     use_fp16  = has_cuda and precision == "fp16"
 
-    # torch.compile — defaults ON because graph compilation is essentially
-    # free performance for this workload: static shapes (fixed seq_len, fixed
-    # micro_batch), no dynamic control flow, no custom kernels. The 1-2 min
-    # compilation cost on the first step amortizes to <1% overhead on a
-    # multi-hour run and buys ~1.3-1.5x throughput on H100/H200/B200.
-    #
-    # Opt out by setting `torch_compile: false` in the training config if
-    # you hit a kernel issue or are debugging the model.
-    torch_compile = bool(train_cfg.get("torch_compile", True)) and has_cuda
+    # Compilation strategy. ``full`` delegates whole-model compilation to
+    # Transformers. ``regional`` compiles only the repeated decoder blocks
+    # after model construction, so TrainingArguments must not compile the
+    # outer model again. ``off`` disables compilation.
+    compile_requested = bool(train_cfg.get("torch_compile", True)) and has_cuda
+    compile_strategy = str(train_cfg.get("torch_compile_strategy", "full")).lower()
+    if compile_strategy not in {"full", "regional", "off"}:
+        raise ValueError(
+            "training.torch_compile_strategy must be one of: full, regional, off; "
+            f"got {compile_strategy!r}"
+        )
+    if not compile_requested:
+        compile_strategy = "off"
+    torch_compile = compile_strategy == "full"
 
     return TrainingArguments(
         output_dir=str(output_dir),
@@ -615,6 +620,32 @@ def build_training_args(cfg: dict, output_dir: Path, resume: bool):
 
         gradient_checkpointing=train_cfg.get("gradient_checkpointing", False),
         ddp_find_unused_parameters=False,
+    )
+
+
+def configure_model_compilation(model, cfg: dict, log: logging.Logger | None = None) -> str:
+    """Apply the configured SLM compilation strategy and return its effective name."""
+    train_cfg = cfg["training"]
+    if not torch.cuda.is_available() or not bool(train_cfg.get("torch_compile", True)):
+        return "off"
+
+    strategy = str(train_cfg.get("torch_compile_strategy", "full")).lower()
+    if strategy == "regional":
+        backend = train_cfg.get("torch_compile_backend", "inductor")
+        mode = train_cfg.get("torch_compile_mode", "default")
+        model.model.compile_repeated_blocks(backend=backend, mode=mode, fullgraph=True)
+        if log is not None:
+            log.info(
+                "torch.compile strategy=regional; compiled %d repeated decoder blocks "
+                "with backend=%s mode=%s fullgraph=true",
+                len(model.model.layers), backend, mode,
+            )
+        return strategy
+    if strategy in {"full", "off"}:
+        return strategy
+    raise ValueError(
+        "training.torch_compile_strategy must be one of: full, regional, off; "
+        f"got {strategy!r}"
     )
 
 
@@ -882,6 +913,7 @@ def main():
     set_seed(training_args.seed)
     log.info("Initializing model%s...", " for resume" if args.resume else " from scratch")
     model = SLMForCausalLM(model_config)
+    compile_strategy = configure_model_compilation(model, cfg, log)
     n_params = sum(p.numel() for p in model.parameters())
     log.info(f"Parameters: {n_params:,} ({n_params / 1e6:.1f}M)")
 
@@ -891,7 +923,8 @@ def main():
         f"grad_accum={training_args.gradient_accumulation_steps}, "
         f"bf16={training_args.bf16}, "
         f"optim={training_args.optim}, "
-        f"compile={training_args.torch_compile}, "
+        f"compile_strategy={compile_strategy}, "
+        f"trainer_full_compile={training_args.torch_compile}, "
         f"grad_ckpt={training_args.gradient_checkpointing}"
     )
 

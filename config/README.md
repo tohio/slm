@@ -107,6 +107,17 @@ inference keep normal dispatch. Native Llama is not modified by this policy.
 Training entry points call the runtime helper; utilities that construct a
 standalone CUDA model should do the same.
 
+### Compilation strategy
+
+`training.torch_compile_strategy` accepts `full`, `regional`, or `off`. `full`
+uses Transformers' whole-model `torch.compile` path. `regional` disables that
+outer compile and compiles each repeated SLM decoder block with the configured
+Inductor backend/mode and `fullgraph=True`, allowing one block program to be
+reused across layer instances while reducing cold-start compilation scope.
+`off` disables compilation. Mini enables `regional` first as a measured rollout;
+larger production sizes retain `full` until the bounded cold-start and
+steady-state checks establish a benefit.
+
 ## Validation
 
 ```bash
