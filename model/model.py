@@ -76,23 +76,6 @@ class SLMModel(nn.Module):
         self.rotary_emb = RotaryEmbedding(config)
         self.gradient_checkpointing = False
 
-    def compile_repeated_blocks(
-        self,
-        *,
-        backend: str = "inductor",
-        mode: str = "default",
-        fullgraph: bool = True,
-    ) -> None:
-        """Compile decoder blocks as repeated regions instead of the whole model.
-
-        Each decoder block has the same tensor program and parameter shapes.
-        PyTorch can therefore reuse the compiled code across block instances while
-        leaving embeddings, the LM head, and loss handling eager. This reduces JIT
-        cold-start cost without changing weights, attention semantics, or outputs.
-        """
-        for layer in self.layers:
-            layer.compile(backend=backend, mode=mode, fullgraph=fullgraph)
-
     def get_input_embeddings(self) -> nn.Embedding:
         return self.embed_tokens
 

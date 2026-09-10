@@ -32,9 +32,6 @@ training:
   gradient_clip_val: 1.0
   gradient_checkpointing: false
   torch_compile: true
-  # Regional compile is enabled first for Mini; promote to larger sizes only
-  # after bounded cold-start and steady-state measurements pass.
-  torch_compile_strategy: regional
   eval_steps: 500
   save_steps: 500
   save_total_limit: 3

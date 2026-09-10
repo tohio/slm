@@ -584,13 +584,7 @@ def run_training(args, cfg, directory, tokenizer, data_identity):
         common_identity = verify_existing_tokens(args.eval_tokenized_dir, tokenizer, tokenizer_fingerprint(token_snapshot))
         common_val = PretrainingDataset(args.eval_tokenized_dir / "val.bin", seq_len=config.max_position_embeddings, split="val")
     output = args.run_dir / "results" / "runs" / args.size / args.backend / "pretrain"
-    training_cfg = copy.deepcopy(cfg)
-    # ``regional`` is an SLM implementation optimization. Keep the native
-    # Llama control on Transformers' whole-model compilation so comparisons do
-    # not silently turn compilation off for the reference backend.
-    if args.backend == "llama" and training_cfg["training"].get("torch_compile_strategy") == "regional":
-        training_cfg["training"]["torch_compile_strategy"] = "full"
-    training_args = build_training_args(training_cfg, output, resume=bool(args.resume))
+    training_args = build_training_args(cfg, output, resume=bool(args.resume))
     if device == "cpu":
         training_args = replace(training_args, use_cpu=True, bf16=False, fp16=False,
                                 tf32=False, torch_compile=False, torch_compile_backend=None,
@@ -614,9 +608,6 @@ def run_training(args, cfg, directory, tokenizer, data_identity):
     set_seed(args.seed)
     model = SLMForCausalLM(config)
     initial_sha = state_digest(model)
-    if args.backend == "slm":
-        from pretrain.train import configure_model_compilation
-        configure_model_compilation(model, training_cfg, log)
     if args.backend == "llama":
         from export.export import _convert_to_native_llama
         native = _convert_to_native_llama(model, tokenizer, torch.float32)
