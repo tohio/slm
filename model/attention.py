@@ -175,17 +175,9 @@ class GroupedQueryAttention(nn.Module):
         if self.config._attn_implementation not in (None, "sdpa", "flash_attention_3"):
             raise ValueError("SLM attention supports only SDPA and FlashAttention-3")
 
-        # Combine projections while retaining the original learned Parameters.
-        # GQA needs unequal Q/K/V widths, not three equal chunks.
-        weight = torch.cat((self.q_proj.weight, self.k_proj.weight, self.v_proj.weight), dim=0)
-        q, k, v = F.linear(hidden_states, weight).split(
-            (
-                self.num_heads * self.head_dim,
-                self.num_kv_heads * self.head_dim,
-                self.num_kv_heads * self.head_dim,
-            ),
-            dim=-1,
-        )
+        q = self.q_proj(hidden_states)
+        k = self.k_proj(hidden_states)
+        v = self.v_proj(hidden_states)
 
         q = q.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         k = k.view(bsz, q_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
