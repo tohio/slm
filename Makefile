@@ -111,6 +111,20 @@ SANITY_PROBE_EVERY_STEPS ?=
 SANITY_BACKEND ?= slm
 SANITY_REUSE_TOKENS ?= 0
 
+# Fully independent model-complete pretrain control. Raw JSONL data is shared;
+# tokenizer, packing, model initialization, dataset and Trainer are independent.
+SANITY_INDEPENDENT_RUN_DIR ?= $(RESULTS_DIR)/diagnostics/independent-$(SIZE)
+SANITY_INDEPENDENT_REFERENCE_DATA ?=
+SANITY_INDEPENDENT_TOKENIZER ?= TinyLlama/TinyLlama-1.1B-intermediate-step-715k-1.5T
+SANITY_INDEPENDENT_TOKENIZER_REVISION ?= main
+SANITY_INDEPENDENT_EPOCHS ?= 2
+SANITY_INDEPENDENT_LR ?=
+SANITY_INDEPENDENT_BATCH_SIZE ?=
+SANITY_INDEPENDENT_GRAD_ACCUM ?=
+SANITY_INDEPENDENT_WARMUP_RATIO ?=
+SANITY_INDEPENDENT_MAX_STEPS ?=
+SANITY_INDEPENDENT_REUSE_DATA ?= 0
+
 # GPU pipeline tests should stay mini-focused by default.
 # If SIZE is explicitly supplied on the command line or environment, use it.
 # Otherwise test targets validate mini artifacts even though the pipeline
@@ -154,7 +168,7 @@ endif
         test-curator test-validate test-tokenizer test-data-pipeline \
         test-training test-sft-instruct test-sft-chat test-sft-code test-dpo-chat test-dpo test-gpu-pipeline test-model test-export test-export-acceptance test-vllm-export test-data-unit test-curation-unit test-training-args test-config-gen test-accel-gen test-comparison test-misc test-unit test-gpu-gate test-pretrain-ready test-pretrain-resume-ready test-artifacts \
         compare-sft-preflight compare-sft \
-        sanity-train sanity-train-small sanity-train-tiny sanity-train-save \
+        sanity-train sanity-train-small sanity-train-tiny sanity-train-save sanity-pretrain-independent \
         clean clean-data clean-results clean-logs help
 
 # ── New-host workflows ────────────────────────────────────────────────────────
@@ -862,6 +876,23 @@ compare-sft:
 sanity-train-small: SANITY_TARGET_TOKENS = 500000000
 sanity-train-tiny: SANITY_TARGET_TOKENS = 50000000
 
+sanity-pretrain-independent: check-training-env
+	@test -n "$(SANITY_INDEPENDENT_REFERENCE_DATA)" || { echo "ERROR: SANITY_INDEPENDENT_REFERENCE_DATA must point to exact raw train/val/test JSONL data"; exit 2; }
+	@echo "==> Independent pretrain control: size=$(SIZE), raw_data=$(SANITY_INDEPENDENT_REFERENCE_DATA), tokenizer=$(SANITY_INDEPENDENT_TOKENIZER)"
+	$(PYTHON) scripts/pretrain_reference_independent.py --stage all \
+		--config "$(SANITY_CONFIG)" \
+		--reference-data-dir "$(SANITY_INDEPENDENT_REFERENCE_DATA)" \
+		--run-dir "$(SANITY_INDEPENDENT_RUN_DIR)" \
+		--tokenizer "$(SANITY_INDEPENDENT_TOKENIZER)" \
+		--tokenizer-revision "$(SANITY_INDEPENDENT_TOKENIZER_REVISION)" \
+		--epochs "$(SANITY_INDEPENDENT_EPOCHS)" \
+		$(if $(SANITY_INDEPENDENT_LR),--learning-rate "$(SANITY_INDEPENDENT_LR)",) \
+		$(if $(SANITY_INDEPENDENT_BATCH_SIZE),--batch-size "$(SANITY_INDEPENDENT_BATCH_SIZE)",) \
+		$(if $(SANITY_INDEPENDENT_GRAD_ACCUM),--gradient-accumulation "$(SANITY_INDEPENDENT_GRAD_ACCUM)",) \
+		$(if $(SANITY_INDEPENDENT_WARMUP_RATIO),--warmup-ratio "$(SANITY_INDEPENDENT_WARMUP_RATIO)",) \
+		$(if $(SANITY_INDEPENDENT_MAX_STEPS),--max-steps "$(SANITY_INDEPENDENT_MAX_STEPS)",) \
+		$(if $(filter 1 true yes,$(SANITY_INDEPENDENT_REUSE_DATA)),--reuse-data,)
+
 sanity-train sanity-train-small sanity-train-tiny sanity-train-save: check-training-env
 	@echo "==> HF control: stage=$(SANITY_STAGE), size=$(SIZE), backend=$(SANITY_BACKEND), outputs=$(SANITY_RUN_DIR)"
 	$(PYTHON) scripts/sanity_train.py --stage "$(SANITY_STAGE)" \
@@ -962,6 +993,7 @@ help:
 	@echo "  sanity-train-small       same selected SIZE/config, 500M unique train-token target"
 	@echo "  sanity-train-tiny        same selected SIZE/config, 50M unique train-token target"
 	@echo "  sanity-train-save        compatibility alias; all control training preserves checkpoints"
+	@echo "  sanity-pretrain-independent  model-complete native HF control; shares raw data + experiment values only"
 	@echo ""
 	@echo "Pipeline:"
 	@echo "  curate             Stage 1  — curate SIZE=smoke|mini|125m|350m|1b"

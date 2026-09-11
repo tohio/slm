@@ -555,3 +555,26 @@ make clean-results
 make clean-logs
 make clean
 ```
+
+### Independent pretraining reference control
+
+To compare the full SLM pretraining stack with a model-complete native-HF
+reference while keeping the **exact raw data documents** and experiment values
+controlled:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 make sanity-pretrain-independent \
+  SIZE=mini \
+  SANITY_INDEPENDENT_REFERENCE_DATA="$PWD/data/slm/results/diagnostics/mini-fineweb-control/data/runs/mini/reference" \
+  SANITY_INDEPENDENT_RUN_DIR="$PWD/data/slm/results/diagnostics/mini-fineweb-independent" \
+  SANITY_INDEPENDENT_EPOCHS=2 \
+  SANITY_INDEPENDENT_LR=1e-4 \
+  SANITY_INDEPENDENT_BATCH_SIZE=32 \
+  SANITY_INDEPENDENT_GRAD_ACCUM=1
+```
+
+This is intentionally different from `SANITY_BACKEND=llama`, which is the
+matched-tensor/model-implementation control. The independent control retokenizes
+the same raw JSONL documents with an external Llama-family tokenizer and uses
+direct HF Llama initialization, independent packing/dataset code, and stock HF
+Trainer. See `scripts/README.md` for the interpretation boundary.

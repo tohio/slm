@@ -281,3 +281,47 @@ template, and fails on an empty generation.
   checkpoints or prepared data.
 - Write reusable results under `$RESULTS_DIR`; use scratch storage only for
   disposable intermediates.
+
+## `pretrain_reference_independent.py`
+
+Fully independent model-complete pretraining control. It shares the selected
+pretraining YAML **values** and the exact raw `train.jsonl`, `val.jsonl`, and
+`test.jsonl` documents with the comparison run, but intentionally shares no SLM
+training implementation artifacts.
+
+The control uses the ungated TinyLlama base/intermediate repository tokenizer by
+default (`TinyLlama/TinyLlama-1.1B-intermediate-step-715k-1.5T`). TinyLlama uses
+the Llama-2 architecture/tokenizer family and exposes a 32K tokenizer, matching
+the Mini recipe vocabulary without embedding resize. The tokenizer revision is
+resolved to an immutable Hub commit and recorded.
+
+The independent path does **not** import or use `model/`, the local SLM
+tokenizer, existing tokenized `.bin` files, production packing,
+`PretrainingDataset`, `SLMTrainer`, the SLM schedule resolver,
+`_convert_to_native_llama`, export, or SLM inference code. It independently
+performs external tokenization and BOS/EOS packing, constructs
+`transformers.LlamaConfig` + `LlamaForCausalLM` directly, and trains with stock
+`transformers.Trainer`.
+
+The raw JSONL splits are intentionally shared because data is the controlled
+variable. Use the same raw FineWeb-Edu `reference/` directory as the matched
+control. A result difference therefore identifies a difference somewhere in the
+**complete SLM pretraining stack versus the independent native-HF stack**; by
+itself it does not localize that difference to the transformer block implementation.
+Use the matched `SANITY_STAGE=check` control for that narrower localization.
+
+Example matching the recent two-pass Mini experiment values:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 make sanity-pretrain-independent \
+  SIZE=mini \
+  SANITY_INDEPENDENT_REFERENCE_DATA="$PWD/data/slm/results/diagnostics/mini-fineweb-control/data/runs/mini/reference" \
+  SANITY_INDEPENDENT_RUN_DIR="$PWD/data/slm/results/diagnostics/mini-fineweb-independent" \
+  SANITY_INDEPENDENT_EPOCHS=2 \
+  SANITY_INDEPENDENT_LR=1e-4 \
+  SANITY_INDEPENDENT_BATCH_SIZE=32 \
+  SANITY_INDEPENDENT_GRAD_ACCUM=1
+```
+
+Actual training requires W&B and exactly one visible CUDA GPU. Use a fresh run
+directory. No production checkpoint or tokenizer is modified.
