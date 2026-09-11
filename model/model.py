@@ -61,13 +61,15 @@ class SLMModel(nn.Module):
         super().__init__()
         self.config = config
         attention_implementation = getattr(config, "_attn_implementation", None)
-        if attention_implementation not in (None, "sdpa"):
+        if attention_implementation not in (None, "sdpa", "flash_attention_3"):
             raise ValueError(
-                "SLM supports attn_implementation='sdpa' only, got "
+                "SLM supports attn_implementation='sdpa' or 'flash_attention_3', got "
                 f"{attention_implementation!r}"
             )
         if attention_implementation is None:
             config._attn_implementation_internal = "sdpa"
+        if attention_implementation == "flash_attention_3" and config.attention_dropout != 0:
+            raise ValueError("FlashAttention-3 requires attention_dropout=0; select SDPA to use attention dropout")
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         self.layers = nn.ModuleList(
@@ -120,7 +122,7 @@ class SLMModel(nn.Module):
 
         # Fixed-length pretraining/evaluation batches contain no padding mask,
         # no cache, and use the default monotonic positions. In that exact case
-        # SDPA can express causality directly with ``is_causal=True``. Avoiding
+        # both attention implementations express causality directly. Avoiding
         # create_causal_mask() here prevents torch.compile from materializing a
         # dense 4D mask solely because the model is being traced. Any caller
         # that supplies a mask, positions, or cache keeps the general path.
@@ -130,6 +132,8 @@ class SLMModel(nn.Module):
             and past_key_values is None
             and not use_cache
         )
+        # Default monotonic positions need no packed-sequence inspection in FA3.
+        flash_position_ids = position_ids
         if output_hidden_states is None:
             output_hidden_states = self.config.output_hidden_states
         if return_dict is None:
@@ -151,6 +155,12 @@ class SLMModel(nn.Module):
 
         if use_cache and past_key_values is None:
             past_key_values = DynamicCache(config=self.config)
+
+        if self.config._attn_implementation == "flash_attention_3":
+            if attention_mask is not None and attention_mask.ndim != 2:
+                raise ValueError("FlashAttention-3 requires a 2D padding mask; select SDPA for custom 4D masks")
+            if past_key_values is not None and past_key_values.is_compileable:
+                raise ValueError("FlashAttention-3 uses DynamicCache; select SDPA for a static cache")
 
         past_seen_tokens = (
             past_key_values.get_seq_length()
@@ -194,6 +204,7 @@ class SLMModel(nn.Module):
                     position_embeddings,
                     None,
                     False,
+                    flash_position_ids,
                 )
             else:
                 hidden_states = layer(
@@ -202,6 +213,7 @@ class SLMModel(nn.Module):
                     position_embeddings=position_embeddings,
                     past_key_values=past_key_values,
                     use_cache=use_cache,
+                    position_ids=flash_position_ids,
                 )
 
         hidden_states = self.norm(hidden_states)
@@ -243,6 +255,7 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
     _supports_sdpa = True
+    _supports_flash_attn = True
     # Match native Llama's compile contract. The forward path is static for
     # fixed-shape pretraining and contains no data-dependent Python control flow.
     _can_compile_fullgraph = True
@@ -252,6 +265,15 @@ class SLMForCausalLM(PreTrainedModel, GenerationMixin):
     _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
 
     def __init__(self, config: SLMConfig):
+        if getattr(config, "_attn_implementation", None) == "flash_attention_3":
+            # Require the installed FA3 extension before Transformers can try
+            # a Hub kernel. Import failures must not select another backend.
+            try:
+                import flash_attn_interface  # noqa: F401
+            except ImportError as exc:
+                raise RuntimeError(
+                    "FlashAttention-3 requires the source build installed by make setup-train"
+                ) from exc
         super().__init__(config)
         self.model = SLMModel(config)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)

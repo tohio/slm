@@ -34,28 +34,40 @@ stage maps the compatible weights and configuration into a native
 | Objective | decoder-only causal language modeling |
 | Decoder | pre-norm attention and MLP residual blocks |
 | Position encoding | RoPE, computed in float32 and shared across layers |
-| Attention | PyTorch SDPA with grouped-query attention |
+| Attention | FlashAttention-3 or explicit PyTorch SDPA, with grouped-query attention |
 | Normalization | RMSNorm |
 | Feed-forward network | bias-free SwiGLU |
 | Embeddings | tied token embedding and LM-head weights |
 | Generation | Transformers `Cache` support and legacy-cache conversion |
 | Dropout | configurable attention dropout; zero in the supplied profiles |
 
-The attention layer accepts only the SDPA implementation. Grouped KV heads
-are temporarily expanded when Transformers' native-GQA eligibility check
-rejects the mask/head shape, matching the pinned Llama SDPA wrapper. Cache
-updates occur before expansion, so the stored KV cache stays grouped. The
-attention mask is never removed to obtain a faster kernel.
+Pretraining selects `attn_implementation="flash_attention_3"`. SLM requires
+CUDA BF16 inputs and zero attention dropout for this backend. Transformers'
+existing FA3 integration handles 2D padding masks, explicit positions, and
+dynamic KV-cache attention; FA3 consumes the original grouped KV heads. A
+missing extension or unsupported input raises an error; SLM does not retry with
+FA2, SDPA, or a downloaded Hub kernel. Setup builds the pinned FA3 source after
+installing PyTorch; see [GPU setup](../infra/README.md).
 
-SLM CUDA BF16/FP16 forwards in training mode require fused SDPA: Flash,
-memory-efficient, or cuDNN. The restriction is scoped at the attention call
-inside the compiled forward; math attention is not an allowed training
-fallback. If no fused backend supports the inputs, PyTorch reports the backend
-rejection reasons and raises an error. Inspect those reasons and the input
-shape/mask/dtype; do not catch the error and retry with math or drop the mask.
-CPU, FP32 diagnostics, and eval-mode inference retain normal dispatch, and the
-call restores the caller's backend flags on exit. No architecture, weights,
-loss, optimizer, or training-schedule settings change.
+Direct `SLMConfig()` construction keeps SDPA as its default for CPU/FP32
+diagnostics. To select it explicitly, pass `attn_implementation="sdpa"` to
+`SLMConfig` or `SLMForCausalLM.from_pretrained`. Use SDPA for custom 4D masks,
+static caches, or nonzero attention dropout. Its existing fused-backend
+restriction for CUDA BF16/FP16 training is retained. The stored KV cache stays
+grouped; only SDPA may temporarily expand KV heads for backend eligibility.
+
+MLP gate/up and attention Q/K/V each use one combined linear projection.
+Weights are concatenated during forward and outputs are split by their original
+widths (Mini: MLP 1536/1536, QKV 512/256/256). The original Parameters, names,
+initialization, optimizer ownership, and native Llama export remain intact;
+there is no checkpoint migration. Weight concatenation and its backward cost
+must be included when measuring a speedup.
+
+Generated and checked-in pretraining recipes use Inductor's
+`max-autotune-no-cudagraphs` mode. `training.torch_compile_mode: default` is the
+comparison setting. Autotuning adds startup work and does not guarantee faster
+complete updates. BF16 loss, gradient/update agreement, compilation, and A100
+throughput still require validation on the training host.
 
 RoPE inverse frequencies use a canonical CPU FP32 calculation, followed by a
 copy to the buffer's destination device. Initialization, checkpoint-buffer

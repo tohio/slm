@@ -206,6 +206,14 @@ make smoke-gen SIZE=125m
 
 ## Validation
 
+Pretraining recipes select `training.attn_implementation: flash_attention_3`
+with BF16 and `training.torch_compile_mode: max-autotune-no-cudagraphs`.
+For an explicit SDPA/compiler comparison, use `sdpa` and `default` respectively.
+Direct model construction and the existing FP32 implementation check retain
+SDPA by default. MLP gate/up and QKV projections are combined in either backend;
+the original learned parameter names and checkpoint/export format are retained.
+See [model details](../model/README.md) and [FA3 setup](../infra/README.md).
+
 Run the architecture and training-contract tests before a paid run:
 
 ```bash

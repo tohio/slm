@@ -138,8 +138,9 @@ Mini, gated sources, reuse, and transfer configuration.
 
 ### GPU training server
 
-Use a supported NVIDIA GPU host with a working compatible driver and
-administrative access. Prepare a separate checkout/environment and `.env` as
+Use a supported NVIDIA GPU host with a working compatible driver, the CUDA
+13.0 development toolkit for the FA3 build, and administrative access.
+Prepare a separate checkout/environment and `.env` as
 above, including the required W&B settings and credentials for the source
 artifact backend. Training dependencies are separate from the curation stack.
 

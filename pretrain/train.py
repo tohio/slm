@@ -571,14 +571,11 @@ def build_training_args(cfg: dict, output_dir: Path, resume: bool):
     use_bf16  = has_cuda and precision == "bf16"
     use_fp16  = has_cuda and precision == "fp16"
 
-    # torch.compile — defaults ON because graph compilation is essentially
-    # free performance for this workload: static shapes (fixed seq_len, fixed
-    # micro_batch), no dynamic control flow, no custom kernels. The 1-2 min
-    # compilation cost on the first step amortizes to <1% overhead on a
-    # multi-hour run and buys ~1.3-1.5x throughput on H100/H200/B200.
-    #
-    # Opt out by setting `torch_compile: false` in the training config if
-    # you hit a kernel issue or are debugging the model.
+    # Autotune the fixed-shape decoder without enabling CUDA Graphs. Measure
+    # startup separately from steady updates; a faster kernel is not guaranteed.
+    # The accepted Liger loss retains its existing compiler boundary.
+    # Set torch_compile_mode: default for comparison, or torch_compile: false
+    # when debugging the model.
     torch_compile = bool(train_cfg.get("torch_compile", True)) and has_cuda
 
     return TrainingArguments(
@@ -604,7 +601,7 @@ def build_training_args(cfg: dict, output_dir: Path, resume: bool):
 
         torch_compile=torch_compile,
         torch_compile_backend=train_cfg.get("torch_compile_backend", "inductor"),
-        torch_compile_mode=train_cfg.get("torch_compile_mode", "default"),
+        torch_compile_mode=train_cfg.get("torch_compile_mode", "max-autotune-no-cudagraphs"),
 
         eval_strategy="steps",
         eval_steps=train_cfg.get("eval_steps", 1000),
@@ -768,6 +765,7 @@ def main():
         rms_norm_eps=model_cfg_dict.get("rms_norm_eps", 1e-5),
         initializer_range=model_cfg_dict.get("initializer_range", 0.02),
         tie_word_embeddings=model_cfg_dict.get("tie_word_embeddings", True),
+        attn_implementation=cfg["training"].get("attn_implementation", "flash_attention_3"),
     )
     validate_model_tokenizer_contract(model_config, tokenizer_dir)
 
@@ -906,6 +904,8 @@ def main():
         f"bf16={training_args.bf16}, "
         f"optim={training_args.optim}, "
         f"compile={training_args.torch_compile}, "
+        f"compile_mode={training_args.torch_compile_mode}, "
+        f"attention={model.config._attn_implementation}, "
         f"grad_ckpt={training_args.gradient_checkpointing}"
     )
 

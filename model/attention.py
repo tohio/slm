@@ -26,6 +26,7 @@ import torch.nn.functional as F
 from torch.nn.attention import SDPBackend, sdpa_kernel
 from transformers.cache_utils import Cache
 from transformers.integrations import use_kernel_func_from_hub, use_kernelized_func
+from transformers.integrations.flash_attention import flash_attention_forward
 from transformers.integrations.sdpa_attention import repeat_kv, use_gqa_in_sdpa
 
 from .config import SLMConfig
@@ -145,7 +146,9 @@ class GroupedQueryAttention(nn.Module):
 
     def __init__(self, config: SLMConfig, layer_idx: int):
         super().__init__()
+        self.config = config
         self.layer_idx = layer_idx
+        self.is_causal = True
 
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
@@ -166,12 +169,23 @@ class GroupedQueryAttention(nn.Module):
         position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
         past_key_values: Optional[Cache] = None,
         use_cache: bool = False,
+        position_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         bsz, q_len, _ = hidden_states.shape
+        if self.config._attn_implementation not in (None, "sdpa", "flash_attention_3"):
+            raise ValueError("SLM attention supports only SDPA and FlashAttention-3")
 
-        q = self.q_proj(hidden_states)
-        k = self.k_proj(hidden_states)
-        v = self.v_proj(hidden_states)
+        # Combine projections while retaining the original learned Parameters.
+        # GQA needs unequal Q/K/V widths, not three equal chunks.
+        weight = torch.cat((self.q_proj.weight, self.k_proj.weight, self.v_proj.weight), dim=0)
+        q, k, v = F.linear(hidden_states, weight).split(
+            (
+                self.num_heads * self.head_dim,
+                self.num_kv_heads * self.head_dim,
+                self.num_kv_heads * self.head_dim,
+            ),
+            dim=-1,
+        )
 
         q = q.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         k = k.view(bsz, q_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
@@ -182,10 +196,33 @@ class GroupedQueryAttention(nn.Module):
         cos, sin = position_embeddings
         q, k = apply_rotary_emb(q, k, cos, sin)
 
-        # Cache objects update in place and preserve DynamicCache/StaticCache
-        # semantics expected by Transformers generation and compilation.
+        if self.config._attn_implementation == "flash_attention_3":
+            if self.attention_dropout != 0:
+                raise ValueError("FlashAttention-3 requires attention_dropout=0")
+            if not q.is_cuda or q.dtype != torch.bfloat16:
+                raise ValueError(
+                    "SLM FlashAttention-3 requires CUDA BF16 inputs; use BF16 "
+                    "autocast or select SDPA for FP32/CPU diagnostics"
+                )
+            if attention_mask is not None and attention_mask.ndim != 2:
+                raise ValueError("FlashAttention-3 requires a 2D padding mask; select SDPA for custom 4D masks")
+
+        # Cache updates retain grouped heads. Validate FA3 inputs first so an
+        # unsupported dtype/mask cannot partially advance a caller's cache.
         if past_key_values is not None:
             k, v = past_key_values.update(k, v, self.layer_idx)
+
+        if self.config._attn_implementation == "flash_attention_3":
+            # Transformers handles padding; FA3 consumes grouped KV directly
+            # and aligns causal attention to the end of the dynamic KV cache.
+            attn_output, _ = flash_attention_forward(
+                self, q, k, v, attention_mask,
+                dropout=0.0,
+                scaling=self.head_dim ** -0.5,
+                is_causal=True,
+                position_ids=position_ids,
+            )
+            return self.o_proj(attn_output.reshape(bsz, q_len, self.num_heads * self.head_dim))
 
         # create_causal_mask() prepares an offset-aware 4D mask whenever one
         # is required. A None mask means SDPA may use its causal fast path.

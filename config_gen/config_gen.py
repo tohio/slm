@@ -870,11 +870,12 @@ training:
   micro_batch_size: {cfg.micro_batch_size}
   gradient_accumulation_steps: {cfg.gradient_accumulation_steps}
   precision: bf16
+  attn_implementation: flash_attention_3
   gradient_clip_val: 1.0
   gradient_checkpointing: {str(cfg.gradient_checkpointing).lower()}
   torch_compile: true
   torch_compile_backend: inductor
-  torch_compile_mode: default
+  torch_compile_mode: max-autotune-no-cudagraphs
   eval_steps: {_pretrain_eval_save_steps(cfg.max_steps)}
   save_steps: {_pretrain_eval_save_steps(cfg.max_steps)}
   save_total_limit: 3

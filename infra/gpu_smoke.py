@@ -26,6 +26,7 @@ def _tiny_model() -> SLMForCausalLM:
         num_attention_heads=8,
         num_key_value_heads=2,
         max_position_embeddings=128,
+        attn_implementation="flash_attention_3",
     )
     return SLMForCausalLM(config).to(device="cuda", dtype=torch.bfloat16)
 
@@ -91,7 +92,7 @@ def main() -> None:
     compiled_model = torch.compile(
         model,
         backend="inductor",
-        mode="default",
+        mode="max-autotune-no-cudagraphs",
     )
     compiled_loss = _training_step(compiled_model, input_ids, "compiled step")
     _verify_generation(model, input_ids[:1, :8])

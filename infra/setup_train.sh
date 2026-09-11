@@ -171,6 +171,31 @@ else
     install_environment "$REPO_DIR/requirements-training.txt"
     run_environment "$VENV_DIR/bin/python" infra/verify_environment.py --require-cuda
 
+    # FA3 imports torch during its build. Use the installed CUDA 13.0 stack
+    # and compile Ampere + Hopper kernels, including backward, from the pin.
+    run_environment "$VENV_DIR/bin/python" - <<'PY'
+from pathlib import Path
+import re
+import subprocess
+from torch.utils.cpp_extension import CUDA_HOME
+
+nvcc = Path(CUDA_HOME) / "bin" / "nvcc" if CUDA_HOME else None
+if nvcc is None or not nvcc.is_file():
+    raise SystemExit("FA3 needs the CUDA 13.0 development toolkit (nvcc + headers). Install it and set CUDA_HOME before rerunning setup-train; see infra/README.md.")
+version = subprocess.check_output([str(nvcc), "--version"], text=True)
+if not re.search(r"release 13\.0[, ]", version):
+    raise SystemExit(f"FA3 must build against the CUDA 13.0 toolkit matching PyTorch; found:\n{version}")
+print(f"FA3 compiler: {nvcc}")
+PY
+    FLASH_ATTENTION_FORCE_BUILD=TRUE \
+    FLASH_ATTENTION_DISABLE_SM80=FALSE \
+    FLASH_ATTENTION_DISABLE_BACKWARD=FALSE \
+    MAX_JOBS="${MAX_JOBS:-4}" \
+        install_packages --no-build-isolation --no-deps -r "$REPO_DIR/requirements-flash-attention.txt"
+    run_environment "$VENV_DIR/bin/python" -c \
+        'import flash_attn_interface; print("FlashAttention-3 import:", flash_attn_interface.__file__)'
+    run_environment "$VENV_DIR/bin/python" -m pip check
+
     log "  ✓ Python dependencies installed"
 fi
 

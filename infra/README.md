@@ -32,9 +32,30 @@ make setup-train DATA_DIR=/data/slm/data
 
 `setup-curate` installs `requirements-curation.txt`, including KenLM build and
 orjson/FastText handling; `setup-train` installs the complete GPU and evaluation
-stack from `requirements-training.txt`. Both include the common
-`requirements.txt`. No separate GPU, evaluation, or HF-transfer requirements
-file is needed.
+stack from `requirements-training.txt`, then builds the FA3 source pinned in
+`requirements-flash-attention.txt` against the installed PyTorch. Both include
+the common `requirements.txt`. Setup handles the FA3 installation order;
+installing `requirements-training.txt` alone does not install FA3.
+
+The training host also needs the **CUDA 13.0 development toolkit**, including
+`nvcc` and headers, matching `torch==2.13.0+cu130`. The driver and PyTorch runtime
+alone do not provide a compiler. Use a CUDA 13.0 development image or install
+that toolkit version using [NVIDIA's Linux installation guide](https://docs.nvidia.com/cuda/cuda-installation-guide-linux/index.html).
+If it is not found automatically, set `CUDA_HOME` to its installation directory
+before setup, for example:
+
+```bash
+export CUDA_HOME=/usr/local/cuda-13.0
+make setup-train DATA_DIR=/data/slm/data
+```
+
+FA3 is built from Dao-AILab's `hopper` subdirectory at the recorded commit,
+with Ampere kernels and backward enabled. Build isolation and dependency
+resolution are disabled for this extension so the validated PyTorch stack is
+retained. The first build can take substantial time; `MAX_JOBS` controls build
+parallelism (default 4). Setup checks the import; `make test-gpu-gate` exercises
+the existing eager/compiled training and generation checks when explicitly run.
+The A100 speedup and numerical behavior have not been measured for this patch.
 
 ### Installer selection
 

@@ -41,8 +41,7 @@ def configure_torch_runtime(log: logging.Logger | None = None) -> None:
     # Model parameters and outputs remain in their configured dtypes.
     torch.set_float32_matmul_precision("high")
 
-    # Keep reference/evaluation defaults available. SLM attention itself
-    # excludes math for CUDA BF16/FP16 training, including compiled forwards.
+    # These flags apply to the explicit SDPA path. FA3 uses its own extension.
     # Do not globally disable math: FP32 diagnostics need independent dispatch.
     cuda_backend = torch.backends.cuda
     for name in (
@@ -58,9 +57,9 @@ def configure_torch_runtime(log: logging.Logger | None = None) -> None:
     if log is not None:
         log.info(
             "CUDA runtime: TF32=high; default SDPA dispatch=automatic. "
-            "SLM CUDA BF16/FP16 training requires fused SDPA (math disabled "
-            "per attention call); CPU/FP32/eval retain normal dispatch. "
-            "This reports backend policy, not the kernel actually selected. "
+            "FA3 is selected by the model's attn_implementation; it does not "
+            "use SDPA dispatch. Explicit SDPA CUDA BF16/FP16 training requires "
+            "a fused backend. This reports policy, not a measured kernel. "
             "Inductor cache=%s (FX graph + AOTAutograd enabled unless overridden).",
             cache_dir,
         )

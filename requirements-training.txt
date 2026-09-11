@@ -12,6 +12,15 @@ huggingface-hub==1.24.0
 fsspec[http]==2026.4.0
 liger-kernel==0.8.2
 
+# FA3 is built after this stack by setup-train, with build isolation disabled.
+# Its pinned source dependency is in requirements-flash-attention.txt.
+setuptools
+wheel
+packaging
+ninja
+psutil
+einops
+
 # Artifact restore, experiment tracking, and training utilities.
 wandb>=0.17.0
 

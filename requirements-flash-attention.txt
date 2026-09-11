@@ -1,0 +1,3 @@
+# Install after requirements-training.txt with --no-build-isolation --no-deps.
+# Build the FA3 hopper subdirectory; the root package installs FA2 instead.
+flash-attn-3 @ git+https://github.com/Dao-AILab/flash-attention.git@9d61d35ba876834539af7df369fbabef1ad1e5d7#subdirectory=hopper

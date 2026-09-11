@@ -59,12 +59,16 @@ def diagnostic_mode(model):
 
 
 def generate_rows(model, tokenizer, cases: list[dict], *, step: int, settings: dict) -> list[dict]:
+    import torch
     from inference.generate import generate
     from inference.utils import resolve_special_token_ids
     model = unwrap_model(model)
     ids = resolve_special_token_ids(tokenizer)
     rows = []
-    with diagnostic_mode(model):
+    # Trainer AMP does not cover callbacks. Keep FA3 probes in BF16 while
+    # retaining FP32 master weights and restoring the model's training mode.
+    use_bf16 = model.device.type == "cuda" and model.config._attn_implementation == "flash_attention_3"
+    with diagnostic_mode(model), torch.autocast(model.device.type, dtype=torch.bfloat16, enabled=use_bf16):
         for case in cases:
             # One prompt at a time bounds diagnostic memory and avoids changing
             # effective training batch size or generation padding semantics.

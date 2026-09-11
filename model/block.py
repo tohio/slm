@@ -71,14 +71,16 @@ class SLMDecoderBlock(nn.Module):
         position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
         past_key_values: Optional[Cache] = None,
         use_cache: bool = False,
+        position_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Args:
             hidden_states: (batch, seq_len, hidden_size)
-            attention_mask: Optional 4D causal/padding mask
+            attention_mask: Optional 2D FA3 padding mask or 4D SDPA mask
             position_embeddings: Shared RoPE cosine and sine tensors
             past_key_values: Optional Transformers cache object
             use_cache: Whether the supplied cache is active
+            position_ids: Explicit positions for FA3 packed-sequence handling
 
         Returns:
             hidden_states: (batch, seq_len, hidden_size). The cache, when
@@ -93,6 +95,7 @@ class SLMDecoderBlock(nn.Module):
             position_embeddings=position_embeddings,
             past_key_values=past_key_values,
             use_cache=use_cache,
+            position_ids=position_ids,
         )
         hidden_states = residual + hidden_states
 

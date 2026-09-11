@@ -72,9 +72,11 @@ class SwiGLUMLP(nn.Module):
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # SwiGLU: element-wise product of gated and value projections
-        # F.silu(x) = x * sigmoid(x)
-        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
+        # One projection; retain the original Parameters for checkpoints,
+        # optimizer state and native Llama export. Autograd splits their grads.
+        weight = torch.cat((self.gate_proj.weight, self.up_proj.weight), dim=0)
+        gate, up = F.linear(x, weight).chunk(2, dim=-1)
+        return self.down_proj(F.silu(gate) * up)
 
     def extra_repr(self) -> str:
         return (
